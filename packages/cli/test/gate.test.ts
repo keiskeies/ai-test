@@ -132,13 +132,95 @@ test('容器步骤不算结论：一次 forEach 里一个失败只是 1 个失�
   assert.match(d.reasons.join('\n'), /1 个断言失败/, `实际理由：${d.reasons.join(' / ')}`);
 });
 
+test('容器 error 且叶子也有 error 时只数一次（orphan 判据反过来就会数成 2 个）', () => {
+  // 这条钉的是 orphan 判据的**另一半**：不能只看"容器报了 error"就算一条，
+  // 还要看**有没有叶子替它背书**。上一条测试钉的是 fail 那半（1 个断言失败），
+  // 但 error 那半此前没人钉 —— 变异「叶子有同状态结论时也算容器那份」就是靠这个空档
+  // 活下来的（它改的是 orphanErrors 那行，而当时全仓没有一条 fixture 让
+  // 容器与叶子**同时**是 error）。
+  const d = gateAfterRun({
+    scenario: scen(),
+    report: rep([
+      { stepId: 'loop', status: 'error', kind: 'forEach', cause: 'env-unavailable' },
+      { stepId: 'body', status: 'error', kind: 'http', cause: 'env-unavailable' },
+    ]),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.code, EXIT.RUNTIME);
+  assert.match(d.reasons.join('\n'), /1 个步骤\*\*出错\*\*/, `容器那条是传递上来的，不该再数一遍。实际理由：${d.reasons.join(' / ')}`);
+});
+
+test('容器自己报 fail 且没有叶子替它背 => TEST_FAILED（引擎目前造不出这个形状，所以手写 fixture）', () => {
+  // **为什么这条用手工 fixture 而不是跑真引擎**（不是偷懒，要说清）：
+  // 逐个查过容器的 fail 是从哪儿来的 —— runChildren 把子步骤的 fail 原样往上递
+  // （interpreter.ts:320-324），forEach/while 转递 runChildren 的状态，parallel 的
+  // fail 只从某一条**已被记录的分支结果**里取（:502-505），RunAborted 那条路径则会在
+  // 外层 catch 里再追一条 `__run__` 的 **error** 叶子。所以**每一处容器 fail 旁边
+  // 都有一条替它背书的叶子 fail** —— orphanFails 在现在的引擎下是**空集**。
+  // 那这个分支是不是白写？不是：它是"以后加了新容器 kind / 改了递送方式"时的兜底，
+  // 而 gate 是纯函数，判据该对**所有能进来的输入**成立，不该只对"今天恰好能产出的那些"成立。
+  // 但**必须写明白它当前不可达**，否则下一个人会拿它当"引擎真会这样"的证据。
+  const d = gateAfterRun({
+    scenario: scen(),
+    report: rep([
+      { stepId: 'ok1', status: 'pass', kind: 'assert' },
+      { stepId: 'p0', status: 'fail', kind: 'parallel' },
+    ]),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.code, EXIT.TEST_FAILED, `容器自己报 fail 必须让 CI 红。实际理由：${d.reasons.join(' / ')}`);
+  assert.match(d.reasons.join('\n'), /p0/);
+});
+
+test('容器自己报的 fail 不因 triage 降级（否则带个标签就能什么都没验还拿 0）', () => {
+  // triage 降级的对象是"生成的断言第一轮过严"。而"控制流压根没把子步骤跑出来"
+  // 不是过严，是没测 —— 跟着降级就等于给假绿开了个标签开关。
+  const s = scen({ tags: ['triage'] });
+  const d = gateAfterRun({
+    scenario: s,
+    report: rep([
+      { stepId: 'ok1', status: 'pass', kind: 'assert' },
+      { stepId: 'p0', status: 'fail', kind: 'parallel' },
+    ]),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.notEqual(d.code, EXIT.OK, 'triage 不能把"没测"洗成"测过且没问题"');
+  assert.match(d.reasons.join('\n'), /不因 triage 降级|压根没断言到/, `要说清为什么不降级。实际理由：${d.reasons.join(' / ')}`);
+});
+
 test('零个叶子步骤不能判通过（空场景是最危险的假绿）', () => {
   const d = gateAfterRun({
     scenario: scen(), report: rep([{ stepId: 'loop', status: 'pass', kind: 'sequence' }]),
     ci: true, allowUnfrozen: false,
   });
   assert.notEqual(d.code, EXIT.OK, '只有容器、没有任何断言的场景必须被拦');
-  assert.match(d.reasons.join('\n'), /没测|0 个叶子/);
+  assert.match(d.reasons.join('\n'), /没有一条断言|没测/, '要说清是"一条断言都没有"，而不是含糊的"没测"');
+});
+
+test('只有一条 set 步骤的场景不算"1 个断言全部通过"（这句话此前是假的，而且是绿的）', () => {
+  // 这条是从 gate-real.test.ts 那个真实 IR 版本反推回手写 fixture 的：
+  // 那边要跑引擎，快不起来；这边把**计数口径**单独钉住，改坏立刻红。
+  // 旧行为：leaves = 非容器步骤，于是 set 被算进"通过的断言数"，
+  // 退出码 0 + 一句"1 个断言全部通过"。set 步骤不产出任何断言结论。
+  const d = gateAfterRun({
+    scenario: scen(), report: rep([{ stepId: 'seed', status: 'pass', kind: 'set' }]),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.code, EXIT.INVALID, `只有 set 的场景没有断言结论，不能是 0。实际理由：${d.reasons.join(' / ')}`);
+  assert.match(d.reasons.join('\n'), /1 个步骤里没有一条断言/, '总数要说叶子数，断言数要单说，两者不能混');
+});
+
+test('绿灯理由里的数字只能数断言：一条 set + 一条 assert 要说"1 条断言全部通过"，不是 2', () => {
+  // 这条钉的是**那句话的数字**，与上一条（能不能是 0）是两件事。
+  // CI 日志里人只看这一句；数字把 set 算进去，"我们这次验了 2 条"就是假话，
+  // 而它是绿的，所以没人会去核。
+  const d = gateAfterRun({
+    scenario: scen(),
+    report: rep([{ stepId: 'seed', status: 'pass', kind: 'set' }, { stepId: 'a', status: 'pass', kind: 'assert' }]),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.code, EXIT.OK, '有一条通过的断言，场景该放行');
+  assert.match(d.reasons.join('\n'), /1 条断言全部通过/, `数字只能数断言。实际理由：${d.reasons.join(' / ')}`);
 });
 
 test('healed 不是通过：跑通了但没人审过定位器改动', () => {

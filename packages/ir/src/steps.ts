@@ -441,6 +441,26 @@ export const CONTAINER_KINDS: readonly Step['kind'][] = [
   'sequence', 'if', 'switch', 'forEach', 'while', 'repeat', 'parallel',
 ];
 
+/**
+ * 会**产出断言结论**的步骤 kind。
+ *
+ * 与 CONTAINER_KINDS 同处一地、同一条理由：多个消费方要同一个答案（CI 退出码要问
+ * "这次真断言了什么"，JUnit/看板将来要问"一条用例对应哪个节点"），各写一份必然漂移。
+ *
+ * 单列一张表而不是用 `kind.startsWith('assert')`：前缀匹配看着等价，实则把
+ * "名字像断言"当成"是断言"。表在这里，新增一个断言形态就得同时改表，
+ * 而 ir/test 里有一条测试**拿前缀去对照这张表** —— 两边不一致当天就红，
+ * 于是"加了 assert 形态忘了加表"不会静默。
+ *
+ * 注意 assertLlm 也在表里。它是不是**算数**由 gatePolicy 决定（report-only 不算），
+ * 那是"这条结论能不能当门禁依据"的判断，与本表"它是不是断言"是两件事；
+ * 把 assertLlm 从本表剔掉会让 report-only 变成"压根不是断言"，
+ * 于是"场景里只有 report-only 断言"会被读成"这场景没写断言"，走错另一条分支。
+ */
+export const ASSERTION_KINDS: readonly Step['kind'][] = [
+  'assert', 'assertLlm', 'assertPerf', 'assertPage', 'assertUi',
+];
+
 /** 需要设备租约的步骤（RESOURCE_LEASE_MISSING 规则的依据） */
 export const LEASE_REQUIRED: Step['kind'][] = ['app', 'tap', 'input', 'swipe', 'key', 'logcat', 'assertUi', 'manualHandoff'];
 

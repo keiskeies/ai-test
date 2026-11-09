@@ -1,0 +1,127 @@
+{
+  "_comment": [
+    "gate.ts 退出码判定的变异集（tests: packages/cli/test/gate-real.test.ts + gate.test.ts）。",
+    "",
+    "这批的价值密度比一般变异集高，因为它改坏的东西是**流水线红不红** ——",
+    "不是「报告少了一列」，是「该红的构建绿了」。每条都对应一个实测过的洞：",
+    "  1. 容器自己报的 fail/error 进不了退出码（parallel 被运行时闸拒 => 0）；",
+    "  2. 断言全是 skipped 时「1 个断言全部通过」+ 0；",
+    "  3. 断言全是 report-only assertLlm 时同样 0（判「是」时 status=pass，光看状态拦不住）；",
+    "  4. 结论集误用 leaves（非容器步骤）=> set/http 被数成「通过了一条结论」。",
+    "",
+    "**跨包变异**（ASSERTION_KINDS / countsTowardPassRate 那两条改的是 packages/ir/src）",
+    "由 harness 的 mustBuild() 自己判要不要重建，spec 里不写 build:false ——",
+    "上次就是图快写了它，结果改坏 ir 的 src、跑 cli 的测试吃的还是旧 dist，得到一条假的 survived。",
+    "",
+    "**写这份 spec 的人在这里栽过一次，记着别复用**：JSON 字符串里写裸双引号会让整份 spec",
+    "解析失败，而 `npm run mutate x.json > log 2>&1; echo $?` 报的是**最后那条 echo 的码**，",
+    "于是「一条都没跑」看起来像「全绿通过」。判据：**日志末尾没有 verdict 汇总行就是没跑**，",
+    "不是跑得快。取真实退出码用 `${pipestatus[1]}`（zsh），或者干脆不接管道。",
+    "**同一份 spec、同一份工作树，两次全量跑出过 12/2 与 14/0 —— 这个不确定性没解决，别把全量数字当结论。**",
+    "两条争议用例（orphanErrors 计数、结论集退回 leaves）**单独跑都是 caught**，而且报的是各自的测试名",
+    "（not ok 12 / not ok 16），所以\"未抓到\"那次是假的。方向要认准：污染能**制造 caught**（上一条留下的变异 dist",
+    "让下一条红在不相干的地方），那比制造 survived 更坏 —— 它让人给一条其实没守住任何东西的断言写上\"已验证\"。",
+    "**所以这份 spec 的读法**：survived 要单独重跑一次才算数； caught 若要写进文档，优先引单独跑的那次。",
+    "根因待查（怀疑是同包 case 之间的 dist 时序，与 mutate.mjs 教训 4 同源）。查清之前别给这份 spec 的汇总行拍照存档。"
+  ],
+  "cases": [
+    {
+      "label": "容器 error 不再进退出码（洞 1 原样复活：parallel 被闸拒 => 0）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (errors.length || orphanErrors.length) {",
+      "replace": "  if (errors.length) {",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "orphan 的 error 不加进理由文本（码对了但话说少了，人以为只有一个步骤出错）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "    const all = [...errors, ...orphanErrors];",
+      "replace": "    const all = [...errors];",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "orphanFails 分支整体失效（容器自己报 fail 时掉回最终的绿灯分支）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (orphanFails.length) {",
+      "replace": "  if (orphanFails.length && false) {",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "orphan 判据反过来：叶子有同状态结论时也算容器那份（一次循环失败数成 N 条）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  const orphanErrors = errors.length ? [] : report.results.filter((r) => isContainer(r) && r.status === 'error');",
+      "replace": "  const orphanErrors = report.results.filter((r) => isContainer(r) && r.status === 'error');",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "report-only assertLlm 也算门禁结论（洞 3 复活：全 LLM 场景模型盖章 => 0）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  const isConc = (r: StepResult) => countsTowardPassRate(r.status) && !isReportOnlyLlm(r);",
+      "replace": "  const isConc = (r: StepResult) => countsTowardPassRate(r.status);",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "gatePolicy 被忽略、按 kind 一律排除 assertLlm（把人显式写的 blocking opt-in 悄悄作废）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "    if (s.kind === 'assertLlm' && p.gatePolicy !== 'blocking') ids.add(s.id);",
+      "replace": "    if (s.kind === 'assertLlm') ids.add(s.id);",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "结论集退回 leaves（洞 4：set 被数成通过了一条结论）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  const assertionLeaves = leaves.filter((r) => ASSERTION_KINDS.includes(r.kind));",
+      "replace": "  const assertionLeaves = leaves;",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "ASSERTION_KINDS 漏掉 assert（最常用的断言形态忽然不算断言 => 正常场景被判空场景）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "  'assert', 'assertLlm', 'assertPerf', 'assertPage', 'assertUi',",
+      "replace": "  'assertLlm', 'assertPerf', 'assertPage', 'assertUi',",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "call 例外被删（只由 call 组成的场景误判成零断言，合法用例被拦）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (!conclusive.length && !hasCallStep) {",
+      "replace": "  if (!conclusive.length) {",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "「没有结论」那条闸挪回 error 判定之前（病因被后果盖住：环境没通被报成你没用例）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
+      "replace": "  if (!conclusive.length && !hasCallStep) return { code: EXIT.INVALID, reasons, refused: false, suppressedFails: 0, attention };\n  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "triage 把 orphanFails 一起降级（带 triage 标签就能什么都没验还拿 0）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (orphanFails.length) {",
+      "replace": "  if (orphanFails.length && !triage) {",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "skipped 不再被排除（countsTowardPassRate 换成「只要不是 fail」，全 skipped 场景报全过）",
+      "file": "packages/ir/src/status.ts",
+      "anchor": "  return status === 'pass' || status === 'fail' || status === 'error' || status === 'healed';",
+      "replace": "  return status !== 'fail';",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "绿灯理由里的数字换成 leaves.length（把 skipped 算进通过的断言数——那句话重新变成假的）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  reasons.push(`${conclusive.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}",
+      "replace": "  reasons.push(`${leaves.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "被排除的断言不在绿灯理由里说（偷偷计入：绿了，但没人知道有一条压根没跑）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  reasons.push(`${conclusive.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}",
+      "replace": "  reasons.push(`${conclusive.length} 条断言全部通过${''}",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    }
+  ]
+}
