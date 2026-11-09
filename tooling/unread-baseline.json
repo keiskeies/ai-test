@@ -1,0 +1,509 @@
+{
+  "_comment": [
+    "unread-fields 的豁免登记表。**每一条例子都必须写清归属哪个阶段和为什么现在没消费者** ——",
+    "没有理由的豁免等于把缺陷登记成正常，第二天就没人再看了。",
+    "反过来：字段一旦真的接上线，扫描会报「豁免已过期」，把条目删掉即可（这一步不能省，",
+    "否则下次同一个字段被改回不读时，扫描会闭嘴）。",
+    "",
+    "判据提醒：**有人提到过这个名字不等于用对了**。parallel.maxConcurrency 那次",
+    "扫描器认为它有读者（解释器确实读了它）却把值用成了丢弃分支的下标。",
+    "所以这份表只管字段完全没人碰，用得对不对仍然靠测试 + 变异检查。"
+  ],
+  "fields": [
+    {
+      "id": "packages/ir/src/asserts.ts#LlmAssertPayloadSchema.judgeGroup",
+      "milestone": "P2/P7",
+      "reason": "视觉比对与性能断言的进阶参数（前帧、忽略区域、基线引用）。今天的 assert 只有 API 侧那几种"
+    },
+    {
+      "id": "packages/ir/src/asserts.ts#PerfAssertPayloadSchema.baselineRef",
+      "milestone": "P2/P7",
+      "reason": "视觉比对与性能断言的进阶参数（前帧、忽略区域、基线引用）。今天的 assert 只有 API 侧那几种"
+    },
+    {
+      "id": "packages/ir/src/asserts.ts#UiAssertPayloadSchema.ignoreRegions",
+      "milestone": "P2/P7",
+      "reason": "视觉比对与性能断言的进阶参数（前帧、忽略区域、基线引用）。今天的 assert 只有 API 侧那几种"
+    },
+    {
+      "id": "packages/ir/src/asserts.ts#UiAssertPayloadSchema.previousFrameRef",
+      "milestone": "P2/P7",
+      "reason": "视觉比对与性能断言的进阶参数（前帧、忽略区域、基线引用）。今天的 assert 只有 API 侧那几种"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.pinned",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.projectId",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.scenarioId",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.sourceRunId",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.takenAt",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.targetKey",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.connections",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.dataVolume",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.runnerCount",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.runnerSpec",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.sutInstances",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.sutSpec",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.vus",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.maxErrorRate",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.maxP50Regression",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.maxP95Regression",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.minRpsRatio",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.p50Ms",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.p95Ms",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.p99Ms",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.rps",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.samples",
+      "milestone": "P7",
+      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#FingerprintSchema.a11yPath",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#FingerprintSchema.bboxHint",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#FingerprintSchema.recordedAt",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#FingerprintSchema.subtreeSha",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#FingerprintSchema.textExpected",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorRuleSchema.frameName",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorRuleSchema.nameMatch",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorRuleSchema.within",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorSpecSchema.confidenceGate",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorSpecSchema.fallbacks",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorSpecSchema.fingerprint",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorSpecSchema.maxCostUsdPerResolve",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#LocatorSpecSchema.primary",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#TemplateCompiledSchema.imageRef",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#TemplateCompiledSchema.recordedAt",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#TemplateCompiledSchema.scaleRange",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/locator.ts#TemplateCompiledSchema.theme",
+      "milestone": "P2.5",
+      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ProvenanceSchema.generatedAt",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ProvenanceSchema.modelId",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ProvenanceSchema.promptHash",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ProvenanceSchema.sourceCaseId",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ScenarioSchema.pinRevision",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ScenarioVersionMetaSchema.createdAt",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ScenarioVersionMetaSchema.createdBy",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ScenarioVersionMetaSchema.healedFromVersion",
+      "milestone": "P1",
+      "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ActStepSchema.expectNewPage",
+      "milestone": "P3+",
+      "reason": "Act 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ActStepSchema.expectResponse",
+      "milestone": "P3+",
+      "reason": "Act 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ActStepSchema.hitTargetCheck",
+      "milestone": "P3+",
+      "reason": "Act 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ActStepSchema.hoverThen",
+      "milestone": "P3+",
+      "reason": "Act 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#AppStepSchema.activity",
+      "milestone": "P3+",
+      "reason": "App 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#AppStepSchema.apkRef",
+      "milestone": "P3+",
+      "reason": "App 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#AppStepSchema.grantAllPermissions",
+      "milestone": "P3+",
+      "reason": "App 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#AppStepSchema.package",
+      "milestone": "P3+",
+      "reason": "App 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#CaptureStepSchema.on",
+      "milestone": "P3+",
+      "reason": "Capture 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#CaptureStepSchema.region",
+      "milestone": "P3+",
+      "reason": "Capture 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#DataSourceStepSchema.collection",
+      "milestone": "P2",
+      "reason": "数据驱动执行器未接（今天 dataSource 步骤有 case 但行租约/来源细节没消费）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#DataSourceStepSchema.leaseRows",
+      "milestone": "P2",
+      "reason": "数据驱动执行器未接（今天 dataSource 步骤有 case 但行租约/来源细节没消费）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#DeviceStepSchema.allowManualHandoff",
+      "milestone": "P3+",
+      "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#DeviceStepSchema.inheritToChildren",
+      "milestone": "P3+",
+      "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#DeviceStepSchema.leaseMs",
+      "milestone": "P3+",
+      "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#HttpRequestSchema.fixtureRef",
+      "milestone": "P1",
+      "reason": "fixtureRef（响应打桩）没有消费者：今天只有 live/frozen 两种模式，桩数据不落盘也没法按 operationId 索引"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#InputStepSchema.clearFirst",
+      "milestone": "P3+",
+      "reason": "Input 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#InputStepSchema.keepKeyboard",
+      "milestone": "P3+",
+      "reason": "Input 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#LogcatStepSchema.assertContains",
+      "milestone": "P3+",
+      "reason": "Logcat 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#LogcatStepSchema.captureBugreportOnCrash",
+      "milestone": "P3+",
+      "reason": "Logcat 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ManualHandoffStepSchema.resumeOn",
+      "milestone": "P3+",
+      "reason": "ManualHandoff 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#NavigateStepSchema.expectResponse",
+      "milestone": "P3+",
+      "reason": "Navigate 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ScriptStepSchema.inputRefs",
+      "milestone": "P0 明确禁用",
+      "reason": "沙箱有独立工作量，且脚本是不透明块会绕过四道静态闸（docs/04）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#ScriptStepSchema.lang",
+      "milestone": "P0 明确禁用",
+      "reason": "沙箱有独立工作量，且脚本是不透明块会绕过四道静态闸（docs/04）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#TapStepSchema.waitIdle",
+      "milestone": "P3+",
+      "reason": "Tap 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/steps.ts#WatcherStepSchema.scopeSteps",
+      "milestone": "P3+",
+      "reason": "Watcher 步骤属于设备端（web/adb adapter 未开工）"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#CapabilitiesSchema.contextSwitch",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#CapabilitiesSchema.hierarchySource",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#CapabilitiesSchema.injection",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#CapabilitiesSchema.streaming",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#DeviceRequirementSchema.model",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#DeviceRequirementSchema.oem",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#DeviceRequirementSchema.osVersion",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#DeviceRequirementSchema.udid",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#OperationSchema.keepKeyboard",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#SessionSchema.stateRef",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#SnapshotSchema.capturedAt",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#SnapshotSchema.imageRef",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.appSha",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.clockMode",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.deviceScaleFactor",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.llmProfileHash",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.locale",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.platform",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.randomSeed",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.runnerVersion",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.timezone",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    },
+    {
+      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.viewport",
+      "milestone": "P1",
+      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
+    }
+  ]
+}
