@@ -129,3 +129,70 @@ export const ScenarioVersionMetaSchema = z
   })
   .strict();
 export type ScenarioVersionMeta = z.infer<typeof ScenarioVersionMetaSchema>;
+
+/**
+ * 场景的**规范投影**：同一份 IR 语义，无论从哪个文件读、键顺序如何，都得到同一个字符串。
+ *
+ * `irSha`（证据清单里的"这条证据由哪一版 IR 产出"）与 `ScenarioVersionMeta.irSha`
+ * 都从这里算，因为**它们必须是同一个值才有用**：P1 的版本表按 irSha 去重，
+ * 证据包也按 irSha 回答"这次跑的是哪一版"。两处各写一套规范化（一边排序、一边不排），
+ * 版本表就会给同一份 IR 建两个版本，而证据包说"它们是一版的"。
+ *
+ * 三条规则，每条都有它防的事故：
+ *  0. **入参必须是 `parseScenario`/`defineScenario` 出来的 Scenario**。
+ *     这个函数**不做校验**（它接收的类型已经是校验过的），因此也不防 NaN ——
+ *     它对"两个语义相同的场景给出同一个串"的保证，前提是场景真的过 schema。
+ *     直接把外部 JSON 塞进来算哈希是错的：那种哈希会把不合法的内容也编成一个稳定值，
+ *     于是"这份证据出自哪一版"会得到一个**看起来能回答**的答案。
+ *  1. **对象键排序，数组顺序保留**。键顺序无语义（重排文件不该产生新版本号），
+ *     数组顺序全是语义（步骤顺序换了就是另一条用例）。
+ *  2. **丢掉 undefined 的键，不丢 null**。`{a: undefined}` 与 `{}` 是同一份 IR；
+ *     而 `null` 是显式值（`{token: null}` 表示"就是要传空"），丢了它会让
+ *     "把某个字段改成 null"这件事不改变哈希 —— 那正是最该触发新版本的一类改动。
+ *  3. **不做任何默认值补全**。zod 的 `.default()` 已经在 parse 期跑过了，
+ *     这里再补一遍等于把默认值焊死在两个地方：日后改默认值，
+ *     所有历史 irSha 会集体漂移，版本表里就会出现"同一份内容两个哈希"。
+ *  4. **`frozen` 被排除**（唯一被排除的正式字段，规则本身有测试钉着）。
+ *     它是**生命周期状态，不是内容**：「冻结」的含义是"人确认这一版可以当门禁依据"，
+ *     内容一个字没改。把它算进哈希，冻结就给同一条用例造出第二个 irSha，
+ *     而 P1 版本表按 irSha 去重 → 冻结动作凭空产生一个"新版本"。
+ *     ⚠ **代价要写明白**：`frozen` 是 `EvidenceManifest` 与 `ScenarioVersionMeta`
+ *     两边共用的字段，排除它意味着 **run 证据里的 frozen 不再等于那一版版本的 frozen**
+ *     （`--allow-unfrozen` 跑出的证据会写着 `frozen:false`，而它指向的版本是冻结的）。
+ *     那个不一致是真的，不做统一：证据要记的是**运行时的实际状态**
+ *     （决定这份证据能不能当门禁依据），版本表要记的是**生命周期动作**。
+ *     读证据的人需要的是前者，所以 manifest 保留 frozen 原样。
+ *
+ * 注意它**不是**内容签名（不是密码学意义上的防篡改）：目的是**稳定性**，
+ * 让"改了一个空格"与"改了一个断言"在哈希上可比。真要防篡改得用签名，那是 P1 权限层的事。
+ */
+export function canonicalScenario(scenario: Scenario): string {
+  const { frozen: _frozen, ...rest } = scenario;
+  void _frozen;
+  return JSON.stringify(stable(rest));
+}
+
+function stable(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(stable);
+  if (v !== null && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      const val = (v as Record<string, unknown>)[k];
+      // 键顺序在这里定了；undefined 在这里丢
+      if (val !== undefined) out[k] = stable(val);
+    }
+    return out;
+  }
+  // 非有限数必须单独编码，**不能让它走 JSON 的默认处理**。
+  // JSON.stringify(NaN) 与 JSON.stringify(Infinity) 都产出 `null`，
+  // 于是「生成器参数写了 NaN」的场景与「同一处写了 null」的场景会算出**同一个 irSha**，
+  // 版本表会认为它们是同一版（探针确认：`{gen:'int', with:{min:NaN}}` 与
+  // `{gen:'int', with:{min:null}}` 的规范串逐字相同）。
+  //
+  // 这条路是活的：数字字段本身过不了 zod（v4 的 number/int 拒 NaN/±Infinity，
+  // 已确认），但 `GenValue.with`、`trace.data`、`keyContext` 这些
+  // **逃生舱字段是 `z.record(z.string(), z.unknown())`，而 unknown 接受一切**。
+  // 逃生舱正是该防的地方 —— 严格 schema 覆盖不到的角落才是碰撞会藏身的地方。
+  if (typeof v === 'number' && !Number.isFinite(v)) return `«nonfinite:${String(v)}»`;
+  return v;
+}

@@ -160,7 +160,9 @@ async function runOne(o: {
   // 各算一遍迟早不一致，而人只会拿其中一份去追问"到底哪个数对"
   const pkg = await buildEvidencePackage({
     scenario, report, store: assembled.store,
-    provenance: scenario.provenance ? { versionId: str(a, 'version-id') } : undefined,
+    // 不再按"有没有 provenance"决定给不给：irSha 由存储层无条件算，
+    // 这里只负责传版本 id（P1 才有，现在多半是 undefined，如实缺着）
+    provenance: { versionId: str(a, 'version-id') },
     junit: { suiteName: scenario.id, classname: scenario.id },
   });
   io.out(summaryText(report, pkg.manifest));

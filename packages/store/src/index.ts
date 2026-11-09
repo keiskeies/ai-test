@@ -11,4 +11,5 @@
  */
 export * from './artifacts.js';
 export * from './evidence.js';
+export * from './ir-hash.js';
 export * from './zip.js';

@@ -26,13 +26,19 @@ import type { RunReport } from '@atest/engine';
 import type { Scenario } from '@atest/ir';
 import { buildZip, readZipEntries, type ZipEntry } from './zip.js';
 import { DiskArtifactStore } from './artifacts.js';
+import { irShaOf } from './ir-hash.js';
 
 export interface BuildEvidenceOptions {
   scenario: Scenario;
   report: RunReport;
   store: DiskArtifactStore;
-  /** 场景版本 id 与 IR 哈希。缺 provenance 时 CI 要拒绝执行（M7），这里如实记缺失而不是编一个 */
-  provenance?: { versionId?: string; irSha?: string };
+  /**
+   * 场景版本 id（P1 版本表的主键）。**`irSha` 不在这里给，由本函数自己算** ——
+   * 如果它是个入参，就一定会有某个调用方忘传（然后证据里躺着 undefined），
+   * 而这正是本仓反复出现的"字段有、没人填"缺陷类。存储层拿着 scenario，
+   * 就自己负责把它算出来，让"证据里必有一版 IR 的指纹"成为无条件性质。
+   */
+  provenance?: { versionId?: string };
   engineVersion?: string;
   irVersion?: string;
   junit?: JUnitOptions;
@@ -82,7 +88,11 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
       // frozen 原样带出。true/false 之差决定了"这份证据能不能当 CI 门禁依据"，
       // 所以它必须在包里，而不是只在调用方的内存里
       frozen: scenario.frozen,
-      irSha: o.provenance?.irSha,
+      // IR 内容指纹。回答的是"这份证据出自哪一版 IR"—— M7 判据里
+      // "provenance 缺失就拒绝执行"要能落地，前提是这个值**每次都能算出来且可回溯**。
+      // 取 canonicalScenario 而不是原始文件字节：文件里的注释、键顺序、
+      // zod 补出来的默认值都不属于 IR 语义，跟着它们算会让人改个缩进就"换了一版"。
+      irSha: irShaOf(scenario),
     },
     tally: report.tally,
     costUsd: report.costUsd,

@@ -26,6 +26,7 @@ import type { Scenario, StepDraft } from '@atest/ir';
 import { b, scen } from './helpers.js';
 import { DiskArtifactStore } from '../src/artifacts.js';
 import { buildEvidencePackage, writeEvidencePackage, readEvidenceMember } from '../src/evidence.js';
+import { irShaOf } from '../src/ir-hash.js';
 import { buildZip, dosStamp, readZipEntries } from '../src/zip.js';
 
 const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
@@ -158,13 +159,56 @@ test('manifest 记录 frozen 与 provenance —— CI 要靠它拒绝执行（M7
   // "纯断言场景的证据包只有 trace/junit/manifest/summary 四个成员"。
   await store.save('resp', '{"n":1}', 'ok');
   const { scenario, report } = await failingRun(store);
-  const pkg = await buildEvidencePackage({ scenario, report, store, provenance: { versionId: 'v7', irSha: 'abc123' } });
+  const pkg = await buildEvidencePackage({ scenario, report, store, provenance: { versionId: 'v7' } });
   const m = JSON.parse(unzipMembers(pkg.bytes).get(EVIDENCE_FILES.manifest)!.toString('utf8'));
   assert.equal(m.scenario.frozen, false, 'frozen 必须原样带出：它决定这份证据能不能当门禁依据');
   assert.equal(m.scenario.versionId, 'v7');
-  assert.equal(m.scenario.irSha, 'abc123');
+  // irSha 由存储层自己算，不接受入参 —— 所以"证据里必有一版 IR 的指纹"是无条件性质
+  assert.match(m.scenario.irSha, /^[0-9a-f]{64}$/, 'irSha 必须是全长 sha256');
+  assert.equal(m.scenario.irSha, irShaOf(scenario), '清单里的指纹必须等于直接对场景算的值');
   assert.equal(m.redaction.keyRules, 'applied', '脱敏策略要写进包里，否则"证据没被动过"无法证明');
   assert.ok(Array.isArray(m.artifacts) && m.artifacts.length >= 1);
+});
+
+test('irSha 无条件产出：provenance 整个缺失时也有（M7 溯源的最小必要件）', async () => {
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store); // scen() 不带 provenance
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  const m = JSON.parse(unzipMembers(pkg.bytes).get(EVIDENCE_FILES.manifest)!.toString('utf8'));
+  // 这不是"多个字段好看"：--ci 缺 provenance 会拒绝执行，而**放行**的那些 run
+  // 必须能回答"出自哪一版 IR"。要是这里跟着 provenance 一起缺，
+  // 门禁就退化成"有 provenance 的才谈溯源"，而最需要溯源的恰恰是手写没署名的场景。
+  assert.match(m.scenario.irSha, /^[0-9a-f]{64}$/);
+  // 稳定性与敏感性的**成对**判据（canonical.test.ts 里有完整的六条，这里只钉"接进了证据链"这一环）：
+  // 序列化通道往返不能换版，改一个断言必须换版。
+  // 只测前者会放过常量函数（它最稳定），所以两条不可拆。
+  assert.equal(irShaOf(JSON.parse(JSON.stringify(scenario)) as Scenario), irShaOf(scenario),
+    'JSON 往返换了版：写盘再读回就"产生新版本"，而 IR 一个字没改');
+  // 与 failingRun 的场景**只差一个字符**（$n > 99 → $n > 98）。
+  // 差得越多这条断言越弱：那样即便哈希只看了步骤 id 也能过
+  const other = scen([
+    { ...b('v'), kind: 'set', assign: { n: 1, token: 'secret:tok1' } },
+    { ...b('ok'), kind: 'assert', against: '$n', expr: '$n == 1' },
+    { ...b('bad'), kind: 'assert', against: '$n', expr: '$n > 98' },
+  ] as StepDraft[]);
+  assert.notEqual(irShaOf(scenario), irShaOf(other),
+    '改断言不换版：版本表会把两条不同用例当同一版，审校队列里改过的用例显示成"未改动"');
+});
+
+test('irSha 对"同一份 IR 的两种书写"给同一个值（规范化真被接进来了）', () => {
+  // ir/test/canonical.test.ts 测的是投影本身，但那边**测不到 irShaOf 有没有真的调用它** ——
+  // 把 irShaOf 换成 JSON.stringify(scenario)，canonical 的测试一条都不会红
+  // （它测的是 canonicalScenario，不是 irShaOf）。
+  // 手写两个键顺序相反的对象（不 parse，所以没有任何东西替我归一键顺序），
+  // 判据是"两个指纹相等"：直接 stringify 的实现会给出两个不同的值。
+  const body = [{ id: 'a', kind: 'assert', against: '$n', expr: '$n == 1' }];
+  const base = { schemaVersion: '1', id: 'scn.hash', name: 'n', env: { environmentRef: 'unit' }, body };
+  // tags 放前面 vs 放后面 => 键**插入顺序**不同（不经过 parse，zod 不会替我归一）
+  const one = { ...base, tags: ['a'] } as unknown as Scenario;
+  const reordered = { tags: ['a'], ...base } as unknown as Scenario;
+  assert.notEqual(JSON.stringify(one), JSON.stringify(reordered), '前提：两者的序列化确实不同，否则什么都没比');
+  assert.equal(irShaOf(one), irShaOf(reordered),
+    '键顺序换了就换指纹：规范化没生效（或压根没被调用），格式化一下 JSON 就"产生新版本"');
 });
 
 test('磁盘上已不存在的证据 -> 记进 missing，而不是静默少一个成员', async () => {
@@ -174,9 +218,13 @@ test('磁盘上已不存在的证据 -> 记进 missing，而不是静默少一�
   // 手工把文件删掉，模拟"证据被清理任务收了"/磁盘故障
   rmSync(join(store.rootDir, 'sha', id.slice(0, 2), id), { force: true });
   const pkg = await buildEvidencePackage({ scenario, report, store });
-  assert.ok(pkg.missing.length >= 0);
+  // 断的是"这一条在 missing 里"。原先写的是 `missing.length >= 0` —— 恒真，
+  // 一个从不填 missing 的实现也能过，而这条测试的名字恰恰是"不能静默少一个成员"。
+  assert.ok(pkg.missing.includes(id), `缺的正是被删掉的 ${id}，实际 missing=${JSON.stringify(pkg.missing)}`);
   // manifest 里这条还在（run 当时确实产出了它），而包里没有：missing 是唯一的解释
   assert.ok(pkg.manifest.artifacts.some((a) => a.id === id));
+  const zipNames = new Set(readZipEntries(pkg.bytes).map((e) => e.name));
+  assert.ok(![...zipNames].some((n) => n.includes(id)), '包里确实没有它（否则 missing 与内容自相矛盾）');
 });
 
 test('写盘：文件名带 runId 与状态，返回 sha256 供 CI 打进日志', async () => {
