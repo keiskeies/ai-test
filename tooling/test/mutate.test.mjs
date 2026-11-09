@@ -11,7 +11,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classify, mustBuild } from '../mutate.mjs';
+import { classify, decideLock, detectResidue, mustBuild } from '../mutate.mjs';
 
 describe('classify：三种"没跑成"都不许被当成结论', () => {
   test('锚点匹配不到 -> ANCHOR_NOT_FOUND，且**不是**"未被抓到"', async () => {
@@ -75,7 +75,154 @@ describe('mustBuild：跨包变异必须重建，且不交给 spec 手填', () =
   });
 });
 
-describe('classify：判读只依赖传入的事实', () => {
+describe('decideLock：同一份工作树里不许有两个驱动', () => {
+  // 这条规则存在的原因是**我自己在同一个会话里犯了第三次**：一份 spec 放后台跑，
+  // 等得久了又在前景跑同一份，于是同一份 spec 给出 12/2 与 14/0 两个结论。
+  // 前两次都只写进注释靠人记住，都没记住 —— 所以改成"它跑不起来"。
+  const dead = () => false;
+  const alive = () => true;
+
+  test('没有锁文件 -> 直接放行', () => {
+    assert.deepEqual(decideLock({ existing: null, isAlive: alive, selfPid: 1 }), { ok: true });
+  });
+
+  test('别人的进程还活着 -> 拒绝。这是唯一真正的并发', () => {
+    const d = decideLock({ existing: { pid: 4242 }, isAlive: alive, selfPid: 1 });
+    assert.equal(d.ok, false);
+    assert.match(d.reason, /4242/);
+    assert.equal(d.stale, undefined, '还在跑的进程不叫"陈旧"，两者的处置动作不一样');
+  });
+
+  test(' pid 已不在、且没在施加变异 -> 接管（收尾完成只是锁没删）', () => {
+    assert.deepEqual(decideLock({ existing: { pid: 4242 }, isAlive: dead, selfPid: 1 }), { ok: true });
+  });
+
+  test('pid 已不在但**死在施加变异的中途** -> 拦住并要求 --force（src 可能还是变异版）', () => {
+    const d = decideLock({ existing: { pid: 4242, inFlight: 'packages/cli/src/gate.ts :: 某条' }, isAlive: dead, selfPid: 1 });
+    assert.equal(d.ok, false, '这种状态最危险：src 是变异版而 npm test 会全绿');
+    assert.equal(d.stale, true, '要标成 stale，好让提示语说清"先还原再 --force"');
+    assert.match(d.reason, /变异版|还原/);
+  });
+
+  test('锁内容读不出 pid（手写过 / JSON 坏了 / 旧版残留）-> 放行并覆盖', () => {
+    // 宁可放行也不做一把永远解不开的锁：不可用的工具不会被人当回事，
+    // 最后大家回到"手改代码试一遍"，那正是本文件存在要取代的做法。
+    for (const existing of [{ pid: 'abc' }, { pid: -1 }, { pid: Number.NaN }, {}]) {
+      assert.equal(decideLock({ existing, isAlive: alive, selfPid: 1 }).ok, true, JSON.stringify(existing));
+    }
+  });
+
+  test('同 pid 视为自己，不自锁', () => {
+    assert.deepEqual(decideLock({ existing: { pid: 7, inFlight: 'x' }, isAlive: alive, selfPid: 7 }), { ok: true });
+  });
+
+  test('pid 已不在但锁里留着**残留清单** -> 拦住（与"死在中途"是两种说法）', () => {
+    // 上一轮是**正常退出**的，只是收尾核对发现磁盘不干净，于是故意不删锁。
+    // 这里要的不是"它死得可疑"那句提示 —— 那种措辞会让人去查进程，
+    // 而该做的是 git status。所以单列一条，并断言提示里出现文件本身。
+    const d = decideLock({ existing: { pid: 4242, residue: ['packages/engine/src/resolve.ts'] }, isAlive: dead, selfPid: 1 });
+    assert.equal(d.ok, false);
+    assert.equal(d.stale, true, '与"死在中途"同一档处置：都要显式 --force');
+    assert.match(d.reason, /resolve\.ts/, '提示里必须带着要还原哪个文件');
+    assert.match(d.reason, /git status/);
+  });
+
+  test('残留清单是空数组 -> 接管（空清单不构成危险状态）', () => {
+    assert.deepEqual(
+      decideLock({ existing: { pid: 4242, residue: [] }, isAlive: dead, selfPid: 1 }),
+      { ok: true });
+  });
+
+  test('存活判断只走注入的 isAlive —— 测的不能是本机进程表', () => {
+    // 断言 decideLock 不碰真实进程：用一个**必然存在**的 pid（自己）配一个恒假的
+    // isAlive，如果它偷偷调了 process.kill，这里就会给出"拒绝"而不是"接管"。
+    const d = decideLock({ existing: { pid: process.pid }, isAlive: () => false, selfPid: process.pid + 1 });
+    assert.equal(d.ok, true);
+  });
+});
+
+describe('classify：residue 优先于一切判读', () => {
+  test('还原核对失败 -> RESIDUE，且**排在锚点判定之前**', async () => {
+    // 顺序不是审美问题。残留状态下磁盘里是什么代码都不知道，
+    // 此时先报"锚点匹配不到"会把人的注意力引去修 spec，
+    // 而真正要看的是"src 里还躺着一份变异版"。所以 residue 必须最先返回。
+    const r = classify({ hits: 0, residue: true });
+    assert.equal(r.verdict, 'RESIDUE');
+    assert.equal(r.conclusive, false);
+    assert.equal(r.ok, false);
+    // 三个方向都不能被 residue 覆盖成"有结论"
+    assert.equal(classify({ hits: 1, testRed: true, residue: true }).verdict, 'RESIDUE', '红也不算抓到');
+    assert.equal(classify({ hits: 1, buildFailed: true, residue: true }).verdict, 'RESIDUE');
+    assert.equal(classify({ hits: 2, residue: true }).verdict, 'RESIDUE');
+  });
+});
+
+describe('detectResidue：残留要认得出，正当用法更不许误报', () => {
+  // 这道闸门两边的错都贵，而且**方向不对称**：
+  //  漏报 -> 整轮结论建立在变异版代码上而看着一切正常（正是它要防的那件事）；
+  //  误报 -> 人开始无脑 --force，于是连真该拦的那次也一起放过去了，闸门等于不存在。
+  // 所以下面"不许报"的每一条与"要报"的每一条同等重要。
+  const anchor = 'if (v === undefined) {';
+  const replace = 'if (false && v === undefined) {';
+  const clean = 'function f(v) {\n  if (v === undefined) { return []; }\n}\n';
+  const mutated = clean.replace(anchor, replace);
+
+  test('磁盘 == 已提交版本 + 这条变异 -> certain（残留的完整指纹）', () => {
+    assert.equal(detectResidue({ current: mutated, committed: clean, anchor, replace }), 'certain');
+  });
+
+  test('文件与已提交版本无关地干净 -> null。改动本身不是残留的证据', () => {
+    // **这一条是整组里最要紧的**：在"我正在改这段代码"的分支上跑变异是最常见的正当用法。
+    // 我第一版就是拿"与 HEAD 不一致"当拦截条件，写错了 —— 那种闸门每天被绕好几次，
+    // 绕熟了连真正的残留也一并 --force 掉。这里钉的就是"不许退回那一版"。
+    const myOwnWork = 'function f(v) {\n  if (v == null) { return []; } // 我刚改的\n}\n';
+    assert.equal(detectResidue({ current: myOwnWork, committed: clean, anchor, replace }), null);
+  });
+
+  test('已提交内容取不到（未跟踪 / 无 git）-> 不作 certain，也不因此报错', () => {
+    // 判不出来就放行，与 decideLock 那条"读不出 pid 就放行"同一个取舍：
+    // 一把经常解不开的锁 / 一道经常误拦的闸门，最后都会被人绕过而失效
+    assert.equal(detectResidue({ current: mutated, committed: undefined, anchor, replace }), 'suspect');
+  });
+
+  test('替换文本在、原锚点没了 -> suspect（残留或 spec 过期，两种都得让人看见）', () => {
+    // 真实来源有两种，这里**不假装能区分**：另一种情形在下一条
+    assert.equal(detectResidue({ current: mutated, committed: '完全不同的东西\n', anchor, replace }), 'suspect');
+  });
+
+  test('spec 过期（那条变异后来成了真实代码）也报 suspect —— 但含义是"去改 spec"', () => {
+    // 这条不是误报：条目本身已经失效了（锚点在当前代码里根本不存在），
+    // 让它静静留在集里更糟 —— 下一个人跑出来一个 ANCHOR_NOT_FOUND，还得从头怀疑一遍。
+    const nowRealCode = mutated; // 有人把这条改法合进了主干
+    assert.equal(detectResidue({ current: nowRealCode, committed: nowRealCode, anchor, replace }), 'suspect');
+  });
+
+  test('锚点不在已提交版本里时，"逐字节相等"不算残留 —— 那是恒等变换', () => {
+    // 我写完 certain 之后自己找出来的洞：spec 过期时锚点在已提交版本里找不到，
+    // 而 `split().join()` 找不到匹配时是**恒等变换**，于是
+    // `current === 施加后的已提交版本` 对一份谁都没碰过的文件也成立。
+    // 不补这个前提的话，只要集里有一条过期条目，每次运行都报残留 ——
+    // 一个每次都误报的闸门活不过第二天。
+    const obsolete = '已经没有人记得这条锚点从哪来的了\n';
+    assert.equal(detectResidue({ current: obsolete, committed: obsolete, anchor, replace }), null);
+  });
+
+  test('replace 把 anchor 整段包在里面时，干净文件不许自炸', () => {
+    // 很常见的一种变异：锚点只截了条件表达式，替换文本却是"整条 if 头"，
+    // 于是 **干净文件里本来就含有 replace**。判据若写成"文件里有 replace 就算残留"，
+    // 这类条目每一轮都会把自己拦下，然后人学会 --force —— 这就是误报的真实代价。
+    const inner = 'v === undefined';
+    const wrap = 'if (v === undefined) { return []; }';
+    assert.ok(clean.includes(wrap), '前提：干净文件里确实同时含有 anchor 与 replace');
+    assert.equal(detectResidue({ current: clean, committed: clean, anchor: inner, replace: wrap }), null);
+  });
+
+  test('anchor 与 replace 完全相同（无变化的条目）-> null，不自触发', () => {
+    assert.equal(detectResidue({ current: clean, committed: clean, anchor, replace: anchor }), null);
+  });
+});
+
+describe('classify：默认值', () => {
   test('hits=1 且未给可选参数时按"期望抓到、测试绿"处理', async () => {
     // 默认值要是反的（默认 testRed=true 或默认期望 equivalent），
     // 整套历史结论都会反过来，而这种错在调用点上完全看不出来

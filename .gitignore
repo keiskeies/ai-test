@@ -27,3 +27,7 @@ evidence.zip
 .idea/
 .vscode/
 *.log
+
+# 变异驱动的单实例锁（tooling/mutate.mjs）。运行时产物，且里面写的是**本机 pid**，
+# 提交上去没有任何意义 —— 反而会让别人拉下来后看到一条"另一个驱动正在跑"。
+tooling/.mutate.lock.json
