@@ -169,12 +169,24 @@ describe('客户端行为（docs/05 §4 清单）', () => {
     assert.equal(r.status, 0, '网络失败不能伪造成 5xx —— 那会让人以为后端返回过东西');
   });
 
-  test('GET 网络级失败自动重试', async () => {
+  test('GET 网络级失败**这一层也不重试**：次数只在引擎那一处定', async () => {
+    /*
+     * 这条以前断言的是 n===3（本层偷偷重试 2 次），而那是**两层叠乘**的另一半：
+     * 引擎的 withRetry 在外面，于是 IR 写 `retry:{count:0}`（明确不要重试）时
+     * 实测仍发 3 次 fetch，写 `count:2` 时发 9 次（3×3）。
+     * 压测里这意味着吞吐曲线是真实负载的 3 倍，而且**报告里看不出来** ——
+     * results 只有引擎那 3 行，本层那 6 次请求在哪个数字里都不在。
+     *
+     * docs/05 §4 那条"幂等 + 网络级才自动重试"的**边界没变**，变的是**归谁**：
+     * 幂等判据在 engine 的 resendsSafely，次数在 IR 的 retry.count，
+     * 于是"重不重试、几次"在 IR 里看得见、在报告里数得出（keyContext.flakyOf）。
+     * 已同步改写 docs/05 §4 那一行，免得下一个人照着"自动重试"再在本层加一次。
+     */
     let n = 0;
     const c = new HttpClient({ fetchImpl: (async () => { n++; if (n < 3) throw new Error('ECONNRESET'); return new Response('{}', { headers: { 'content-type': 'application/json' } }); }) as typeof fetch });
     const r = await c.send({ method: 'GET', url: 'http://x/a' });
-    assert.equal(n, 3);
-    assert.equal(r.status, 200, '第三次成功了，就该报成功');
+    assert.equal(n, 1, '一次 send 就是一次 fetch。要重试请在 IR 上写 retry.count');
+    assert.equal(r.error?.kind, 'network', '失败要原样带出分类，让引擎决定重不重试');
   });
 
   test('超时：到点返回 timeout 错误而不是挂死', async () => {

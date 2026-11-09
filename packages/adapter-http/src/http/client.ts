@@ -16,7 +16,7 @@
 import { parseJsonKeepBigInt, stringifyBody } from './bigint.js';
 import { compileValidator, isValid, type Validator } from '../openapi/validate.js';
 import type { OperationSpec, ParsedDoc } from '../openapi/parse.js';
-import type { ExecContext, HttpExec } from '@atest/engine';
+import { TransportError, type ExecContext, type HttpExec } from '@atest/engine';
 // **type-only**：auth/token.ts 反过来 import 本文件（要 new 一个 HttpClient），
 // 这里若做值导入就构成模块环。ESM 能跑但初始化顺序会变脆弱（谁先被求值不确定），
 // 而这里的用法只需要类型（AuthHook 实例由 CLI 注入，本文件从不构造它）。
@@ -41,8 +41,12 @@ export interface SendRequest {
   timeoutMs?: number;
   maxBytes?: number;
   followRedirects?: boolean;
-  /** 幂等请求网络级失败时的自动重试次数上限。默认 2；POST 一律 0 */
-  retries?: number;
+  // 这里**没有** retries 字段。它以前是"幂等请求网络失败自动重试 N 次（默认 2）"
+  // 的开关，与外面引擎的 withRetry 叠乘：IR 写 `retry:{count:0}`（明确不要重试）时
+  // 实测仍发出 3 次 fetch，写 `count:2` 时 9 次。
+  // 次数只能由引擎的 retry.count 决定（幂等与否的判据在 engine 的 resendsSafely），
+  // 所以字段连着读取点一起删掉，而不是留个 `retries?: never` 的墓碑 ——
+  // 留着一个不能用的开关，比没有开关更容易骗到下一个读代码的人。
   /** 期望的响应 content-type。非 JSON 时不解析（HTML 错误页很常见） */
   expectJson?: boolean;
 }
@@ -92,18 +96,21 @@ export class HttpClient {
     this.doFetch = opts.fetchImpl ?? ((input, init) => globalThis.fetch(input as never, init as never));
   }
 
+  /**
+   * 发一次请求。**这里不重试**（以前重试 2 次，见下面的注释）。
+   *
+   * **为什么把重试从这一层拿掉**：这一层以前对幂等方法偷偷重试 `retries ?? 2` 次，
+   * 而引擎的 withRetry 在外面。两层各 retry 一次不是"配得细一点"，是
+   * **谁都不知道总共发了几次** —— 实测 IR 写 `count: 0`（明确不重试）时
+   * 真实 fetch 发生 **3 次**，写 `count: 2` 时发生 **9 次**（3×3）。
+   * 对 POST 之外的方法，这意味着"用例里写了不重试"与"重复下单"之间
+   * 只隔着一个没人看的默认值；对压测，意味着吞吐曲线是实际负载的 3 倍。
+   *
+   * 幂等性判断（哪些方法可以安全重发）**留在这一层** —— 见 idempotent()，
+   * 引擎按它决定是否允许重试，但**次数只由引擎的 retry.count 决定**。
+   */
   async send(r: SendRequest): Promise<SendResult> {
-    const method = r.method.toUpperCase();
-    const wantRetry = IDEMPOTENT.has(method);
-    const maxAttempts = wantRetry ? 1 + Math.max(0, r.retries ?? 2) : 1;
-    let last: SendResult | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      last = await this.sendOnce(r);
-      if (!last.error) return last;
-    }
-    // 重试耗尽：把最后一次的网络错误原样带出，**不伪造成 5xx**。
-    // 合成状态码会让人以为"后端返回了 599"，而真相是压根没连上。
-    return last!;
+    return this.sendOnce(r);
   }
 
   private async sendOnce(r: SendRequest): Promise<SendResult> {
@@ -163,6 +170,11 @@ export class HttpClient {
       };
     } catch (e) {
       const timedOut = ctrl.signal.aborted && String((ctrl.signal.reason as Error | undefined)?.message ?? '').includes('atest-timeout');
+      // **返回**而不是抛出：send() 的调用方有三个（token.ts / authcheck.ts / asHttpExec），
+      // 前两个各自把 error 包成**刻意清洗过**的错误文案（token 那条不带 URL，
+      // authcheck 那条按本次用到的真值脱敏）。改成抛出会让这两处精心写的消息
+      // 被 fetch 的原始消息顶掉 —— 那是往"错误消息可能带凭证"的方向退一步。
+      // 给引擎的那一路（asHttpExec）再转成带分类的 TransportError。
       return networkFail(e instanceof Error ? e.message : String(e), t0, timedOut ? 'timeout' : 'network');
     } finally {
       clearTimeout(timer);
@@ -249,7 +261,23 @@ export function asHttpExec(client: HttpClient, docs?: DocProvider, auth?: AuthHo
       // 现在 kind 是封闭枚举，这类事在**这里**编译期就报。
       // 传输细节（bytes/truncated/状态码）由引擎的 step.finished 带进 trace，
       // 那才是它们该在的地方：一次步骤一条记录，而不是两条对不齐的。
-      if (r.error) throw new Error(`HTTP 请求失败：${r.error.kind} — ${r.error.message}`);
+      /*
+       * 传输层失败转成**带分类的异常**抛给引擎。
+       *
+       * 以前是 `throw new Error("HTTP 请求失败：network — …")`：分类退化成一句人读文本，
+       * 而引擎要按分类决定重不重试，就只能去 match 错误文本 ——
+       * undici 换个措辞、换一个 fetch 实现，重试就**静默变成永不重试**，
+       * 症状与"压根没配重试"完全一样（这正是 retryOn:['network','timeout'] 从来没生效过的成因）。
+       * 分类由本层给出：本层本来就在 AbortSignal 与 fetch 抛出物之间分好了
+       * timeout/network，让它以**类型上的字段**上来，而不是以措辞上来。
+       *
+       * 只有 kind==='aborted'（GET/HEAD 误带 body 这类"我们主动拒绝发"）
+       * 仍走普通 Error：重试它一万次也不会好，把它标成可重试分类是撒谎。
+       */
+      if (r.error) {
+        if (r.error.kind === 'aborted') throw new Error(`HTTP 请求失败：${r.error.message}`);
+        throw new TransportError(r.error.kind, `HTTP 请求失败：${r.error.kind} — ${r.error.message}`, { cause: r.error });
+      }
       return { status: r.status, headers: r.headers, body: r.body, bodyText: r.bodyText, durationMs: r.durationMs, bytes: r.bytes, truncated: r.truncated };
     },
     async resolveOperation(ref) {

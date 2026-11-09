@@ -9,12 +9,12 @@
  *  3. **状态语义**：环境问题 → error，断言不成立 → fail，自愈 → healed（不算绿），
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
-import type { Step, Scenario, Lease, ForEachStep, WhileStep } from '@atest/ir';
-import { countsTowardPassRate, LEASE_REQUIRED, parallelHazards, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import type { Step, Scenario, Lease, ForEachStep, WhileStep, Retry, FlakyAttempt } from '@atest/ir';
+import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, parallelHazards, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
-import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
+import { TransportError, type AdapterRegistry, type Clock, type ExecContext } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
 import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
@@ -299,7 +299,23 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       const status: StepStatus = e instanceof AssertionFailure ? 'fail' : 'error';
       return finish(s, path, status, stepStart, errSummary(e), {
         cause: e instanceof AssertionFailure ? 'product-bug' : e instanceof VarError ? 'case-stale' : 'env-unavailable',
-        keyContext: { errorName: (e as Error).name, stack: firstFrames(e) },
+        keyContext: {
+          errorName: (e as Error).name,
+          stack: firstFrames(e),
+          /*
+           * 传输层失败的**种类**走 keyContext，不扩 FAILURE_CAUSE。
+           *
+           * 我一开始直接把 cause 写成 'network' / 'timeout'，那是**运行时会炸的**：
+           * 那两个词在 retryOn 的枚举里，**不在** FAILURE_CAUSE 里，
+           * 而 StepResultSchema 是 strict + 封闭枚举 —— 磁盘写得出、parseStepResults 读不回，
+           * 症状是"证据包里的这一步整条被丢"，比归错类更隐蔽。
+           * 为什么不把两个词加进 FAILURE_CAUSE：那个枚举是**triage 与 flake 看板的分组口径**，
+           * 加值等于改磁盘格式与所有看板分组；而"这一步为什么没测成"的人话归因
+           * 就是 env-unavailable（连不上=环境不可用），细分种类是**重试判据**要用的，
+           * 不是归因口径。所以：归因照旧，种类另带一个字段。
+           */
+          ...(e instanceof TransportError ? { [TRANSPORT_KEY]: e.kind } : {}),
+        },
       });
     }
   };
@@ -355,21 +371,144 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'LOOP_BODY_NEVER_RUN', detail: `${s.kind} ${why}` } });
   };
 
-  /** 带重试的包装 */
+  /**
+   * 找到 r 在 results 里的位置并换掉它（找不到就什么都不做）。
+   *
+   * **为什么按对象身份找而不是 `results[results.length - 1]`**：
+   * 我一开始以为"最后一条"在并行下会指错 —— 两次尝试之间隔着
+   * `await clock.sleep(backoff)`，另一支完全能在这段 sleep 里 push 自己的行。
+   * **实测不成立**（两支并行、b1 首次抛错后 backoff，b2 在 sleep 期间跑完）：
+   * 回填点紧跟在 `await fn()` 之后、中间没有 await，所以那一条就是本步骤刚 push 的。
+   * 改成身份查找**不是修那个不存在的 bug**，而是不把正确性押在
+   * "回填点与 push 之间永远没有 await"这条没人会记得的不变量上 ——
+   * 将来谁在 withRetry 里加一次 await（比如重试前重新取租约），
+   * 位置假设就会静默变成"改别人的结论"，而那种错只会表现为偶发的报告错乱。
+   *
+   * 顺带说明为什么这里不担心 lastIndexOf 找不到：r 由 finish 推进数组，
+   * 只可能被 dropResult 撤掉（撤掉后就不再回填），所以找不到只会发生在
+   * 已经不该写的情形，静默返回副本是安全的。
+   */
+  const replaceResult = (r: StepResult, patch: Partial<StepResult>): StepResult => {
+    const next = { ...r, ...patch };
+    const i = results.lastIndexOf(r);
+    if (i >= 0) results[i] = next;
+    return next;
+  };
+
+  /** 丢掉一次**没采纳**的尝试的行（见 withRetry 里"为什么必须丢"）。 */
+  const dropResult = (r: StepResult): void => {
+    const i = results.lastIndexOf(r);
+    if (i >= 0) results.splice(i, 1);
+  };
+
+  /**
+   * 这一步这次失败**值不值得再发一次**。
+   *
+   * 三条前置，缺一不可：
+   *  1. **状态是 error**（没测成）。fail 是被测算出的答案，重跑同一份数据必然同答案；
+   *     pass/healed 更不用说的。
+   *  2. **种类命中 retryOn**。比的是 keyContext 里那个**传输种类**，
+   *     不再是 cause —— 以前比的是 `cause === 'network'`，
+   *     而 cause 永远不可能等于 network（它在 FAILURE_CAUSE 里就没有），
+   *     所以**默认 retryOn 从来没重试过一次**（实测：count=3 + 默认 retryOn => 发 1 次）。
+   *  3. **重发是安全的**（resendsSafely）：POST/PATCH 一律不重发。
+   *     判据必须在这里而不是 adapter 里 —— 决定重发的是这个循环。
+   *
+   * 抛错与"正常返回 error"两条路都算：传输层抛 TransportError，
+   * runStep 的 catch 会把它收敛成 error 行并把种类塞进 keyContext，
+   * 所以下面只看行上的字段就够，不必分情况。
+   */
+  const worthRetrying = (s: Step, r: StepResult): boolean => {
+    if (r.status !== 'error' || !resendsSafely(s)) return false;
+    const kinds = retryPolicyOf(s).retryOn;
+    const kind = r.keyContext?.[TRANSPORT_KEY];
+    return typeof kind === 'string' && kinds.includes(kind as 'network' | 'timeout');
+  };
+
+  /**
+   * 带重试的包装。
+   *
+   * **为什么这里要自己合并 config.retries，而不是靠 schema 的默认值**：
+   * 以前是 `s.retry?.count ?? scenario.config.retries.count` ——
+   * 看着像"步骤没写就吃场景级"，实际吃不到：
+   * Zod 对**存在的** `retry` 对象会补齐它所有缺省字段，所以
+   * `retry: { retryOn: [...] }`（只写想覆盖的那项，最自然的写法）落地时
+   * `count` 已经是 0，`?? ` 那条兜底**永远不触发**。
+   * 实测：场景级写 `count: 3`，无论步骤上写什么、还是不写，
+   * **发请求次数都是 1** —— 也就是说 config.retries 这个配置项
+   * 在任何组合下都产生不了一次重试。
+   * （步骤完全不写 retry 时能吃到场景级 count，但那时 retryOn 用的是
+   *  schema 的默认 ['network','timeout']，而场景级写的 retryOn 又被忽略 ——
+   *  两种形状各漏一半，正是 docs/04 §10 那条"同一概念两套形状"的后遗症。）
+   *
+   * 现在**显式表示"没写"**：count/backoff/baseMs/maxMs/retryOn 逐项
+   * 从步骤取、取不到退回场景级，`retry: {}` 这种空对象也不再吞掉整条场景配置。
+   */
+  const retryPolicyOf = (s: Step): Retry => {
+    // s.retry 的类型就是"每项可选"（RetryOverride），所以这里逐项 ?? 是**类型强制**的。
+    // 以前它是 `s.retry as Partial<Retry>`：步骤上的 retry 其实是**已补默认值**的
+    // Retry，那次 cast 把"count 其实永远是 0"从编译期错误变成了运行时静默。
+    const d = scenario.config.retries;
+    const o = s.retry;
+    return {
+      count: o?.count ?? d.count,
+      backoff: o?.backoff ?? d.backoff,
+      baseMs: o?.baseMs ?? d.baseMs,
+      maxMs: o?.maxMs ?? d.maxMs,
+      retryOn: o?.retryOn ?? d.retryOn,
+    };
+  };
+
   const withRetry = async (s: Step, path: string[], fn: () => Promise<StepResult>): Promise<StepResult> => {
-    const max = s.retry?.count ?? scenario.config.retries.count;
+    const policy = retryPolicyOf(s);
+    const max = policy.count;
     let last: StepResult | undefined;
+    /** 被后续尝试取代掉的尝试（连同那次重试前等了多久）。信息不能凭空消失，见 flakyOf。 */
+    const superseded: Array<{ r: StepResult; waitedMs: number }> = [];
     for (let attempt = 0; attempt <= max; attempt++) {
       last = await fn();
-      const retryable = last.status === 'error' && (s.retry?.retryOn ?? ['network', 'timeout']).some((k) => (last?.cause ?? '') === (k === 'status5xx' ? 'env-unavailable' : k));
-      if (last.status === 'pass' || last.status === 'healed' || !retryable || attempt === max) {
-        if (attempt > 0) results[results.length - 1] = { ...last, retry: attempt };
-        return last;
-      }
-      const backoff = s.retry?.backoff === 'exponential'
-        ? Math.min((s.retry?.baseMs ?? 2000) * 2 ** attempt, s.retry?.maxMs ?? 10_000)
-        : (s.retry?.baseMs ?? 2000);
-      await clock.sleep(backoff);
+      if (last.status === 'pass' || !worthRetrying(s, last) || attempt === max) break;
+      /*
+       * **被取代的尝试必须从 results 里撤掉**。以前它留在数组里，一个步骤就留下
+       * N 行（实测 `h:error, h:pass` 两行），四个后果全在"红绿可不可信"这条线上：
+       *  1. 整体状态是 `gate.some(r => r.status === 'error')` ——
+       *     **重试成功的那一步仍然把整个 run 判成 error**（实测确认），
+       *     "重跑即通过"这个 flaky 的定义形状在这里变成永远修不完的红灯；
+       *  2. JUnit 一行一个 <testcase>，tests 计数被同一步骤重复贡献（压测尤其失真）；
+       *  3. 通过率分母 countsTowardPassRate 把 error 与 pass **都**算进去，
+       *     于是一次 flake 同时抬高分子和分母，指标看着"有在动"但没有含义；
+       *  4. 门禁的 leaves 里同一步骤两条自相矛盾的结论，人先要花时间怀疑报告坏了。
+       *
+       * **撤掉不等于丢掉信息**：attempt 计数、每一次尝试的 status/cause/摘要
+       * 都并进最后那一行（flakyOf），所以"第 2 次才过"与"第 1 次是 500 还是连不上"
+       * 在报告与证据里仍可查。这与 docs/08 里"少验了什么要有一行可指"是同一条纪律 ——
+       * 撤行是为了让**结论**唯一，不是为了销毁过程。
+       *
+       * 成本与耗时同理**求和而不是丢弃**：那几次尝试真的花了钱、真的占用了时间。
+       * 只保留最后一次有两个后果 —— sum(rows.costUsd) 对不上 run 级 costUsd，
+       * 以及"这一步很慢"这个 flake 的**主要症状**从报告里消失。
+       *
+       * **重试前的 backoff 等待也算进这一步的 durMs**。一开始我没算，理由是
+       * "等待不是工作"；但 durMs 的用途是 JUnit 的 per-testcase time，
+       * 而人看那个数字是为了找慢用例 —— 配了 count=3 / baseMs=2000 的用例
+       * 报 time=0.005 而整个 run 报 6s，人只会说"JUnit 数字不准"然后去看别的。
+       * （perf 断言不受影响：它读的是 adapter 自己量的 response.durationMs，
+       *  见 assertions.ts 的 payload.durationMs 分支，不是 StepResult.durMs。）
+       */
+      const waitedMs = backoffMs(policy, attempt);
+      superseded.push({ r: last, waitedMs });
+      dropResult(last);
+      await clock.sleep(waitedMs);
+    }
+    if (superseded.length) {
+      // keyContext 是被 strict schema 收下的唯一扩展位（StepResultSchema 是 .strict()，
+      // 顶层加字段等于改磁盘格式），所以 flaky 的成因走这里。
+      last = replaceResult(last!, {
+        retry: superseded.length,
+        durMs: last!.durMs + superseded.reduce((n, x) => n + x.r.durMs + x.waitedMs, 0),
+        costUsd: last!.costUsd + superseded.reduce((n, x) => n + x.r.costUsd, 0),
+        keyContext: { ...last!.keyContext, [FLAKY_OF_KEY]: superseded.map((x, i) => flakyOf(x.r, i + 1, x.waitedMs)) },
+      });
     }
     return last!;
   };
@@ -746,7 +885,27 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const exports = { resp: { status: res.status, body: res.body, bodyText: res.bodyText, headers: res.headers, durationMs: res.durationMs }, status: res.status, body: res.body };
         vars.exportStep(s.id, exports);
         if (s.saveAs) vars.set(s.saveAs, res.body);
-        return { status: 'pass', summary: `${s.request.method} ${res.status} ${fmtMs(res.durationMs)}`, keyContext: { status: res.status, bytes: res.bytes, truncated: res.truncated } };
+        /*
+         * **响应体落证据**，与 openapiCall 那条路同一做法（理由完整写在那一侧：
+         * 无条件存、存 bodyText 而非 body、保留策略归存储层）。
+         *
+         * 这一句以前**只在 openapiCall 里有**。实测（接了 DiskArtifactStore 跑一条
+         * 普通 http 步骤拿到 200）：`artifactIds=[]`、磁盘上按 stepId 查到 **0 条**，
+         * 而 ARTIFACT_STORE_MISSING 事件也是 0 条 —— 意思是"没配存储"那句警告
+         * 压根不会响，因为代码根本没走到需要警告的地方。
+         * 症状是 **evidence.zip 看起来正常打开、只有元数据，而里面没有响应体**，
+         * 对**手写 http 步骤**的用户（最常见的第一条用例，见 wiring.ts 那条
+         * "http adapter 无条件注册"的注释讲的同一个盲区）；走 spec 的用户一切正常，
+         * 于是这个洞被"能复现的人少"长期掩盖。本仓这一类的第三例
+         * （另两例：confidenceGate 只在解释器、autoEvidence 只修一条路径）。
+         */
+        const artifactId = await autoEvidence(s.id, 'http-response', res.bodyText);
+        return {
+          status: 'pass',
+          summary: `${s.request.method} ${res.status} ${fmtMs(res.durationMs)}`,
+          keyContext: { status: res.status, bytes: res.bytes, truncated: res.truncated },
+          ...(artifactId ? { artifactIds: [artifactId] } : {}),
+        };
       }
       case 'openapiCall': {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
@@ -1064,6 +1223,69 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
 }
 
 // ── 辅助 ─────────────────────────────────────────────────────────────────
+
+/** 幂等方法（docs/05 §4）。只有它们能被自动重发；POST/PATCH 永不。 */
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+
+/**
+ * keyContext 里携带"传输失败种类"的字段名。
+ *
+ * 写成常量而不是散在两处的字面量：写的一侧是 runStep 的 catch，
+ * 读的一侧是 worthRetrying。两边打错一个字母的表现是**永不重试**，
+ * 与"没配重试"同症状，谁也不会怀疑到这儿。
+ * （为什么不进 FAILURE_CAUSE：见 runStep catch 里那段注释。）
+ */
+const TRANSPORT_KEY = 'transportKind';
+
+/**
+ * 这一步的请求**能不能重发**。
+ *
+ * 判据放在引擎这一层而不是 adapter 里，是因为"重不发"必须由**做重发决定的那一层**
+ * 执行：重试循环是引擎的 withRetry，adapter 只看得见自己这一次。
+ * 以前 adapter 内部对幂等方法偷偷 retry 2 次（`retries ?? 2`），于是
+ * IR 写 `count: 0`（明确不要重试）时实测仍然真实发出 **3 次** fetch。
+ *
+ * **拿不到 method 就当不能重发**（openapiCall 的 method 是 optional，
+ * 靠 spec 解析才知道）：方向选保守的一边，因为这里错的代价不对称 ——
+ * 少重试只是"这次抖动没被救回来"（还有红灯会报），
+ * 多重试一个 POST 是重复下单，而它的症状是一次成功的 200，谁都看不见。
+ * 要在那个形状上开重试，就得按 docs/05 §4 说的显式 `retry` + `idempotencyKey`，
+ * 而不是让引擎猜 method。
+ */
+function resendsSafely(s: Step): boolean {
+  if (s.kind !== 'http' && s.kind !== 'openapiCall') return true; // 不发请求的步骤，重试不涉及业务副作用
+  const m = (s.kind === 'http' ? s.request.method : s.method) ?? '';
+  return m !== '' && IDEMPOTENT_METHODS.has(m.toUpperCase());
+}
+
+/**
+ * 第 attempt 次重试**之前**要等多久。
+ *
+ * `none` 以前会走到 fixed 那条分支（`backoff === 'exponential' ? … : baseMs`），
+ * 于是"我配了不等待"变成"每轮白等 baseMs（默认 2000ms）"：
+ * 一个 count=3 的用例在 CI 里凭空多花 6 秒，而 flake 治理里
+ * "重试要快"正是配 none 的唯一动机。schema 收了三个值，就得有三个分支。
+ */
+function backoffMs(retry: Retry | undefined, attempt: number): number {
+  const base = retry?.baseMs ?? 2000;
+  if (retry?.backoff === 'exponential') return Math.min(base * 2 ** attempt, retry.maxMs ?? 10_000);
+  return retry?.backoff === 'none' ? 0 : base;
+}
+
+/**
+ * 一次**没被采纳**的尝试的摘要（挂在最终那行的 `keyContext.flakyOf` 上）。
+ *
+ * 只带四件事：第几次、状态、归因、摘要。**刻意不带** keyContext 与 artifactIds：
+ *  - keyContext 里是响应体片段、表达式实际值这类"数据"，而 flakyOf 是要进
+ *    每一步每一行的常设字段，把失败尝试的数据复制一份到成功行上，等于给脱敏
+ *    多开一条没人审的路径（脱敏是在序列化那一刻做的，字段越少越守得住）；
+ *  - 失败尝试落盘的证据由存储层按 run 收尾统一保留策略处理，
+ *    不在这里点名 —— 在这里点名会让"这一步通过了"的行背上一步没通过的证据 id。
+ */
+/** 撤掉的尝试在 keyContext[FLAKY_OF_KEY] 里的形状。类型见 ir 的 FlakyAttempt（读侧与写侧共用一份）。 */
+function flakyOf(r: StepResult, attempt: number, waitedMs: number): FlakyAttempt {
+  return { attempt, status: r.status, waitedMs, ...(r.cause ? { cause: r.cause } : {}), ...(r.assertionSummary ? { summary: r.assertionSummary } : {}) };
+}
 
 class AssertionFailure extends Error {}
 

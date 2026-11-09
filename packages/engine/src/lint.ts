@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult } from '@atest/ir';
-import { LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, parallelHazards, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern } from '@atest/ir';
@@ -32,7 +32,7 @@ export type LintCode =
   | 'STEP_BUDGET_EXCEEDED' | 'EXPR_SYNTAX' | 'DUPLICATE_STEP_ID' | 'CLEARDATA_VS_PRESERVE_SESSION'
   | 'PIXEL_ASSERT_ON_NONHIERARCHY' | 'NEGATIVE_ASSERT_VISION_BASED' | 'TEMPLATE_NOT_UNIQUE'
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
-  | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE';
+  | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER';
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
@@ -115,6 +115,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   ASSERT_FREE_SCENARIO: 'docs/11 §2.2',
   SLEEP_USED: 'docs/02 §3',
   LOOP_UNBOUNDED: 'docs/02 §2',
+  RETRY_ON_CONTAINER: 'docs/05 §4',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
   LITERAL_OVERFIT: 'docs/02 §4、docs/00 §6.3',
@@ -421,6 +422,48 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     for (const h of parallelHazards(s.steps)) {
       push({ code: 'PARALLEL_VAR_RACE', level: 'error', stepId: s.id, ...raceText(h) });
     }
+  });
+
+  /*
+   * **容器上的 retry 现在什么都不做**，所以要响。
+   *
+   * （为什么单开一次 walk 而不是并进上面那条 parallel 规则：两条规则遍历同三段
+   *  看着可以合一次，但合了之后它们**共享同一个回调**，将来谁改另一条的回调形状
+   *  就会连带改到这条 —— 而 mutate 集里有两条 spec 的锚点横跨 parallel 规则的
+   *  walk 头两行，我第一次就是插在中间把那条 spec 弄哑的。规则各占一次遍历，
+   *  锚点就只会因为**自己这条**的改动而失效。）
+   *
+   * 以前它是**能做**的，而且做得很危险：容器的结论是从子步骤递上来的，
+   * 子步骤报 env-unavailable 时容器也报 env-unavailable，于是 `status5xx` 那条
+   * alias（等价于"任何 error 都重试"）会**把整个容器重跑一遍** ——
+   * 包括里面的 POST。而"POST 永不自动重试"（docs/05 §4）这条安全边界
+   * 是按步骤看的，它看不见"POST 在某个 parallel 分支里"。
+   *
+   * 本轮把重试判据改成"必须有传输层种类"之后，容器**天然不再重试**
+   * （容器那一行不带 transportKind，见 engine 的 worthRetrying）。
+   * 这是**故意的**：重跑一个块意味着重跑它的所有子步骤，两个后果
+   *  (1) 块里的 POST 会被再发一次（重复下单级事故，症状是一次成功的 200）；
+   *  (2) 上一次尝试留在 results 里的**子步骤行**撤不掉 ——
+   *      撤行只撤容器自己那一行，子行在下一层，撤了会连"这一轮跑过"一起消失，
+   *      不撤就是"同一个步骤 id 两份结论"（正是本轮修掉的那个症状）。
+   *
+   * 所以：不做，但**要响**。写成 error 而不是 warning，理由是它不是风格问题 ——
+   * 一个静默失效的重试配置就是"用户以为自己配了容错，其实没有"，
+   * 而那正是本仓反复立档的缺陷类；而且它的替代写法（把 retry 挪到块里那条
+   * 幂等请求上）是一行的事，拒得起。
+   *
+   * 登记在 docs/08：真要支持块级重试，得先有"子树里全是幂等请求"的判定
+   * 加上整棵子树的行回滚，那是重试**范围**的设计改动，与 retryOn 那三个
+   * 删掉的值同源（见 values.ts 的 RetrySchema 注释）。
+   */
+  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
+    if (!CONTAINER_KINDS.includes(s.kind) || (s.retry?.count ?? 0) <= 0) return;
+    push({
+      code: 'RETRY_ON_CONTAINER', level: 'error', stepId: s.id,
+      message: `${s.kind} 上写了 retry.count=${s.retry?.count}，但**容器级重试已不再生效**：重跑一个块会重发块里的 POST，且上一次尝试的子步骤行撤不掉（会变成同 id 两份结论）`,
+      fix: '把 retry 挪到块内**那条幂等请求**上（GET/HEAD/OPTIONS/PUT/DELETE）；块里若有 POST，重试要显式配 idempotencyKey 后再议（docs/05 §4）',
+      doc: 'docs/05 §4、docs/08 §3',
+    });
   });
 
   // ── 场景级规则 ──────────────────────────────────────────────────

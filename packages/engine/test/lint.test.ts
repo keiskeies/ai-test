@@ -10,6 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { lintScenario, toReport, type LintCode, type LintContext } from '../src/index.js';
+import { CONTAINER_KINDS } from '@atest/ir';
 import { b, scen, getStep, tapStep, run, res, type StepDraft } from './helpers.js';
 
 const codes = (body: StepDraft[], ctx: LintContext = {}, extra: object = {}): LintCode[] =>
@@ -397,5 +398,71 @@ describe('干净场景必须零 error（误报会让整套 lint 被关掉）', (
     const rep = toReport(lintScenario(s));
     assert.deepEqual(rep.errors.map((e) => `${e.code}@${e.stepId ?? '-'}`), [], rep.summary);
     assert.equal(rep.ok, true);
+  });
+});
+
+describe('RETRY_ON_CONTAINER（容器上的 retry 现在什么都不做，所以要响）', () => {
+  /*
+   * 这条规则是本轮**改动的副产品**，而它存在的理由正是本仓反复写的那句话：
+   * 静默失效的配置比报错的配置坏得多。
+   *
+   * 改动前容器 retry 是"能做"的，但做法是"子步骤报 error => 容器报 error =>
+   * status5xx 那条 alias 命中 => 整个块重跑"，于是 parallel 分支里的 POST
+   * 会被再发一次，而"POST 永不自动重试"（docs/05 §4）那条边界是按步骤看的，
+   * 看不见"POST 在某个块里"。改动后重试要求"这一行带传输种类"，
+   * 容器那一行永远不带 —— 于是容器 retry **静默变成空操作**。
+   * 不修成"能重试"是故意的（重跑块会重发 POST、上一轮的子步骤行撤不掉），
+   * 但**放着不响**就等于把一个会做危险事的配置换成一个骗人的配置。
+   */
+  const hit = (body: readonly unknown[], extra: object = {}) =>
+    lintScenario(scen(body as never[], extra as never)).filter((i) => i.code === 'RETRY_ON_CONTAINER');
+  const withRetry = (step: StepDraft): StepDraft => ({ ...step, retry: { count: 2 } } as StepDraft);
+
+  /** 每种容器一个**能过 schema** 的最小形状（容器都要求至少 1 个子步骤，空的不合法） */
+  const child: StepDraft = { ...b('n'), kind: 'noop' };
+  const CONTAINERS: ReadonlyArray<[string, StepDraft]> = [
+    ['sequence', { ...b('c'), kind: 'sequence', steps: [child] }],
+    ['if', { ...b('c'), kind: 'if', condition: '$x', then: [child], else: [] }],
+    ['switch', { ...b('c'), kind: 'switch', value: '$x', cases: [{ is: { expr: 'true' }, steps: [child] }], default: [] }],
+    ['forEach', { ...b('c'), kind: 'forEach', items: '[1]', as: 'i', maxIterations: 2, steps: [child] }],
+    ['while', { ...b('c'), kind: 'while', condition: 'false', maxIterations: 2, steps: [child] }],
+    ['repeat', { ...b('c'), kind: 'repeat', times: 1, steps: [child] }],
+    ['parallel', { ...b('c'), kind: 'parallel', failFast: true, maxConcurrency: 1, steps: [child] }],
+  ] as const;
+
+  for (const [kind, step] of CONTAINERS) {
+    test(`${kind} 上写 retry.count>0 -> error`, () => {
+      const i = hit([{ ...step, retry: { count: 1 } }])[0];
+      assert.ok(i, `${kind} 带 retry 必须报 —— 它是"用户以为配了容错，其实一次都不会重试"`);
+      assert.equal(i!.level, 'error', 'warning 会被 `atest lint` 放过、CI 照跑，而这份配置永远不会生效');
+      assert.equal(i!.stepId, 'c', '要指到写 retry 的那个容器');
+      assert.match(i!.message, /不再生效|不会生效|已.*失效/, '要说清"写了不等于生效"，只说"不支持"会让人以为是老版本问题');
+      assert.match(i!.fix ?? '', /幂等|GET/, 'fix 必须给出**能照做**的替代：把 retry 挪到块内那条幂等请求上');
+      assert.ok(i!.doc);
+    });
+  }
+
+  test('七种容器都被覆盖（新增容器 kind 时这条会提醒补上面那张表）', () => {
+    assert.deepEqual(CONTAINERS.map(([k]) => k).sort(), [...CONTAINER_KINDS].sort(),
+      'CONTAINER_KINDS 加了一种而这里没加 => 那种容器的 retry 静默失效而无人报');
+  });
+
+  test('普通步骤上的 retry 不许被这条规则误伤', () => {
+    // 这条是**反向**守卫：判据必须是"容器"，否则本轮刚修好的步骤级重试
+    // 会被自己的 lint 拦在门外，症状是"照文档配了重试，lint 说不许配"。
+    const i = hit([withRetry(getStep('h'))]);
+    assert.deepEqual(i, [], 'http 步骤上的 retry 是**唯一有效**的写法，报它就是报正确答案');
+  });
+
+  test('retry.count=0（默认值）不报：没写就等于没配', () => {
+    assert.deepEqual(hit([{ ...b('c'), kind: 'sequence', steps: [] }]), []);
+  });
+
+  test('setup / teardown 里的容器同样查（与 PARALLEL_VAR_RACE 同一条理由）', () => {
+    const s = scen([{ ...b('h'), kind: 'noop' }] as never[], {
+      setup: [{ ...b('s1'), kind: 'sequence', steps: [], retry: { count: 1 } }] as never[],
+    } as never);
+    assert.ok(lintScenario(s).some((i) => i.code === 'RETRY_ON_CONTAINER' && i.stepId === 's1'),
+      '只查 body 的话"前置里配了个不会生效的重试"照样静默');
   });
 });

@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 
 import { b, run, scen, type StepDraft } from './helpers.js';
 import { toJUnitXml, type RunReport } from '../src/index.js';
@@ -201,4 +201,33 @@ test('真实运行（跑过的场景）也能导出可解析的 JUnit', async ()
   const out = parseXml(toJUnitXml(r, { suiteName: 'scn.test' }));
   assert.ok(out.tests >= 2, '真实运行的步骤都该在里面');
   assert.equal(out.failures, 1, 'bad 那步是 fail');
+});
+
+describe('重试之后才通过的步骤在 JUnit 里留痕', () => {
+  /*
+   * 撤行修复之后，一次 flake 只剩一行 status=pass —— 光看 bucket 一条都拦不住。
+   * 这里钉的是"它得能在 JUnit 里被捞出来"，同时钉住**它不算 failure**：
+   * 判红等于叫别人别配 retry，而 retry 的存在意义就是吸收抖动。
+   */
+  const FLAKY_CTX = { flakyOf: [{ attempt: 1, status: 'error', waitedMs: 500, cause: 'env-unavailable', summary: 'ECONNREFUSED' }] };
+
+  test('pass 的步骤带 attn="flaky-recovered"，且不产生 <failure>', () => {
+    const xml = toJUnitXml(rep([{ stepId: 'fl', kind: 'http', status: 'pass', retry: 1, keyContext: FLAKY_CTX }]));
+    assert.match(xml, /attn="flaky-recovered"/, 'CI 侧要能用一条 attn= 把所有"看一眼但不用改"的捞出来');
+    assert.match(xml, /attempts="2"/, '第几次才过要写出来，看板按这个排序就是 flake 榜');
+    assert.doesNotMatch(xml, /<failure|<error/, '重试通过的步骤不该让 job 变红');
+  });
+
+  test('普通 pass 不带这个属性（窄性对照）', () => {
+    const xml = toJUnitXml(rep([{ stepId: 'ok', kind: 'http', status: 'pass' }]));
+    assert.doesNotMatch(xml, /flaky-recovered|attempts=/, '没有重试就别出话');
+  });
+
+  test('重试用尽仍失败的步骤**不**标 flaky（它已经在 <error> 里了）', () => {
+    // 判据是 pass + 有 flakyOf。status=error 那些归 error 那条路说，
+    // 标两次会让"需要看一眼的东西"数出两个来源。
+    const xml = toJUnitXml(rep([{ stepId: 'fl', kind: 'http', status: 'error', retry: 1, keyContext: FLAKY_CTX }]));
+    assert.match(xml, /<error/, '先要真的是 error');
+    assert.doesNotMatch(xml, /flaky-recovered/, '同一件事不出现两次');
+  });
 });

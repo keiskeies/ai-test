@@ -17,7 +17,7 @@
  *     混起来会让人在环境问题上查产品代码。
  */
 import type { RunReport } from '@atest/engine';
-import { ASSERTION_KINDS, CONTAINER_KINDS, countsTowardPassRate, walk, type Scenario, type Step, type StepResult } from '@atest/ir';
+import { ASSERTION_KINDS, CONTAINER_KINDS, countsTowardPassRate, flakyAttempts, isFlakyPass, walk, type Scenario, type Step, type StepResult } from '@atest/ir';
 import { EXIT } from './exit.js';
 
 export interface GateInput {
@@ -90,7 +90,38 @@ export function gateBeforeRun(i: GateInput): GateDecision {
  *  - triage 场景的 fail 要降级；
  *  - "什么都没跑"（results 为空）不是通过 —— 那是绿得可疑。
  */
+/**
+ * 跑完之后的门禁。**薄壳**，真正的判定在 gateAfterRunCore。
+ *
+ * 分两层只有一个原因：**flake 那句必须任何分支都能看到**。
+ * gateAfterRunCore 有 9 个 return（INVALID / RUNTIME / TEST_FAILED / OK …），
+ * 在每个 return 前各补一句的写法，将来加第 10 个分支时一定会漏掉 flake，
+ * 而漏掉的表现是"某个红法下没提 flake"——没人会去查自己没看见的那一行。
+ * 包一层让"追加"这件事**只有一处可写**，也保证它永远排在最后
+ * （flake 是"这次绿得有多脆"，它不该抢在真正的失败原因前面）。
+ */
 export function gateAfterRun(i: GateInput): GateDecision {
+  const d = gateAfterRunCore(i);
+  if (!i.report || d.refused) return d;
+  const flaky = i.report.results.filter(isFlakyPass);
+  if (!flaky.length) return d;
+  return {
+    ...d,
+    // 进 attention：**红与不红是两件事，被不被看见是第三件事**。
+    // 与 healed 同一处置（healed 也只进 attention 不参与红绿）。
+    attention: [...d.attention, ...flaky.map((r) => {
+      const a = flakyAttempts(r);
+      return `~ ${r.stepId}（第 ${a.length + 1} 次才通过，前面 ${a.length} 次：${a.map((x) => `${x.status}${x.cause ? `/${x.cause}` : ''}`).join('、')}）`;
+    })],
+    reasons: [...d.reasons,
+      `${flaky.length} 步是**重试之后**才通过的（${flaky.map((r) => r.stepId).join('、')}）—— 这次算通过，不计入退出码，`
+      + '但"重跑即通过"就是 flake 的定义：单次绿灯掩盖的是不稳定本身。'
+      + '偶尔一次可能是环境抖，同一支反复出现就要查数据/等待/隔离（docs/08 §3 flake 治理）。',
+    ],
+  };
+}
+
+function gateAfterRunCore(i: GateInput): GateDecision {
   const before = gateBeforeRun(i);
   if (before.refused) return before;
   const report = i.report;

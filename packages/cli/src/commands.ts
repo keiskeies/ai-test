@@ -580,7 +580,7 @@ export async function cmdAuthCheck(a: ParsedArgs, io: Io): Promise<CommandResult
         timeoutMs: req.timeoutMs, maxBytes: 64 * 1024,
         // 不跟重定向：跟到登录页会拿到一个 200 的 HTML，
         // 于是"凭证有效"的结论是从一个登录表单页推出来的
-        followRedirects: false, retries: 0,
+        followRedirects: false,
       });
       return { status: r.status, body: r.body, error: r.error };
     },

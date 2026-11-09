@@ -95,13 +95,74 @@ export const RetrySchema = z
     backoff: z.enum(['none', 'fixed', 'exponential']).default('fixed'),
     baseMs: z.int().min(0).max(60_000).default(500),
     maxMs: z.int().min(100).max(120_000).default(10_000),
-    /** 仅在网络级/瞬时错误上重试。**POST 默认永不自动重试**（docs/05 §4） */
+    /**
+     * 只在**这一层观测得到的瞬时故障**上重试。
+     *
+     * **为什么只有两个值**（以前这里有五个：另有 status5xx / assert-fail / locator-stale）：
+     * 那三个是"schema 收下了而运行时从不产生"的字段 —— 写它的人以为配了重试，
+     * 实际一次都不会重发，症状与"没配"完全相同。逐个为什么做不了：
+     *  - `assert-fail`：重跑一个 assert 步骤就是拿**同一份数据**再判一次，
+     *     结果必然相同。要救 5xx 那种抖动，重试的单位得是"请求 + 它的断言"，
+     *     而这里的重试单位是单个步骤 —— 那是重试**范围**的设计改动（docs/08 已登记）。
+     *  - `status5xx`：同上。而且 http 步骤对任何**收到的响应**都判 pass
+     *     （500 是被测系统的答案，判红是 assert 的事），所以步骤状态永远不是 error，
+     *     而重试的前置条件就是 error。
+     *     以前它靠一条 alias 勉强能用：`k==='status5xx' ? cause==='env-unavailable'`，
+     *     于是它**等价于"任何 error 都重试"** —— 实测连"http adapter 未注册"
+     *     这种重试一万次也不会好的配置错误也照重试 3 次。
+     *  - `locator-stale`：定位失败发生在 adapter 里，引擎只拿到"定不到/置信度低"；
+     *     而重Resolve 同一个页面不会变好，那是 wait 的职责（docs/02 §3）。
+     *
+     * 删值而不是留值加注释，是因为**被拒的写法会响**：IR 里写 `retryOn:["status5xx"]`
+     * 现在得到一条列出合法值的 schema 错误，而不是一个静默的空配置。
+     *
+     * **POST/PATCH 不受这里控制**：非幂等方法一律不自动重发
+     * （engine 的 resendsSafely，docs/05 §4），配了也白配。
+     */
     retryOn: z
-      .array(z.enum(['network', 'timeout', 'status5xx', 'assert-fail', 'locator-stale']))
+      .array(z.enum(['network', 'timeout']))
       .default(['network', 'timeout']),
   })
   .strict();
 export type Retry = z.infer<typeof RetrySchema>;
+
+/**
+ * 步骤上的 retry：**只写想覆盖的那几项**，其余继承场景级 `config.retries`。
+ *
+ * **为什么需要第二个 schema 而不是直接用 RetrySchema.optional()**：
+ * Zod 对**存在的**对象会补齐它自己所有缺省字段。于是
+ * `retry: { retryOn: ['timeout'] }`（最自然的"只改一项"写法）解析出来是
+ * `{count:0, backoff:'fixed', baseMs:500, …}` —— **没写的 count 变成 0**，
+ * 而引擎那句 `s.retry?.count ?? scenario.config.retries.count` 里的 `??`
+ * 就永远不触发。实测当时**任何**配置组合下 config.retries 都产生不了一次重试。
+ * （`z.partial()` 也救不了：实测它同样吃 default。已验。）
+ *
+ * **不在此处重抄一遍约束**：从 RetrySchema 的 shape 派生
+ * （`unwrap()` 剥掉 default、保留 min/max/enum，实测 parse(99) 仍报 too_big）。
+ * 手写一份"看着一样但没有 default"的 schema 就是本仓反复立档的那个缺陷类 ——
+ * 两份边界，改一处漏一处，而且漏了不会红。
+ *
+ * 类型上的连带好处：`RetryOverride` 全字段可选，
+ * 所以引擎里 `o?.count ?? d.count` 那句是**类型强制**的，
+ * 不象以前 `retry?: Retry` 配 `as Partial<Retry>` 的 cast ——
+ * cast 把"其实读不到"这件事从编译期错误变成了运行时静默。
+ */
+export const RetryOverrideSchema: z.ZodType<RetryOverride> = z
+  .object(
+    // 每项先 unwrap（剥 default、留边界）再 optional。cast 到 z.ZodType 会让
+    // **推断出来的**输出类型全变成 `{}`，所以整个 schema 要显式标注
+    // z.ZodType<RetryOverride> —— 少了那个标注，引擎里 `o?.count ?? d.count`
+    // 会拿到 `{}` 而不是 number|undefined，编译期就拦住（这次真的拦住了，见 git 历史）。
+    Object.fromEntries(
+      Object.entries(RetrySchema.shape).map(([k, v]) => {
+        const u = v as unknown as { unwrap?: () => z.ZodType };
+        return [k, (u.unwrap?.() ?? (v as unknown as z.ZodType)).optional()];
+      }),
+    ),
+  )
+  .strict();
+/** 全字段可选的 retry 覆盖。手写成 mapped type 而不是 z.infer，是为了让"可选"这件事写在类型里而不是依赖推断 */
+export type RetryOverride = { [K in keyof Retry]?: Retry[K] };
 
 export const ParamDefSchema = z
   .object({

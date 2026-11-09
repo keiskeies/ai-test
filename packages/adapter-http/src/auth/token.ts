@@ -128,8 +128,9 @@ export class TokenSource {
       // 然后报"没有 access_token"，而真相是 URL 配错了
       followRedirects: false,
       // token 请求**一次都不重试**：某些 IdP 每次签发会吊销上一个 token，
-      // 网络抖动后重试可能把刚拿到的有效 token 作废，把一次抖动变成永久失效
-      retries: 0,
+      // 网络抖动后重试可能把刚拿到的有效 token 作废，把一次抖动变成永久失效。
+      // 现在这一层本来就不重试（次数只在引擎的 retry.count 那里定），
+      // 而 token 请求是 adapter 自己发的、不经引擎的重试循环 —— 天然一次。
     });
 
     if (res.error) {

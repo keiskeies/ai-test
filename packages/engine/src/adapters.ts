@@ -8,6 +8,31 @@
  */
 import type { StepStatus, TraceEventKindT } from '@atest/ir';
 
+/** 传输层失败的种类。与 adapter 侧的 SendResult.error.kind 同一套词，刻意不另起名字。 */
+export type TransportKind = 'timeout' | 'network' | 'aborted';
+
+/**
+ * adapter 抛给引擎的**传输层**错误（连不上 / 超时 / 取消），带得上分类。
+ *
+ * **为什么要有这个类，而不是让引擎去看 error.message**：
+ * 重试配置里的 `retryOn: ['network','timeout']` 以前**从来没生效过** ——
+ * 引擎侧的判据是 `cause === 'network'`，而没有任何代码把 cause 设成 network
+ * （实测：`retry:{count:3}` 配默认 retryOn，一次都不重发）。
+ * 最省事的"修法"是 `if (/ECONN|ETIMEDOUT/.test(msg))`，那是**盾牌不是修复**：
+ * undici 的措辞变了、换个 fetch 实现、本地化过的错误文本，
+ * 都会让它静默退回"不重试"，而症状与"根本没配重试"一模一样。
+ * 所以分类由**知道得最多的那一层**（adapter，它本来就在
+ * `AbortSignal` 与 fetch 抛出物之间分好了 timeout/network）显式带上来。
+ *
+ * 只有 error 用这个类；被测算出 500 不是传输错误（那是答案，不是抖动）。
+ */
+export class TransportError extends Error {
+  constructor(readonly kind: TransportKind, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'TransportError';
+  }
+}
+
 /** 引擎对外的唯一副作用出口。所有网络/设备/DB 访问都经这里。 */
 export interface ExecContext {
   target: 'api' | 'web' | 'android' | 'ios' | 'harmony';

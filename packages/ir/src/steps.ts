@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { LlmAssertPayloadSchema, PerfAssertPayloadSchema, StructAssertPayloadSchema, UiAssertPayloadSchema } from './asserts.js';
 import { DeviceRequirementSchema, SessionSchema, TargetKindSchema } from './targets.js';
-import { ExprSchema, RefSchema, RetrySchema, SecretRefSchema, ValueSchema, VarNameSchema, type Retry } from './values.js';
+import { ExprSchema, RefSchema, RetryOverrideSchema, SecretRefSchema, ValueSchema, VarNameSchema, type RetryOverride } from './values.js';
 import { LocatorSpecSchema, type LocatorSpec } from './locator.js';
 import { WaitOptionsSchema, WaitPredicateSchema, type WaitPredicate } from './waits.js';
 
@@ -29,7 +29,13 @@ const Base = {
   /** 守卫：让任何节点可被条件跳过，因此不必为每个分支包一层 if（抄 Maestro when:） */
   when: ExprSchema.optional(),
   timeoutMs: z.int().min(100).max(1_800_000).optional(),
-  retry: RetrySchema.optional(),
+  /**
+   * 步骤级重试**覆盖**。刻意不是 `RetrySchema.optional()`：
+   * 那个 schema 会把它自己的默认值全填上，于是"只写 retryOn"的步骤
+   * 带着 count=0 落地，场景级 `config.retries` 被静默清零。
+   * 理由与派生方式见 values.ts 的 RetryOverrideSchema 注释。
+   */
+  retry: RetryOverrideSchema.optional(),
   onError: z.enum(['fail', 'continue', 'retry']).default('fail'),
   tags: z.array(z.string().max(40)).default([]),
   note: z.string().max(2000).optional(),
@@ -40,7 +46,7 @@ export interface StepBase {
   name?: string;
   when?: string;
   timeoutMs?: number;
-  retry?: Retry;
+  retry?: RetryOverride;
   onError: 'fail' | 'continue' | 'retry';
   tags: string[];
   note?: string;

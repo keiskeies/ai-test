@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { defineScenario, type Scenario, type ScenarioDraft, type StepDraft } from '@atest/ir';
-import { deterministicClock, runScenario } from '@atest/engine';
+import { deterministicClock, runScenario, TransportError } from '@atest/engine';
 
 import { EXIT } from '../src/exit.js';
 import { gateAfterRun } from '../src/gate.js';
@@ -42,12 +42,12 @@ function scen(body: StepDraft[], extra: Partial<ScenarioDraft> = {}): Scenario {
  * 变异集里那条（"orphan 的 error 不加进理由文本"）就是靠它才survived 的。
  * 这正是 docs/08 §3 记的那个缺陷类的又一例：**测试通过的原因与它想验的东西无关**。
  */
-async function run1(s: Scenario, adapters: unknown = {}): Promise<{ code: number; said: string; why: string }> {
+async function run1(s: Scenario, adapters: unknown = {}): Promise<{ code: number; said: string; why: string; attn: string[] }> {
   const report = await runScenario({ scenario: s, clock: deterministicClock(7), adapters: adapters as never });
   const d = gateAfterRun({ scenario: s, report, ci: true, allowUnfrozen: false });
   const said = d.reasons.join(' / ');
   const rows = report.results.map((r) => `${r.stepId}/${r.kind}=${r.status}`).join(' ');
-  return { code: d.code, said, why: `[${rows}] ${said}` };
+  return { code: d.code, said, why: `[${rows}] ${said}`, attn: d.attention };
 }
 
 const okAssert = (id: string): StepDraft =>
@@ -347,4 +347,65 @@ test('窄性对照：正常的确定性全绿场景仍然是 0，且理由里不
   const g = await run1(scen([seed(200), okAssert('c0'), okAssert('c1')]));
   assert.equal(g.code, EXIT.OK, `实际：${g.why}`);
   assert.doesNotMatch(g.said, /未计入结论|没有任何断言结论/, '没有异常就别出话，否则真信号会被噪音淹掉');
+});
+
+// ── flake：重试之后才通过的步骤 ───────────────────────────────────────────
+
+/*
+ * 这一组存在的理由是**本轮那次修复自己造成的洞**：以前一次 flake 会在 results 里
+ * 留下 `h:error, h:pass` 两行，红得很吵（虽然吵得没道理：整体状态被一次
+ * 已经恢复的失败判成 error）。修好之后**只剩一行 pass**——
+ * 也就是说"重跑即通过"这件事从报告里**彻底消失**了。
+ *
+ * 撤掉噪音而不补上信号，等于把 flake 从"看起来坏了"改成"看起来很好"，
+ * 而 flake 治理的第一件事是**让它被看见**（docs/08 §3）。
+ * 所以这里钉的是：不改变退出码（重试的存在意义就是吸收抖动，判红等于白重试），
+ * 但**必须出现在 reasons 与 attention 里**，点名步骤与"第几次才过"。
+ */
+const flakyAdapters = (failUntil: number): unknown => ({
+  http: {
+    async send() {
+      flakySends++;
+      if (flakySends < failUntil) throw new TransportError('network', 'ECONNREFUSED');
+      return { status: 200, headers: {}, body: { st: 200 }, bodyText: '{"st":200}', bytes: 9, truncated: false, durationMs: 2 };
+    },
+  },
+});
+let flakySends = 0;
+
+test('一次 flake 之后全绿：退出码仍是 0，但那一步必须被点名', async () => {
+  flakySends = 0;
+  const g = await run1(scen([
+    seed(200),
+    { id: 'g', kind: 'http', request: { method: 'GET', url: 'http://x/a' }, retry: { count: 2 } } as StepDraft,
+    okAssert('c0'),
+  ]), flakyAdapters(2));
+  assert.equal(flakySends, 2, '重试没发生的话，下面几条断言验的是一件没发生的事');
+  assert.equal(g.code, EXIT.OK, `重试吸收了抖动，不该判红（否则配 retry 毫无意义）。实际：${g.why}`);
+  assert.match(g.said, /重试之后|重试后才通过/, `理由里必须说清这一步是重试过的。实际：${g.why}`);
+  assert.match(g.said, /\bg\b/, `要点名是哪个步骤。实际：${g.why}`);
+  assert.equal(g.attn.length, 1, `要进待确认清单（与 healed 同一处置）。实际：${JSON.stringify(g.attn)}`);
+  assert.match(g.attn[0]!, /第 2 次才通过/);
+});
+
+test('没有任何重试的正常场景**不许**出现这句（窄性对照）', async () => {
+  const g = await run1(scen([seed(200), okAssert('c0')]));
+  assert.equal(g.code, EXIT.OK);
+  assert.doesNotMatch(g.said, /重试/, '没有 flake 就别出话，否则真信号被噪音淹掉');
+  assert.deepEqual(g.attn, []);
+});
+
+test('flake 那句排在真正的失败原因**之后**，不抢话', async () => {
+  flakySends = 0;
+  const g = await run1(scen([
+    // st=500 而断言要 200 => 一条**真红**的断言
+    seed(500),
+    { id: 'g', kind: 'http', request: { method: 'GET', url: 'http://x/a' }, retry: { count: 2 } } as StepDraft,
+    okAssert('c0'),
+  ]), flakyAdapters(2));
+  assert.equal(g.code, EXIT.TEST_FAILED, `有真失败就是 1，flake 那句不能把它盖掉。实际：${g.why}`);
+  const iFail = g.said.indexOf('断言失败');
+  const iFlaky = g.said.indexOf('重试');
+  assert.ok(iFail >= 0, `先要说断言失败。实际：${g.why}`);
+  assert.ok(iFlaky > iFail, 'flake 是"这次绿得有多脆"，不该抢在真正的失败原因前面');
 });

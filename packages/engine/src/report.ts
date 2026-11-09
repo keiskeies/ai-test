@@ -11,7 +11,7 @@
  */
 import type { StepResult, TraceEvent } from '@atest/ir';
 import type { RunReport } from './interpreter.js';
-import { StepResultSchema, TraceEventSchema, CONTAINER_KINDS } from '@atest/ir';
+import { StepResultSchema, TraceEventSchema, CONTAINER_KINDS, flakyAttempts, isFlakyPass } from '@atest/ir';
 
 
 // 脱敏策略在 redact.ts（唯一一份）。本文件不重复定义 —— 那个文件顶部记着
@@ -199,6 +199,14 @@ export function toJUnitXml(report: RunReport, opts: JUnitOptions = {}): string {
     ];
     if (r.status === 'healed') attrs.push('attn="healed-unreviewed"');
     if (r.status === 'triaged') attrs.push('attn="triaged"');
+    /*
+     * **重试之后才通过的步骤也要留痕**。撤行修复之后这种步骤的状态就是 pass，
+     * 光看 bucket 一条都拦不住（与 healed 需要单独一个 attn 是同一个理由）。
+     * 不进 <failure>：JUnit 里 failure 会计数并让 job 变红，
+     * 而重试吸收抖动正是 retry 存在的意义 —— 判红等于叫别人别配 retry。
+     * 属性名复用 attn，让 CI 侧一条 grep 就能拉出"所有需要看一眼但不用改的"。
+     */
+    if (isFlakyPass(r)) attrs.push(`attn="flaky-recovered" attempts="${flakyAttempts(r).length + 1}"`);
     if (r.resolvedBy) attrs.push(`resolvedBy="${xmlAttr(r.resolvedBy)}"`);
 
     const open = `<testcase ${attrs.join(' ')}>`;
