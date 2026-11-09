@@ -67,7 +67,7 @@
 | M0 / M0.5 / M1 / M2 / M3 / **M0.6** | `packages/ir`（场景 IR + zod schema + builder + **`baseline` 性能基线模型**）、`packages/engine`（引用/表达式/等待/断言/解释器/静态闸/**`StepExecutor` 两种执行形态**）、`packages/adapter-http`（OpenAPI 3 解析 + 确定性别名 + style 序列化 + ajv 双向校验 + spec 生成的 mock server）、`tooling/lint-layers`（分层与 node-free 强制） |
 | **M6 / M7 判据侧** | `packages/store`（磁盘内容寻址 + 脱敏在序列化时发生 + 自研 zip + 证据包组装）、`packages/cli`（**`atest run/lint/gen/agent/init/evidence/auth-check`** 七命令，七档退出码 + `--ci` 门禁闸）、`engine/report.ts`（`trace.jsonl` + JUnit XML + manifest/summary） |
 | **鉴权层**（`docs/05` §2） | apiKey×3 / bearer / basic / oauth2 clientCredentials + token 缓存与过期前刷新 + **`atest auth-check`**（逐方案×逐身份，只走只读方法）。方案语义与密钥值都**留在 adapter**，引擎只传不透明引用 |
-| 测试 | **593 例**（`node:test`）。含「引擎在浏览器里能跑」的 esbuild+vm 行为验证、「引擎跑真实 IR 打到 spec 生成的 mock server」的端到端验证、「**功能形态与预编译形态逐步等价**」的 35 例（含 40 例随机树属性测试），以及 M6 的**外部实现验产物**两类：JUnit XML 交给 CPython 的 expat 解析、`evidence.zip` 交给系统 `unzip -t`。`npm test` 全绿、`npm run build` / `npm run typecheck:test` / `npm run lint:layers` 干净 |
+| 测试 | **598 例**（`node:test`），其中鉴权层 83 例（adapter 侧方案与凭证表 47 + 引擎侧身份意图 13 + `auth-check` 判读 23）。含「引擎在浏览器里能跑」的 esbuild+vm 行为验证、「引擎跑真实 IR 打到 spec 生成的 mock server」的端到端验证、「**功能形态与预编译形态逐步等价**」的 35 例（含 40 例随机树属性测试），以及 M6 的**外部实现验产物**两类：JUnit XML 交给 CPython 的 expat 解析、`evidence.zip` 交给系统 `unzip -t`。`npm test` 全绿、`npm run build` / `npm run typecheck:test` / `npm run lint:layers` 干净 |
 | 变异检查 | `npm run mutate tooling/mutate/<名>.json`（`tooling/mutate.mjs`）。关键断言必须在实现被改坏时变红；等价变异照列并标 `expect:"equivalent"`。**harness 自己的判读也有测试** —— 它产出的是"这条断言已验证"这个结论，判错与它要防的 bug 一样坏 |
 
 M2 的判据是「打本地 mock server（mock 由 spec 生成）全绿」—— 现在引擎自测**不依赖任何真实后端**，
