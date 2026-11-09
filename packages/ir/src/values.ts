@@ -114,7 +114,17 @@ export const RetrySchema = z
      *     而重Resolve 同一个页面不会变好，那是 wait 的职责（docs/02 §3）。
      *
      * 删值而不是留值加注释，是因为**被拒的写法会响**：IR 里写 `retryOn:["status5xx"]`
-     * 现在得到一条列出合法值的 schema 错误，而不是一个静默的空配置。
+     * 现在会被 schema 拒掉，而不是静默当一个空配置。
+     * （**但要如实说清拒到什么程度**：作者看到的是
+     *  `场景不合法…（首个问题：body.0 → Invalid input）`，
+     *  **不含字段名也不含合法值列表** —— zod 的 error 里有
+     *  `path: retry.retryOn.0` 与 `values:["network","timeout"]`，
+     *  是 ir/index.ts 的 humanize() 没下钻 discriminatedUnion 的嵌套 issues 把它们丢了。
+     *  我最初在这行写的是"得到一条列出合法值的 schema 错误"，那是**错的**，
+     *  被自己新写的测试当场证伪（断言"错误里列出合法值"，红的）。
+     *  为什么不在本轮顺手修 humanize：直接下钻实测得到 **173 条 issue**（同一个 retryOn
+     *   错被 28 个分支各报一遍，其中 39 条提到 retryOn，其余是各分支自己的缺字段噪音），
+     *  去重与"报第几支"是真设计问题 —— 登记在 docs/08，单开一步做。）
      *
      * **POST/PATCH 不受这里控制**：非幂等方法一律不自动重发
      * （engine 的 resendsSafely，docs/05 §4），配了也白配。

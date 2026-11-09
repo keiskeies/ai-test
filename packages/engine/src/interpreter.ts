@@ -1129,7 +1129,10 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         emit({ kind: 'log.emitted', stepId: s.id, data: { level: s.level, message: interpolate(s.message, vars) } });
         return { status: 'pass', summary: 'log' };
       case 'fail':
-        return { status: 'fail', summary: s.reason, cause: (s.cause as StepResult['cause']) ?? 'product-bug' };
+        // 不再需要 `as StepResult['cause']`：FailStepSchema.cause 现在就是 FailureCause。
+        // 留着那个 cast 的话，将来把 schema 侧放宽成 z.string() 也不会红 ——
+        // 而它放宽一次，非法归因就能一路写进证据包（StepResultSchema 读不回来）。
+        return { status: 'fail', summary: s.reason, cause: s.cause ?? 'product-bug' };
       case 'noop':
         return { status: 'pass', summary: 'noop' };
       default:

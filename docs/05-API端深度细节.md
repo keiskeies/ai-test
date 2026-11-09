@@ -94,6 +94,10 @@ P0 的 M2 会在这里花掉预期的 3 倍时间。按遭遇频率排序：
 - **压缩**：`accept-encoding: gzip, deflate, br` 自动解；`br` 要 `zlib.brotliDecompress`。有些网关对 `br` + 流式响应有 bug，遇到时按 provider 配置降级。
 - **时间语义**：断言里的时间一律用相对表达式（`createdAt` 与 `now` 差值 < 5s）而不是字面值，除非 IR 里显式 `exact`。
 - **重试边界**：**只有幂等方法（GET/HEAD/OPTIONS/PUT/DELETE）且错误是网络级时才自动重试**；POST 永不自动重试（会造成重复下单级别的事故），需要时由 IR 里显式 `retry` + `idempotencyKey` 承担。
+  - **归谁执行**：判据与次数**都在引擎**（`resendsSafely` 管幂等、IR 的 `retry.count` 管次数），HTTP 客户端**一次 send 就是一次 fetch**。以前客户端内部对幂等方法偷偷 `retries ?? 2`，与引擎的重试循环叠乘：IR 写 `count:0`（明确不重试）时实测发出 3 次请求，写 `count:2` 时 9 次，而报告里只看得见引擎那 3 行 —— 压测的吞吐曲线因此是真实负载的 3 倍且不可见。**"哪些方法可以重发"这条边界一个字没改**，改的只是不许有两处各实现一半。
+  - **可重试的种类**：`retryOn` 只有 `network` / `timeout` 两个值，由 adapter 以 `TransportError.kind` 显式带上。以前判据是 `cause === 'network'`，而那个词从来不在 `FAILURE_CAUSE` 里 => 默认配置**一次都没重试过**；`status5xx` 靠 alias 映射到 `env-unavailable`，于是等价于"任何 error 都重试"（连"adapter 未注册"这种配置错误也白重试）。`assert-fail` / `locator-stale` 在**按步骤**的重试范围里做不出来（重跑 assert 是拿同一份数据再判一次；http 步骤对任何**收到的**响应都判 pass），已从枚举删除。
+  - **容器上不生效**：`sequence`/`parallel`/`forEach` 等写 `retry.count>0` 会被 lint 以 `RETRY_ON_CONTAINER` 拒 —— 重跑一个块会重发块里的 POST（幂等判据按步骤看，看不见块里的那个），且上一轮的子步骤行撤不掉，会变成同 id 两份结论。把 `retry` 挪到块内那条幂等请求上。
+  - **重试成功后只留一行结论**：被取代的尝试从 `results` 撤掉，整体状态不再被"已经恢复的失败"判成 error。过程不销毁：尝试次数与每次的 status/cause/摘要在 `keyContext.flakyOf`，门禁的 attention 与 JUnit 的 `attn="flaky-recovered" attempts=N` 都会点名它（**但不改退出码**：判红等于叫别人别配 retry）。
 - **变量类型保真**：JSON 大整数（雪花 ID）用 string 存，别过 `Number`（超过 2^53 精度丢失 → 提取出来的 id 传给下一步是错的，且极难排查）。这是 API 测试里最阴的一个 bug。
 - **敏感字段**：脱敏在**序列化到磁盘那一刻**做（`password`/`token`/`idCard`/`phone`/`authorization` 按名匹配 + 值形态匹配双规则），不是在展示层做——展示层脱敏意味着磁盘上还是明文。
 

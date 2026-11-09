@@ -26,10 +26,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toJUnitXml } from '../src/report.js';
+import { parseStepResults, toJUnitXml } from '../src/report.js';
 import { TransportError, type AdapterRegistry } from '../src/adapters.js';
 import { b, res, run, scen, type StepDraft } from './helpers.js';
-import { countsTowardPassRate } from '@atest/ir';
+import { countsTowardPassRate, IrValidationError } from '@atest/ir';
 import type { RunReport } from '../src/index.js';
 
 /** 撤掉那些尝试的摘要。keyContext 是 record(string, unknown)，所以读侧必须自己收窄类型 */
@@ -273,5 +273,77 @@ describe('容器上的 retry：运行时**不重跑**（配套 lint 的 RETRY_ON
     const r = await run(scen([seq([{ ...b('h'), kind: 'http', request: { method: 'GET', url: 'http://x/a' } } as StepDraft])]), { adapters });
     assert.deepEqual(r.results.map((x) => x.stepId), ['h', 'blk'],
       '一次尝试：子步骤一行 + 容器一行。出现重复 stepId 就是"同一结论两份"那个症状回来了');
+  });
+});
+
+describe('retryOn 的取值范围（写了做不了的值会被 schema 拒，而不是静默当一个空配置）', () => {
+  /*
+   * 这三条钉的是**schema 层面**的行为，与上面那些"运行时重不重试"是两件事：
+   * 本轮从 retryOn 删掉了 status5xx / assert-fail / locator-stale（理由见
+   * values.ts 的 RetrySchema 注释与 git 历史）。删值之后**唯一的防线**是
+   * "作者写了会被拒" —— 如果 schema 仍然收下来，那就退回到本轮修掉的那个洞：
+   * 配置静默无效，而用户以为自己配了容错。
+   */
+  test('写 status5xx 直接被拒（而不是静默当一个空配置）', () => {
+    /*
+     * 只断言"被拒"，**不断言错误文案**。
+     *
+     * 我第一版在这里加了 `assert.match(错误, /network|timeout/)`，理由是注释里写着
+     * "拒并列出合法值" —— 结果**测试当场红**：作者实际看到的是
+     * `场景不合法…（首个问题：body.0 → Invalid input）`，字段名与合法值都在
+     * zod 的 error 里（`path: retry.retryOn.0` + `values:["network","timeout"]`），
+     * 被 ir/index.ts 的 humanize() 丢了（它不下钻 discriminatedUnion 的嵌套 issues）。
+     * 所以那条断言**证伪的是我的注释，不是 schema 的行为**。
+     *
+     * 修法是先修 humanize（要处理"28 个分支各报一遍同一个错"的去重，
+     * 实测：直接下钻会产生 173 条近似重复的 issue），登记在 docs/08 单开一步。
+     * 在那之前不把弱文案钉进断言：钉了就得在修好的那天回来改测试，
+     * 而"修好了反而要让测试红"会让人倾向于不修。
+     */
+    assert.throws(() => scen([retried('h', 2, { retryOn: ['status5xx'] })]), IrValidationError);
+  });
+
+  test('写 assert-fail / locator-stale 同样被拒', () => {
+    for (const bad of ['assert-fail', 'locator-stale']) {
+      assert.throws(() => scen([retried('h', 1, { retryOn: [bad] })]), IrValidationError, `${bad} 应被拒`);
+    }
+  });
+
+  test('network / timeout 仍然合法（别把在用的两个也一起拒了）', () => {
+    assert.doesNotThrow(() => scen([retried('h', 1, { retryOn: ['network'] })]));
+    assert.doesNotThrow(() => scen([retried('h', 1, { retryOn: ['timeout', 'network'] })]));
+  });
+});
+
+describe('fail 步骤的 cause：是封闭枚举（归因口径不能是自由字符串）', () => {
+  /*
+   * 以前 FailStepSchema 的 cause 是 z.string()，解释器再 `as` 进 StepResult.cause。
+   * 于是 cause:'拼错了' 能过 IR 校验、能跑、能写进证据包，而 StepResultSchema
+   * 的 cause 是封闭枚举 => 磁盘写得出、读不回（实测 parseStepResults 抛 ZodError）。
+   * 更要紧的是看板：按 cause 分组时 `env` / `env-unavailable` / `环境问题`
+   * 会被算成三个桶，而没有任何东西会响。
+   */
+  const failStep = (cause: string): StepDraft =>
+    ({ ...b('f'), kind: 'fail', reason: '故意失败', cause } as StepDraft);
+
+  test('写一个不是 FAILURE_CAUSE 的值 -> IR 校验直接拒', () => {
+    assert.throws(() => scen([failStep('环境问题')]), IrValidationError);
+    assert.throws(() => scen([failStep('env')]), IrValidationError, '少写了 -unavailable 也要拒，否则看板多一个桶');
+  });
+
+  test('合法值照收（含本轮仍无引擎产出点的那三个）', () => {
+    // flaky / data-conflict / locator-stale 目前**没有任何引擎产出点**，
+    // 但 fail 步骤是作者**手工归因**的入口，所以它们在 IR 侧仍然必须可写
+    // （跨运行的 flaky 判定要等 P1 的看板层，见 docs/08）。
+    for (const c of ['product-bug', 'case-stale', 'env-unavailable', 'locator-stale', 'data-conflict', 'flaky', 'untriaged']) {
+      assert.doesNotThrow(() => scen([failStep(c)]), `${c} 必须可写`);
+    }
+  });
+
+  test('跑完之后这一行的 cause 能原样读回（写盘与读盘是同一套值）', async () => {
+    const r = await run(scen([failStep('data-conflict')]));
+    const row = r.results[0]!;
+    assert.equal(row.cause, 'data-conflict');
+    assert.doesNotThrow(() => parseStepResults([JSON.parse(JSON.stringify(row))]));
   });
 });

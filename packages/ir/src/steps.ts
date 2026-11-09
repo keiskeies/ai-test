@@ -19,6 +19,7 @@ import { DeviceRequirementSchema, SessionSchema, TargetKindSchema } from './targ
 import { ExprSchema, RefSchema, RetryOverrideSchema, SecretRefSchema, ValueSchema, VarNameSchema, type RetryOverride } from './values.js';
 import { LocatorSpecSchema, type LocatorSpec } from './locator.js';
 import { WaitOptionsSchema, WaitPredicateSchema, type WaitPredicate } from './waits.js';
+import { FailureCauseSchema } from './status.js';
 
 // ── 公共字段 ────────────────────────────────────────────────────────────────
 const Base = {
@@ -364,7 +365,25 @@ const DbStepSchema = z
   })
   .strict();
 const LogStepSchema = z.object({ kind: z.literal('log'), ...Base, level: z.enum(['info', 'warn', 'error']).default('info'), message: z.string().max(2000) }).strict();
-const FailStepSchema = z.object({ kind: z.literal('fail'), ...Base, reason: z.string().min(1).max(1000), cause: z.string().optional() }).strict();
+const FailStepSchema = z.object({
+  kind: z.literal('fail'), ...Base, reason: z.string().min(1).max(1000),
+  /**
+   * 作者指定的失败归因。**是封闭枚举而不是 z.string()**。
+   *
+   * 以前这里是 `z.string().optional()`，而解释器把它原样 cast 进
+   * `StepResult.cause`（`s.cause as StepResult['cause']`）—— 于是
+   * `{kind:'fail', cause:'拼错了'}` 能过 IR 校验、能跑、能落进证据包，
+   * 而 StepResultSchema 的 cause 是封闭枚举：**磁盘写得出、读不回**。
+   * （实测：跑完的 results[0].cause === "拼错了不是枚举值"，
+   *  parseStepResults 那一步抛 ZodError。）
+   *
+   * 更实际的危害是归因数据本身：docs/08 那份 flake/失败看板要按 cause 分组，
+   * 一个自由字符串意味着同一种原因能被写成 `env` / `env-unavailable` / `环境问题`
+   * 三种，看板把它们算成三个桶，而**没有任何东西会响**。
+   * 归因口径是分类字段，分类字段就该是枚举 —— 收紧到 FAILURE_CAUSE 本身。
+   */
+  cause: FailureCauseSchema.optional(),
+}).strict();
 const NoopStepSchema = z.object({ kind: z.literal('noop'), ...Base }).strict();
 /** 人工介入：自动化停、人接管、完成后交还。接管动作可被录制用于蒸馏成 IR（docs/07 §4） */
 const ManualHandoffStepSchema = z
