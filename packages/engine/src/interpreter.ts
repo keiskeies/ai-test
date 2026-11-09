@@ -391,15 +391,73 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             keyContext: { hint: '每个身份写一条独立场景，或用 parallelGroup/concurrencySafe 让调度器串行化' },
           };
         }
-        // 变量写入串行化：并发子步骤各自带独立子帧，写回时按顺序提交
-        const frames = s.steps.map(() => vars);
-        void frames;
-        const settled = await Promise.allSettled(
-          s.steps.slice(0, s.maxConcurrency).map((c) => withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id]))),
-        );
-        const bad = settled.find((r) => r.status === 'rejected' || (r.status === 'fulfilled' && (r.value.status === 'fail' || r.value.status === 'error')));
-        if (bad) return { status: 'fail', summary: '并行分支中有失败' };
-        return { status: 'pass', summary: `并行 ${s.steps.length} 支` };
+        /*
+         * 并发池。**原先写的是 `s.steps.slice(0, s.maxConcurrency)`** ——
+         * 那是本仓那个缺陷类的第 9 例，而且比"字段没人读"更坏一级：
+         * 分支压根没执行，场景照样 pass，summary 还说"并行 5 支"（用的是 s.steps.length）。
+         * maxConcurrency 默认 4，所以任何 5 支以上的并行**每次都会静默丢尾巴**。
+         * 被丢的是用例这件事没有任何地方看得见：结果里没有那些 stepId，
+         * 报告里那一支是"通过"，覆盖率按分支数算 —— 全线一致地谎报。
+         * 现在按池调度：谁先跑完谁补下一支，一支不漏；没来得及起跑的分支
+         * 只可能在 failFast 提前中止时出现，那时**逐个补记为 skipped**，
+         * 而不是从结果里消失（"没跑"必须能在报告里被读出来）。
+         */
+        const BAD = new Set(['fail', 'error']);
+        const OK = new Set(['pass', 'healed']);
+        const left = [...s.steps];
+        const done: PromiseSettledResult<StepResult>[] = [];
+        let stop = false;
+        let abort: unknown;
+        /** 一支 worker：跑完一支就补下一支，直到没活可补或 failFast 拉闸。
+         *  共享数组的 shift/push 都发生在 await 之外，JS 单线程下不会交错破坏。 */
+        const worker = async (): Promise<void> => {
+          while (!stop) {
+            const c = left.shift();
+            if (!c) break;
+            try {
+              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id]));
+              done.push({ status: 'fulfilled', value: r });
+            } catch (e) {
+              // RunAborted（外部取消/超时）必须能掀翻整个 run，不能被吞成"这支失败了"——
+              // 吞掉的后果是取消之后其余分支还在往被测系统发请求。
+              if (e instanceof RunAborted) { abort = e; stop = true; break; }
+              done.push({ status: 'rejected', reason: e });
+            }
+            /*
+             * **唯一的拉闸点**，写成"扫一遍已完成的分支"而不是在 try/catch 两边各写一次
+             * `stop = true`。理由不是风格：抛错那条路**今天压根到不了** —— runStep 把除
+             * RunAborted 以外的异常全收敛成 error 结果（interpreter.ts 的 catch），
+             * 所以在 catch 里写的 stop 是一行永远执行不到的代码，变异它测试不会红，
+             * 于是它会一直"看起来有防护"。判据落在可达的那一侧，两种失败就都覆盖了。
+             *
+             * **skipped 不算失败**：守卫不成立的分支不该把同批其他分支全拉停
+             * （那会让"未执行"的规模由调度顺序决定，正是这个缺陷类最怕的 flaky 形态）。
+             */
+            if (s.failFast && done.some((d) => d.status !== 'fulfilled' || BAD.has(d.value.status))) stop = true;
+          }
+        };
+        // min(...) 而不是直接 maxConcurrency：少开压根不会醒的 worker，
+        // 免得将来有人往 worker 里加"每支都做一次"的副作用时凭空多出 N 次。
+        await Promise.all(Array.from({ length: Math.min(s.maxConcurrency, s.steps.length) }, () => worker()));
+        if (abort) throw abort;
+        // 没起跑的分支（只可能在 failFast 拉闸后出现）补进结果里记 skipped。
+        // **必须补**：从结果里消失的分支在报告里等于"不存在"，
+        // 而这条分支本来要跑的断言恰恰是这次运行唯一没验的那部分。
+        for (const c of left) finish(c, [...path, s.id], 'skipped', clock.mono(), '未执行（failFast：同批已有分支失败）');
+        const bad = done.find((r) => r.status !== 'fulfilled' || BAD.has(r.value.status));
+        if (bad) {
+          const why = bad.status === 'rejected' ? errSummary(bad.reason) : bad.value.assertionSummary;
+          return { status: 'fail', summary: `并行分支中有失败：${why ?? '未知'}` };
+        }
+        // 只**全部**没成功才报 skipped。一支守卫没成立、四支通过的场景，
+        // 那四支是真验过了；整只容器报 skipped 会把它们从通过率的分母里一起抹掉
+        // （skipped 不计入分母，见 docs/02 §9），比原来"全算 pass"更失真。
+        const ran = done.filter((r) => r.status === 'fulfilled');
+        const allIdle = !ran.some((r) => OK.has((r as PromiseFulfilledResult<StepResult>).value.status));
+        const notRun = done.filter((r) => r.status === 'fulfilled' && r.value.status === 'skipped').length + left.length;
+        let tail = `并行 ${s.steps.length} 支`;
+        if (notRun) tail += `，未执行 ${notRun} 支${left.length ? '（failFast 提前中止）' : '（分支自身守卫不成立）'}`;
+        return { status: allIdle ? 'skipped' : 'pass', summary: tail };
       }
       case 'call': {
         if (!adapters.http && !('callScenario' in adapters)) return { status: 'error', summary: '子场景解析器未注入（CallResolver）', cause: 'env-unavailable' };

@@ -1,0 +1,113 @@
+{
+  "_comment": [
+    "parallel 并发池的变异集（tests: packages/engine/test/parallel.test.ts）。",
+    "这批的价值集中在一件事：**分支没跑的时候，测试必须变红**。",
+    "原缺陷（slice(0, maxConcurrency)）能活到今天，就是因为所有相关测试断的都是",
+    "summary 与容器状态，而这两样在丢分支时依然是 pass + \"并行 5 支\"。",
+    "所以每条变异都改在\"会不会少跑一支 / 少跑的那支会不会被记下来\"上。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "回到 slice 丢分支的形态（少开一路 worker，尾巴没人跑）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "Array.from({ length: Math.min(s.maxConcurrency, s.steps.length) }, () => worker())",
+      "replace": "Math.max(1, Math.min(s.maxConcurrency, s.steps.length) - 1) }, () => worker())",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "并发上限彻底不生效（一次开满）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "Array.from({ length: Math.min(s.maxConcurrency, s.steps.length) }, () => worker())",
+      "replace": "s.steps.length }, () => worker())",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "没起跑的分支不再补记 skipped（从结果里消失 = 原缺陷的报告侧）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        for (const c of left) finish(c, [...path, s.id], 'skipped', clock.mono(), '未执行（failFast：同批已有分支失败）');\n",
+      "replace": "",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "skipped 的说明文字丢掉 failFast 字样（用户看不出是没跑还是跑了没过）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "'未执行（failFast：同批已有分支失败）');",
+      "replace": "'跳过');",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "skipped 也算失败并拉停同批（未执行规模随调度顺序变）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "if (s.failFast && done.some((d) => d.status !== 'fulfilled' || BAD.has(d.value.status))) stop = true;",
+      "replace": "if (false) stop = true;",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "failFast 闸整个失效（写了没用）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "if (s.failFast && done.some((d) => d.status !== 'fulfilled' || BAD.has(d.value.status))) stop = true;",
+      "replace": "if (false) stop = true;",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "抛错分支不再拉停（failFast 只管正常返回的失败）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "if (s.failFast && done.some((d) => d.status !== 'fulfilled' || BAD.has(d.value.status))) stop = true;",
+      "replace": "if (s.failFast && done.every((d) => d.status === 'fulfilled' && BAD.has(d.value.status)) && done.length > 1) stop = true;",
+      "testFile": "packages/engine/test/parallel.test.ts",
+      "_note": "把\"任一分支失败就停\"改成\"要两支以上才停\"：可达路径上的第一个真实失败仍然放行，测的是这条闸真的在数数，而不是恒真。"
+    },
+    {
+      "label": "RunAborted 被吞成分支失败（取消后其余分支继续打被测系统）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "              if (e instanceof RunAborted) { abort = e; stop = true; break; }\n",
+      "replace": "",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "中止后不往外抛（run 层收不到取消）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (abort) throw abort;",
+      "replace": "        void abort;",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "分支 error 不再让容器 fail（全绿假象）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "const BAD = new Set(['fail', 'error']);",
+      "replace": "const BAD = new Set(['fail']);",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "有分支通过时容器仍报 skipped（把通过的从分母里抹掉）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "const allIdle = !ran.some((r) => OK.has((r as PromiseFulfilledResult<StepResult>).value.status));",
+      "replace": "const allIdle = ran.some((r) => r.status === 'fulfilled' && r.value.status === 'skipped');",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "\"未执行 N 支\"不再进 summary（丢分支重新变得不可见）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (notRun) tail += `，未执行 ${notRun} 支${left.length ? '（failFast 提前中止）' : '（分支自身守卫不成立）'}`;\n",
+      "replace": "",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "等价变异：stop 用独立标志位改写（同一语义的另一种写法）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          while (!stop) {",
+      "replace": "          while (stop === false) {",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "等价变异：left 换成 shift 语义相同的 reverse 序（分支顺序不是本文件要守的性质）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "const left = [...s.steps];",
+      "replace": "const left = [...s.steps].reverse(); left.reverse();",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    }
+  ]
+}
