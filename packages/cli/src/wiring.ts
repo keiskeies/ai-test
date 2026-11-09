@@ -15,7 +15,11 @@ import {
   deterministicClock, liveClock, SECRET_PLACEHOLDER,
   type AdapterRegistry, type Clock, type RunOptions,
 } from '@atest/engine';
-import { parseOpenApi, HttpClient, asHttpExec, startMockServer, type ParsedDoc, type MockServer } from '@atest/adapter-http';
+import {
+  parseOpenApi, HttpClient, asHttpExec, startMockServer,
+  AuthHook, CredentialTable, TokenSource, normalizeSecuritySchemes,
+  type AuthConfigRaw, type ParsedDoc, type MockServer,
+} from '@atest/adapter-http';
 import { DiskArtifactStore } from '@atest/store';
 import { parseScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
 
@@ -198,7 +202,25 @@ export function buildEnv(envFile: string | undefined, overrides: string[]): Reco
   for (const kv of overrides) {
     const eq = kv.indexOf('=');
     if (eq <= 0) throw new CliError(`--env-var 要写成 k=v，实际是 "${kv}"`, EXIT.USAGE);
-    env[kv.slice(0, eq)] = kv.slice(eq + 1);
+    const key = kv.slice(0, eq);
+    /**
+     * **拒绝带点号的键。** 这不是洁癖，是被一个具体写法逼出来的：
+     * `--env-var auth.default.secret=secret:x` 看着完全合理，实际这里会存进一个
+     * 名字就叫 `"auth.default.secret"` 的扁平键，而鉴权层读的是 `env.auth` ——
+     * **配了而完全没生效**，表现是"我明明传了凭证"。
+     *
+     * 也不是"暂不支持、将来再说"：引擎侧 `$env.a.b` 走的是 queryOne 路径查询
+     * （vars.ts 的 root==='env' 分支），扁平的点号键**在任何用法下都取不到**。
+     * 所以这里不存在"现在能用、以后更好用"的中间态，只能当场说清。
+     */
+    if (key.includes('.')) {
+      throw new CliError(
+        `--env-var 表达不了嵌套结构（"${key}" 会被存成一个名字里带点号的扁平键，谁也读不到它）。`,
+        EXIT.USAGE,
+        '把嵌套部分写进环境文件（--env ./myenv.json，形如 {"baseUrl":"…","auth":{"default":{"secret":"secret:<ref>"}}}）；只有 baseUrl 这类扁平值适合用 --env-var',
+      );
+    }
+    env[key] = kv.slice(eq + 1);
   }
   return env;
 }
@@ -288,6 +310,119 @@ function baseName(p: string): string {
   return seg.replace(/[^A-Za-z0-9_-]/g, '_') || 'doc';
 }
 
+/**
+ * 建鉴权层（docs/05 §2）。分开成函数是因为 `atest auth-check` 要用**同一套**装配 ——
+ * 那条命令的全部价值是"不跑用例也能回答鉴权对不对"，
+ * 而它要是自己再拼一遍凭证解析，就会与真正发请求时的那套不一致，
+ * 于是"auth-check 说没问题、跑起来还是 401"，那条命令就变成误导。
+ */
+export function buildAuthHook(o: {
+  registry: DocRegistry;
+  env: Record<string, unknown>;
+  resolveSecret: (ref: string) => string | undefined;
+  environmentRef: string;
+  /** 确定性时钟的 now。oauth2 的 token 缓存要跟着它，否则 --clock deterministic 下过期判断用墙上时间 */
+  now: () => number;
+  fetchImpl?: typeof fetch;
+}): { hook: AuthHook; table: CredentialTable; notes: string[]; tokenSources: Map<string, TokenSource> } {
+  const { table, notes } = CredentialTable.fromEnv(o.env.auth as AuthConfigRaw | undefined);
+  const tokenSources = new Map<string, TokenSource>();
+
+  const hook = new AuthHook({
+    doc: (docRef) => {
+      const doc = o.registry.get(docRef);
+      if (!doc) return undefined;
+      return {
+        securitySchemes: doc.securitySchemes,
+        operation: (ref) => {
+          const op = ref.operationId
+            ? doc.byId.get(ref.operationId)
+            : doc.operations.find((x) => x.method === ref.method?.toUpperCase() && x.path === ref.path);
+          return op ? { security: op.security } : undefined;
+        },
+      };
+    },
+    table,
+    resolveSecret: o.resolveSecret,
+    tokenSources,
+    cookieHeader: undefined, // cookie jar 是 P1（docs/05 §2 的会话那一行）
+  });
+
+  // oauth2 的 token 源按 docRef 建。两个容易踩的点都在这段里处理了：
+  //  1. spec 里的 tokenUrl **经常是相对的**（`/oauth/token`，甚至只有 host）。
+  //     直接拿它发请求会得到"相对 URL"错误或打到 localhost，
+  //     而报出来的错与"配置错了"这件事隔了几层。
+  //  2. token 端点走**独立的 HttpClient**（不带鉴权 hook）。
+  //     带 hook 会递归取 token —— 这不是理论问题，interceptor 会问 TokenSource 要 token。
+  const baseUrl = typeof o.env.baseUrl === 'string' ? o.env.baseUrl : undefined;
+  for (const docRef of o.registry.names()) {
+    const doc = o.registry.get(docRef);
+    if (!doc) continue;
+    const { schemes } = normalizeSecuritySchemes(doc.securitySchemes);
+    for (const sc of schemes.values()) {
+      if (sc.kind !== 'oauth2' || !sc.tokenUrl) continue;
+      tokenSources.set(docRef, new TokenSource({
+        tokenUrl: absoluteUrl(sc.tokenUrl, baseUrl),
+        environmentRef: o.environmentRef,
+        resolveSecret: o.resolveSecret,
+        now: o.now,
+        fetchImpl: o.fetchImpl,
+      }));
+      break; // 一个 docRef 一个源；多 scheme 的 scope 差异已经进了缓存 key
+    }
+  }
+  return { hook, table, notes, tokenSources };
+}
+
+/**
+ * 建"一次运行所需的鉴权装配"：凭证解析 + hook + 发请求的 client。
+ *
+ * `assemble` 与 `atest auth-check` **共用这一个函数**。这是有意的：
+ * auth-check 的全部价值是"不跑用例也能回答鉴权对不对"，而那份回答必须来自
+ * 与真实请求完全相同的装配 —— 自己再拼一遍就会不一致，
+ * 于是"auth-check 说没问题、跑起来还是 401"，那比没这条命令更坏。
+ *
+ * 连 HttpClient 实例都在这里建：SSRF allowlist 之类的选项将来会加在
+ * HttpClientOptions 上，两处各 new 一份的话，将来 auth-check 会走一条
+ * **没有 allowlist** 的路去打内网地址。
+ *
+ * `envVars` 默认 process.env；测试里传一个进来 ——
+ * 本仓的 CLI 测试一律不碰 process.env（改了要记得还原，忘了就污染同文件后面的用例）
+ */
+export function buildAuthLayer(o: {
+  registry: DocRegistry;
+  env: Record<string, unknown>;
+  environmentRef: string;
+  now: () => number;
+  envVars?: Record<string, string | undefined>;
+  fetchImpl?: typeof fetch;
+}): {
+  hook: AuthHook; table: CredentialTable; notes: string[]; client: HttpClient;
+  resolveSecret: (ref: string) => string; missingSecrets: Set<string>;
+} {
+  const missingSecrets = new Set<string>();
+  const resolveSecret = secretResolverFromEnv(o.envVars ?? process.env, (r) => { void missingSecrets.add(r); });
+  const built = buildAuthHook({
+    registry: o.registry, env: o.env, resolveSecret,
+    environmentRef: o.environmentRef, now: o.now, fetchImpl: o.fetchImpl,
+  });
+  // 凭证表引用了、环境里没有值的密钥也要扫出来：env 配了 auth 段而 IR 不引用
+  // 任何 secret 是完全可能的（鉴权完全由 spec 声明驱动，这正是"生成的用例不该全 401"的目标形态）
+  for (const ref of built.table.refs()) resolveSecret(ref);
+  return { ...built, client: new HttpClient({ fetchImpl: o.fetchImpl }), resolveSecret, missingSecrets };
+}
+
+/** 把 spec 里的 tokenUrl 变成绝对 URL。拼不出来就原样交出去（让 HTTP 层报它自己的错，别在这层编一个） */
+export function absoluteUrl(tokenUrl: string, baseUrl: string | undefined): string {
+  if (/^https?:\/\//i.test(tokenUrl)) return tokenUrl;
+  if (!baseUrl) return tokenUrl;
+  try {
+    return new URL(tokenUrl.startsWith('/') ? tokenUrl : `/${tokenUrl}`, baseUrl.replace(/\/+$/, '') + '/').toString();
+  } catch {
+    return tokenUrl;
+  }
+}
+
 export interface AssembleOptions {
   scenario: Scenario;
   env: Record<string, unknown>;
@@ -323,13 +458,23 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
   const store = new DiskArtifactStore({ dir: o.evidenceDir });
 
   const adapters: AdapterRegistry = { artifactStore: store };
-  // http adapter **无条件注册**。
-  // 原来这里写的是 `if (!o.registry.empty())` —— 于是"只用了 http 步骤、没导 spec"的
-  // 场景（这是最常见的第一条用例）永远得到 "http adapter 未注册"。
-  // spec 只有 openapiCall 才需要（asHttpExec 的第二个参数只服务 resolveOperation），
-  // 把"有没有文档"当成"要不要网络"是两件事被一个条件绑走了。
-  // 单测里没抓到，是因为 e2e 用例都会传 --doc；而手工写 http 步骤这条路没人走过。
-  adapters.http = asHttpExec(new HttpClient(), o.registry.empty() ? undefined : o.registry.provider());
+
+  /**
+   * 鉴权装配（凭证解析 + hook + client）。**建在最前面**，
+   * 因为下面扫 IR 用的 secretResolver 必须是**同一个**：
+   * 两处各调 secretResolverFromEnv 的话就有两个缺失集合，
+   * 而"两处各一份迟早只更新其中一处"正是这个文件反复记的那个毛病。
+   */
+  const auth = buildAuthLayer({
+    registry: o.registry, env: o.env,
+    // 环境的 auth 段/凭证都按环境名分桶，token 缓存 key 也用它
+    environmentRef: o.scenario.env.environmentRef,
+    now: () => o.clock.now(),
+  });
+  for (const n of auth.notes) warnings.push(`env 的 auth 段：${n}`);
+  const missingSecrets = auth.missingSecrets;
+  const resolve = auth.resolveSecret;
+  // 凭证表引用的密钥已在 buildAuthLayer 里扫过，IR 里引用的在这里扫（同一个集合）
 
   // 装配期**扫一遍 IR** 而不是等运行期撞上了再说：
   // 一个 $secret 没解析到，登录接口就返回 401，用例于是"失败"，
@@ -337,10 +482,15 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
   // 报错必须在跑之前直说"缺哪个变量"。
   // 运行期真正解析失败时也记进同一个集合（IR 里有动态 ref 时扫不出来），
   // 所以这里是"提前告警"，不是"唯一来源"。
-  const missingSecrets = new Set<string>();
-  const onMissing = (ref: string): void => { void missingSecrets.add(ref); };
-  const resolve = secretResolverFromEnv(process.env, onMissing);
   for (const ref of scanSecretRefs(o.scenario)) resolve(ref); // 只为填 missingSecrets；返回值这里不用
+
+  // http adapter **无条件注册**。
+  // 原来这里写的是 `if (!o.registry.empty())` —— 于是"只用了 http 步骤、没导 spec"的
+  // 场景（这是最常见的第一条用例）永远得到 "http adapter 未注册"。
+  // spec 只有 openapiCall 才需要（asHttpExec 的第二个参数只服务 resolveOperation），
+  // 把"有没有文档"当成"要不要网络"是两件事被一个条件绑走了。
+  // 单测里没抓到，是因为 e2e 用例都会传 --doc；而手工写 http 步骤这条路没人走过。
+  adapters.http = asHttpExec(auth.client, o.registry.empty() ? undefined : o.registry.provider(), auth.hook);
 
   const runOptions: RunOptions = {
     scenario: o.scenario,

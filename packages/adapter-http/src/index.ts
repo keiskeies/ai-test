@@ -61,5 +61,16 @@ export {
 export { HttpClient, asHttpExec, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS, type SendRequest, type SendResult, type HttpClientOptions } from './http/client.js';
 export { parseJsonKeepBigInt, quoteBigInts, stringifyBody, BIG_INT_DIGITS } from './http/bigint.js';
 
+// —— 鉴权（docs/05 §2）——
+export {
+  normalizeSecuritySchemes, parseSecurityRequirements, chooseSchemeGroup,
+  type AuthScheme, type SecurityRequirement, type SchemeChoice, type SchemeParseResult, type UnsupportedScheme,
+} from './auth/scheme.js';
+export { CredentialTable, type CredentialBinding, type DocCredentials, type AuthConfigRaw, type CredentialResolution } from './auth/credentials.js';
+export { applyAuth, scrubSecrets, base64Utf8, MissingCredentialError, type AppliedAuth, type ApplyInput } from './auth/apply.js';
+export { TokenSource, TokenError, cacheKey, type TokenSourceOptions, type TokenCacheEntry } from './auth/token.js';
+export { AuthResolver, type AuthResolverOptions, type AuthPlan } from './auth/interceptor.js';
+export { AuthHook, AuthRequiredError, type AuthHookOptions, type AuthApplyInput, type OpAuthNeed } from './auth/hook.js';
+
 // —— Mock ——
 export { startMockServer, sampleFromSchema, buildUrlFor, type MockServer, type MockOptions } from './mock/mock.js';

@@ -1,0 +1,129 @@
+{
+  "_comment": "auth-check 判读逻辑的变异集。这一组的价值集中在 interpret()：那几条规则反直觉（500 算凭证被接受），一旦有人'顺手修正'成 500=失败，只有变异检查能证明测试拦得住。",
+  "build": false,
+  "cases": [
+    {
+      "label": "interpret：500 改成算凭证被拒（那个'顺手修正'）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  if (status >= 500) {\n    return { outcome: 'ok',",
+      "replace": "  if (status >= 500) {\n    return { outcome: 'rejected',",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "interpret：404 改成算凭证被拒",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  if (status === 404) {\n    return { outcome: 'ok',",
+      "replace": "  if (status === 404) {\n    return { outcome: 'rejected',",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "interpret：403 与 401 合并成同一句修法",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "      hint: '403 也可能是\"凭证有效但这个角色读不到这个接口\"。如果你正要测的就是权限，这个结果是对的，不算问题',",
+      "replace": "      hint: '凭证无效，换一份',",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "500 的 hint 去掉（'凭证没问题但 500 要另查'那半句）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "hint: '凭证这一关没问题。500 本身要另查'",
+      "replace": "hint: undefined",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "探测允许写方法（把 POST 也当候选）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "const READ_ONLY = new Set(['GET', 'HEAD']);",
+      "replace": "const READ_ONLY = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE']);",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "pickTargets 丢掉 docRef（多系统共用匿名桶）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "        docRef, operationId: op.operationId, method: op.method, path: op.path,",
+      "replace": "        docRef: '', operationId: op.operationId, method: op.method, path: op.path,",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "unreachable 也算'有问题'（VPN 没连把流水线刷红）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  const problems = rows.filter((r) => r.outcome === 'needs-config' || r.outcome === 'rejected').length;",
+      "replace": "  const problems = rows.filter((r) => r.outcome !== 'ok').length;",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "needs-config 不算问题（缺凭证却报成全绿）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  const problems = rows.filter((r) => r.outcome === 'needs-config' || r.outcome === 'rejected').length;",
+      "replace": "  const problems = rows.filter((r) => r.outcome === 'rejected').length;",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "authCheckExit 一律返回 OK",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  return r.problems > 0 ? EXIT.ENV : EXIT.OK;",
+      "replace": "  return EXIT.OK;",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "authCheckExit 用 TEST_FAILED(1) 而不是 ENV(4)",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  return r.problems > 0 ? EXIT.ENV : EXIT.OK;",
+      "replace": "  return r.problems > 0 ? EXIT.TEST_FAILED : EXIT.OK;",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "没导 spec 时不再补一行（'没检查'与'没查出问题'混同）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  if (!rows.length) {\n    rows.push({\n      target: '-', docRef: '(无)'",
+      "replace": "  if (false) {\n    rows.push({\n      target: '(无)'",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "输出不经 scrubSecrets（clean 变成直通）",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  return scrubSecrets(text, values).slice(0, 400);",
+      "replace": "  return text.slice(0, 400);",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "缺密钥的 hint 不再给变量名",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  const key = secretEnvKey(ref);\n  if (!key) return undefined;",
+      "replace": "  const key = '';\n  if (!key) return undefined;",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "探测跟随重定向（登录页的 200 会被当成凭证有效）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "        followRedirects: false, retries: 0,",
+      "replace": "        followRedirects: true, retries: 0,",
+      "testFile": "packages/cli/test/authcheck.test.ts",
+      "expect": "equivalent",
+      "_note": "**期望不被抓到，且这不是漏洞被掩盖**：命令级测试走注入的 send，压根不经过 HttpClient 的重定向分支。列出来并标 equivalent，是标明'这个选项目前只由代码审查守着'，别让下一个人以为它被测试覆盖了。要真覆盖它得让命令收一个 send 工厂注入点 —— 等接真环境时再补，现在补等于给一个没验证过的假设搭脚手架。"
+    },
+    {
+      "label": "跨包变异：hasIdentityBinding 永远返回 true（身份回落不再可见）",
+      "file": "packages/adapter-http/src/auth/credentials.ts",
+      "anchor": "    if (!identity) return true; // 没要求身份，谈不上回落\n    return this.lookupVia(docRef, identity).via === 'identity';",
+      "replace": "    return true; // 变异：永不告警",
+      "testFile": "packages/cli/test/authcheck.test.ts",
+      "_note": "**故意跨包**（改 adapter 的 src、跑 cli 的测试）：cli 测试 import @atest/adapter-http 走的是 dist，所以 harness 必须强制重建。这一条同时也在验 mustBuild 那条规则本身 —— 它要是退回手填 build:false，这条会假装'未被抓到'。"
+    },
+    {
+      "label": "跨包变异：lookupVia 把身份命中也说成 default",
+      "file": "packages/adapter-http/src/auth/credentials.ts",
+      "anchor": "        if (hit) return { binding: hit, via: 'identity', where: b.where };",
+      "replace": "        if (hit) return { binding: hit, via: 'default', where: b.where };",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "等价变异：problems 的判定改成 !== 'ok' && != unreachable && != not-probed",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  const problems = rows.filter((r) => r.outcome === 'needs-config' || r.outcome === 'rejected').length;",
+      "replace": "  const problems = rows.filter((r) => r.outcome !== 'ok' && r.outcome !== 'unreachable' && r.outcome !== 'not-probed').length;",
+      "expect": "equivalent",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    }
+  ]
+}

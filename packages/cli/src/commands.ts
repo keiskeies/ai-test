@@ -22,8 +22,9 @@ import { gateAfterRun, gateBeforeRun, isTriage } from './gate.js';
 import { generateScenarios, renderScenarioJson, strategyOf, STRATEGIES, GENERATED_STRATEGY_IDS } from './gen.js';
 import { findConfig, resolveEnvFile, resolveScenarioPath, writeConfig, DEFAULT_CONFIG, CONFIG_FILE } from './paths.js';
 import {
-  assemble, CliError, DocRegistry, loadScenarioFile, makeClock, startLocalMock, buildEnv,
+  assemble, buildAuthLayer, CliError, DocRegistry, loadScenarioFile, makeClock, startLocalMock, buildEnv, secretEnvKey,
 } from './wiring.js';
+import { authCheckExit, checkAuth } from './authcheck.js';
 
 export interface Io {
   out(s: string): void;
@@ -512,6 +513,103 @@ export async function cmdEvidence(a: ParsedArgs, io: Io): Promise<CommandResult>
 async function listMembers(path: string): Promise<string[]> {
   const buf = await readFile(path);
   return readZipEntries(new Uint8Array(buf)).map((e) => `${e.name}  (${e.data.byteLength} 字节)`);
+}
+
+// ── atest auth-check ──────────────────────────────────────────────────────
+
+/**
+ * 逐 securityScheme × 逐身份验证凭证（docs/05 §2）。
+ *
+ * 那条文档说这个命令"性价比高于任何 AI 功能"，理由是具体的：
+ * "生成用例跑出来全是 401" 是 API 平台的第一体验杀手，而它的原因九成在环境配置，
+ * 一次 401 让人查两小时产品代码，比任何一次生成质量不够都更劝退。
+ *
+ * 本函数**只做输入装配与打印**，判读全在 authcheck.ts ——
+ * 那样"500 算凭证被接受"这类判断能被直接测试，不需要起真后端。
+ */
+export async function cmdAuthCheck(a: ParsedArgs, io: Io): Promise<CommandResult> {
+  const specs = a.multi.doc ?? [];
+  if (!specs.length) {
+    throw new CliError(
+      'auth-check 需要至少一份 OpenAPI 文档：atest auth-check --doc shop=./spec/openapi.json --env staging',
+      EXIT.USAGE,
+      '没有 spec 就无从知道"哪个接口要哪种鉴权"。这时只能用 atest run 跑一条带 auth 字段的用例去看真实响应',
+    );
+  }
+  const envName = str(a, 'env');
+  if (!envName && !a.multi['env-var']?.length) {
+    throw new CliError('没有环境。凭证是按环境配的，所以这里必须指定：--env staging', EXIT.USAGE);
+  }
+  const cfg = await findConfig(io.cwd);
+  const envFile = envName ? await resolveEnvFile(cfg, envName, io.cwd) : undefined;
+  const env = buildEnv(envFile, a.multi['env-var'] ?? []);
+  const registry = await DocRegistry.load(specs);
+
+  const auth = buildAuthLayer({
+    registry, env,
+    environmentRef: envName ?? 'inline',
+    now: () => Date.now(),
+    // io.env 而不是 process.env：Io 是这套 CLI 唯一的注入点，
+    // 测试里传一个假的进来，不用改全局再记得还原
+    envVars: io.env,
+  });
+  for (const n of auth.notes) io.err(`env 的 auth 段：${n}`);
+  // 缺失密钥在**探测之前**就说一遍。等到探测时报"需要鉴权但没有凭证"，
+  // 用户看到的是结论而拿不到"该设哪个变量"，而后者才是这条命令的价值
+  if (auth.missingSecrets.size) {
+    io.err(`以下凭证引用没有解析到值：`);
+    for (const ref of auth.missingSecrets) io.err(`  · ${ref} → 设环境变量 ${secretEnvKey(ref)}`);
+    io.err('  （真值只从环境变量取。写进 env 文件会被提交，写进命令行会被 ps/CI 日志记走）');
+  }
+
+  const identities: Array<{ label: string; identity?: string }> = [{ label: '(默认)' }];
+  for (const idt of auth.table.identities()) identities.push({ label: idt, identity: idt });
+
+  const sample = str(a, 'sample') === undefined ? 1 : Number(str(a, 'sample'));
+  if (!Number.isInteger(sample) || sample < 1 || sample > 20) {
+    throw new CliError(`--sample 要是 1..20 的整数，实际是 "${str(a, 'sample')}"`, EXIT.USAGE,
+      '它是**每个身份**探几个只读接口。默认 1 就够了：这条命令验的是凭证有效性，不是接口覆盖率');
+  }
+
+  const result = await checkAuth({
+    hook: auth.hook, table: auth.table, registry, env, identities,
+    sampleLimit: sample,
+    send: async (req) => {
+      const r = await auth.client.send({
+        method: req.method, url: req.url, headers: req.headers,
+        timeoutMs: req.timeoutMs, maxBytes: 64 * 1024,
+        // 不跟重定向：跟到登录页会拿到一个 200 的 HTML，
+        // 于是"凭证有效"的结论是从一个登录表单页推出来的
+        followRedirects: false, retries: 0,
+      });
+      return { status: r.status, body: r.body, error: r.error };
+    },
+  });
+
+  // 逐行打。列而不是段落：这条命令的输出会被贴进工单和聊天记录，
+  // 而"哪个身份的哪个接口是什么结论"要能一眼对上
+  for (const r of result.rows) {
+    /**
+     * 符号。回落的行即使凭证有效也打 **~** 而不是 ✓：
+     * 那个符号会被扫读，"✓ 但下面跟一行小字"有一半概率只被看到符号。
+     * 但**只在 ok 上降级** —— 一行既是问题又带回落时仍然是 ✗，
+     * 把它降成 ~ 等于把一个真问题藏成"未判定"。
+     */
+    const isProblem = r.outcome === 'rejected' || r.outcome === 'needs-config';
+    const mark = isProblem ? '✗' : r.outcome === 'ok' && !r.warning ? '✓' : '~';
+    // docRef 占一列：同一个 `GET /orders` 在两份 spec 上用的是不同桶的凭证，
+    // 不打出来时两行结论不同而目标相同，读起来像"同一个接口一会儿好一会儿坏"
+    io.out(`${mark} ${r.docRef.padEnd(10)} ${r.identity.padEnd(10)} ${r.target.padEnd(26)} ${r.outcome.padEnd(13)} ${r.detail}`);
+    // 告警单独一行且用 ⚠：它是"这行绿得有条件"的意思，混进 detail 尾部会被扫过去
+    if (r.warning) io.out(`    ⚠ ${r.warning}`);
+    if (r.hint) io.out(`    修法：${r.hint}`);
+  }
+  io.out('');
+  io.out(result.summary);
+  io.out('说明：~ 是**未判定**（连不上/没得探），不是"没问题"也不是"有问题"。');
+  io.err('');
+  io.err(CI_HINT);
+  return { code: authCheckExit(result), summary: result.summary };
 }
 
 // ── 开关取值的统一入口 ─────────────────────────────────────────────────────

@@ -1,0 +1,148 @@
+{
+  "_comment": [
+    "身份切换与鉴权意图的变异集（tooling/mutate.mjs）。",
+    "每条都对应一个真实修过的 bug 或一条明确要守住的判据 —— 不是为凑数造的变异。",
+    "expect=equivalent 的条目期望不被抓到，列出来是把『为什么没红』记下来，",
+    "免得下一个人重新怀疑一遍（docs/08 §3 记了这个做法的理由）。"
+  ],
+  "build": false,
+  "_build_comment": "本批全部改的是测试用 tsx 直接 import 的 ../src 文件（engine 测 engine/src、adapter 测 adapter/src），不跨包，所以不需要重建 dist。跑起来若第一条就『未抓到』，说明读的是旧 dist，把这个字段去掉重来。",
+  "cases": [
+    {
+      "label": "identityFor 回退成读场景级静态值（useIdentity 对 http 无效的那一版）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "const identityFor = (stepIdentity: string | undefined): string | undefined => stepIdentity ?? currentIdentity;",
+      "replace": "const identityFor = (stepIdentity: string | undefined): string | undefined => stepIdentity ?? scenario.identity;",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "openapiCall 的 auth 不传给 send（『算了不用』那一版）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          auth: authIntent,\n",
+      "replace": "",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "docRef 只在有身份时才交下去（把『没切身份』当成『公开接口』）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const authIntent = {\n          identity: identityFor(s.identity),\n          docRef: s.docRef,",
+      "replace": "        const authIntent = {\n          identity: identityFor(s.identity),\n          docRef: identityFor(s.identity) ? s.docRef : undefined,",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "operationId 不优先用解析结果（adapter 定位不到 operation）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          operationId: op.operationId ?? s.operationId,",
+      "replace": "          operationId: s.operationId,",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "method/path 用步骤上的可选值而非解析结果",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          method: op.method ?? s.method,\n          path: op.urlTemplate ?? s.path,",
+      "replace": "          method: s.method,\n          path: s.path,",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "parallel 的静态判定只看直接子步骤（不 walk）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    walk(steps, (s) => { if (s.kind === 'useIdentity') hit = true; });",
+      "replace": "    for (const s of steps) { if (s.kind === 'useIdentity') hit = true; }",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "parallel 的闸改成永不开（把正常并行也拒掉的方向）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const racing = s.steps.filter((c) => containsIdentitySwitch([c]));",
+      "replace": "        const racing = s.steps;",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "runChildren 的身份复位从 finally 挪到正常路径末尾",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    } finally {\n      currentIdentity = identityBefore;\n    }",
+      "replace": "    } finally {\n      void identityBefore;\n    }",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "useIdentity 回到只回 pass 不切身份（那个报告成功的原始 bug）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const from = currentIdentity;\n        currentIdentity = s.identity;",
+      "replace": "        const from = currentIdentity;",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "等价变异：identityFor 里去掉 ?? 分支的兜底顺序（stepIdentity 优先已另测）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "const identityFor = (stepIdentity: string | undefined): string | undefined => stepIdentity ?? currentIdentity;",
+      "replace": "const identityFor = (stepIdentity: string | undefined): string | undefined => (stepIdentity === undefined ? currentIdentity : stepIdentity);",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "等价变异：authIntent 里 method 写成 op.method ?? s.method ?? 'GET'（夹具里 op.method 恒有值）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          method: op.method ?? s.method,",
+      "replace": "          method: op.method ?? s.method ?? 'GET',",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/identity.test.ts"
+    },
+    {
+      "label": "凭证表：docRef 桶让位给匿名 default（混写时丢桶的那一版）",
+      "file": "packages/adapter-http/src/auth/credentials.ts",
+      "anchor": "    for (const b of buckets) {\n      if (b.bucket?.default) return { binding: b.bucket.default, via: 'default', where: b.where };",
+      "replace": "    for (const b of [buckets[1], buckets[0]]) {\n      if (b.bucket?.default) return { binding: b.bucket.default, via: 'default', where: b.where };",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    },
+    {
+      "label": "凭证表：身份不再跨桶查（admin 被 shop 的 default 抢掉）",
+      "file": "packages/adapter-http/src/auth/credentials.ts",
+      "anchor": "      for (const b of buckets) {\n        const hit = b.bucket?.identities?.[identity];",
+      "replace": "      for (const b of buckets.slice(0, 1)) {\n        const hit = b.bucket?.identities?.[identity];",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    },
+    {
+      "label": "凭证表：接受明文密码（不再强制 secret: 前缀）",
+      "file": "packages/adapter-http/src/auth/credentials.ts",
+      "anchor": "  if (typeof o.secret !== 'string' || !/^secret:[A-Za-z0-9_-]+$/.test(o.secret)) return undefined;",
+      "replace": "  if (typeof o.secret !== 'string' || !o.secret) return undefined;",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    },
+    {
+      "label": "applyAuth：覆盖人显式写的 authorization",
+      "file": "packages/adapter-http/src/auth/apply.ts",
+      "anchor": "        if (headers.authorization) return { url: i.url, headers, secretValues, detail: 'authorization 已由步骤显式给出，未覆盖' };",
+      "replace": "        if (false) return { url: i.url, headers, secretValues, detail: 'x' };",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    },
+    {
+      "label": "applyAuth：密钥取不到时不抛、发匿名请求",
+      "file": "packages/adapter-http/src/auth/apply.ts",
+      "anchor": "    if (!v || v.startsWith('«')) throw new MissingCredentialError(i.binding.secret, hint);",
+      "replace": "    if (!v || v.startsWith('«')) return '';",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    },
+    {
+      "label": "applyAuth：头查找不再统一小写（人写的 X-Api-Key 被覆盖）",
+      "file": "packages/adapter-http/src/auth/apply.ts",
+      "anchor": "  const headers = lowerHeaders(i.headers);",
+      "replace": "  const headers = { ...i.headers };",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    },
+    {
+      "label": "scrubSecrets：短值阈值降到 0",
+      "file": "packages/adapter-http/src/auth/apply.ts",
+      "anchor": "    if (!v || v.length < 6) continue;",
+      "replace": "    if (!v) continue;",
+      "testFile": "packages/adapter-http/test/auth.test.ts",
+      "_note": "第一轮标的是 equivalent，标错了：这是真行为变化。而当时那条'短值不洗'的测试用的是 'abc' 对 'about the abstract'，文本里压根没有 'abc'，所以它压根不可能失败。已把 fixture 修成子串真的出现。"
+    },
+    {
+      "label": "base64Utf8 退回 btoa（非 ASCII 密码会抛）",
+      "file": "packages/adapter-http/src/auth/apply.ts",
+      "anchor": "  return Buffer.from(new TextEncoder().encode(s)).toString('base64');",
+      "replace": "  return btoa(s);",
+      "testFile": "packages/adapter-http/test/auth.test.ts"
+    }
+  ]
+}

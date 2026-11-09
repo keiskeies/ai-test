@@ -11,7 +11,7 @@
  * 本文件不做任何业务判断 —— 判断全在 gate.ts / gen.ts 这类纯模块里，
  * 这样"流水线为什么红"这件事可以被直接调用测试，不需要起子进程。
  */
-import { cmdAgent, cmdEvidence, cmdGen, cmdInit, cmdLint, cmdRun, type CommandResult, type Io } from './commands.js';
+import { cmdAgent, cmdAuthCheck, cmdEvidence, cmdGen, cmdInit, cmdLint, cmdRun, type CommandResult, type Io } from './commands.js';
 import { formatErrors, parseArgv, type CommandSpec } from './args.js';
 import { CI_HINT, EXIT } from './exit.js';
 import { GENERATED_STRATEGY_IDS, STRATEGIES } from './gen.js';
@@ -110,6 +110,26 @@ export const COMMANDS: CommandSpec[] = [
     ],
   },
   {
+    name: 'auth-check',
+    summary: '逐个鉴权方案 × 逐个身份验证凭证；不跑用例就知道会不会 401',
+    usage: 'atest auth-check --doc <docRef>=<openapi.json> --env <环境> [开关]',
+    detail: [
+      'docs/05 §2：「生成用例跑出来全是 401」是 API 平台的第一体验杀手，而原因九成在环境配置。',
+      '探测**只走 GET/HEAD**：一条诊断命令在 CI 里产生业务副作用（下单/删除）不可接受。',
+      '没有只读接口时报"未探测"并说明原因，绝不退而去 POST 一个接口。',
+      '',
+      '结论分五种，刻意不合并：ok / rejected（配了但后端不认）/ needs-config（压根没配）/ unreachable（不知道）/ not-probed（没探）。',
+      '三者的修法毫无重叠，合成一句"鉴权失败"会让人三件事都做一遍。',
+      '500 与 404 算 ok：请求进到业务代码了，说明网关放行 —— 报成鉴权问题会让人换一份好凭证然后继续 500。',
+    ].join('\n'),
+    flags: [
+      { name: 'doc', value: true, repeatable: true, metavar: 'name=path', desc: 'OpenAPI 文档。**必填** —— 没 spec 就不知道哪个接口要哪种鉴权' },
+      { name: 'env', alias: 'e', value: true, metavar: 'staging', desc: '环境名。凭证是按环境配的，所以必须指定（或 --env-var 临时给）' },
+      { name: 'env-var', value: true, repeatable: true, metavar: 'k=v', desc: '覆盖单个环境值，可重复。baseUrl 是必需的' },
+      { name: 'sample', value: true, metavar: '1', desc: '每个身份探几个只读接口（1..20，默认 1）。验凭证不需要接口覆盖率' },
+    ],
+  },
+  {
     name: 'evidence',
     summary: '查看已产出的证据包（不用解压）',
     usage: 'atest evidence <show|list> <evidence.zip> [成员名]',
@@ -158,6 +178,7 @@ async function dispatch(a: Parameters<typeof cmdRun>[0], io: Io): Promise<Comman
     case 'agent': return cmdAgent(a, io);
     case 'init': return cmdInit(a, io);
     case 'evidence': return cmdEvidence(a, io);
+    case 'auth-check': return cmdAuthCheck(a, io);
     default: throw new CliError(`没有这个命令：${a.command}`, EXIT.USAGE, 'atest --help');
   }
 }

@@ -54,6 +54,25 @@ export interface HttpExec {
   send(req: {
     method: string; url: string; headers: Record<string, string>;
     body?: unknown; form?: Record<string, string>; timeoutMs: number; maxBytes: number; followRedirects: boolean;
+    /**
+     * 鉴权**意图**。引擎只说"这一步要用鉴权"，不说怎么用。
+     *
+     * 为什么引擎不自己写 Authorization：原先它是
+     * `headers.authorization = 'Bearer ' + secret(ref)`，三个后果 ——
+     *  1. 引擎认识了"方案"（bearer/basic/apiKey-in-query/cookie 是网关语义），
+     *     而"引擎能在浏览器里跑只读校验"要求它不知道这些；
+     *  2. apiKey 放 query/cookie、basic、oauth2 全写不出来（只有一条 Bearer 硬编码）；
+     *  3. **真值进了引擎内存**，于是它能顺着任何一次 keyContext 流到磁盘。
+     * 现在引擎只传不透明引用与身份名，值只在 adapter 的一层里被取出。
+     *
+     * 三个字段都是**可选**且各自独立：
+     *  - `ref` —— 步骤上明写的 `secret:<ref>`（IR 里看得见、审校过，优先级最高）
+     *  - `identity` —— 多身份场景（权限矩阵用例依赖它）
+     *  - `docRef` + `operationId`/`method`/`path` —— 让 adapter 去 spec 里查
+     *     这个 operation 声明了哪个 securityScheme。传这些是为了**不传**
+     *     解析结果：spec 内容进引擎等于把网关语义带进引擎。
+     */
+    auth?: { ref?: string; identity?: string; docRef?: string; operationId?: string; method?: string; path?: string };
   }, ctx: ExecContext): Promise<{
     status: number; headers: Record<string, string>; body: unknown; bodyText: string;
     durationMs: number; bytes: number; truncated: boolean;

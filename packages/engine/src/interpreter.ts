@@ -10,7 +10,7 @@
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
 import type { Step, Scenario, Lease } from '@atest/ir';
-import { countsTowardPassRate, LEASE_REQUIRED, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import { countsTowardPassRate, LEASE_REQUIRED, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
@@ -103,6 +103,51 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     const ev: TraceEvent = { seq: seq++, ts: new Date(clock.now()).toISOString(), mono: clock.mono(), path: [], data: {}, ...e };
     events.push(ev);
   };
+
+  /**
+   * 当前身份（docs/05 §2 的"多租户/多身份"）。
+   *
+   * 语义是"**从这一步起，同一序列里后续的步骤都用它**"（与 SQL 的 SET 一样是语句，
+   * 不是块），所以它是一个会被改的值，而不是靠路径算出来的作用域。
+   *
+   * 两条防串的规定：
+   *  1. **容器退出时复位**（见 runChildren 的 finally）：`forEach` 里某次迭代切了身份，
+   *     不该把后续迭代一起带跑 —— 那会让"第 3 次迭代用了第 2 次的身份"这种结果
+   *     完全依赖执行顺序，而顺序是不可见的。
+   *  2. **parallel 的分支里禁止切身份**（见 case 'parallel'）：分支共享同一个变量，
+   *     交错执行下"谁先切"决定后面看到谁 —— 而权限矩阵用例（A 的资源 B 读不到）
+   *     要的恰恰是隔离，串了会**双双通过**。宁可当场报错，也不给一个随并发度变的答案。
+   */
+  let currentIdentity: string | undefined = scenario.identity;
+
+  /**
+   * 这批步骤里（含任意深度）有没有 useIdentity。
+   *
+   * 必须在**进入并行之前**静态判定，不能"运行时发现有人改了身份就报错"：
+   * 交错执行下报错与否取决于调度顺序，而一个随并发度出现的 error
+   * 会被当成 flaky 重试掉，正好把要防的东西藏起来。
+   */
+  const containsIdentitySwitch = (steps: Step[]): boolean => {
+    let hit = false;
+    walk(steps, (s) => { if (s.kind === 'useIdentity') hit = true; });
+    return hit;
+  };
+
+  /**
+   * 这一步该用哪个身份。**只有这一处公式**，http 与 openapiCall 共用。
+   *
+   * 为什么要有这个函数：两个入口原先各写一份，各错一处 ——
+   *  - openapiCall 算出了 authIntent 却没塞进 send()（**算了不用**）；
+   *  - http 读的是 `scenario.identity`（场景级静态值）而不是 currentIdentity，
+   *    于是 useIdentity 切完之后它还是拿开头的身份 ——
+   *    "切换身份"那一步自己变绿了，后面的请求一个都没变。
+   * 两处都是本仓那个老毛病：字段在 IR 里、注释把它讲得很对、执行侧没人接。
+   * 合成一处之后，"两个入口对同一件事各写一份、其中一份写错"不再可表达。
+   *
+   * 步骤上的 identity 优先于场景级：权限矩阵用例常在 forEach 里切，
+   * 而整个场景也可能声明一个默认身份。
+   */
+  const identityFor = (stepIdentity: string | undefined): string | undefined => stepIdentity ?? currentIdentity;
 
   const ctxBase = {
     runId,
@@ -264,14 +309,22 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
 
   const runChildren = async (steps: Step[], path: string[]): Promise<Outcome> => {
     const rs: StepResult[] = [];
-    for (const c of steps) {
-      const r = await withRetry(c, path, () => runStep(c, path));
-      rs.push(r);
-      if (r.status === 'fail' || r.status === 'error') {
-        if (c.onError === 'continue') continue;
-        if (c.onError === 'retry') { /* withRetry 已处理，走到这里说明重试用尽 */ }
-        return { status: r.status, summary: `${c.name ?? c.id}: ${r.assertionSummary ?? ''}`.trim(), cause: r.cause };
+    // 身份在**每个序列**入口快照、出口复位（理由见 currentIdentity 的注释）。
+    // finally 是必须的：中途 return（子步骤失败且 onError 不是 continue）
+    // 是常态而不是异常路径，只在正常结束复位等于"失败的场景里身份泄漏"。
+    const identityBefore = currentIdentity;
+    try {
+      for (const c of steps) {
+        const r = await withRetry(c, path, () => runStep(c, path));
+        rs.push(r);
+        if (r.status === 'fail' || r.status === 'error') {
+          if (c.onError === 'continue') continue;
+          if (c.onError === 'retry') { /* withRetry 已处理，走到这里说明重试用尽 */ }
+          return { status: r.status, summary: `${c.name ?? c.id}: ${r.assertionSummary ?? ''}`.trim(), cause: r.cause };
+        }
       }
+    } finally {
+      currentIdentity = identityBefore;
     }
     const healed = rs.some((r) => r.healed);
     return { status: healed ? 'healed' : 'pass', summary: `${rs.length} 个子步骤` };
@@ -324,6 +377,20 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       }
       case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id]);
       case 'parallel': {
+        // **分支里不许切身份**。身份是共享的可变量，分支交错执行时
+        // "谁先切"决定另一边看到谁 —— 而用 parallel 跑多身份恰恰是权限矩阵的
+        // 常见写法（"A 和 B 同时读同一份资源"）。那种写法会**双双通过**：
+        // 两个分支最后用的是同一个身份，断言"读不到"的那条自然也过。
+        // 与其给一个随并发度变化的答案，不如当场说清该怎么写（拆成两条场景，
+        // 或把分支改成 sequence 把切换收在分支内部 —— 后者仍然会竞态，所以一律拒）。
+        const racing = s.steps.filter((c) => containsIdentitySwitch([c]));
+        if (racing.length) {
+          return {
+            status: 'error', cause: 'case-stale',
+            summary: `parallel 的分支里有 useIdentity（${racing.map((c) => c.id).join('、')}）。并行分支共享身份状态，结果会随调度顺序变化。`,
+            keyContext: { hint: '每个身份写一条独立场景，或用 parallelGroup/concurrencySafe 让调度器串行化' },
+          };
+        }
         // 变量写入串行化：并发子步骤各自带独立子帧，写回时按顺序提交
         const frames = s.steps.map(() => vars);
         void frames;
@@ -443,12 +510,23 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
         const headers = strMap(s.request.headers, resolveValue);
         const query_ = strMap(s.request.query, resolveValue);
-        const auth = s.auth ? ctxBase.secret(s.auth) : undefined;
-        if (auth) headers.authorization = headers.authorization ?? `Bearer ${auth}`;
         const url = buildUrl(resolveUrl(s.request.url, ctxBase.env), query_);
         const res = await adapters.http.send({
           method: s.request.method, url, headers, body: s.request.body === undefined ? undefined : resolveValue(s.request.body),
           timeoutMs: s.timeoutMs ?? 30_000, maxBytes: s.maxResponseBytes, followRedirects: s.followRedirects,
+          // 只交**引用与身份**，不交值。原先这里是
+          // `headers.authorization = 'Bearer ' + ctxBase.secret(s.auth)` ——
+          // 引擎由此同时知道了方案（Bearer 是硬编码的，于是 apiKey/basic 写不出来）
+          // 和密钥真值（真值在引擎内存里，就能顺着任意一次 keyContext 流到磁盘）。
+          // 现在怎么带、带不带、值从哪取，全在 adapter 的 auth 层（docs/05 §2）。
+          //
+          // 身份取 currentIdentity，**不是 scenario.identity**：后者是场景级的静态值，
+          // 于是 useIdentity 切完之后这一行还是拿开头的身份 ——
+          // "切身份"那一步自己变绿了，后面的请求却一个没变。
+          // 与 openapiCall 用同一个表达式，就是为了两个入口不再各写一份。
+          auth: s.auth || identityFor(s.identity)
+            ? { ref: s.auth, identity: identityFor(s.identity) }
+            : undefined,
         }, execCtx('api'));
         // bodyText 一并导出：regex 提取需要原始文本（HTML/文本接口）。见 extract 的 regex 分支。
         const exports = { resp: { status: res.status, body: res.body, bodyText: res.bodyText, headers: res.headers, durationMs: res.durationMs }, status: res.status, body: res.body };
@@ -476,7 +554,32 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (leftover) return { status: 'error', summary: `URL 里还有未填的参数：${leftover.join('、')}`, cause: 'case-stale' };
         const qs = strMap(s.queryParams, resolveValue);
         const headers = strMap(s.headers, resolveValue);
-        if (s.identity) { const tok = ctxBase.secret(`identity:${s.identity}`); if (tok && !tok.startsWith('«')) headers.authorization = `Bearer ${tok}`; }
+        // identity 交给 adapter 解析，**引擎不再自己查密钥**。
+        // 原先这里写 `ctxBase.secret('identity:' + s.identity)`，而 CLI 的
+        // secretResolver 只认 `secret:<ref>` 形态：'identity:admin' 归一出来是空串，
+        // 取回占位符，然后 `if (!tok.startsWith('«'))` 安静地不加头 ——
+        // 于是"切了身份"的用例其实一直在用默认身份跑，
+        // 而"权限矩阵"那类用例（A 的资源 B 不能读）会**双方都拿到同一个身份**，
+        // 表现为"权限测试全绿"，而它压根没测到权限。这是 docs/08 §3 那个缺陷类的又一例。
+        //
+        // **无条件带上**，不再以"有没有身份"为条件：这个对象的主体是
+        // docRef/operationId/method/path —— adapter 拿它去 spec 里查这个 operation
+        // 声明了哪个 securityScheme。而绝大多数 operation 都声明了 security、
+        // 又由 env 的凭证表决定用哪个 ref，跟"这次有没有切身份"毫无关系。
+        // 早先那个 `idForThisCall ? … : undefined` 的写法等于把"没切身份"当成
+        // "这个 operation 是公开接口"，于是所有走 spec 的正常请求都变成匿名请求。
+        const authIntent = {
+          identity: identityFor(s.identity),
+          docRef: s.docRef,
+          // 三个都**优先取解析后的值**，步骤上声明的那个只作兜底。
+          // adapter 拿 method + path 去 spec 里定位这个 operation、读它的 security，
+          // 而 IR 里 method/path 是 optional（大多数用例只写 operationId）——
+          // 交下来 undefined 等于让 adapter 定位不到，于是"按 spec 自动加鉴权"
+          // 对这类用例整个失效，而且失效方式是"没加头"，看起来像后端不要鉴权。
+          operationId: op.operationId ?? s.operationId,
+          method: op.method ?? s.method,
+          path: op.urlTemplate ?? s.path,
+        };
 
         // 请求侧 schema 校验（IR 的 validateRequest 默认 true）。
         // **但对负向策略只记事件不拦**：requiredMissing / typeViolation / negativeFuzz
@@ -502,6 +605,11 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           method: op.method, url: buildUrl(resolveUrl(url, ctxBase.env), qs), headers,
           body: bodyForSend,
           timeoutMs: s.timeoutMs ?? 30_000, maxBytes: 10_000_000, followRedirects: false,
+          // 就是上面那个 authIntent。它原先算完就被丢在这里不用了 ——
+          // 而它上面的注释正好在讲"为什么必须交给 adapter"。
+          // 这类 bug 读代码看不出来（变量确实"被使用"了，用在上一行的字面量里），
+          // 只有断言"send 收到的第二参里有它"才拦得住。
+          auth: authIntent,
         }, execCtx('api'));
         // 响应侧符合性检查：**只在环境显式声明 spec 可信时做**，且**只上报**。
         // 两条都来自 docs/05 §1.1，弄反任何一条都会烧掉红绿的可信度：
@@ -578,8 +686,27 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (!adapters.device) return { status: 'skipped', summary: `人工介入跳过（无 device adapter）：${s.reason}` };
         return { status: 'skipped', summary: `等待人工接管：${s.reason}` };
       }
-      case 'useIdentity':
-        return { status: 'pass', summary: `切换身份 ${s.identity}` };
+      case 'useIdentity': {
+        /**
+         * 这一步原先是 `return { status: 'pass', summary: '切换身份 X' }` —— **什么都没切**。
+         * IR 里有字段、解释器回了个 pass，写"权限矩阵"用例的人会看到全绿，
+         * 而所有请求都在用同一个身份发。这是本仓反复出现的"schema 有字段、执行侧没人读"
+         * 的最坏一例：前几例至少会失败，这一例**报告成功**。
+         *
+         * 现在它真的改 currentIdentity。身份值本身仍不进变量空间（Agent 读到 token
+         * 就能把它写进生成的用例里提交，docs/03 §5），只有名字进 trace。
+         * 具体取哪个凭证由 adapter 按 (docRef, identity) 查凭证表。
+         */
+        const from = currentIdentity;
+        currentIdentity = s.identity;
+        return {
+          status: 'pass',
+          summary: `切换身份 ${from ?? '(默认)'} → ${s.identity}`,
+          // preserveSession=false 的含义是"别把上一个身份的会话带过来"。
+          // 会话（cookie jar / storageState）在 adapter 侧，这里只能把要求带出去。
+          keyContext: { identity: s.identity, preserveSession: s.preserveSession, secrets: s.secrets.length },
+        };
+      }
 
       // ── 断言与横切 ─────────────────────────────────────────────
       case 'assert': case 'assertPage': case 'assertUi': case 'assertLlm': case 'assertPerf': {

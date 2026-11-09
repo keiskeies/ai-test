@@ -17,6 +17,10 @@ import { parseJsonKeepBigInt, stringifyBody } from './bigint.js';
 import { compileValidator, isValid, type Validator } from '../openapi/validate.js';
 import type { OperationSpec, ParsedDoc } from '../openapi/parse.js';
 import type { ExecContext, HttpExec } from '@atest/engine';
+// **type-only**：auth/token.ts 反过来 import 本文件（要 new 一个 HttpClient），
+// 这里若做值导入就构成模块环。ESM 能跑但初始化顺序会变脆弱（谁先被求值不确定），
+// 而这里的用法只需要类型（AuthHook 实例由 CLI 注入，本文件从不构造它）。
+import type { AuthHook } from '../auth/hook.js';
 
 /** 默认响应体上限 10MB（docs/05 §4）。 */
 export const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
@@ -104,7 +108,7 @@ export class HttpClient {
 
   private async sendOnce(r: SendRequest): Promise<SendResult> {
     const t0 = monoNow();
-    const headers: Record<string, string> = { accept: 'application/json, text/plain;q=0.9, */*;q=0.5', ...lower(r.headers) };
+    const headers: Record<string, string> = { accept: 'application/json, text/plain;q=0.9, */*;q=0.5', ...lowerHeaders(r.headers) };
     if (!headers['user-agent']) headers['user-agent'] = this.opts.userAgent ?? 'atest/0.0';
 
     let payload: string | URLSearchParams | undefined;
@@ -193,7 +197,7 @@ function validatorFor(doc: ParsedDoc, op: OperationSpec): Validator | undefined 
  * 传了 docs 就同时提供 operation 解析与请求侧校验；不传则只有 send
  * （纯 `http` 步骤的场景不需要 spec）。
  */
-export function asHttpExec(client: HttpClient, docs?: DocProvider): HttpExec {
+export function asHttpExec(client: HttpClient, docs?: DocProvider, auth?: AuthHook): HttpExec {
   const find = (docRef: string, ref: { operationId?: string; method?: string; path?: string }) => {
     if (!docs) throw new Error('resolveOperation/validateRequest 需要文档登记表（asHttpExec 的第二个参数）');
     const doc = docs(docRef);
@@ -205,10 +209,31 @@ export function asHttpExec(client: HttpClient, docs?: DocProvider): HttpExec {
   };
   return {
     async send(req, ctx: ExecContext) {
+      // 鉴权在**发出去之前**落地，且在这里而不是 HttpClient 的 onRequest 里：
+      // onRequest 只能改 headers，而 `apiKey in: query` 必须改 URL。
+      let url = req.url;
+      let headers = req.headers;
+      const notes: string[] = [];
+      if (auth) {
+        const a = await auth.apply({
+          url, headers,
+          docRef: req.auth?.docRef, operationId: req.auth?.operationId,
+          method: req.auth?.method ?? req.method, path: req.auth?.path,
+          identity: req.auth?.identity, ref: req.auth?.ref,
+        });
+        url = a.url;
+        headers = a.headers;
+        notes.push(...a.notes);
+        // log.emitted 而不是 lint.reported：这些是"这次带了什么凭证"的说明，
+        // 不是静态检查结论。混进 lint 通道会让 lint 计数与看板把它算成问题
+        for (const n of notes) ctx.emit({ kind: 'log.emitted', stepId: undefined, data: { level: 'info', message: n } });
+        // AuthRequiredError 不 catch：它是"环境没配凭证"，让它冒到解释器变成 error
+        // （解释器对未捕获异常给的正是 error + env-unavailable，判得对）
+      }
       const r = await client.send({
         method: req.method,
-        url: req.url,
-        headers: req.headers,
+        url,
+        headers,
         body: req.body,
         form: req.form,
         timeoutMs: req.timeoutMs,
@@ -274,7 +299,14 @@ export function asHttpExec(client: HttpClient, docs?: DocProvider): HttpExec {
   };
 }
 
-function lower(h: Record<string, string> | undefined): Record<string, string> {
+/**
+ * 头名统一小写。HTTP 头名大小写不敏感（HTTP/2 直接要求全小写）。
+ *
+ * 导出给鉴权层用，**不要各写一份**：鉴权的"不覆盖用户显式写的头"这条判据
+ * 依赖查找与写入用同一个规范化形态，两处各写一份、其中一份忘了 toLowerCase，
+ * 结果就是"人手写的头被 spec 声明静默覆盖" —— 而那正是那条判据要防的事。
+ */
+export function lowerHeaders(h: Record<string, string> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(h ?? {})) out[k.toLowerCase()] = v;
   return out;
