@@ -122,42 +122,154 @@ const llmAssert = (id: string, gatePolicy?: 'report-only' | 'blocking'): StepDra
   ({ id, kind: 'assertLlm', question: '这个返回值符合业务预期吗', evidenceFrom: '$st', ...(gatePolicy ? { gatePolicy } : {}) }) as unknown as StepDraft;
 
 /** 一律判"是"的 judge —— 模拟"LLM 盖章通过"这个危险方向 */
-const llmYes = { llm: { async judge() { return { passed: true, evidence: 'ok', costUsd: 0 }; } } } as never;
+const llmYes = { llm: { async judge() { return { passed: true, evidence: 'ok', costUsd: 0 }; } } };
+/** 当 adapters 用时要 cast：AdapterRegistry 其它字段是必填的，这里只给得起 llm */
+const asAdapters = (o: object) => o as never;
 
 test('场景只有 report-only 的 assertLlm（模型判"是"，status=pass）=> 不能当门禁用例拿 0', async () => {
   const s = scen([seed(200), llmAssert('l0')]);
   // 先钉住**前提**：这条 assertLlm 在引擎里确实产 status=pass。
   // 不钉的话，"引擎哪天改成返回 triaged"这条测试会照样绿 —— 而那时它测的已经不是本洞了。
-  const probe = await runScenario({ scenario: s, clock: deterministicClock(7), adapters: llmYes });
+  const probe = await runScenario({ scenario: s, clock: deterministicClock(7), adapters: asAdapters(llmYes) });
   const leaf = probe.results.find((r) => r.stepId === 'l0');
   assert.equal(leaf?.status, 'pass', `前提变了：report-only 的 assertLlm 判"是"时不再是 pass（实际 ${leaf?.status}），本测试的靶子要重找`);
 
-  const g = await run1(s, llmYes);
+  const g = await run1(s, asAdapters(llmYes));
   assert.equal(g.code, EXIT.INVALID, `report-only 断言判"是"不配让 CI 绿。实际：${g.why}`);
   assert.match(g.said, /gatePolicy.*blocking/, '要给出路（显式 blocking 或补确定性断言），否则人只会把断言改成假的硬断言');
 });
 
 test('显式写了 gatePolicy:"blocking" 的 assertLlm 算门禁结论（不能被"按 kind 一律排除"误伤）', async () => {
-  const g = await run1(scen([seed(200), llmAssert('l0', 'blocking')]), llmYes);
+  const g = await run1(scen([seed(200), llmAssert('l0', 'blocking')]), asAdapters(llmYes));
   assert.equal(g.code, EXIT.OK, `人显式要求进门禁，门禁就得认。实际：${g.why}`);
 });
 
-// ── call 例外：断言在子场景里时，父侧看不见 ≠ 没有断言 ────────────────────
+// ── call 的子场景：门禁要看**实际跑了什么**，不是"IR 里声明了什么" ──────────
+/*
+ * 这一段是本轮改 call 时重写的。**旧的那一条测试已经失去鉴别力**：
+ * 它断言"只有一个 call 的场景不该被判空场景"，而旧的豁免（`hasCallStep`：IR 里声明了
+ * call 就放行）与新判据（看 report.childRuns 里实际跑出来的 IR 与 results）
+ * **都让它通过** —— 我把 gate.ts 整个退回旧豁免跑过一次，它照样绿。
+ * 那正是 docs/08 §3 记的缺陷类「测试通过的原因和它想验的东西无关」，
+ * 而这次是我自己上一轮留下的。所以下面每一条都**至少有一个形状能把新旧判据分开**。
+ */
 
-test('场景只有一个 call（断言全在子场景里）=> 不能被"零断言"误拦', async () => {
-  // 前提钉死：call 的子结果**确实不回流**父报告（runScenarioIn 只回流 cost 与 events）。
-  // 这个例外是为了迁就那个事实而开的口子；哪天子结果并进来了，这条测试与
-  // gate.ts 里的 hasCallStep 要一起删掉 —— 否则"全 call 且子场景全跳过"永远绿。
-  const child = scen([{ id: 'childAssert', kind: 'assert', against: '$st', jsonPath: { $: { eq: 1 } } } as StepDraft], { id: 'scn.child' });
+/** 一个只有 call 的父场景 + 把 ref 固定解析到 child 的适配器 */
+function withCall(child: Scenario, extraAdapters: Record<string, unknown> = {}): { parent: Scenario; adapters: unknown } {
   const parent = scen([{ id: 'c1', kind: 'call', scenarioRef: 'scn.child', args: { st: 1 } } as unknown as StepDraft]);
-  const adapters = { callScenario: async () => child } as never;
+  return { parent, adapters: { callScenario: async () => child, ...extraAdapters } };
+}
 
-  const probe = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters });
-  assert.ok(!probe.results.some((r) => r.stepId === 'childAssert'),
-    '前提变了：子场景结果已并回父报告，gate.ts 的 hasCallStep 例外该删了（连带这条测试）');
+/**
+ * 子场景统一带一条自己的 seed。
+ *
+ * 不是因为 call.args 传不进去（传得进，`childVars` 的 inputs 就是 args 解析出来的），
+ * 而是为了让子场景里的断言**不依赖父侧传什么**：父传 st=1 而 okAssert 要 eq:200 的话，
+ * 子场景会 fail，测的就不是"门禁怎么判"而是"fixture 有没有对齐"了。
+ * 我第一版就是这么错的（三条测试一起红，红的理由还都看着像门禁的 bug）。
+ */
+const childWith = (steps: StepDraft[]) => scen([seed(200), ...steps], { id: 'scn.child' });
+
+test('call 的子运行会被记进报告（这是新判据唯一的依据，所以先单独钉住它）', async () => {
+  const child = childWith([okAssert('childAssert')]);
+  const { parent, adapters } = withCall(child);
+  const rep = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as never });
+
+  assert.ok(!rep.results.some((r) => r.stepId === 'childAssert'),
+    '前提：子结果**仍然不并进**父的 results（并进 JUnit 是另一件事，见 docs/08 那条未闭环）');
+  assert.equal(rep.childRuns?.length, 1, '子运行没记进来的话，门禁就只能退回"声明即放行"那个旧豁免');
+  const c = rep.childRuns?.[0];
+  assert.equal(c?.callStepId, 'c1', '要能说出是哪一步的调用，否则提示里没法定位');
+  assert.ok(c?.results.some((r) => r.stepId === 'childAssert'), '子场景自己的 results 要原样带着');
+  // IR 必须一起带 —— 只有 results 判不了 report-only（判"是"时 status 就是 pass）
+  assert.ok(JSON.stringify(c?.scenario).includes('scn.child'), 'gatePolicy 住在 IR 里，不带 IR 就等于没带判据');
+});
+
+test('子场景只有一条 report-only 的 assertLlm => 不能靠 call 绕过洞 3（旧的声明即放行会让它绿）', async () => {
+  // **这条是本轮最要紧的一条**：洞 3 本来已经修好了（场景只有 report-only assertLlm
+  // 时判 INVALID），但"只有一个 call、断言都在子场景里"这个形状从另一道门把它重开了 ——
+  // 旧豁免只看"IR 里有没有 call"，而它拿不到子场景的 IR，所以看不见那条是 report-only。
+  const { parent, adapters } = withCall(childWith([llmAssert('childLlm')]), llmYes);
+
+  // 先钉前提：子场景里那条 assertLlm 确实跑成了 pass（否则这条测的就不是洞 3 了）
+  const probe = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as never });
+  assert.equal(probe.childRuns?.[0]?.results.find((r) => r.stepId === 'childLlm')?.status, 'pass',
+    '前提变了：report-only 的 assertLlm 判"是"时不再是 pass，本测试的靶子要重找');
 
   const g = await run1(parent, adapters);
-  assert.equal(g.code, EXIT.OK, `子场景里有断言，父侧看不见不该判"空场景"。实际：${g.why}`);
+  assert.equal(g.code, EXIT.INVALID,
+    'LLM 盖章不该让"只有一个 call"的场景绿。这是父场景 + 子场景两层都要过的判据。实际：' + g.why);
+  assert.match(g.said, /gatePolicy.*blocking/, '要给出路，否则人只会把子场景里的断言改成假的硬断言');
+});
+
+test('子场景的断言全部被守卫跳过 => 判空场景（"声明了 call"不等于"验到了东西"）', async () => {
+  // 旧豁免的第二个洞：call 存在就一直放行，于是"全 call 且子场景全跳过"永远绿。
+  // 新判据问的是跑出来的东西，所以这种形状照样拦。
+  const { parent, adapters } = withCall(childWith([
+    { id: 'cs', kind: 'assert', when: '1 == 2', against: '$st', jsonPath: { $: { eq: 1 } } } as StepDraft,
+  ]));
+  const g = await run1(parent, adapters);
+  assert.equal(g.code, EXIT.INVALID, `子场景一条都没跑成，父侧就没有任何结论。实际：${g.why}`);
+  assert.doesNotMatch(g.said, /全部通过/);
+});
+
+test('子场景有真断言 => 放行，但**不计进本场景的用例数**（那句话要和 JUnit 对得上）', async () => {
+  const { parent, adapters } = withCall(childWith([okAssert('a1'), okAssert('a2')]));
+  const g = await run1(parent, adapters);
+  assert.equal(g.code, EXIT.OK, `子场景给出了确定性结论，父场景不该被判空。实际：${g.why}`);
+  // 父场景自己一条断言都没有 => 不能说"2 条断言全部通过"（JUnit 的 tests 是 1，
+  // 那个 1 是 call 步骤本身）。本文件的注释一直警告"CI 退出码与报告里的用例数对不上"，
+  // 这句理由就是那种对不上的一个入口。
+  assert.match(g.said, /本场景自身没有断言/, `父侧零断言时要把话说成实话。实际：${g.said}`);
+  assert.match(g.said, /2 条结论全部来自 call 子场景/);
+  assert.doesNotMatch(g.said, /^2 条断言全部通过/, '虚报的用例数比不报更难查');
+});
+
+test('三层嵌套（断言只在最里层）=> 不能被判空场景', async () => {
+  // 这条钉的是 childRuns 的**扁平**合并。只记直接子层的话，父侧看到的是
+  // "c1 调了 scn.child，而 scn.child 的 results 里只有一个 call、没有断言" => 判空，
+  // 而真相是断言在孙子层跑过了。那是**误拦合法用例**，比漏拦更糟。
+  const grand = scen([seed(200), okAssert('g1')], { id: 'scn.grand' });
+  const child = scen([{ id: 'c2', kind: 'call', scenarioRef: 'scn.grand', args: { st: 1 } } as unknown as StepDraft], { id: 'scn.child' });
+  const parent = scen([{ id: 'c1', kind: 'call', scenarioRef: 'scn.child', args: { st: 1 } } as unknown as StepDraft]);
+  const adapters = { callScenario: async (ref: string) => (ref === 'scn.child' ? child : grand) };
+
+  const rep = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as never });
+  assert.ok(rep.childRuns?.some((c) => c.results.some((r) => r.stepId === 'g1')),
+    '孙子层的运行没扁平并进来的话，深层复用的用例会被当成空场景');
+
+  const g = await run1(parent, adapters);
+  assert.equal(g.code, EXIT.OK, `实际：${g.why}`);
+});
+
+test('父子同名断言时各按**自己那份 IR** 判 gatePolicy（混成一个集合会拿错判据）', async () => {
+  // 形状很自然：父场景写了一条 blocking 的 assertLlm，子场景里也有一条叫同名但是
+  // report-only 的。如果 reportOnly 是全场一个 Set，子侧那条会把父侧那条**顶掉**，
+  // 于是人拿到"你的断言没计入结论"，去查一个本来就写对了的 gatePolicy。
+  const child = childWith([llmAssert('shared')]);
+  const parent = scen([
+    seed(200), llmAssert('shared', 'blocking'),
+    { id: 'c1', kind: 'call', scenarioRef: 'scn.child', args: { st: 1 } } as unknown as StepDraft,
+  ] as StepDraft[]);
+  const adapters = { callScenario: async () => child, ...llmYes };
+
+  const g = await run1(parent, adapters);
+  assert.equal(g.code, EXIT.OK,
+    `父侧显式写了 blocking，就必须算结论 —— 不能被子场景里同名的 report-only 顶掉。实际：${g.why}`);
+});
+
+test('窄性对照：报告没记子运行时（手写 fixture）仍保留宽容，不误拦', async () => {
+  // childRuns === undefined 与 [] 必须可区分，这条钉的就是 undefined 那一半：
+  // 手写 results 的调用方、别的引擎实现，都不该因为门禁多要一样东西就被判空场景。
+  // 而 [] 那一半（记了、确实一个 call 都没跑）不给宽容 —— 由上面几条覆盖。
+  const s = scen([{ id: 'c1', kind: 'call', scenarioRef: 'scn.child', args: {} } as unknown as StepDraft]);
+  const report = {
+    runId: 'r', status: 'pass', startedAt: 0, durMs: 1,
+    results: [{ stepId: 'c1', kind: 'call', status: 'pass', durMs: 1, retry: 0, healed: false, nonReplayable: false, keyContext: {}, costUsd: 0, artifactIds: [] }],
+    events: [], outputs: {}, costUsd: 0, tally: { pass: 1, fail: 0, error: 0, healed: 0, skipped: 0, triaged: 0 }, summary: '',
+  } as never;
+  const d = gateAfterRun({ scenario: s, report, ci: true, allowUnfrozen: false });
+  assert.equal(d.code, EXIT.OK, `数据缺失时的让步是给"没记"的，不是给 call 写法的。理由：${d.reasons.join(' / ')}`);
 });
 
 test('窄性对照：http 步骤连不上（error）时报 5 而不是 3 —— 病因不能被"没有结论"这个后果盖住', async () => {

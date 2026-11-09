@@ -7,15 +7,18 @@
  * 两个都是"每一次运行都会误拦"那种 —— 靠手写 fixture 想不到，是靠真 spec 撞出来的。
  * 所以这里把真 spec 全量过一遍：以后任何人加一条形状奇怪的变异，这条会当场拦住。
  *
- * **不读工作区的源文件**，一律用 git 里的已提交内容当"干净现场"。两个理由：
- *  1. 工作区**正在被变异驱动改**的时候跑测试，读到的就是变异版 —— 那条测试会红，
- *     而它报的是"有残留"，把一次正常的并发说成现场污染，指错方向；
- *  2. 结论应当与"我这台机器此刻脏不脏"无关，否则它就不是回归测试而是环境探测器。
+ * **两组测试用两个不同的基准，这不是疏忽**：
+ *  - 残留误报那组用 **git 的已提交内容**当"干净现场"。理由：工作区可能**正在被变异驱动改**，
+ *    读磁盘会把一次正常的并发读成"现场污染"；而且结论应当与"这台机器此刻脏不脏"无关。
+ *  - 锚点是否存在那组用**工作区**。理由更直接：变异驱动读的就是工作区
+ *    （`readFileSync(path)`），拿 HEAD 判等于拿"提交历史"当"磁盘内容"，
+ *    两者只在提交完那一刻重合 —— 我第一版就是这么写的，当场把本轮刚写的
+ *    `call-reflux.json` 误报成过期，而"给新写的代码跑一轮变异"是正常流程。
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { detectResidue } from '../mutate.mjs';
@@ -71,17 +74,22 @@ describe('真变异集在干净现场下都不许被判成残留', () => {
     });
   }
 
-  test('锚点必须在已提交内容里出现，否则那条变异其实根本没在测东西', () => {
-    // 这是顺带查出来的一件事，与残留无关但同源：锚点在 HEAD 里找不到时，
-    // `split().join()` 是恒等变换 —— 施加"变异"等于没施加，
-    // 于是这条永远"未被抓到"，白占一个"已验证"名额。
+  test('锚点必须在**工作区**的文件里出现，否则那条变异其实根本没在测东西', () => {
+    // 判据用工作区而不是 HEAD —— 变异驱动读的是**工作区**（readFileSync(path)），
+    // 我第一版拿 HEAD 判，当场把本轮刚写的 call-reflux.json 报成过期：
+    // "给新写的测试跑一轮变异"是正常流程，那时代码还没提交，锚点当然不在 HEAD 里。
+    // 拿 HEAD 当准就是拿"提交历史"当"磁盘内容"，两个东西只在提交完那一刻重合。
+    //
+    // 顺带这条查的是真缺陷：锚点在磁盘上找不到时，`split().join()` 是**恒等变换**，
+    // "施加变异"等于没施加，于是那条永远"未被抓到"、白占一个"已验证"名额。
     const missing = [];
     for (const { name, spec } of specs) {
       for (const c of spec.cases ?? []) {
         if (!c.file || c.anchor === undefined) continue;
-        const head = committedOf(c.file, cache);
-        if (head === undefined) continue;
-        if (!head.includes(c.anchor)) missing.push(`${name} :: ${c.label ?? c.anchor.slice(0, 40)}`);
+        const p = join(ROOT, c.file);
+        if (!existsSync(p)) { missing.push(`${name} :: ${c.label ?? ''}（文件不存在：${c.file}）`); continue; }
+        const cur = readFileSync(p, 'utf8');
+        if (!cur.includes(c.anchor)) missing.push(`${name} :: ${c.label ?? c.anchor.slice(0, 40)}`);
         if (c.anchor === c.replace) missing.push(`${name} :: ${c.label ?? '(无 label)'}（anchor 与 replace 相同 = 空变异）`);
       }
     }

@@ -63,8 +63,8 @@
     {
       "label": "report-only assertLlm 也算门禁结论（洞 3 复活：全 LLM 场景模型盖章 => 0）",
       "file": "packages/cli/src/gate.ts",
-      "anchor": "  const isConc = (r: StepResult) => countsTowardPassRate(r.status) && !isReportOnlyLlm(r);",
-      "replace": "  const isConc = (r: StepResult) => countsTowardPassRate(r.status);",
+      "anchor": "    conclusive: leaves.filter((r) => countsTowardPassRate(r.status) && !isReportOnlyLlm(r)),",
+      "replace": "    conclusive: leaves.filter((r) => countsTowardPassRate(r.status)),",
       "testFile": "packages/cli/test/gate-real.test.ts"
     },
     {
@@ -77,8 +77,8 @@
     {
       "label": "结论集退回 leaves（洞 4：set 被数成通过了一条结论）",
       "file": "packages/cli/src/gate.ts",
-      "anchor": "  const assertionLeaves = leaves.filter((r) => ASSERTION_KINDS.includes(r.kind));",
-      "replace": "  const assertionLeaves = leaves;",
+      "anchor": "  const leaves = sc.results.filter((r) => ASSERTION_KINDS.includes(r.kind));",
+      "replace": "  const leaves = sc.results;",
       "testFile": "packages/cli/test/gate.test.ts"
     },
     {
@@ -89,9 +89,9 @@
       "testFile": "packages/cli/test/gate-real.test.ts"
     },
     {
-      "label": "call 例外被删（只由 call 组成的场景误判成零断言，合法用例被拦）",
+      "label": "宽容被删（报告没记子运行的手写 fixture 会被误判成零断言，合法用例被拦）",
       "file": "packages/cli/src/gate.ts",
-      "anchor": "  if (!conclusive.length && !hasCallStep) {",
+      "anchor": "  if (!conclusive.length && !declaresButUnmeasured) {",
       "replace": "  if (!conclusive.length) {",
       "testFile": "packages/cli/test/gate-real.test.ts"
     },
@@ -99,7 +99,7 @@
       "label": "「没有结论」那条闸挪回 error 判定之前（病因被后果盖住：环境没通被报成你没用例）",
       "file": "packages/cli/src/gate.ts",
       "anchor": "  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
-      "replace": "  if (!conclusive.length && !hasCallStep) return { code: EXIT.INVALID, reasons, refused: false, suppressedFails: 0, attention };\n  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
+      "replace": "  if (!conclusive.length && !declaresButUnmeasured) return { code: EXIT.INVALID, reasons, refused: false, suppressedFails: 0, attention };\n  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
       "testFile": "packages/cli/test/gate-real.test.ts"
     },
     {
@@ -119,15 +119,15 @@
     {
       "label": "绿灯理由里的数字换成 leaves.length（把 skipped 算进通过的断言数——那句话重新变成假的）",
       "file": "packages/cli/src/gate.ts",
-      "anchor": "  reasons.push(`${conclusive.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}",
-      "replace": "  reasons.push(`${leaves.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}",
+      "anchor": "    ? `${ownCount} 条断言全部通过${softTail(nonConclusive.filter((n) => !n.from))}${childNote}`",
+      "replace": "    ? `${ownScope.results.length} 条断言全部通过${softTail(nonConclusive.filter((n) => !n.from))}${childNote}`",
       "testFile": "packages/cli/test/gate.test.ts"
     },
     {
       "label": "被排除的断言不在绿灯理由里说（偷偷计入：绿了，但没人知道有一条压根没跑）",
       "file": "packages/cli/src/gate.ts",
-      "anchor": "  reasons.push(`${conclusive.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}",
-      "replace": "  reasons.push(`${conclusive.length} 条断言全部通过${''}",
+      "anchor": "    ? `${ownCount} 条断言全部通过${softTail(nonConclusive.filter((n) => !n.from))}${childNote}`",
+      "replace": "    ? `${ownCount} 条断言全部通过${''}${childNote}`",
       "testFile": "packages/cli/test/gate-real.test.ts"
     }
   ]

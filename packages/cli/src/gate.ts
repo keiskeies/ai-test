@@ -102,7 +102,6 @@ export function gateAfterRun(i: GateInput): GateDecision {
   // 叶子步骤才算结论。清单来自 ir 的 CONTAINER_KINDS（与 JUnit 计数同一份），
   // 不在这儿手写一遍：两处清单迟早漂移，而漂移的表现是"CI 退出码与报告里的用例数对不上"
   const leaves = report.results.filter((r) => !CONTAINER_KINDS.includes(r.kind));
-  const reportOnlyLlm = reportOnlyLlmIds(i.scenario);
   const fails = leaves.filter((r) => r.status === 'fail');
   const errors = leaves.filter((r) => r.status === 'error');
   const healed = leaves.filter((r) => r.status === 'healed');
@@ -155,12 +154,9 @@ export function gateAfterRun(i: GateInput): GateDecision {
    *    "seed(set) + 一条 report-only assertLlm" 照样 0 —— 测试当场报出来了。
    *    而且那句"2 个断言全部通过"里数进 set 步骤，**这句话本来就是假的**。
    *
-   * **call 例外**（`hasCallStep`）：`call` 的子场景结果是**另起一次 runScenario** 跑的，
-   * 子报告只回流 cost 与 events，`rep.results` 不并进父报告（interpreter.ts 的 runScenarioIn），
-   * 实测父报告只有 `c1/call=pass` 一条。所以"只由 call 组成的场景"在这里看不到任何断言，
-   * 若不豁免就会被误判成空场景 —— 那是**误拦合法用例**，比漏拦更糟。
-   * 真正的修法是把子结果并进来（顺带让子场景的断言进 JUnit 与证据包），已登记 docs/08；
-   * 修掉之后这个豁免要一起删掉，否则"全 call 且子场景全跳过"永远是绿的。
+   * **call 的子场景怎么算**：见下面 scopes 那段。以前是"IR 里声明了 call 就一律放行"，
+   * 那个豁免有两个洞（子场景全 skipped / 只有一条 report-only assertLlm 时都照样绿），
+   * 现在按 `report.childRuns` 里**实际跑出来的那份 IR** 判。
    *
    * 落在 INVALID 而不是新增一个码：它和"空场景"是同一件事（用例结构没给出结论），
    * CI 侧的动作也相同（改用例，不是查产品、也不是重试）。
@@ -168,13 +164,42 @@ export function gateAfterRun(i: GateInput): GateDecision {
    * **这条闸仍盖不住的形状**（记在 docs/08）：一条确定性断言 + 一堆 assertLlm 时
    * `conclusive` 非空、退出码照旧。"report-only 占比过高"是治理指标，不是退出码。
    */
-  const isReportOnlyLlm = (r: StepResult) => r.kind === 'assertLlm' && reportOnlyLlm.has(r.stepId);
-  const isConc = (r: StepResult) => countsTowardPassRate(r.status) && !isReportOnlyLlm(r);
-  const assertionLeaves = leaves.filter((r) => ASSERTION_KINDS.includes(r.kind));
-  const conclusive = assertionLeaves.filter(isConc);
+  // 结论**按 IR 作用域分别算**（理由见 Scope 的注释：gatePolicy 住在各自那份 IR 里，
+  // 父子同 id 时混成一个集合会拿错的 gatePolicy 去判，然后给人一句查不出来的提示）。
+  // 父场景单独命名一份，而不是拼进数组再取 [0]：那个下标在类型上证明不了非空，
+  // 而命名顺便把"哪些数字是本场景的、哪些是子场景的"写进了变量名。
+  const ownScope: Scope = { scenario: i.scenario, results: leaves, label: '' };
+  const childScopes: Scope[] = (report.childRuns ?? []).map((c) => ({
+    scenario: c.scenario,
+    // 容器步骤同样要剔掉：子场景里的 forEach 结论是控制流的，不是业务结论，
+    // 数进"几条断言"就是虚报（与上面 leaves 同一条理由，两个作用域共用一条规则）
+    results: c.results.filter((r) => !CONTAINER_KINDS.includes(r.kind)),
+    label: `${c.callStepId}→${c.ref}`,
+  }));
+  const own = scopeConclusions(ownScope);
+  // 父那份直接复用上面算好的 own，不重算第二遍
+  const judged = [{ sc: ownScope, ...own }, ...childScopes.map((sc) => ({ sc, ...scopeConclusions(sc) }))];
+  const totalLeaves = judged.reduce((n, j) => n + j.sc.results.length, 0);
+  const conclusive = judged.flatMap((j) => j.conclusive);
   /** 断言叶子里没被算作结论的那几条。要如实点名，不能说一句"全过"就完事 */
-  const nonConclusive = assertionLeaves.filter((r) => !isConc(r));
-  const hasCallStep = declaresCall(i.scenario);
+  const nonConclusive = judged.flatMap((j) => j.nonConclusive.map((r) => ({ r, from: j.sc.label, isReportOnlyLlm: j.isReportOnlyLlm })));
+  const assertionLeaves = judged.flatMap((j) => [...j.conclusive, ...j.nonConclusive]);
+  /**
+   * **只在门禁拿不到子运行数据时**才保留的宽容。
+   *
+   * 旧的判据是 `hasCallStep`（"IR 里声明了 call 就别拦"），它有两个洞：
+   *  - 子场景全 skipped 时照样放行 => 场景永远绿（"声明了 call"与"验到了东西"是两件事）；
+   *  - 子场景只有一条 report-only 的 assertLlm 时照样放行 => 洞 3 从 call 这道门重开。
+   *
+   * 现在 `report.childRuns` 带着**每个子场景自己的 IR 与 results**，
+   * 上面那些都能照实判，所以宽容的条件收到最窄：
+   * **声明了 call，且这份报告压根没记子运行**（手写 fixture、别的引擎实现）。
+   * `childRuns === undefined` 与 `[]` 必须可区分就是这个原因：
+   * `[]` 是"记了，确实没跑 call"，那种没理由宽容；undefined 才是"我不知道"。
+   * 保留它而不是彻底删掉，是因为**误拦合法用例比漏拦更糟** ——
+   * 但方向要说清：这是对**数据缺失**的让步，不是对 call 这种写法的让步。
+   */
+  const declaresButUnmeasured = declaresCall(i.scenario) && report.childRuns === undefined;
 
   let suppressed = 0;
   if (triage && fails.length) {
@@ -249,37 +274,48 @@ export function gateAfterRun(i: GateInput): GateDecision {
   //    （非容器步骤）当结论集，于是 set/http/sleep 全被算成"通过了一条结论"，
   //    "一条 set + 一条 report-only assertLlm"照样 0。
   //
-  // **call 例外**：call 的子场景是另起一次 runScenario 跑的，子报告只回流 cost 与
-  // events，`rep.results` 不并进父报告（interpreter.ts 的 runScenarioIn）——
-  // 实测父报告只有 `c1/call=pass` 一条。所以"只由 call 组成的场景"这里看不到断言，
-  // 不豁免就是**误拦合法用例**，比漏拦更糟。真正的修法是子结果并进来
-  // （顺带让子场景断言进 JUnit 与证据包），已登记 docs/08；修掉后这个豁免要一起删。
+  // **子场景的失败/错误为什么不在这里数第二遍**：`childRuns` 带回来的是「子场景跑的那份
+  // IR + 那份 results」，而它**只用来回答「这次有没有一条能当门禁的结论」**。
+  // 失败与错误仍然只看父侧那一份，这不是遗漏：子场景的 fail/error 会由 call 步骤
+  // 自己带上来（interpreter.ts 的 call 分支 `return { status: rep.status }`），
+  // 再把子侧数一遍就是「一次子场景失败数出两条」—— 与上面 leaves 过滤存在的同一条理由，
+  // 也实测确认过（子里一条断言失败 => 父侧只有 `c1/call=fail` 一条）。
   //
   // 落在 INVALID 而不是新码：它与"空场景"是同一件事（用例结构没给出结论），
   // CI 侧动作也相同（改用例，不是查产品、也不是重试）。
   //
   // **仍盖不住**（记 docs/08）：一条确定性断言 + 一堆 assertLlm 时 conclusive 非空、
   // 退出码照旧。"report-only 占比过高"是治理指标，不是退出码能表达的。
-  if (!conclusive.length && !hasCallStep) {
+  if (!conclusive.length && !declaresButUnmeasured) {
     const why = assertionLeaves.length
-      ? `${assertionLeaves.length} 条断言没有一条给出可门禁的结论（${skippedNote(nonConclusive, isReportOnlyLlm)}）`
-      : `${leaves.length} 个步骤里没有一条断言`;
+      ? `${assertionLeaves.length} 条断言没有一条给出可门禁的结论（${skippedNote(nonConclusive)}）`
+      : `${totalLeaves} 个步骤里没有一条断言`;
     reasons.push(`本次运行没有任何断言结论（${why}）。空场景判"通过"是最危险的假绿：它什么也没测。`);
-    if (nonConclusive.some(isReportOnlyLlm)) {
+    if (nonConclusive.some((n) => n.isReportOnlyLlm(n.r))) {
       reasons.push(
         '结论全部来自 report-only 的 assertLlm。它按 docs/02 §4 不进门禁：判"否"不配让 CI 红，判"是"同样不配让 CI 绿。'
         + '两条出路：补至少一条确定性断言，或给要进门禁的那条显式写 gatePolicy:"blocking"。',
       );
     }
-    if (nonConclusive.some((r) => r.status === 'skipped')) {
+    if (nonConclusive.some((n) => n.r.status === 'skipped')) {
       reasons.push('skipped 的常见成因：步骤上的守卫 when 不成立（数据/环境没准备好，于是整段静默跳过）。守卫是给自己看的，不是给门禁看的。');
     }
     return { code: EXIT.INVALID, reasons, refused: false, suppressedFails: suppressed, attention };
   }
-  // 计数用 conclusive 而不是 leaves：leaves 里躺着 skipped 与 report-only 的断言，
-  // 拿它当"通过数"就是前面那条假绿报告的来源（"1 个断言全部通过"，
-  // 而那一条其实是 skipped、压根没跑）。被排除多少要说出来，不说就是偷偷计入。
-  reasons.push(`${conclusive.length} 条断言全部通过${softTail(nonConclusive, isReportOnlyLlm)}${hasCallStep ? '（另有 call 子场景，其内部断言不计入本场景计数，见 docs/08）' : ''}`);
+  // 计数分两侧说，是因为**这句话里的数字必须能和 JUnit 的 tests 对上**。
+  // 子场景的断言不进父报告的 results，也就没进 JUnit 的计数；把它们算进"N 条断言全部通过"，
+  // 得到的就是本文件在别处警告过的那个症状："CI 退出码与报告里的用例数对不上"。
+  // 所以：本场景自己的数字说自己的，子场景的另起一句、明说不计入。
+  const ownCount = own.conclusive.length;
+  const childCount = conclusive.length - ownCount;
+  const childNote = childCount
+    ? `；另有 call 子场景给出 ${childCount} 条结论（**不计入本场景的用例数**，子结果尚未并进父报告，见 docs/08）`
+    : '';
+  // 本场景自己一条结论都没有、全靠子场景时，"0 条断言全部通过"是句读不通的假话，
+  // 而"1 条断言全部通过"又是虚报 —— 所以这种形状换一种说法。
+  reasons.push(ownCount
+    ? `${ownCount} 条断言全部通过${softTail(nonConclusive.filter((n) => !n.from))}${childNote}`
+    : `本场景自身没有断言，${childCount} 条结论全部来自 call 子场景（不计入本场景的用例数，见 docs/08）${softTail(nonConclusive.filter((n) => !n.from))}`);
   return { code: EXIT.OK, reasons, refused: false, suppressedFails: suppressed, attention };
 }
 
@@ -291,12 +327,47 @@ function allSteps(scenario: Scenario): Step[] {
 }
 
 /**
- * 场景里有没有 `call` 节点。有就别按"零断言"拦 ——
- * 子场景的 results 不回流父报告（见 gateAfterRun 里的 call 例外说明），
- * 父侧看不到断言**不等于没有断言**，据"看不到"下结论会误拦合法用例。
+ * 场景的 IR 里有没有 `call` 节点。**只在报告没记子运行时**才用它放行（见调用点）。
+ *
+ * 为什么不能只凭「IR 里声明了 call」就放行：那与「验到了东西」是两件事 ——
+ * 子场景全 skipped、或子场景只有一条 report-only 的 assertLlm 时，
+ * 声明照样成立而一条结论都没有，据它放行就是放行一个空场景（判据与实测在 `declaresButUnmeasured`）。
  */
 function declaresCall(scenario: Scenario): boolean {
   return allSteps(scenario).some((s) => s.kind === 'call');
+}
+
+/**
+ * 一次运行里的**一个结论作用域**：一份 IR + 那份 IR 自己跑出来的 results。
+ *
+ * 为什么要有这个概念：`gatePolicy` 住在 IR 里，而"这个 stepId 是不是 report-only"
+ * 必须拿**它自己那份 IR**去问。`call` 的子场景是另一份 IR（运行时由 CallResolver 取回），
+ * 把子场景的 stepId 并进父场景那一个 Set 里会串味 —— 父子同 id 时，
+ * 父侧那条 blocking 的断言会被子侧同名的 report-only 顶掉，
+ * 于是人拿到一句"你的断言没计入结论"，去查一个本来就写对了的 gatePolicy。
+ * 分作用域算，这个形状**不可表达**，而不是"尽量避免"。
+ */
+interface Scope {
+  scenario: Scenario;
+  /** 该作用域里筛过的叶子结果（容器步骤已经去掉） */
+  results: StepResult[];
+  /** 报给人看时怎么称呼这个作用域。父侧是空串（"本场景"不用点名） */
+  label: string;
+}
+
+/** 一个作用域里"能当门禁的结论"与"不能"各有哪些。 */
+function scopeConclusions(sc: Scope): {
+  conclusive: StepResult[]; nonConclusive: StepResult[];
+  isReportOnlyLlm: (r: StepResult) => boolean;
+} {
+  const reportOnly = reportOnlyLlmIds(sc.scenario);
+  const isReportOnlyLlm = (r: StepResult) => r.kind === 'assertLlm' && reportOnly.has(r.stepId);
+  const leaves = sc.results.filter((r) => ASSERTION_KINDS.includes(r.kind));
+  return {
+    conclusive: leaves.filter((r) => countsTowardPassRate(r.status) && !isReportOnlyLlm(r)),
+    nonConclusive: leaves.filter((r) => !(countsTowardPassRate(r.status) && !isReportOnlyLlm(r))),
+    isReportOnlyLlm,
+  };
 }
 
 /**
@@ -310,10 +381,7 @@ function declaresCall(scenario: Scenario): boolean {
  *
  * 也**不往 StepResult 加 gatePolicy 字段**：那是磁盘格式（证据包里的
  * step_results 走 strict schema），而这个判断要的只是"这个 id 在 IR 里是不是
- * report-only"，而 IR 就在 GateInput.scenario 里。
- *
- * `call` 的子场景步骤不在这里（运行时才从别处取回）。方向是安全的：
- * 认不出来的步骤按"可门禁"处理，最多是漏拦一个软断言，不会误拦一个硬断言。
+ * report-only"，而 IR 就在调用方手里（见 Scope）。
  */
 function reportOnlyLlmIds(scenario: Scenario): Set<string> {
   const ids = new Set<string>();
@@ -327,25 +395,25 @@ function reportOnlyLlmIds(scenario: Scenario): Set<string> {
 /**
  * 未计入结论的断言的分布描述，例：'2 个 skipped、1 个 triaged'。无则空串。
  *
- * 参数是**已经筛过的**"不算结论"的那批，外加"这条是不是 report-only 的 assertLlm"
- * 这个判据。判据必须由调用方给：分桶标签要说的是**为什么没计入**，
- * 而 `kind === 'assertLlm'` 不等于"report-only" —— 写了 blocking 的那条如果正好
- * 是 skipped，标成"report-only"就是句假话，人会照着假话去查 gatePolicy。
+ * 参数是**已经筛过的**"不算结论"的那批，每条自带"它属于哪个 IR 作用域"。
+ * 作用域标签只在**非空**（也就是来自 call 子场景）时才拼上：
+ * 父侧的步骤人就在看本场景，点名是噪音；而子场景那条不点名，
+ * 人会拿父场景的 IR 去找一个在别的文件里的 stepId，找不到就以为报告坏了。
  */
-function skippedNote(rest: StepResult[], isReportOnlyLlm: (r: StepResult) => boolean): string {
+function skippedNote(rest: { r: StepResult; from: string; isReportOnlyLlm: (r: StepResult) => boolean }[]): string {
   if (!rest.length) return '';
   const by = new Map<string, number>();
-  for (const r of rest) {
+  for (const n of rest) {
     // report-only 的 assertLlm 按原因分桶而不是按 status：它的 pass 与 triaged
     // 是同一个原因，分成两桶会让人以为其中一半"跑过了所以没问题"。
-    const key = isReportOnlyLlm(r) ? 'assertLlm（report-only）' : r.status;
+    const key = (n.isReportOnlyLlm(n.r) ? 'assertLlm（report-only）' : n.r.status) + (n.from ? `（在 ${n.from}）` : '');
     by.set(key, (by.get(key) ?? 0) + 1);
   }
-  return [...by].map(([k, n]) => `${n} 个 ${k}`).join('、');
+  return [...by].map(([k, cnt]) => `${cnt} 个 ${k}`).join('、');
 }
 
-/** 绿光结论后面的尾巴：把**没计入结论**的叶子如实报出来。没有则空串，不制造噪音。 */
-function softTail(nonConclusive: StepResult[], isReportOnlyLlm: (r: StepResult) => boolean): string {
-  const note = skippedNote(nonConclusive, isReportOnlyLlm);
+/** 绿灯结论后面的尾巴：把**没计入结论**的叶子如实报出来。没有则空串，不制造噪音。 */
+function softTail(nonConclusive: { r: StepResult; from: string; isReportOnlyLlm: (r: StepResult) => boolean }[]): string {
+  const note = skippedNote(nonConclusive);
   return note ? `，另有 ${note} 未计入结论（不算通过，也不算失败）` : '';
 }

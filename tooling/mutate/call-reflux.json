@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "call 子场景回流门禁这一轮的变异集（tests: packages/cli/test/gate-real.test.ts）。",
+    "",
+    "这一份的存在理由有点特殊：**上一轮我留给 call 的那条例外测试已经失去鉴别力了**。",
+    "它断言「只有一个 call 的场景不该被判空场景」，而旧的豁免（IR 里声明了 call 就放行）",
+    "与本轮的新判据（看 report.childRuns 里实际跑出来的那份 IR 与 results）**都让它通过** ——",
+    "我把 gate.ts 整个退回旧豁免跑过一次，它照样绿。那正是 docs/08 §3 记的",
+    "「测试通过的原因和它想验的东西无关」，而这次是我自己上一轮留下的。",
+    "所以下面每条变异都对应一条**能把新旧判据分开**的测试。",
+    "",
+    "四个方向各管一件事，缺一个就有一类假绿能活：",
+    "  1. 不记子运行 -> 门禁只能退回「声明即放行」，洞 3 从 call 这道门重开；",
+    "  2. 不扁平合并 -> 三层嵌套（断言在孙子层）被判空场景，**误拦合法用例**；",
+    "  3. 宽容条件放宽回「声明了 call」-> 子场景全 skipped 时永远绿；",
+    "  4. 子结果拿父 IR 判 gatePolicy -> 子场景里 report-only 的 assertLlm 被当成阻断性结论。",
+    "",
+    "**跨包重建由 harness 自己判**（mustBuild），这里不写 build:false：",
+    "第 1、2 条改的是 packages/engine/src，而 gate-real.test.ts 在 packages/cli 下",
+    "import '@atest/engine' 走的是 **dist**。上一轮我就因为没重建把三条本来抓得到的变异",
+    "读成了 survived —— 那次是「看起来跑了而结论是假的」的又一例，别复用那个读法。",
+    "（本轮手工验变异时踩的就是这个：先没 build，三条全「survived」；补上 build 后全部 caught。）"
+  ],
+  "cases": [
+    {
+      "label": "不记子运行：call 跑完什么都不留（门禁只能退回「声明即放行」= 洞 3 从 call 重开）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });",
+      "replace": "        void childRuns; // 变异：不记这次 call 跑了什么",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "只记直接子层、不并孙子层（三层嵌套的复用用例会被误判成空场景）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        childRuns.push(...(rep.childRuns ?? []));",
+      "replace": "        void childRuns; // 变异：丢掉更深层的运行",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "宽容退回「IR 里声明了 call 就放行」（子场景全 skipped 时场景永远绿）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  const declaresButUnmeasured = declaresCall(i.scenario) && report.childRuns === undefined;",
+      "replace": "  const declaresButUnmeasured = declaresCall(i.scenario);",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "子结果拿**父场景的 IR** 判 gatePolicy（子场景里 report-only 的会被当成阻断性结论）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "    scenario: c.scenario,",
+      "replace": "    scenario: i.scenario,",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "等价变异：先并孙子层再记自己（childRuns 的**顺序**换了，成员一个不少）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });\n        childRuns.push(...(rep.childRuns ?? []));",
+      "replace": "        childRuns.push(...(rep.childRuns ?? []));\n        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });",
+      "expect": "equivalent",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    }
+  ]
+}

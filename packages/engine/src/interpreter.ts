@@ -35,12 +35,46 @@ export interface RunOptions {
   signal?: { aborted: boolean };
 }
 
+/**
+ * 一次 `call` 实际跑了什么。
+ *
+ * 为什么要把这个单独记出来，而不是"把子结果并进 results"就算完：
+ * 门禁判"哪些 assertLlm 是 report-only"靠的是**读 IR 里的 gatePolicy**，
+ * 而子场景的 IR **不在父场景的 IR 里**（它是 CallResolver 在运行时解析出来的）。
+ * 于是只把子结果并进 results 会重新打开一个已经修掉的假绿：
+ * 子场景里只有一条 report-only 的 assertLlm、模型盖了个章 => 门禁把它当成阻断性结论 => CI 绿。
+ * 光有 results 判不出来（report-only 的 assertLlm 判"是"时 status 就是 pass），
+ * **必须把"跑的是哪份 IR"一起带出来**。
+ *
+ * `scenario` 存的是解析后的那份子 IR —— 不是引用字符串，因为"引用哪个 id"回答不了
+ * "它当时声明的 gatePolicy 是什么"。
+ */
+export interface ChildRun {
+  /** 发起这次调用的 call 步骤 id（父侧的坐标，用于把话说清是哪一步） */
+  callStepId: string;
+  ref: string;
+  scenario: Scenario;
+  /** 子场景**自己**那份报告里的 results（stepId 是子场景内的原始 id，不加前缀） */
+  results: StepResult[];
+}
+
 export interface RunReport {
   runId: string;
   status: StepStatus;
   startedAt: number;
   durMs: number;
   results: StepResult[];
+  /**
+   * 本场景（含任意深度）通过 `call` 跑过的每个子场景。**扁平**：
+   * 孙子层的 run 也在这一层里，每条带着它**自己的** IR 与 results。
+   * 扁平是为了让门禁不必递归就能看全"整棵调用树里有没有一条真断言"；
+   * 深层嵌套（A→B→C，断言全在 C）如果只记直接子层，就会被判成"空场景"而误拦。
+   *
+   * **可选**：`undefined` = "这份报告没记这件事"（手写 fixture、旧调用方），
+   * 与 `[]`（记了，且确实一个 call 都没跑）必须可区分 ——
+   * 前者门禁只能保留旧的宽容，后者可以照实判"没验任何东西"。
+   */
+  childRuns?: ChildRun[];
   /** 追加式事件流。真实运行时同时进 Redis Stream 与 trace.jsonl */
   events: TraceEvent[];
   outputs: Record<string, unknown>;
@@ -93,6 +127,13 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   const rootVars = new VarSpace({ inputs: opts.inputs, inputDefs: scenario.inputs, env: opts.env, secretResolver: opts.secretResolver });
   const events: TraceEvent[] = [];
   const results: StepResult[] = [];
+  /**
+   * 本场景通过 `call` 跑过的子场景（**含任意深度**，见 RunReport.childRuns）。
+   * 与 addCost 同一套做法：它是 runScenario 作用域里的闭包，dispatch 的 call 分支
+   * 直接往这里记，不需要把参数一路透传下去 —— 透传版的漏传是本仓那个
+   * 「字段在 IR 里、注释讲得很对、执行侧没人接」缺陷类的又一个入口。
+   */
+  const childRuns: ChildRun[] = [];
   let seq = 0;
   let costUsd = 0;
   const maxCost = opts.maxCostUsd ?? scenario.config.maxCostUsd;
@@ -526,6 +567,19 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           env: opts.env, secretResolver: opts.secretResolver,
         });
         const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0 });
+        /**
+         * 把"这次 call 跑的是哪份 IR、跑出什么"记进父报告。
+         *
+         * **扁平合并而不是嵌套**：`rep.results` 是子场景自己那一层，
+         * `rep.childRuns` 是它下面所有层（各自的 IR 与各自的 results）。
+         * 只记直接子层的话，A→B→C 而断言全在 C 时会判成"这个场景没验任何东西"——
+         * 那是**误拦合法用例**，比漏拦更糟，也正是这里选扁平的原因。
+         *
+         * 顺序上放在 assignTo 之前之后都一样，但**必须在这个 case 的每个 return 之前**：
+         * 少记一条，门禁就会把一个真的跑过断言的场景当成空场景拦下。
+         */
+        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });
+        childRuns.push(...(rep.childRuns ?? []));
         if (s.assignTo) vars.set(s.assignTo, rep.outputs);
         if (rep.status === 'fail' || rep.status === 'error') return { status: rep.status, summary: `子场景 ${child.name}: ${rep.summary}`, cause: rep.results.find((r) => r.cause)?.cause };
         return { status: 'pass', summary: `子场景 ${child.name}` };
@@ -934,7 +988,11 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     : tally.healed > 0 ? 'healed' : 'pass';
 
   return {
+    // childRuns **只在跑过 call 时给**。给个空数组会让"这份报告没记这件事"
+    // （手写 fixture、别的实现）与"确实一个 call 都没跑"看起来一样，
+    // 而门禁对这两件事的处置不同（前者只能保留旧的宽容，后者可以照实判）。
     runId, status, startedAt, durMs: clock.mono() - t0, results, events,
+    ...(childRuns.length ? { childRuns } : {}),
     outputs: rootVars.outputs, costUsd, tally,
     summary: `${status} · ${counted} 步计入通过率 · ${rate}% 通过 · ${tally.healed} 自愈待审 · $${costUsd.toFixed(4)}`,
   };
