@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "零迭代循环留痕这一轮的变异集（LOOP_CEILING_HIT 的同族另一半，见 docs/08）。",
+    "",
+    "**这一族的原始失效长这样**（改动前实测）：while 条件第一次就为假 => 循环体一条没跑，",
+    "而父报告里连体步骤的那一行都没有 => 体外一条真断言撑着，退出码 0、理由写着",
+    "「1 条断言全部通过」。所以这里每条变异都在问同一件事：**少验的东西还在不在报告里**。",
+    "",
+    "为什么不是「发一条 lint 事件」就完事（第 1、2 条就是在钉这个）：",
+    "门禁不读 events（gateAfterRun 里一处 events 都没有），而预编译形态压根没有事件通道。",
+    "只看「有没有事件」会得出「已经修好了」，而两侧退出码都照旧是 0。",
+    "",
+    "**第 3 条是这份集子里最值得跑的一条**：它改 packages/engine/src，",
+    "而 testFile 在 packages/cli（import @atest/engine 走 **dist**）。",
+    "这正是本文件开头第 2 条坑的形状 —— 不重建就会把一条抓得到的变异读成 survived。",
+    "留它是为了让那条坑每次都被真实执行一遍，而不是只在注释里被引用。",
+    "",
+    "第 4 条是**故意等价**的：容器自己报 pass 而不是 skipped 是刻意的立场",
+    "（循环体一遇到非 pass 就 return，内层报 skipped 会静默截掉外层剩下的轮次）。",
+    "把容器改成 skipped 的变异**应该**被抓住；而只改 summary 措辞的不该被抓住 —— 那条我没写，",
+    "因为没有测试钉措辞，写了就是一条恒过的凑数条目（与 call-reflux 里那条 void 0 同一个毛病）。"
+  ],
+  "cases": [
+    {
+      "label": "while 一次都没进时不留痕（体里的断言从报告里消失 = 原始那个假绿）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (i === 0) noteNeverRun(s, path, '条件第一次就为假，一次都没进循环');",
+      "replace": "        void noteNeverRun; // 变异：0 次 while 什么都不记",
+      "testFile": "packages/engine/test/control.test.ts"
+    },
+    {
+      "label": "forEach 空集合时不留痕（数据驱动取数为空 => 整段没跑而场景绿）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (cap === 0) noteNeverRun(s, path, '迭代 0 次（items 是空集合）');",
+      "replace": "        void noteNeverRun; // 变异：空数据什么都不记",
+      "testFile": "packages/engine/test/control.test.ts"
+    },
+    {
+      "label": "补的行不带结构化成因（门禁只能去匹配一句话的前缀，或干脆误导成 when 守卫）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    for (const c of s.steps) finish(c, [...path, s.id], 'skipped', clock.mono(), `未执行：${why}`, { keyContext: { neverRun: why } });",
+      "replace": "    for (const c of s.steps) finish(c, [...path, s.id], 'skipped', clock.mono(), `未执行：${why}`);",
+      "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "预编译形态不留痕（两种形态分叉：功能形态有提示、压测形态静默）",
+      "file": "packages/engine/src/executor.ts",
+      "anchor": "          if (i === 0) for (const k of s.steps) st.add(k, 'skipped');",
+      "replace": "          void 0; // 变异：只在功能形态留痕",
+      "testFile": "packages/engine/test/executor.test.ts"
+    },
+    {
+      "label": "等价变异：容器 summary 的措辞改掉（留痕与状态都不变，本就不该有测试钉措辞）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        return { status: 'pass', summary: `循环 ${i} 次${i ? '' : '，循环体一条未执行'}` };",
+      "replace": "        return { status: 'pass', summary: `循环 ${i} 次` };",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/control.test.ts"
+    }
+  ]
+}

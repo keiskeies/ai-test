@@ -121,6 +121,69 @@ describe('控制流', () => {
     assert.equal(res(r, 'loop').status, 'pass');
   });
 
+  test('while 条件第一次就为假 => 循环体在结果里记 skipped，而不是从报告里消失', async () => {
+    /*
+     * 这条盯的是 docs/08 登记的 `LOOP_CEILING_HIT` 同族另一半：撞上限有事件，
+     * **一次都没进**却什么都不留。改动前实测（体内一条断言、体外一条真断言）：
+     * 场景 pass、退出码 0、门禁理由写着「1 条断言全部通过」，
+     * 而体里那条断言压根没跑 —— 报告里连它的行都没有，所以谁也不会去查它。
+     *
+     * **为什么不满足于「发一条 lint 事件」**：门禁不读 events（gateAfterRun 里
+     * 一处 events 都没有），而预编译形态压根没有事件通道。两个理由各自都足以
+     * 让"有事件"变成"只有人眼能看见"，所以这里钉的是 **results 里有一行**。
+     */
+    const r = await run(scen([
+      { ...b('seed'), kind: 'set', assign: { n: 5 } },
+      { ...b('w'), kind: 'while', condition: '$n < 3', maxIterations: 5,
+        steps: [{ ...b('body'), kind: 'assert', against: '$n', jsonPath: { $: { eq: 5 } } }] },
+    ]));
+    assert.equal(res(r, 'body').status, 'skipped', '没跑的循环体步骤必须有一行 skipped');
+    assert.match(res(r, 'body').assertionSummary ?? '', /一次都没进循环/,
+      '要能说出为什么没跑，否则一个孤零零的 skipped 和没有它一样难查');
+    assert.ok(
+      r.events.some((e) => e.kind === 'lint.reported' && e.data?.code === 'LOOP_BODY_NEVER_RUN'),
+      '同时要有 lint 事件（给人看的通路），但它不能是唯一的通路',
+    );
+  });
+
+  test('空数据/零次循环的容器自己仍报 pass，补的行是 skipped 而不是 fail', async () => {
+    // **窄性对照**，两边都得钉住，少一边就会被实现反掉：
+    //  - 容器报 skipped/fail 会改场景状态与通过率分母（空数据是合法输入，不是用例错误，
+    //    与上面「真实存在的空数组仍然合法迭代 0 次」同一条立场）；
+    //  - 补的行报 fail 就是「没跑」被算成「跑坏了」—— 把数据问题报成产品 bug。
+    // 更深的一层：forEach/while 的循环体一遇到非 pass/healed 就 return，
+    // 所以嵌套时内层报 skipped 会**静默截掉外层剩下的轮次**。
+    // kind 直接放在条目上而不是嵌进 step 里：嵌一层之后 `${c.kind}` 在类型上就是错的，
+    // 而 `npm test` 用 tsx 跑、**不做类型检查**，这种错只有 typecheck:test 看得见。
+    const cases = [
+      { id: 'w', kind: 'while', step: { condition: 'false', maxIterations: 5 } },
+      { id: 'f', kind: 'forEach', step: { items: '$rows', as: 'x', maxIterations: 5 } },
+    ] as const;
+    for (const c of cases) {
+      const r = await run(scen([
+        { ...b('seed'), kind: 'set', assign: { rows: [] } },
+        { ...b(c.id), kind: c.kind, ...c.step, steps: [{ ...b('body'), kind: 'noop' }] } as never,
+      ]));
+      assert.equal(res(r, c.id).status, 'pass', `${c.kind} 容器自己不该因为零迭代变色`);
+      assert.equal(r.status, 'pass', `${c.kind}：整段场景不该因为零迭代变红`);
+      assert.equal(res(r, 'body').status, 'skipped', `${c.kind}：没跑要留痕`);
+    }
+  });
+
+  test('零迭代只补循环体的**顶层**步骤，不重建没跑的子树', async () => {
+    // 与 parallel 给 failFast 分支补 skipped 同一做法：目的是让「这次少验了什么」
+    // 在报告里有一行可指，而不是按 IR 铺出一整棵没执行过的树 —— 后者会让
+    // JUnit 的用例数随 IR 嵌套深度虚增，而那些层其实连求值都没发生过。
+    const r = await run(scen([
+      { ...b('w'), kind: 'while', condition: 'false', maxIterations: 3, steps: [
+        { ...b('top'), kind: 'if', condition: 'true', then: [{ ...b('deep'), kind: 'noop' }], else: [] },
+      ] },
+    ]));
+    assert.equal(res(r, 'top').status, 'skipped');
+    assert.equal(r.results.find((x) => x.stepId === 'deep'), undefined,
+      'if 里面那层不该被铺出来（它连条件都没求值过）');
+  });
+
   test('while 撞上 maxIterations 要留痕，不能静默截断', async () => {
     const r = await run(scen([
       { ...b('w'), kind: 'while', condition: 'true', maxIterations: 3, steps: [{ ...b('n'), kind: 'noop' }] },

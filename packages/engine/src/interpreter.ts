@@ -9,7 +9,7 @@
  *  3. **状态语义**：环境问题 → error，断言不成立 → fail，自愈 → healed（不算绿），
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
-import type { Step, Scenario, Lease } from '@atest/ir';
+import type { Step, Scenario, Lease, ForEachStep, WhileStep } from '@atest/ir';
 import { countsTowardPassRate, LEASE_REQUIRED, parallelHazards, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
@@ -320,6 +320,41 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     return r;
   };
 
+  /**
+   * 循环体一次都没跑时，给体内**顶层步骤**各补一条 skipped。
+   *
+   * **为什么不满足于"发一条 lint 事件"**（这是本轮真正的那件事）：
+   * 实测过 `while` 一次没进 + 体外一条真断言的形状 => 场景 `pass`、退出码 0、
+   * 理由写着"1 条断言全部通过"，而体里那条断言**压根没跑**。
+   * lint 事件（`LOOP_CEILING_HIT` 那一族）拦不住它，有两个原因，缺一不可都致命：
+   *  1. **门禁不读 events**（`gateAfterRun` 里一处 `events` 都没有）—— 事件只能给人看，
+   *     不能改变退出码，所以"有事件"与"门禁知道"是两件事；
+   *  2. 预编译形态**没有事件通道**（executor.ts 的 `emit: () => {}`），
+   *     所以发事件这件事天然只能修一半，而分叉的表现是"功能形态有提示、压测形态静默"。
+   * 补进 `results` 是让**同一个事实**同时被 JUnit（`<skipped>`）、通过率分母
+   * （skipped 不计入分母，docs/02 §9）与门禁看到，而不是只写进一条日志。
+   *
+   * **为什么容器自己仍报 pass 而不是 skipped**：`forEach`/`while` 的循环体一遇到
+   * 非 pass/healed 就 `return o`（本文件两处 `o.status !== 'pass' && o.status !== 'healed'`），
+   * 所以嵌套时内层报 skipped 会**静默截掉外层循环剩下的轮次**。
+   * 实测过这个形状（forEach 3 项、体内 parallel 分支全跳过）：外层确实继续跑完了，
+   * 但那是因为 parallel 的 skipped 是**在容器自己那一层**收掉的；
+   * 我不想赌"没人写过嵌套 while"，所以状态不变，只加行。
+   * （parallel 那边报 skipped 是安全的，因为它没有"剩下没跑的轮次"这个概念。）
+   *
+   * **只补顶层，不递归补孙层**：与上面 parallel 补 failFast 分支同一做法 ——
+   * 目的是让"这次运行少验了什么"在报告里**有一行可指**，不是重建整棵没跑的子树。
+   * 补的都是 skipped 而不是 fail：没跑不等于跑坏了，报 fail 就是把环境/数据问题算成产品 bug
+   * （docs/02 §9 那套状态语义在这里同样成立）。
+   */
+  const noteNeverRun = (s: ForEachStep | WhileStep, path: string[], why: string): void => {
+    // keyContext 里带结构化的成因，而不是只写进 assertionSummary 那句话：
+    // 门禁要区分"循环体没跑"与"守卫 when 不成立"，而**跨包匹配一句话的前缀**
+    // 是迟早会断的耦合（改个措辞就悄悄退化，而且没有任何编译期东西会发现）。
+    for (const c of s.steps) finish(c, [...path, s.id], 'skipped', clock.mono(), `未执行：${why}`, { keyContext: { neverRun: why } });
+    emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'LOOP_BODY_NEVER_RUN', detail: `${s.kind} ${why}` } });
+  };
+
   /** 带重试的包装 */
   const withRetry = async (s: Step, path: string[], fn: () => Promise<StepResult>): Promise<StepResult> => {
     const max = s.retry?.count ?? scenario.config.retries.count;
@@ -398,7 +433,8 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           vars.popTo(depth); // 按深度回退：子步骤若没配对 pop（失败提前返回），迭代变量也不会漏出去
           if (o.status !== 'pass' && o.status !== 'healed') return o;
         }
-        return { status: 'pass', summary: `迭代 ${cap} 次` };
+        if (cap === 0) noteNeverRun(s, path, '迭代 0 次（items 是空集合）');
+        return { status: 'pass', summary: `迭代 ${cap} 次${cap ? '' : '，循环体一条未执行'}` };
       }
       case 'while': {
         let i = 0;
@@ -414,7 +450,8 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (i === s.maxIterations && evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now })) {
           emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'LOOP_CEILING_HIT', detail: `达到上限 ${s.maxIterations}，条件仍为真` } });
         }
-        return { status: 'pass', summary: `循环 ${i} 次` };
+        if (i === 0) noteNeverRun(s, path, '条件第一次就为假，一次都没进循环');
+        return { status: 'pass', summary: `循环 ${i} 次${i ? '' : '，循环体一条未执行'}` };
       }
       case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id], vars);
       case 'parallel': {

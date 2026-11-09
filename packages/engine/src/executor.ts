@@ -287,6 +287,8 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
             // 截断行为、以及 healed 继续迭代，都与解释器一致
             if (r !== 'pass' && r !== 'healed') return r;
           }
+          // 同 while：空数据时循环体一行都没跑，两种形态都得在 results 里留痕
+          if (n === 0) for (const k of s.steps) st.add(k, 'skipped');
           return 'pass';
         });
       }
@@ -311,6 +313,12 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
           }
           // 顶到上限且条件仍为真 = 疑似死循环。解释器在这里发 LOOP_CEILING_HIT 事件；
           // 预编译形态没有事件通道，**但结论必须一致**，所以只判一致性、不改状态。
+          //
+          // 一次都没进循环时**必须补 skipped 行**，而且不能只照抄"发个事件"那条路：
+          // 这个形态压根没有事件通道（`emit: () => {}`），所以"发事件"那种修法在这里
+          // 天然是空的，分叉的表现就是"功能形态有提示、压测形态静默"。
+          // 补行是两种形态**共用同一个载体**（results）的唯一做法，也才谈得上等价。
+          if (i === 0) for (const k of s.steps) st.add(k, 'skipped');
           return 'pass';
         });
       }

@@ -115,6 +115,63 @@ test('场景里**有一条真跑过**的断言 + 一条被跳过 => 仍然 0，�
   assert.match(g.said, /另有 1 个 skipped/, `跳过的必须可见，否则就是被偷偷计入。实际：${g.why}`);
 });
 
+// ── 零迭代循环：skipped 有两种成因，下一步动作相反 ──────────────────────────
+
+test('唯一的断言在"一次都没进"的循环体里 => INVALID，且不能让人去查 when 守卫', async () => {
+  /*
+   * docs/08 登记的 LOOP_CEILING_HIT 同族另一半。改动前实测：体里那条断言**连一行
+   * results 都没有**，所以门禁看不见它 —— 有体外断言时退出码 0、理由"1 条断言全部通过"。
+   * 引擎侧现在补 skipped 行（control.test.ts 钉那半边），这边钉**门禁真的读到了**：
+   * 补行而门禁不读，就又是本仓那个老毛病"字段有了、没人读"。
+   *
+   * 第二条断言是这条测试的全部价值所在：**两种 skipped 的排查方向相反**。
+   * 守卫不成立要去看 when；循环体没跑要去看"数据为什么是空的"。
+   * 沿用那句"常见成因是 when"会把人送去查一个根本没写守卫的步骤 ——
+   * 而这句话在改动前对所有 skipped 都是对的，所以它不是错在措辞，是错在只有一种成因时才对。
+   */
+  const g = await run1(scen([
+    seed(200),
+    { id: 'w', kind: 'while', condition: 'false', maxIterations: 5,
+      steps: [{ id: 'body', kind: 'assert', against: '$st', jsonPath: { $: { eq: 200 } } }] } as StepDraft,
+  ]));
+  assert.equal(g.code, EXIT.INVALID, `循环体一次没进 => 本次没有任何结论。实际：${g.why}`);
+  assert.match(g.said, /循环体一次都没进/, `要说清是没跑循环体。实际：${g.why}`);
+  assert.doesNotMatch(g.said, /守卫 when 不成立/, '这个场景没有 when，指过去就是误导');
+});
+
+test('体外有真断言 + 循环体一次没进 => 仍是 0，但那句必须说出是没跑循环体', async () => {
+  /*
+   * **这才是现实里最常见的那一半**：数据驱动用例取回空列表，体外还有一条真断言撑着。
+   * 退出码是 0（有确定性结论，拦整个场景是误拦），所以绿灯理由那行话是**唯一的提示**。
+   * 只说"另有 1 个 skipped"是不够的：CI 日志里每天都能看到 skipped，
+   * 而"空数据导致整段没验"和"某条守卫今天不成立"是完全不同的处置。
+   */
+  const g = await run1(scen([
+    seed(200), okAssert('c0'),
+    { id: 'w', kind: 'while', condition: 'false', maxIterations: 5,
+      steps: [{ id: 'body', kind: 'assert', against: '$st', jsonPath: { $: { eq: 200 } } }] } as StepDraft,
+  ]));
+  assert.equal(g.code, EXIT.OK, `体外有真结论时不该拦。实际：${g.why}`);
+  assert.match(g.said, /skipped（循环体一次都没进）/, `绿灯理由要点名成因。实际：${g.why}`);
+  // 不再加一条 doesNotMatch(/全部通过$/) 之类的"反向"断言：理由串以
+  // "（不算通过，也不算失败）"收尾，那个正则在实现对不对都恒不匹配 ——
+  // 恒过的断言与恒真的断言是同一种东西，写它不如不写。
+});
+
+test('when 守卫与"循环体没跑"同时出现 => 两句都要说，不能只报一种', async () => {
+  // 混合形状。只报一种的话，另一种就又被静默了 —— 而这条测试防的正是
+  // "把分支写成 if/else 二选一"那种看起来更干净的实现。
+  const g = await run1(scen([
+    seed(200),
+    { id: 'g', kind: 'assert', when: '1 == 2', against: '$st', jsonPath: { $: { eq: 200 } } } as StepDraft,
+    { id: 'w', kind: 'while', condition: 'false', maxIterations: 5,
+      steps: [{ id: 'body', kind: 'assert', against: '$st', jsonPath: { $: { eq: 200 } } }] } as StepDraft,
+  ]));
+  assert.equal(g.code, EXIT.INVALID, `实际：${g.why}`);
+  assert.match(g.said, /循环体一次都没进/, `实际：${g.why}`);
+  assert.match(g.said, /守卫 when 不成立/, `实际：${g.why}`);
+});
+
 // ── 洞 3：report-only 断言不配单独撑起一个绿灯 ────────────────────────────
 
 /** 一条 report-only 的语义断言。gatePolicy 默认 report-only（ir/src/asserts.ts） */

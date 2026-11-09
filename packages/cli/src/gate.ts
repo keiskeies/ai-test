@@ -297,8 +297,25 @@ export function gateAfterRun(i: GateInput): GateDecision {
         + '两条出路：补至少一条确定性断言，或给要进门禁的那条显式写 gatePolicy:"blocking"。',
       );
     }
-    if (nonConclusive.some((n) => n.r.status === 'skipped')) {
-      reasons.push('skipped 的常见成因：步骤上的守卫 when 不成立（数据/环境没准备好，于是整段静默跳过）。守卫是给自己看的，不是给门禁看的。');
+    const skipped = nonConclusive.filter((n) => n.r.status === 'skipped');
+    if (skipped.length) {
+      // **两种 skipped 的下一步动作相反**，所以不能共用一句话：
+      //  - 守卫 `when` 不成立 => 去把数据/环境准备好（或承认这条守卫不该在 CI 里）；
+      //  - 循环体一次没跑 => 守卫没问题，是**数据是空的 / 条件一开始就为假**，
+      //    要查的是"这批数据为什么是空的"，去查守卫会白查一晚上。
+      // 判据取引擎放在 keyContext 里的结构化成因，而不是匹配 assertionSummary 的措辞
+      // —— 跨包匹配一句话前缀是迟早会悄悄断的耦合。
+      const neverRun = skipped.filter((n) => typeof n.r.keyContext?.neverRun === 'string');
+      if (neverRun.length) {
+        reasons.push(
+          `${neverRun.length} 步没跑是因为**循环体一次都没进**（${[...new Set(neverRun.map((n) => n.r.keyContext?.neverRun))].join('；')}）。`
+          + '容器自己报 pass 是对的（空数据是合法输入），但"里面那条断言"这次压根没执行：'
+          + '先确认取数步骤有没有真拿到数据，再决定这条场景是否应该在空数据下跑。',
+        );
+      }
+      if (neverRun.length < skipped.length) {
+        reasons.push('skipped 的常见成因：步骤上的守卫 when 不成立（数据/环境没准备好，于是整段静默跳过）。守卫是给自己看的，不是给门禁看的。');
+      }
     }
     return { code: EXIT.INVALID, reasons, refused: false, suppressedFails: suppressed, attention };
   }
@@ -406,7 +423,15 @@ function skippedNote(rest: { r: StepResult; from: string; isReportOnlyLlm: (r: S
   for (const n of rest) {
     // report-only 的 assertLlm 按原因分桶而不是按 status：它的 pass 与 triaged
     // 是同一个原因，分成两桶会让人以为其中一半"跑过了所以没问题"。
-    const key = (n.isReportOnlyLlm(n.r) ? 'assertLlm（report-only）' : n.r.status) + (n.from ? `（在 ${n.from}）` : '');
+    //
+    // **循环体没跑的 skipped 同理**：它和"守卫不成立"是两种下一步动作相反的成因
+    // （一个去查数据取回没取回，一个去查守卫），混成一句"另有 N 个 skipped"就等于
+    // 说了等于没说 —— 而那半边场景（体外有真断言）退出码是 0，这行是唯一的提示。
+    // 判据取引擎放在 keyContext 里的结构化成因，不匹配 assertionSummary 的措辞。
+    const neverRun = typeof n.r.keyContext?.neverRun === 'string';
+    const key = (n.isReportOnlyLlm(n.r) ? 'assertLlm（report-only）'
+      : neverRun ? `${n.r.status}（循环体一次都没进）`
+        : n.r.status) + (n.from ? `（在 ${n.from}）` : '');
     by.set(key, (by.get(key) ?? 0) + 1);
   }
   return [...by].map(([k, cnt]) => `${cnt} 个 ${k}`).join('、');

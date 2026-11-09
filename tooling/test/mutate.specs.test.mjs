@@ -62,6 +62,15 @@ describe('真变异集在干净现场下都不许被判成残留', () => {
         if (!c.file || c.anchor === undefined || c.replace === undefined) continue;
         const head = committedOf(c.file, cache);
         if (head === undefined) continue; // 未跟踪的文件（比如本轮新加的）无从判起
+        // **锚点不在 HEAD 但在工作区** => 这条 spec 针对的是比 HEAD 更新的代码。
+        // "给刚写的代码跑一轮变异"是正常流程，那种时候 HEAD 里当然没有那行。
+        // 少了这个 continue，每写一份新 spec 就必红一条 —— 而"每次都要手动放过的红"
+        // 正是把人训练成无脑 --force 的那类误报（本文件开头记的代价）。
+        //
+        // 这不是把测试放宽到恒过：**锚点在 HEAD 与工作区都不在**的情况照样由下面
+        // 那条"锚点必须在工作区出现"的测试抓住（跑了等于没跑），
+        // 而这里跳过的是"HEAD 太旧、模拟不出干净现场"这种无从判起。
+        if (!head.includes(c.anchor)) continue;
         // 干净现场 = 磁盘内容与已提交内容相同。此时 detectResidue 必须闭嘴。
         const kind = detectResidue({ current: head, committed: head, anchor: c.anchor, replace: c.replace });
         assert.equal(

@@ -183,6 +183,36 @@ test('while 顶到 maxIterations 时状态一致（不静默死循环）', async
   assert.equal(r.steps.filter((x) => x.stepId === 'nx').length, 4);
 });
 
+test('零迭代时两种形态都必须补 skipped 行（不许只在功能形态留痕）', async () => {
+  /*
+   * 随机属性测试**确实**会造出 `condition:'false'` 的 while，所以这条看起来是重复的。
+   * 但它不是：属性测试挂掉时说的是"seed=17 两边不一致"，
+   * 而这里要防的失效恰好不是不一致 —— 是**两种形态一起把留痕删掉**，
+   * 那种改法属性测试照样全绿（两边都空，norm 相等）。
+   * 实测过：把两侧留痕同时抹掉，232 条引擎测试全绿。
+   * 所以这条钉的是「**两边都各有一行**」，而不是「两边一样」。
+   *
+   * 这也是本仓那条老毛病的第三种长相：`LOOP_CEILING_HIT` 只发事件，
+   * 而预编译形态没有事件通道（`emit: () => {}`）——
+   * "发事件"这种修法在压测形态里天然是空的，功能形态回归全绿、压测形态静默。
+   */
+  for (const [name, loop] of [
+    ['while', { kind: 'while', condition: 'false', maxIterations: 3 }],
+    ['forEach', { kind: 'forEach', items: '$rows', as: 'x', maxIterations: 3 }],
+  ] as const) {
+    const s = scen([
+      { ...b('v'), kind: 'set', assign: { rows: [] } },
+      { ...b('L'), ...loop, steps: [{ ...b('body'), kind: 'noop' } as StepDraft] } as StepDraft,
+    ] as StepDraft[]);
+    const { a, c } = await both(s);
+    for (const [form, out] of [['功能', a], ['预编译', c]] as const) {
+      assert.equal(out.steps.find((x) => x.stepId === 'body')?.status, 'skipped',
+        `${name}/${form} 形态：零迭代时循环体必须在 results 里留一行`);
+    }
+    await same(s);
+  }
+});
+
 test('repeat 展开后的 id 与计数等价', async () => {
   const s = scen([
     { ...b('rp'), kind: 'repeat', times: 3, steps: [{ ...b('n'), kind: 'noop' } as StepDraft] },
