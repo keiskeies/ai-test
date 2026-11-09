@@ -88,7 +88,8 @@ export class VarSpace {
   /** 引擎解析密钥用；对 Agent 永不可见 */
   private secretResolver: ((ref: string) => string) | undefined;
   private writes: { name: string; frame: string; scopeId?: string }[] = [];
-  private loopStack: unknown[] = [];
+  /** forkBranch 给自己加的那一帧在本实例 frames 里的下标；根实例为 -1 */
+  private ownIndex = -1;
 
   /**
    * @param inputDefs `scenario.inputs`（声明带 default 的那一份）。传了就把 default 兜进去，
@@ -103,6 +104,123 @@ export class VarSpace {
     this.runRoot = { inputs: applyInputDefaults(init.inputDefs, init.inputs), outputs: {} };
     this.envMap = init.env ?? {};
     this.secretResolver = init.secretResolver;
+  }
+
+  /*
+   * 给一条 parallel 分支切一份**局部作用域**。
+   *
+   * 要解决的问题（探针 packages/engine/test/scope.test.ts 里钉着）：帧栈整个 VarSpace
+   * 只有一条，并发分支各自 push/pop 同一条栈。分支 B 里一句 `set mineOnly = 42`
+   * 走到 set→declare，写的是**当时栈顶那一帧** —— 而那时栈顶可能是分支 A 的 forEach
+   * 刚压的迭代帧。A 的迭代结束时 popTo 把那一帧弹掉，B 写进去的值跟着一起没了：
+   * B 那一步报 pass，`$mineOnly` 却永远查不到。三支都是 set + 各自循环的写法
+   * 在真实场景里太常见（并发拉列表再各自断言），不该指望作者避开。
+   *
+   * 三条设计决定：
+   *  1. **global 帧按引用共享**，各分支只给自己加那**一帧**。于是"写一个 parallel
+   *     之前就已声明的名字"（累加器写法，docs/02 §5 明确推荐的）仍然直接写进共享帧，
+   *     行为一个字节没变；只有"分支里新声明的名字"才落在分支本地。
+   *     这一条是实测出来的：预先声明 `mineOnly = 0` 之后同样的并发就不丢了。
+   *  2. **各分支不再共享步骤导出**。原先两支的 `saveAs` 撞名是"谁后跑谁算"，
+   *     同一份冻结场景能给 pass 也能给 fail —— 直接破 M7 的确定性断言。
+   *     隔离之后两支各写各的 Map，**交错不再决定值**，但那条静态闸我**没有删**：
+   *     两支写同一个名字这件事，隔离只解决了"运行中互不干扰"，
+   *     没解决"收尾要合并成一份"（见第 3 条），所以照样拒。
+   *     闸现在只剩这一条判据（另一条"一支压帧、另一支提到同名循环项"才是真被隔离修掉的）。
+   *  3. **收尾合并**。`adoptFrom` 把分支本地帧里的名字提到**外层栈顶那一帧**
+   *     （不是 global —— parallel 常在 forEach 里，提到 global 等于让循环内的并发漏到循环外）。
+   *     于是分支里新声明的名字在 parallel **之后**可读 —— 这是刻意的：不合并的话
+   *     并发写法只能读预先声明的名字，等于用隔离换个新功能不能写，
+   *     而"每支各算一个结果、parallel 之后统一断言"恰恰是并发最主要的用法。
+   *     判据用 `has()`（**只看帧**，不看 inputs/env），理由见 adoptFrom 的注释。
+   *     两支同名时**先并的赢**，而并的顺序是分支**声明顺序**（不是完成顺序）——
+   *     这保证确定性，但"确定"不等于"对"（作者两份都想要），所以那种写法由闸拒掉。
+   *
+   * 用 Object.assign 而不是逐字段列一遍来构造：以后给 VarSpace 加字段会自动带上。
+   * 逐字段列的话，漏一个 `secretResolver` 就是"parallel 分支里密钥解析静默失效" ——
+   * 又是本仓那个缺陷类（字段在、没人接），而且只在并发下出现。
+   */
+  forkBranch(label: string): VarSpace {
+    const branch = Object.assign(Object.create(VarSpace.prototype) as VarSpace, this) as VarSpace;
+    /*
+     * 帧表**复制数组本身**，里面的帧对象按引用带走。
+     *
+     * 为什么不裁成"只带 global"：parallel 常常写在 forEach 里面（"每条数据并发跑一遍"），
+     * 裁成只带 global 会让分支看不到那层迭代帧，于是分支里 `set item.x` 这种
+     * "写外层已声明的名字"落不回迭代帧，反而写进分支本地 —— 帧弹掉就丢，
+     * 正是这次要修的那个缺陷的另一个版本。修一个 bug 换一个同形的 bug 不算修好。
+     * 带上引用是安全的：分支只在**自己复制时的长度之上** push，
+     * popTo 的 depth 永远 >= 自己那个下标，摸不到复制来的帧。
+     */
+    const inherited = this.frames.length;
+    (branch as unknown as { frames: Frame[] }).frames = [...this.frames];
+    // 步骤导出**必须各支一份**。共享的话两支 saveAs 同名仍是"谁后写谁算"，
+    // 那正是本条要消灭的竞态；共享一个 Map 等于把它从变量空间挪到导出表里藏起来。
+    (branch as unknown as { stepExports: Map<string, Record<string, unknown>> }).stepExports = new Map();
+    (branch as unknown as { ownIndex: number }).ownIndex = inherited;
+    // 写入历史各记一份，合并时由 adoptFrom 搬进主表；
+    // 不搬的话 UI 的「谁改了这个值」在并发用例里会缺一半记录
+    (branch as unknown as { writes: { name: string; frame: string; scopeId?: string }[] }).writes = [];
+    branch.push(`branch:${label}`);
+    return branch;
+  }
+
+  /**
+   * 这一支有没有留下需要并回主实例的东西。
+   * 只看帧变量不够：一支只做 `http saveAs` 的话一帧都没写，但导出必须合并 ——
+   * 漏判的表现是"parallel 之后 $.step.<分支内 id> 说尚无输出"，一个只在并发下出现的假失败。
+   */
+  hasLocalWrites(): boolean {
+    if (this.ownIndex < 0) return false; // 根实例从不被合并；不挡的话它任何一步之后都返回 true
+    if (this.stepExports.size) return true;
+    for (let i = Math.max(1, this.ownIndex); i < this.frames.length; i++) if (this.frames[i]!.vars.size) return true;
+    return false;
+  }
+
+  /**
+   * 把分支本地的写入并回主实例。见 {@link forkBranch} 第 3 条。
+   * 只并"global 里查不到"的名字；分支自己的步骤导出整体并回来（stepId 全局唯一，不会撞）。
+   */
+  adoptFrom(branch: VarSpace): void {
+    const self = this as unknown as { frames: Frame[]; writes: { name: string; frame: string; scopeId?: string }[] };
+    const b = branch as unknown as { frames: Frame[]; writes: { name: string; frame: string }[]; ownIndex: number; stepExports: Map<string, Record<string, unknown>> };
+    /*
+     * 并回**外层栈顶那一帧**，不是 global 帧。
+     *
+     * parallel 常常写在 forEach 里面（"每条数据并发跑一遍"）。写进 global 的话，
+     * 分支里新声明的名字会被提到循环外面 —— 而循环体外层根本不该看见它，
+     * docs/02 §5 的语义是"帧退栈即销毁"。提到 global 等于让循环里的并发
+     * 污染循环外的变量空间，那正是这次要修的缺陷的镜像版本（一个是值凭空消失，
+     * 一个是值凭空多出来活着出去）。
+     */
+    const target = self.frames[self.frames.length - 1]!;
+    for (let i = Math.max(1, b.ownIndex); i < b.frames.length; i++) {
+      for (const [k, v] of b.frames[i]!.vars) {
+        /*
+         * 判据用 **has（只看帧）**，不是 knows（帧+inputs+env）。
+         * 理由不是"哪个更方便"，而是**并行必须与顺序同语义**：
+         * 顺序执行时 `set token = "x"` 而 token 只存在于 env/inputs，
+         * 走的是 declare —— 在当前帧新建一个遮蔽它的变量，之后读 `$token` 得到 "x"。
+         * 若这里用 knows，env 里有 token 就跳过合并，于是**同一步写在 parallel 里
+         * 会被静默丢弃、写在 parallel 外却生效** —— 同一份 IR 挪个位置就换行为，
+         * 正是本仓反复出现的那类"看着一样、实际两套语义"。
+         * 用 has 之后两种情形都是"帧里遮蔽 env"，一致。
+         * 另一支/外层已声明的情况照样挡住：那时它就在某一层**帧**里，has 为真。
+         */
+        if (this.has(k)) continue; // 外层或先并的分支已有：不覆盖（先声明者赢，顺序固定 → 结果确定）
+        target.vars.set(k, v);
+      }
+    }
+    for (const [id, exp] of b.stepExports) this.stepExports.set(id, { ...this.stepExports.get(id), ...exp });
+    self.writes.push(...b.writes);
+    // 搬空，避免同一条写入被并两次（分支失败后又被合并一次的 paths）
+    b.writes.length = 0;
+    for (let i = Math.max(1, b.ownIndex); i < b.frames.length; i++) b.frames[i]!.vars.clear();
+  }
+
+  /** 这个名字在不在任何一层（帧 / 上层输入 / env）。可见性判据只有这一处。 */
+  knows(name: string): boolean {
+    return this.has(name) || name in this.inputs || name in this.envMap;
   }
 
   // ── 作用域栈 ────────────────────────────────────────────────────────────
@@ -234,7 +352,7 @@ export class VarSpace {
     const name = root + segs.slice(1).map(segStr).join('');
     const head = name.split('.')[0]!.replace(/\[.*$/, '');
     // 变量、上层输入、环境变量三处任一存在即算「已定义」，与 asExprRoot 的可见性一致
-    const known = this.has(head) || head in this.inputs || head in this.envMap;
+    const known = this.knows(head);
     // 「未定义」才是错误；「值是 undefined」合法（docs/02 §5），故 found 只看名字存不存在
     return { found: known, value: this.lookup(name) };
   }

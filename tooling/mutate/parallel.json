@@ -4,7 +4,9 @@
     "这批的价值集中在一件事：**分支没跑的时候，测试必须变红**。",
     "原缺陷（slice(0, maxConcurrency)）能活到今天，就是因为所有相关测试断的都是",
     "summary 与容器状态，而这两样在丢分支时依然是 pass + \"并行 5 支\"。",
-    "所以每条变异都改在\"会不会少跑一支 / 少跑的那支会不会被记下来\"上。"
+    "所以每条变异都改在\"会不会少跑一支 / 少跑的那支会不会被记下来\"上。",
+    "**本轮删掉了一条变异**（\"mentionedNames 不做 $ 二次切分\"）。它锚的那个函数随 `frame-shadow` 那条判据一起被删了（分支作用域隔离之后不再需要\"读侧遮蔽\"判据）。留着它的后果很具体：harness 报 `ANCHOR_NOT_FOUND`，而**\"没跑成\"与\"抓到了\"是两档**，前者没有任何结论 —— 一份里躺一条永远跑不成的用例，读报告的人会把它算进\"覆盖过\"。（`tooling/mutate.mjs` 的退出码对 ANCHOR_NOT_FOUND 是非零的，所以这条不会被静默忽略；删掉是为了让\"81 条全都能跑\"这件事本身成立。）",
+    "**又删掉一条**（\"frame-shadow 只查写侧不查读侧\"）。这条与上一条删的原因不同，值得分开记：上一条是锚点漂了，这条是**它守的那条判据本身被删了** —— `frame-shadow`（一支压帧、另一支提到同名循环项）在分支作用域隔离之后不再是需要拒的形态，根因修掉了（见 `docs/14` §4.6）。\n**但行为覆盖没有丢，只是换了地方**：`scope.test.ts` 里 \"跨支读对方**分支内部**的变量 → 清晰报错（不是读到别人的值）\"与\"一支新写的变量，另一支在**运行中**读不到\"两条接住了同一件事，而且后者是变异检查逼出来的（第一版全套 0 失败，说明原有测试对\"隔离失效但值不消失\"是盲的）。删一条变异时要顺带说清**它守的东西现在由谁守**，否则删变异就成了悄悄减覆盖。"
   ],
   "build": false,
   "cases": [
@@ -110,13 +112,6 @@
       "testFile": "packages/engine/test/parallel.test.ts"
     },
     {
-      "label": "mentionedNames 不做 $ 二次切分（$item 当成一个词，读侧静默漏判）",
-      "file": "packages/ir/src/steps.ts",
-      "anchor": "for (const part of m[0].split('$')) if (part) out.add(part);",
-      "replace": "out.add(m[0]);",
-      "testFile": "packages/engine/test/parallel.test.ts"
-    },
-    {
       "label": "writtenNames 把 forEach 的循环项也算进共享名字（闸变过宽，真实场景没法用）",
       "file": "packages/ir/src/steps.ts",
       "anchor": "    if (s.kind === 'forEach') return;\n",
@@ -130,13 +125,6 @@
       "file": "packages/ir/src/steps.ts",
       "anchor": "if (bs.length > 1) out.push({ kind: 'shared-write', name, branches: bs });",
       "replace": "if (bs.length > 2) out.push({ kind: 'shared-write', name, branches: bs });",
-      "testFile": "packages/engine/test/parallel.test.ts"
-    },
-    {
-      "label": "frame-shadow 只查写侧不查读侧（去掉提到名字的匹配）",
-      "file": "packages/ir/src/steps.ts",
-      "anchor": ".filter((o) => looped.some((n) => mentionedNames([o]).has(n)))",
-      "replace": "",
       "testFile": "packages/engine/test/parallel.test.ts"
     },
     {

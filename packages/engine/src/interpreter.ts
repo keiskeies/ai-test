@@ -90,7 +90,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   const runId = opts.runId ?? `run_${clock.now().toString(36)}`;
   // inputDefs 传 scenario.inputs：声明了 default 的输入要能被兜住，
   // 否则 IR 里的 default 是个没人读字段（详见 vars.ts 的 applyInputDefaults）
-  const vars = new VarSpace({ inputs: opts.inputs, inputDefs: scenario.inputs, env: opts.env, secretResolver: opts.secretResolver });
+  const rootVars = new VarSpace({ inputs: opts.inputs, inputDefs: scenario.inputs, env: opts.env, secretResolver: opts.secretResolver });
   const events: TraceEvent[] = [];
   const results: StepResult[] = [];
   let seq = 0;
@@ -222,7 +222,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   };
 
   /** 单个步骤的执行。返回 StepResult，异常一律在此收敛成 error 状态。 */
-  const runStep = async (s: Step, path: string[]): Promise<StepResult> => {
+  const runStep = async (s: Step, path: string[], vars: VarSpace = rootVars): Promise<StepResult> => {
     checkAbort();
     for (const w of stepCtx.watchers) void w;
     const stepStart = clock.mono();
@@ -243,7 +243,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     }
 
     try {
-      const outcome = await dispatch(s, path);
+      const outcome = await dispatch(s, path, vars);
       // 守望在步骤之后跑一次，处理「上一步触发的弹窗」
       await runWatchers();
       return finish(s, path, outcome.status, stepStart, outcome.summary, {
@@ -307,7 +307,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     artifactIds?: string[];
   }
 
-  const runChildren = async (steps: Step[], path: string[]): Promise<Outcome> => {
+  const runChildren = async (steps: Step[], path: string[], vars: VarSpace = rootVars): Promise<Outcome> => {
     const rs: StepResult[] = [];
     // 身份在**每个序列**入口快照、出口复位（理由见 currentIdentity 的注释）。
     // finally 是必须的：中途 return（子步骤失败且 onError 不是 continue）
@@ -315,7 +315,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     const identityBefore = currentIdentity;
     try {
       for (const c of steps) {
-        const r = await withRetry(c, path, () => runStep(c, path));
+        const r = await withRetry(c, path, () => runStep(c, path, vars));
         rs.push(r);
         if (r.status === 'fail' || r.status === 'error') {
           if (c.onError === 'continue') continue;
@@ -330,20 +330,20 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     return { status: healed ? 'healed' : 'pass', summary: `${rs.length} 个子步骤` };
   };
 
-  const dispatch = async (s: Step, path: string[]): Promise<Outcome> => {
+  const dispatch = async (s: Step, path: string[], vars: VarSpace = rootVars): Promise<Outcome> => {
     switch (s.kind) {
       // ── 控制流 ────────────────────────────────────────────────
-      case 'sequence': return runChildren(s.steps, [...path, s.id]);
+      case 'sequence': return runChildren(s.steps, [...path, s.id], vars);
       case 'if': {
         const ok = evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now });
-        return runChildren(ok ? s.then : s.else, [...path, s.id]);
+        return runChildren(ok ? s.then : s.else, [...path, s.id], vars);
       }
       case 'switch': {
         const value = compileExpr(s.value).eval({ root: vars.asExprRoot(), vars: vars.visible(), now: clock.now });
         for (const c of s.cases) {
-          if (looseEq(value, resolveValue(c.is))) return runChildren(c.steps, [...path, s.id]);
+          if (looseEq(value, resolveValue(c.is, vars))) return runChildren(c.steps, [...path, s.id], vars);
         }
-        return runChildren(s.default, [...path, s.id]);
+        return runChildren(s.default, [...path, s.id], vars);
       }
       case 'forEach': {
         const items = toIterable(compileExpr(s.items).eval({ root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }));
@@ -353,7 +353,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         }
         for (let i = 0; i < cap; i++) {
           const depth = vars.pushIteration(s.as, items[i], s.indexAs, i);
-          const o = await runChildren(s.steps, [...path, s.id]);
+          const o = await runChildren(s.steps, [...path, s.id], vars);
           vars.popTo(depth); // 按深度回退：子步骤若没配对 pop（失败提前返回），迭代变量也不会漏出去
           if (o.status !== 'pass' && o.status !== 'healed') return o;
         }
@@ -365,7 +365,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           checkAbort();
           if (!evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now })) break;
           const depth = vars.push('while');
-          const o = await runChildren(s.steps, [...path, s.id]);
+          const o = await runChildren(s.steps, [...path, s.id], vars);
           vars.popTo(depth);
           if (o.status !== 'pass' && o.status !== 'healed') return o;
           i++;
@@ -375,7 +375,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         }
         return { status: 'pass', summary: `循环 ${i} 次` };
       }
-      case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id]);
+      case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id], vars);
       case 'parallel': {
         // **分支里不许切身份**。身份是共享的可变量，分支交错执行时
         // "谁先切"决定另一边看到谁 —— 而用 parallel 跑多身份恰恰是权限矩阵的
@@ -392,23 +392,33 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           };
         }
         /*
-         * **变量竞态的静态闸**（判据与探针见 ir/src/steps.ts 的 parallelHazards）。
+         * **每支一份局部作用域**。
          *
-         * 两条已实测会串的写法：两支写同一个名字（谁后跑谁算，同一份冻结场景
-         * 能给 pass 也能给 fail —— 直接破 M7 的"跑 20 次断言结果完全一致"）；
-         * 以及一支带 forEach、另一支提到同一个循环项名字（帧栈是 VarSpace 共享的一条，
-         * A 支的 popTo 会把 B 支刚压的帧一起弹掉 —— 探针里 A 支读到了 B 支的循环项值）。
+         * 这里原先的做法是"跑之前静态拒掉两种会串的写法"，那是临时盾牌：
+         * 它只覆盖我**想到的**那两种交错，而根因（帧栈全局共享一条）还在，
+         * 于是第三个形态照样漏 —— 探针实测：B 支一句 `set mineOnly = 42`，
+         * 那时栈顶恰好是 A 支 forEach 的迭代帧，值写进 A 的帧、跟着 A 一起弹掉，
+         * B 那步报 pass，`$mineOnly` 永远查不到。闸抓不到它（两支不同名、无共享写、
+         * B 也没提 A 的循环项）。继续加宽就是第 4 条、第 5 条规则加下去，
+         * 而每加一条都在把 parallel 能写的形状收窄。
          *
-         * 拒而不做"每支一份独立作用域"：那要把 vars 从闭包变量改成显式参数，
-         * 牵动 36 处 vars. 调用与所有容器，属于 P1 的作用域重构（已记 docs/08）。
-         * 在那之前跑出一个随调度顺序变的答案更糟 —— 而这类结果**重跑一次可能正好对**，
-         * 是最容易被当成 flaky 重试掉、从而永久藏起来的那种。
+         * 现在的做法（VarSpace.forkBranch）：**global 帧按引用共享，各支只给自己加帧**。
+         * 于是
+         *  - 分支里新声明的名字落在本支帧里，别人看不见，也不会被别人的 popTo 弹掉；
+         *  - "写 parallel **之前**已声明的名字"（累加器写法，docs/02 §5 推荐的那个）
+         *    照旧写进共享的 global 帧，行为一个字节没改 —— 这条是实测出来的，
+         *    预先 `set mineOnly = 0` 之后同样的并发就不丢值了；
+         *  - 步骤导出各支一份 Map，两支 saveAs 同名从"谁后跑谁算"变成物理上不可能。
+         * parallel 结束后各支的本地写入按**声明顺序**并回 global（顺序理由见下面 scopes）。
+         */
+        /*
+         * 静态闸**收窄到只剩一条**：两支写同一个名字（判据见 ir 的 parallelHazards）。
+         * 原来那两条里的"一支压帧、另一支提到那个循环项"已经由上面的分支作用域修掉了，
+         * 再靠闸去追根因就是无限加宽 —— 见上一条注释。
          */
         const hazards = parallelHazards(s.steps);
         if (hazards.length) {
-          const what = hazards
-            .map((h) => (h.kind === 'shared-write' ? `"${h.name}" 被 ${h.branches.join(' / ')} 同时写` : `分支 ${h.from} 的循环项 "${h.name}" 会被 ${h.into.join(' / ')} 读到（共享作用域栈）`))
-            .join('；');
+          const what = hazards.map((h) => `"${h.name}" 被 ${h.branches.join(' / ')} 同时写`).join('；');
           return {
             status: 'error', cause: 'case-stale',
             summary: `parallel 的分支之间变量会串：${what}`,
@@ -430,6 +440,13 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const OK = new Set(['pass', 'healed']);
         const left = [...s.steps];
         const done: PromiseSettledResult<StepResult>[] = [];
+        /* 分支局部作用域，按**分支 id**存。
+         * 用 Map 而不是"跑完就合并"：合并必须按 s.steps 的**声明顺序**做，
+         * 不能按完成顺序 —— 按完成顺序的话，两支各自新声明同名变量时，
+         * 谁赢取决于谁先跑完，同一份冻结场景就能给出不同结果，
+         * 直接把 M7 的"跑 20 次断言结果完全一致"破掉（而且是最难查的那种：
+         * 重跑一次可能正好对，于是被当成 flaky 重试掉）。 */
+        const scopes = new Map<string, VarSpace>();
         let stop = false;
         let abort: unknown;
         /** 一支 worker：跑完一支就补下一支，直到没活可补或 failFast 拉闸。
@@ -438,8 +455,10 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           while (!stop) {
             const c = left.shift();
             if (!c) break;
+            const branch = vars.forkBranch(c.id);
+            scopes.set(c.id, branch);
             try {
-              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id]));
+              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id], branch));
               done.push({ status: 'fulfilled', value: r });
             } catch (e) {
               // RunAborted（外部取消/超时）必须能掀翻整个 run，不能被吞成"这支失败了"——
@@ -464,6 +483,18 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // 免得将来有人往 worker 里加"每支都做一次"的副作用时凭空多出 N 次。
         await Promise.all(Array.from({ length: Math.min(s.maxConcurrency, s.steps.length) }, () => worker()));
         if (abort) throw abort;
+        /*
+         * 收尾合并：按**声明顺序**把各支的局部写入并回外层作用域。
+         *
+         * 为什么在并发池这里收、而不是在 VarSpace 里自己收：合并顺序是"parallel 的
+         * 分支列表顺序"这个**IR 层面的事实**，VarSpace 不知道分支列表长什么样，
+         * 让它自己收就只能按完成顺序 —— 见上面 scopes 的注释，那会破确定性。
+         * 用 s.steps 而不是 done：done 是完成顺序。
+         */
+        for (const c of s.steps) {
+          const b = scopes.get(c.id);
+          if (b?.hasLocalWrites()) vars.adoptFrom(b);
+        }
         // 没起跑的分支（只可能在 failFast 拉闸后出现）补进结果里记 skipped。
         // **必须补**：从结果里消失的分支在报告里等于"不存在"，
         // 而这条分支本来要跑的断言恰恰是这次运行唯一没验的那部分。
@@ -488,7 +519,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const sub = (adapters as unknown as { callScenario: (ref: string) => Promise<Scenario> }).callScenario(s.scenarioRef);
         const child = await sub;
         const childVars = new VarSpace({
-          inputs: Object.fromEntries(Object.entries(s.args).map(([k, v]) => [k, resolveValue(v)])),
+          inputs: Object.fromEntries(Object.entries(s.args).map(([k, v]) => [k, resolveValue(v, vars)])),
           // 子场景自己的 inputs 声明：call.args 没给全时由子场景的 default 兜。
           // 用 child.inputs 而不是父场景的 —— default 属于被调用方
           inputDefs: child.inputs,
@@ -526,12 +557,12 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
 
       // ── 变量 ──────────────────────────────────────────────────
       case 'set': {
-        for (const [k, v] of Object.entries(s.assign)) vars.setDeep(k, resolveValue(v));
+        for (const [k, v] of Object.entries(s.assign)) vars.setDeep(k, resolveValue(v, vars));
         vars.exportStep(s.id, vars.visible());
         return { status: 'pass', summary: `赋值 ${Object.keys(s.assign).join(', ')}` };
       }
       case 'table': {
-        const rows = s.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, resolveValue(v)])));
+        const rows = s.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, resolveValue(v, vars)])));
         // 以前写死 'table'：`as` 声明了却没人读，两个 table 步骤互相覆盖同一个变量。
         // schema 的默认值就是 'table'，所以省略 as 的场景行为一字未变。
         vars.set(s.as, rows);
@@ -600,11 +631,11 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       // ── API ───────────────────────────────────────────────────
       case 'http': {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
-        const headers = strMap(s.request.headers, resolveValue);
-        const query_ = strMap(s.request.query, resolveValue);
+        const headers = strMap(s.request.headers, (v) => resolveValue(v, vars));
+        const query_ = strMap(s.request.query, (v) => resolveValue(v, vars));
         const url = buildUrl(resolveUrl(s.request.url, ctxBase.env), query_);
         const res = await adapters.http.send({
-          method: s.request.method, url, headers, body: s.request.body === undefined ? undefined : resolveValue(s.request.body),
+          method: s.request.method, url, headers, body: s.request.body === undefined ? undefined : resolveValue(s.request.body, vars),
           timeoutMs: s.timeoutMs ?? 30_000, maxBytes: s.maxResponseBytes, followRedirects: s.followRedirects,
           // 只交**引用与身份**，不交值。原先这里是
           // `headers.authorization = 'Bearer ' + ctxBase.secret(s.auth)` ——
@@ -630,7 +661,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
         const op = await adapters.http.resolveOperation({ docRef: s.docRef, operationId: s.operationId, method: s.method, path: s.path });
         if (op.deprecated) emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'DEPRECATED_OPERATION', detail: s.operationId ?? `${op.method} ${op.urlTemplate}` } });
-        const params = strMap(s.pathParams, resolveValue);
+        const params = strMap(s.pathParams, (v) => resolveValue(v, vars));
         let url = op.urlTemplate;
         for (const [k, v] of Object.entries(params)) {
           // 只替换真实出现的占位符；没出现说明 pathParams 写错了名字 ——
@@ -644,8 +675,8 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // 剩余未填占位符必须报错：把 `{id}` 原样发出去得到的是 404，查不到原因
         const leftover = url.match(/\{([^}/]+)\}/g);
         if (leftover) return { status: 'error', summary: `URL 里还有未填的参数：${leftover.join('、')}`, cause: 'case-stale' };
-        const qs = strMap(s.queryParams, resolveValue);
-        const headers = strMap(s.headers, resolveValue);
+        const qs = strMap(s.queryParams, (v) => resolveValue(v, vars));
+        const headers = strMap(s.headers, (v) => resolveValue(v, vars));
         // identity 交给 adapter 解析，**引擎不再自己查密钥**。
         // 原先这里写 `ctxBase.secret('identity:' + s.identity)`，而 CLI 的
         // secretResolver 只认 `secret:<ref>` 形态：'identity:admin' 归一出来是空串，
@@ -678,7 +709,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // 的用意就是发一个不合法的请求去看后端拒不拒绝（docs/05 §3）。
         // 在这里一律拦，等于把最有价值的一类用例（后端缺参数校验）全部作废 ——
         // 而且废得很安静：用例会变成"跳过"，覆盖率看着还挺高。
-        const bodyForSend = s.body === undefined ? undefined : resolveValue(s.body);
+        const bodyForSend = s.body === undefined ? undefined : resolveValue(s.body, vars);
         if (s.validateRequest && adapters.http.validateRequest && !NEGATIVE_STRATEGIES.has(s.strategy ?? '')) {
           const v = await adapters.http.validateRequest({ docRef: s.docRef, operationId: op.operationId }, bodyForSend);
           if (!v.ok) {
@@ -802,19 +833,22 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
 
       // ── 断言与横切 ─────────────────────────────────────────────
       case 'assert': case 'assertPage': case 'assertUi': case 'assertLlm': case 'assertPerf': {
+        // 传的是**分支作用域**那一份（dispatch 的 vars 形参），不是 vars：
+        // 断言里 `$xxx` 读的是这一支看得见的变量。写成 vars 的话，
+        // "parallel 分支里断言自己那一支刚算出来的值"会读到共享帧那份或干脆读不到。
         const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, stepCtx)), clock, addCost, emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
         vars.exportStep(s.id, { assertion: r });
         return r;
       }
       case 'db': {
         if (!adapters.db) return { status: 'error', summary: 'db adapter 未注册', cause: 'env-unavailable' };
-        const rows = await adapters.db.query(s.datasource, s.sql, strMap(s.vars, resolveValue), execCtx('api'));
+        const rows = await adapters.db.query(s.datasource, s.sql, strMap(s.vars, (v) => resolveValue(v, vars)), execCtx('api'));
         if (s.assignTo) vars.set(s.assignTo, rows);
         vars.exportStep(s.id, { rows, count: rows.length });
         return { status: 'pass', summary: `DB ${rows.length} 行` };
       }
       case 'log':
-        emit({ kind: 'log.emitted', stepId: s.id, data: { level: s.level, message: interpolate(s.message) } });
+        emit({ kind: 'log.emitted', stepId: s.id, data: { level: s.level, message: interpolate(s.message, vars) } });
         return { status: 'pass', summary: 'log' };
       case 'fail':
         return { status: 'fail', summary: s.reason, cause: (s.cause as StepResult['cause']) ?? 'product-bug' };
@@ -825,12 +859,18 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     }
   };
 
-  // 变量与值的解析入口
-  // 值求值走**共享实现**（resolve.ts）。第二种执行形态（压测预编译）也调它 ——
-  // 两条路径必须逐字节同语义，否则"功能全绿、压测报退化"能查三天。
-  const valueScope: ValueScope = { vars, clock };
-  const resolveValue = (v: unknown): unknown => resolveValueShared(v, valueScope);
-  function interpolate(text: string): string {
+  /*
+   * 值求值走**共享实现**（resolve.ts）。第二种执行形态（压测预编译）也调它 ——
+   * 两条路径必须逐字节同语义，否则"功能全绿、压测报退化"能查三天。
+   *
+   * `vars` 是必填、**没有默认值**：给了默认值，"忘了用分支作用域"就编译得过去，
+   * 于是 parallel 分支里的一句表达式悄悄读到共享作用域 —— 表现是并发用例偶发失败、
+   * 单跑必过，正是这一串改动要消灭的那类 bug。让编译器管比写在注释里可靠。
+   */
+  const rootScope: ValueScope = { vars: rootVars, clock };
+  const resolveValue = (v: unknown, vars: VarSpace): unknown =>
+    resolveValueShared(v, vars === rootVars ? rootScope : { vars, clock });
+  function interpolate(text: string, vars: VarSpace): string {
     return text.replace(/\$[A-Za-z_][\w.[\]-]*/g, (m) => {
       try { const r = vars.resolveRef(m); return r.found ? String(r.value ?? '') : `⟨未定义:${m}⟩`; } catch { return `⟨错误:${m}⟩`; }
     });
@@ -869,8 +909,8 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       }
     }
     for (const o of scenario.outputs) {
-      const r = vars.resolveRef(o.from);
-      if (r.found) vars.setOutput(o.name, r.value);
+      const r = rootVars.resolveRef(o.from);
+      if (r.found) rootVars.setOutput(o.name, r.value);
     }
     if (stepCtx.lease && adapters.device) await adapters.device.release({ id: stepCtx.lease.id }, execCtx('android'));
   } catch (e) {
@@ -895,7 +935,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
 
   return {
     runId, status, startedAt, durMs: clock.mono() - t0, results, events,
-    outputs: vars.outputs, costUsd, tally,
+    outputs: rootVars.outputs, costUsd, tally,
     summary: `${status} · ${counted} 步计入通过率 · ${rate}% 通过 · ${tally.healed} 自愈待审 · $${costUsd.toFixed(4)}`,
   };
 }

@@ -193,15 +193,15 @@ describe('parallel 并发池', () => {
 });
 
 /**
- * 变量竞态的静态闸。
+ * 变量竞态的静态闸。**现在只剩一条判据**：两支写同一个名字。
  *
- * 两条判据都是**探针实测出来的**，不是推演：
- *  - 同名共享写：`saveAs` 撞 `saveAs`，用手动 settle 的 http 控制完成顺序，
- *    同一份 IR 一支先完成给 pass、另一支先完成给 fail。
- *  - 循环项遮蔽：两支各带 forEach、都用最自然的 `as: 'item'`，
- *    A 支的断言读到了 **B 支的循环项值**（帧栈共享，A 支 popTo 把 B 支的帧一起弹了）。
- * 所以这里要守的是两件事：闸**该响的时候响**，以及**不该响的时候别响**
- * （后者同样重要 —— 把带 forEach 的分支一律拒掉，parallel 在真实场景里就废了）。
+ * 原先有两条，第二条是"一支带 forEach、另一支提到同名循环项"（帧栈全仓共享一条，
+ * A 支的 popTo 会把 B 支刚压的帧一起弹掉）。那条已经由**分支作用域隔离**修掉了
+ * —— 见 scope.test.ts。留在闸里只会让 parallel 白白少掉一批能写的形状。
+ *
+ * 这里保留的是那条真竞态：名字在两支之间撞了，谁后写谁赢（外层已声明的那种），
+ * 或者收尾合并只能留一份（两支各自新声明的那种）。两种都得拒，
+ * 而"确定地挑一份"和"随调度顺序变"一样不可接受 —— 前者只是更难被发现。
  */
 describe('parallel 变量竞态静态闸', () => {
   const httpOk = fakeHttp(async () => ok);
@@ -231,39 +231,13 @@ describe('parallel 变量竞态静态闸', () => {
     assert.match(res(r, 'p').assertionSummary ?? '', /total/);
   });
 
-  test('一支带 forEach、另一支提到同名循环项 -> 拒（共享作用域栈）', async () => {
-    const r = await run(scen([
-      { ...b('seed'), kind: 'set', assign: { list: [1, 2] } },
-      par('p', [
-        { ...b('k0'), kind: 'forEach', items: 'list', as: 'item', steps: [{ ...b('n0'), kind: 'noop' }] },
-        // 另一支只是**读** item，不写 —— 但帧栈共享，栈顶是谁决定它读到什么
-        { ...b('k1'), kind: 'assert', against: '$item', jsonPath: { $: { notNull: true } } },
-      ], { maxConcurrency: 2 }),
-    ]));
-    assert.equal(res(r, 'p').status, 'error', '读的一侧不写就放行是错的：lookup 从栈顶往下找，栈顶不再属于自己');
-    assert.match(res(r, 'p').assertionSummary ?? '', /item/);
-  });
-
-  test('两支各带 forEach 但循环项名字不同 -> 放行（闸必须够窄，否则 parallel 没法用）', async () => {
-    const r = await run(scen([
-      { ...b('seed'), kind: 'set', assign: { list: [1, 2] } },
-      par('p', [
-        { ...b('k0'), kind: 'forEach', items: 'list', as: 'rowA', steps: [{ ...b('n0'), kind: 'noop' }] },
-        { ...b('k1'), kind: 'forEach', items: 'list', as: 'rowB', steps: [{ ...b('n1'), kind: 'noop' }] },
-      ], { maxConcurrency: 2 }),
-    ]));
-    assert.equal(res(r, 'p').status, 'pass', res(r, 'p').assertionSummary ?? '');
-  });
-
-  test('各分支写各自不同的变量 -> 放行', async () => {
-    const r = await run(scen([
-      par('p', [
-        { ...b('k0'), kind: 'set', assign: { fromA: 1 } },
-        { ...b('k1'), kind: 'set', assign: { fromB: 2 } },
-      ], { maxConcurrency: 2 }),
-    ]));
-    assert.equal(res(r, 'p').status, 'pass', res(r, 'p').assertionSummary ?? '');
-  });
+  /*
+   * 「一支带 forEach、另一支提到同名循环项 -> 拒」这条在这里删掉了。
+   * 它守的是"帧栈全仓共享一条"这个**根因**，而根因已经修掉（分支作用域隔离），
+   * 那种写法现在是确定性的"查不到该变量"，不再是需要拒的形态。
+   * 判据与它的对照组在 scope.test.ts —— 那边同时钉"该拒的拒"和"该放的放"。
+   * 留着这条会变成：一条永远不可能触发的规则，配一个必须改判的断言。
+   */
 
   test('只有一支时完全不查（单支没有"另一个分支"可串）', async () => {
     const r = await run(scen([
