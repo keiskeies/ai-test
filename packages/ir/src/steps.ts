@@ -455,4 +455,194 @@ export function flatten(steps: Step[]): Step[] {
   return out;
 }
 
+/**
+ * 会往变量空间**压作用域帧**的步骤。
+ *
+ * 只有这两种（已核对解释器：全仓只有 `pushIteration`(forEach) 与 `push('while')`(while)
+ * 两处调用 `vars.push`）。这个清单的意义是**它决定 parallel 分支安不安全**：
+ * 帧栈是整个 VarSpace 共享的一条，分支里压了帧，别的支持分支的读写就会看到它。
+ */
+export const FRAME_PUSHING_KINDS: Step['kind'][] = ['forEach', 'while'];
+
+/** 往变量空间**写名字**的步骤 → 写的是哪个字段。 */
+export interface WriteSites {
+  /** 写单个名字（saveAs / assignTo / as / 循环项） */
+  single?: (s: Step) => string | undefined;
+  /** 写一批名字（set.assign 的键、extract.rules[].var、script.outputVars） */
+  many?: (s: Step) => string[];
+}
+
+/**
+ * **每个会写变量的步骤 kind 都必须在这里出现**。
+ *
+ * 类型标成 `Record<Step['kind'], WriteSites>`（而不是 Partial）是刻意的：
+ * 以后加一个会写变量的步骤，若没在这里登记，`tsc` 直接报"缺属性"。
+ * 因为这条表是 parallel 那条静态闸的唯一依据，**漏一个 kind 就等于闸失效**，
+ * 而闸失效的表现是"竞态用例照样跑、结果随调度顺序变" —— 正是本仓那个缺陷类
+ * 最难查的一种（它只在并发下出现，重跑一次还可能正好对）。
+ * 不写变量的 kind 显式给 `{}`，让"这个 kind 不写变量"这件事也是被声明过的。
+ */
+export const STEP_WRITE_SITES: Record<Step['kind'], WriteSites> = {
+  set: { many: (s) => Object.keys((s as { assign?: Record<string, unknown> }).assign ?? {}) },
+  extract: { many: (s) => ((s as { rules?: { var: string }[] }).rules ?? []).map((r) => r.var) },
+  table: { single: (s) => (s as { as?: string }).as },
+  dataSource: { single: (s) => (s as { as?: string }).as },
+  forEach: {
+    // 循环项与下标都在**分支自己压的帧**里，所以不算"共享名字"（见 forEachWritesOuterName）
+    many: (s) => {
+      const x = s as { as?: string; indexAs?: string };
+      return [x.as, x.indexAs].filter((v): v is string => typeof v === 'string');
+    },
+  },
+  http: { single: (s) => (s as { saveAs?: string }).saveAs },
+  openapiCall: { single: (s) => (s as { saveAs?: string }).saveAs },
+  call: { single: (s) => (s as { assignTo?: string }).assignTo },
+  db: { single: (s) => (s as { assignTo?: string }).assignTo },
+  script: { many: (s) => (s as { outputVars?: string[] }).outputVars ?? [] },
+  // 明确不写变量的 kind：留空是为了让"漏登记"编译不过
+  sequence: {},
+  if: {},
+  switch: {},
+  while: {},
+  repeat: {},
+  parallel: {},
+  wait: {},
+  sleep: {},
+  navigate: {},
+  act: {},
+  capture: {},
+  device: {},
+  app: {},
+  tap: {},
+  input: {},
+  swipe: {},
+  key: {},
+  watcher: {},
+  logcat: {},
+  assert: {},
+  assertLlm: {},
+  assertPerf: {},
+  assertPage: {},
+  assertUi: {},
+  log: {},
+  fail: {},
+  noop: {},
+  manualHandoff: {},
+  useIdentity: {},
+};
+
+/** 一个步骤（含其子树）写进**共享作用域**的名字。forEach 的循环项写在自己的帧里，不计入。 */
+export function writtenNames(steps: Step[]): string[] {
+  const out = new Set<string>();
+  walk(steps, (s) => {
+    const sites = STEP_WRITE_SITES[s.kind];
+    // forEach 只写循环项/下标，两者都落在它自己那一帧；其余 kind 写的都是共享作用域
+    if (s.kind === 'forEach') return;
+    if (sites.single) {
+      const n = sites.single(s);
+      if (n) out.add(n);
+    }
+    for (const n of sites.many?.(s) ?? []) out.add(n);
+  });
+  return [...out];
+}
+
+/** 子树里有没有压帧的步骤（forEach/while）。压帧的分支在并发下不安全。 */
+export function pushesFrame(steps: Step[]): boolean {
+  let hit = false;
+  walk(steps, (s) => {
+    if (FRAME_PUSHING_KINDS.includes(s.kind)) hit = true;
+  });
+  return hit;
+}
+
+/**
+ * forEach 声明在**自己那一帧**里的名字（循环项与下标）。
+ *
+ * 它们不进 writtenNames（那些算的是共享作用域），但对 parallel 的静态闸必须单独看：
+ * 帧栈是整个 VarSpace 共享的一条，A 支压的帧会被同时运行的 B 支查到。
+ */
+export function loopVarNames(steps: Step[]): string[] {
+  const out = new Set<string>();
+  walk(steps, (s) => {
+    if (s.kind !== 'forEach') return;
+    const x = s as unknown as { as?: string; indexAs?: string };
+    if (x.as) out.add(x.as);
+    if (x.indexAs) out.add(x.indexAs);
+  });
+  return [...out];
+}
+
+/**
+ * 一个分支里**提到**了哪些标识符。用 JSON 词法切，不做引用解析。
+ *
+ * 这是**过近似**：注释、同名的普通字段都会算进来。方向选过近似是因为这里是
+ * **安全闸** —— 漏判的代价是"竞态用例照样跑、结果随调度顺序变"（本仓那个缺陷类
+ * 最难查的一种），误判的代价只是一句"这两个分支请改成顺序执行"。
+ */
+export function mentionedNames(steps: Step[]): Set<string> {
+  const out = new Set<string>();
+  /*
+   * 先按"标识符字符（含 $）"整段切，再**按 $ 二次切分**。
+   *
+   * 少了第二次切分就抓不到引用：`against:"$item"` 会被第一段正则切成**一个**
+   * token `$item`（$ 本来就在字符类里），于是循环项 `item` 永远不在集合里，
+   * "另一支只是读它"这一路静默漏判 —— 而这一路正是探针里实测会串的那条。
+   * `$.item` 反倒能过（点号把两段分开了），所以只测点号形态会以为正则没问题。
+   */
+  for (const m of JSON.stringify(steps).matchAll(/[A-Za-z0-9_$]+/g)) {
+    for (const part of m[0].split('$')) if (part) out.add(part);
+  }
+  return out;
+}
+
+/** parallel 分支之间的一条冲突。 */
+export type ParallelHazard =
+  | { kind: 'shared-write'; name: string; branches: string[] }
+  | { kind: 'frame-shadow'; name: string; from: string; into: string[] };
+
+/**
+ * 静态查出 parallel 分支之间**已经证实会串**的两种写法。
+ *
+ * 为什么要静态拒而不是"运行时加锁/做合并策略"：
+ *  - 变量空间是一条共享的帧栈（`VarSpace.frames`），并发子步骤各自 push/pop 同一条栈。
+ *    两支各有 forEach 时，A 支的 `popTo(depth)` 会把 B 支刚压的帧一起弹掉，
+ *    而 `lookup` 是从栈顶往下找 —— 探针实测：A 支的断言读到了 B 支的循环项值，
+ *    B 支随后"变量未定义"。这不是命名冲突，是作用域栈被并发写坏了。
+ *  - 同一名字被两支写（`saveAs` 撞 `saveAs`）则是**完成顺序谁后谁算**，
+ *    同一份冻结场景能给出 pass 也能给出 fail —— 直接破 M7 的
+ *    "同一冻结场景跑 20 次，断言结果完全一致"。
+ * 真正的解法是给每个分支一份独立作用域（要贯穿 36 处 `vars.` 调用），记在 docs/08 作为 P1；
+ * 在那之前，宁可在执行前说清"这两支不能并发"，也不要跑出一个随调度顺序变的答案。
+ *
+ * **刻意窄**：只拒这两条。把"任何两支里有任何一支带 forEach"一起拒掉，
+ * 会让 parallel 在真实场景里几乎不可用（分支里十有八九有循环），
+ * 而一个用不了的功能跟没有功能一样，只是多了个报错。
+ */
+export function parallelHazards(branches: Step[]): ParallelHazard[] {
+  const out: ParallelHazard[] = [];
+  if (branches.length < 2) return out;
+  const names = branches.map((b) => writtenNames([b]));
+
+  // 1) 两支写同一个共享名字
+  const owners = new Map<string, string[]>();
+  branches.forEach((b, i) => {
+    for (const n of names[i] ?? []) owners.set(n, [...(owners.get(n) ?? []), b.id]);
+  });
+  for (const [name, bs] of owners) if (bs.length > 1) out.push({ kind: 'shared-write', name, branches: bs });
+
+  // 2) 一支压帧、另一支提到了那个循环项名字（共享栈上会互相遮蔽）
+  branches.forEach((b) => {
+    const looped = loopVarNames([b]);
+    if (!looped.length) return;
+    const mine = new Set([b.id]);
+    const victims = branches
+      .filter((o) => !mine.has(o.id))
+      .filter((o) => looped.some((n) => mentionedNames([o]).has(n)))
+      .map((o) => o.id);
+    for (const n of looped) if (victims.length) out.push({ kind: 'frame-shadow', name: n, from: b.id, into: victims });
+  });
+  return out;
+}
+
 

@@ -191,3 +191,95 @@ describe('parallel 并发池', () => {
     assert.equal(r.status, 'pass', r.summary);
   });
 });
+
+/**
+ * 变量竞态的静态闸。
+ *
+ * 两条判据都是**探针实测出来的**，不是推演：
+ *  - 同名共享写：`saveAs` 撞 `saveAs`，用手动 settle 的 http 控制完成顺序，
+ *    同一份 IR 一支先完成给 pass、另一支先完成给 fail。
+ *  - 循环项遮蔽：两支各带 forEach、都用最自然的 `as: 'item'`，
+ *    A 支的断言读到了 **B 支的循环项值**（帧栈共享，A 支 popTo 把 B 支的帧一起弹了）。
+ * 所以这里要守的是两件事：闸**该响的时候响**，以及**不该响的时候别响**
+ * （后者同样重要 —— 把带 forEach 的分支一律拒掉，parallel 在真实场景里就废了）。
+ */
+describe('parallel 变量竞态静态闸', () => {
+  const httpOk = fakeHttp(async () => ok);
+  const getStep = (id: string, url: string, extra: Record<string, unknown> = {}): StepDraft =>
+    ({ ...b(id), kind: 'http', request: { method: 'GET', url }, ...extra }) as StepDraft;
+
+  test('两支写同一个 saveAs -> 拒（否则结果取决于谁后完成）', async () => {
+    const r = await run(
+      scen([
+        par('p', [getStep('k0', 'http://x/1', { saveAs: 'winner' }), getStep('k1', 'http://x/2', { saveAs: 'winner' })], { maxConcurrency: 2 }),
+      ]),
+      { adapters: { http: httpOk } },
+    );
+    assert.equal(res(r, 'p').status, 'error');
+    assert.match(res(r, 'p').assertionSummary ?? '', /winner/, '报错要说清是哪个名字撞了，只说"有竞态"等于让人自己找');
+    assert.match(res(r, 'p').assertionSummary ?? '', /k0.*k1|k1.*k0/, '要指出是哪两支');
+  });
+
+  test('两支写同一个 set 变量 -> 拒', async () => {
+    const r = await run(scen([
+      par('p', [
+        { ...b('k0'), kind: 'set', assign: { total: 1 } },
+        { ...b('k1'), kind: 'set', assign: { total: 2 } },
+      ], { maxConcurrency: 2 }),
+    ]));
+    assert.equal(res(r, 'p').status, 'error');
+    assert.match(res(r, 'p').assertionSummary ?? '', /total/);
+  });
+
+  test('一支带 forEach、另一支提到同名循环项 -> 拒（共享作用域栈）', async () => {
+    const r = await run(scen([
+      { ...b('seed'), kind: 'set', assign: { list: [1, 2] } },
+      par('p', [
+        { ...b('k0'), kind: 'forEach', items: 'list', as: 'item', steps: [{ ...b('n0'), kind: 'noop' }] },
+        // 另一支只是**读** item，不写 —— 但帧栈共享，栈顶是谁决定它读到什么
+        { ...b('k1'), kind: 'assert', against: '$item', jsonPath: { $: { notNull: true } } },
+      ], { maxConcurrency: 2 }),
+    ]));
+    assert.equal(res(r, 'p').status, 'error', '读的一侧不写就放行是错的：lookup 从栈顶往下找，栈顶不再属于自己');
+    assert.match(res(r, 'p').assertionSummary ?? '', /item/);
+  });
+
+  test('两支各带 forEach 但循环项名字不同 -> 放行（闸必须够窄，否则 parallel 没法用）', async () => {
+    const r = await run(scen([
+      { ...b('seed'), kind: 'set', assign: { list: [1, 2] } },
+      par('p', [
+        { ...b('k0'), kind: 'forEach', items: 'list', as: 'rowA', steps: [{ ...b('n0'), kind: 'noop' }] },
+        { ...b('k1'), kind: 'forEach', items: 'list', as: 'rowB', steps: [{ ...b('n1'), kind: 'noop' }] },
+      ], { maxConcurrency: 2 }),
+    ]));
+    assert.equal(res(r, 'p').status, 'pass', res(r, 'p').assertionSummary ?? '');
+  });
+
+  test('各分支写各自不同的变量 -> 放行', async () => {
+    const r = await run(scen([
+      par('p', [
+        { ...b('k0'), kind: 'set', assign: { fromA: 1 } },
+        { ...b('k1'), kind: 'set', assign: { fromB: 2 } },
+      ], { maxConcurrency: 2 }),
+    ]));
+    assert.equal(res(r, 'p').status, 'pass', res(r, 'p').assertionSummary ?? '');
+  });
+
+  test('只有一支时完全不查（单支没有"另一个分支"可串）', async () => {
+    const r = await run(scen([
+      { ...b('seed'), kind: 'set', assign: { list: [1] } },
+      par('p', [{ ...b('k0'), kind: 'forEach', items: 'list', as: 'item', steps: [{ ...b('n0'), kind: 'set', assign: { shared: 1 } }] }]),
+    ]));
+    assert.equal(res(r, 'p').status, 'pass', res(r, 'p').assertionSummary ?? '');
+  });
+
+  test('分支里嵌套的 set 也算（要 walk 到底，不能只看直接子步骤）', async () => {
+    const r = await run(scen([
+      par('p', [
+        { ...b('k0'), kind: 'sequence', steps: [{ ...b('k0a'), kind: 'set', assign: { deep: 1 } }] },
+        { ...b('k1'), kind: 'sequence', steps: [{ ...b('k1a'), kind: 'set', assign: { deep: 2 } }] },
+      ], { maxConcurrency: 2 }),
+    ]));
+    assert.equal(res(r, 'p').status, 'error', '嵌套里的写漏了，闸就等于形同虚设');
+  });
+});

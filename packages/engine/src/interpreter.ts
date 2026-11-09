@@ -10,7 +10,7 @@
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
 import type { Step, Scenario, Lease } from '@atest/ir';
-import { countsTowardPassRate, LEASE_REQUIRED, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import { countsTowardPassRate, LEASE_REQUIRED, parallelHazards, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
@@ -389,6 +389,30 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             status: 'error', cause: 'case-stale',
             summary: `parallel 的分支里有 useIdentity（${racing.map((c) => c.id).join('、')}）。并行分支共享身份状态，结果会随调度顺序变化。`,
             keyContext: { hint: '每个身份写一条独立场景，或用 parallelGroup/concurrencySafe 让调度器串行化' },
+          };
+        }
+        /*
+         * **变量竞态的静态闸**（判据与探针见 ir/src/steps.ts 的 parallelHazards）。
+         *
+         * 两条已实测会串的写法：两支写同一个名字（谁后跑谁算，同一份冻结场景
+         * 能给 pass 也能给 fail —— 直接破 M7 的"跑 20 次断言结果完全一致"）；
+         * 以及一支带 forEach、另一支提到同一个循环项名字（帧栈是 VarSpace 共享的一条，
+         * A 支的 popTo 会把 B 支刚压的帧一起弹掉 —— 探针里 A 支读到了 B 支的循环项值）。
+         *
+         * 拒而不做"每支一份独立作用域"：那要把 vars 从闭包变量改成显式参数，
+         * 牵动 36 处 vars. 调用与所有容器，属于 P1 的作用域重构（已记 docs/08）。
+         * 在那之前跑出一个随调度顺序变的答案更糟 —— 而这类结果**重跑一次可能正好对**，
+         * 是最容易被当成 flaky 重试掉、从而永久藏起来的那种。
+         */
+        const hazards = parallelHazards(s.steps);
+        if (hazards.length) {
+          const what = hazards
+            .map((h) => (h.kind === 'shared-write' ? `"${h.name}" 被 ${h.branches.join(' / ')} 同时写` : `分支 ${h.from} 的循环项 "${h.name}" 会被 ${h.into.join(' / ')} 读到（共享作用域栈）`))
+            .join('；');
+          return {
+            status: 'error', cause: 'case-stale',
+            summary: `parallel 的分支之间变量会串：${what}`,
+            keyContext: { hint: '给各分支用不同的变量名，或把这几支拆成顺序步骤 / 独立场景' },
           };
         }
         /*

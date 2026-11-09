@@ -108,6 +108,51 @@
       "replace": "const left = [...s.steps].reverse(); left.reverse();",
       "expect": "equivalent",
       "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "mentionedNames 不做 $ 二次切分（$item 当成一个词，读侧静默漏判）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "for (const part of m[0].split('$')) if (part) out.add(part);",
+      "replace": "out.add(m[0]);",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "writtenNames 把 forEach 的循环项也算进共享名字（闸变过宽，真实场景没法用）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "    if (s.kind === 'forEach') return;\n",
+      "replace": "",
+      "testFile": "packages/engine/test/parallel.test.ts",
+      "expect": "equivalent",
+      "_note": "**等价**：writtenNames 多出的那批名字（forEach 的 as/indexAs）与 loopVarNames 完全同一批，而 frame-shadow 那条判据已经把所有\"另一支提到同名循环项\"的写法拒了。所以去掉这条例外，接受/拒绝的集合不变。留着的价值是给以后别的 writtenNames 消费者（lint）留正确的语义，不是给闸用的。"
+    },
+    {
+      "label": "shared-write 判定从 >1 改成 >2（两支撞名不再拦）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "if (bs.length > 1) out.push({ kind: 'shared-write', name, branches: bs });",
+      "replace": "if (bs.length > 2) out.push({ kind: 'shared-write', name, branches: bs });",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "frame-shadow 只查写侧不查读侧（去掉提到名字的匹配）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": ".filter((o) => looped.some((n) => mentionedNames([o]).has(n)))",
+      "replace": "",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "parallelHazards 开头就返回空（整条闸失效）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "  if (branches.length < 2) return out;",
+      "replace": "  return out;",
+      "testFile": "packages/engine/test/parallel.test.ts"
+    },
+    {
+      "label": "嵌套里的写不算（只看直接子步骤，不 walk）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "  walk(steps, (s) => {\n    const sites = STEP_WRITE_SITES[s.kind];",
+      "replace": "  steps.forEach((s) => {\n    const sites = STEP_WRITE_SITES[s.kind];",
+      "testFile": "packages/engine/test/parallel.test.ts",
+      "_note": "walk -> forEach（同形、只遍历顶层）。原先写成 for...of，收尾的 `});` 配不上对，编译就挂了 —— 那产出的是 BUILD_BROKEN 而不是结论。"
     }
   ]
 }
