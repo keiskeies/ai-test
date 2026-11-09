@@ -16,7 +16,7 @@ import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
-import { resolveValue as resolveValueShared, toIterable, flattenTimes, looseEq, type ValueScope } from './resolve.js';
+import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
@@ -346,7 +346,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         return runChildren(s.default, [...path, s.id], vars);
       }
       case 'forEach': {
-        const items = toIterable(compileExpr(s.items).eval({ root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }));
+        const items = iterItems(compileExpr(s.items).eval({ root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }));
         const cap = Math.min(items.length, s.maxIterations);
         if (items.length > s.maxIterations) {
           emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'LOOP_TRUNCATED', detail: `数据 ${items.length} 条被 maxIterations=${s.maxIterations} 截断` } });

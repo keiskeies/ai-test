@@ -25,7 +25,7 @@ import { compileExpr, truthy } from './expr.js';
 import { evalStructAssert } from './assertions.js';
 import { VarError, VarSpace, type InputDef, type VarSpace as VarSpaceT } from './vars.js';
 import { PathError } from './jsonpath.js';
-import { flattenTimes, looseEq, resolveValue, toIterable, type ValueScope } from './resolve.js';
+import { flattenTimes, looseEq, resolveValue, iterItems, type ValueScope } from './resolve.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 
 /** docs/09 §4.2 里那个接口。两种形态实现同一个形状。 */
@@ -278,7 +278,7 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
         const indexAs = s.indexAs;
         const cap = s.maxIterations;
         return asContainer(s.id, (st) => {
-          const items = toIterable(st.evalExpr(itemsSrc));
+          const items = iterItems(st.evalExpr(itemsSrc));
           const n = Math.min(items.length, cap);
           for (let i = 0; i < n; i++) {
             const depth = st.vars.pushIteration(as, items[i], indexAs, i);

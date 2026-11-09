@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "forEach.items 未定义时报错这条判据的变异集。",
+    "tests: packages/engine/test/control.test.ts（行为与 cause）+ executor.test.ts（两种形态等价）。",
+    "",
+    "这一小份只测两件事，但都是**改坏就静默**的那种：",
+    "  1. 判据本身（未定义要抛、真实空数组放过）—— 方向不能反，反了就是把合法输入拦死；",
+    "  2. **两种执行形态不能分叉** —— iterItems 是 resolve.ts 里共用的，但抛出后",
+    "     怎么收敛成一步 error 是两边各自实现的（解释器 runStep 的 catch vs runSeq 的统一 catch）。",
+    "     分叉的表现是「功能回归全绿、压测形态悄悄跳过整段循环」，而这两件事在同一次 CI 里",
+    "     看起来都是绿的。第三条变异就是把预编译那一侧单独退回旧行为，",
+    "     我先把这件事手工验过一遍（改 executor 一侧 -> 只有等价那条红），再固化成变异。",
+    "",
+    "engine 包内互改，同包，harness 会自己判要不要重建（见 mustBuild）。",
+    "（原本列过一条\"引用不存在的函数\"的变异，已删 —— 它只会产出 BUILD_BROKEN（无结论），那不是\"测试抓到了\"。同形可编译的版本是最后那条。）"
+  ],
+  "cases": [
+    {
+      "label": "判据整体失效：未定义也当空表（回到\"静默迭代 0 次 + 场景绿\"）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "export function iterItems(v: unknown): unknown[] {\n  if (v === undefined) {",
+      "replace": "export function iterItems(v: unknown): unknown[] {\n  if (false && v === undefined) {",
+      "testFile": "packages/engine/test/control.test.ts"
+    },
+    {
+      "label": "判据过宽：把 null 也当错误（真实空表/显式 null 的合法用例被拦死）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  if (v === undefined) {",
+      "replace": "  if (v === undefined || v === null) {",
+      "testFile": "packages/engine/test/control.test.ts"
+    },
+    {
+      "label": "cause 退成环境问题：用普通 Error 而不是 VarError（值班人去查一个好好的环境）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "    throw new VarError(\n      'forEach 的 items 求值为 undefined：这个变量不存在（拼写？还没 set/extract？声明在别的分支里？）',\n      'forEach.items',\n    );",
+      "replace": "    throw new Error('forEach 的 items 求值为 undefined：这个变量不存在');",
+      "testFile": "packages/engine/test/control.test.ts",
+      "_note": "必须把整个 throw（含第二个参数）一起换掉：VarError 的构造是 (message, varName)，\n只把 new VarError( 改成 new Error( 会多出一个实参 -> TS2554 编译不过 -> 只能得到 BUILD_BROKEN（无结论）。\n我第一版就是这么写的，跑出来是 BUILD_BROKEN 而不是 caught。"
+    },
+    {
+      "label": "只有预编译形态修得不对：items 未定义时按空表跑（同形、可编译）",
+      "file": "packages/engine/src/executor.ts",
+      "anchor": "          const items = iterItems(st.evalExpr(itemsSrc));",
+      "replace": "          const items = (st.evalExpr(itemsSrc) ?? []) as unknown[];",
+      "testFile": "packages/engine/test/executor.test.ts"
+    }
+  ]
+}

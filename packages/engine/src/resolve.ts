@@ -79,11 +79,45 @@ export function generate(kind: string, w: Record<string, unknown>, clock: Pick<C
 // 正是最容易在两份实现之间悄悄分叉的地方 —— 分叉的后果是
 // "功能回归全绿、压测报退化"，极难查。
 
-/** 迭代对象的取集合：数组原样，对象取 values，标量包成单元素（null/undefined 是空集） */
+/** 迭代对象的取集合：数组原样，对象取 values，标量包成单元素（null 是空集） */
 export function toIterable(v: unknown): unknown[] {
   if (Array.isArray(v)) return v;
   if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>);
   return v === undefined || v === null ? [] : [v];
+}
+
+/**
+ * `items` 解析不出来时**抛错**而不是当成空表。
+ *
+ * 为什么单开一个函数而不是改 toIterable：toIterable 的"null/undefined 是空集"在
+ * **别处**是对的（比如把响应里的可选数组喂给它），而 `forEach.items` 这里要的语义不一样 ——
+ * 拆开两个函数比给一个函数加 flag 诚实，因为这两处语义**本来就该不同**。
+ *
+ * 为什么这里要抛：`items: 'missingList'`（变量名拼错）求值出 `undefined`，
+ * 与"真的是空数组"在 toIterable 里**撞成同一个结果**（实测：两者都是 0 次迭代、
+ * 场景整体绿）。于是数据驱动用例最典型的失效方式完全静默：
+ * 变量名拼错 → 循环体一条都没跑 → 退出码 0。
+ * 而 undefined 与 [] 在**调用点**是可区分的（实测 evalExpr 对未定义名字给 undefined，
+ * 对声明过的空数组给 []），所以这个区分不需要新信息，只是此前没人看。
+ *
+ * 只管 undefined，**不管 null**：`set x = null` 之后 items 是运行时的真实值，
+ * 那可能确实表示"没数据"；而 undefined 的含义窄得多 —— **那个名字压根不存在**。
+ *
+ * 抛错落点是 `forEach` 这个**容器步骤自己**的 error。这条能被看见的前提是
+ * gate.ts 那侧刚修的"容器自己记的结论要进退出码"：在那之前，这个 error
+ * 会被 leaves 过滤掉，等于把一种假绿换成另一种。
+ */
+export function iterItems(v: unknown): unknown[] {
+  if (v === undefined) {
+    // 抛 VarError 而不是 Error：解释器按异常类型定 cause（runStep 的 catch：
+    // VarError -> case-stale，其它 -> env-unavailable）。用 Error 会把"用例里变量名拼错"
+    // 报成"环境有问题"，值班人去查一个好好的环境 —— 这正是 cause 这个字段存在要防的事。
+    throw new VarError(
+      'forEach 的 items 求值为 undefined：这个变量不存在（拼写？还没 set/extract？声明在别的分支里？）',
+      'forEach.items',
+    );
+  }
+  return toIterable(v);
 }
 
 /** repeat 的展开。id 加 `#i` 后缀，让 extract/引用能区分是第几轮。 */

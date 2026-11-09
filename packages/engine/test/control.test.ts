@@ -75,6 +75,52 @@ describe('控制流', () => {
     assert.match(res(r, 'leak').assertionSummary ?? '', /未找到|未定义/);
   });
 
+  test('items 指向不存在的变量 => error，不能静默迭代 0 次', async () => {
+    // 与下面 while 撞上限那条同一条原则：**"看起来正常结束了"是最贵的静默**。
+    // 实测改动前：`items:'$list'` 与 `items:'list'` 两种写法都是 `loop=pass` + "迭代 0 次"
+    // + 场景整体 pass —— 数据驱动用例最典型的失效方式（变量名拼错 → 整段没跑 → 绿）。
+    // 注意 `$list` 也一样：`$` 前缀不会让未定义变成异常，expr 求值一样给 undefined。
+    for (const items of ['$list', 'list']) {
+      const r = await run(scen([
+        { ...b('loop'), kind: 'forEach', items, as: 'x', maxIterations: 5,
+          steps: [{ ...b('n'), kind: 'noop' }] },
+      ]));
+      assert.equal(r.status, 'error', `items=${items} 时不该是绿的`);
+      assert.equal(res(r, 'loop').status, 'error', `items=${items}`);
+      assert.equal(res(r, 'loop').cause, 'case-stale',
+        'cause 必须是用例问题而不是环境问题，否则值班人去查一个好好的环境');
+      assert.equal(r.results.filter((x) => x.stepId === 'n').length, 0, '循环体一步都不该跑');
+    }
+  });
+
+  test('items 是**真实存在的空数组**仍然合法迭代 0 次（不能把上一条的错误码当成"零迭代一律错"）', async () => {
+    // 这条是上一条的**窄性对照**。少了它，"未定义要报错"就会被实现成"空数组也报错"，
+    // 而空列表在数据驱动里完全合法（这一批恰好没数据）。
+    const r = await run(scen([
+      { ...b('seed'), kind: 'set', assign: { rows: [] } },
+      { ...b('loop'), kind: 'forEach', items: '$rows', as: 'x', maxIterations: 5,
+        steps: [{ ...b('n'), kind: 'noop' }] },
+    ]));
+    assert.equal(r.status, 'pass', '空数组是合法输入，不是用例错误');
+    assert.equal(res(r, 'loop').status, 'pass');
+  });
+
+  test('items 是显式 null 时仍按空表处理（undefined 与 null 的区别就是这条判据的全部依据）', async () => {
+    // 这条不是凑数：**"只管 undefined、不管 null" 是本判据的唯一立足点**，
+    // 而它一度只是注释里的一句话 —— 变异「把 null 也当错误」当场活下来证明了这点。
+    // 立场：undefined 的含义窄到只剩"这个名字压根不存在"（多半是拼错），
+    // 而 null 是人显式写进去的**一个值**，`set rows = null` 之后迭代它，
+    // 说"没数据"比说"用例写错了"更贴近事实。真要收口成"null 也算错"，
+    // 得连这条测试与 resolve.ts 的注释一起改，别只改实现。
+    const r = await run(scen([
+      { ...b('seed'), kind: 'set', assign: { rows: null } },
+      { ...b('loop'), kind: 'forEach', items: '$rows', as: 'x', maxIterations: 5,
+        steps: [{ ...b('n'), kind: 'noop' }] },
+    ]));
+    assert.equal(r.status, 'pass', '显式 null 是合法的空数据，不是用例错误');
+    assert.equal(res(r, 'loop').status, 'pass');
+  });
+
   test('while 撞上 maxIterations 要留痕，不能静默截断', async () => {
     const r = await run(scen([
       { ...b('w'), kind: 'while', condition: 'true', maxIterations: 3, steps: [{ ...b('n'), kind: 'noop' }] },

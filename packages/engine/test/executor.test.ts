@@ -124,6 +124,22 @@ test('forEach 的迭代变量与销毁等价', async () => {
   assert.equal(r.steps.find((x) => x.stepId === 'leakIdx')?.status, 'error', '$i 泄漏到循环外了');
 });
 
+test('forEach 的 items 未定义时，两种形态都得报 error 而不是各自静默 0 次', async () => {
+  // 这条存在的理由不是"再验一次未定义会错"（control.test.ts 已经钉了行为与 cause），
+  // 而是**两种执行形态不能在这一条上分叉**：iterItems 是 resolve.ts 里共用的，
+  // 但"抛出后怎么收敛成一步 error"两边是各自实现的（解释器 runStep 的 catch /
+  // runSeq 的统一 catch）。分叉的表现是"功能回归全绿、压测形态悄悄跳过整段循环"。
+  const s = scen([
+    { ...b('fe'), kind: 'forEach', items: '$nosuch', as: 'x', maxIterations: 5,
+      steps: [{ ...b('n'), kind: 'noop' }] },
+  ] as StepDraft[]);
+  const r = await same(s);
+  // 一致还不够，得**两边都是 error**：两边一起静默也算"等价"（同上一条注释里那条教训）
+  assert.equal(r.status, 'error', `两边一致但都放过了：status=${r.status}`);
+  assert.equal(r.steps.find((x) => x.stepId === 'fe')?.status, 'error');
+  assert.equal(r.steps.filter((x) => x.stepId === 'n').length, 0, '循环体一步都不该跑');
+});
+
 test('forEach 截断行为一致（maxIterations 小于数据量）', async () => {
   const s = scen([
     { ...b('v'), kind: 'set', assign: { list: [1, 2, 3, 4, 5], sum: 0 } },
