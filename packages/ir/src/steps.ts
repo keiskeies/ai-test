@@ -141,7 +141,25 @@ const ExtractStepSchema = z
   })
   .strict();
 const TableStepSchema = z
-  .object({ kind: z.literal('table'), ...Base, rows: z.array(z.record(z.string(), ValueSchema)).min(1), as: VarNameSchema.default('row') })
+  .object({
+    kind: z.literal('table'),
+    ...Base,
+    rows: z.array(z.record(z.string(), ValueSchema)).min(1),
+    /*
+     * 行集合**写进哪个变量**（不是"每行绑到什么名字"）。
+     *
+     * 这个字段原先声明了但执行侧一行没读（本仓那个缺陷类的实例）：解释器写死
+     * `vars.set('table', rows)`，于是 `as:'users'` 静默无效，而两个 table 步骤
+     * 会互相覆盖同一个 `table` 变量。
+     *
+     * **默认值刻意取 `'table'`（而不是原来的 `'row'`）**：省略 `as` 的场景
+     * 行为必须一字不变（现在有一个测试断的就是 `$table`）。
+     * 原来那个 `'row'` 读起来像"每行绑到 row"，但本 IR 里**没有**这个语义的容身之处
+     * —— 逐行是 forEach 的活（`items` + `as`），table/dataSource 只负责产出一个数组。
+     * 名字与语义错配大概就是它一直没人接线的原因。
+     */
+    as: VarNameSchema.default('table'),
+  })
   .strict();
 const DataSourceStepSchema = z
   .object({
@@ -152,7 +170,8 @@ const DataSourceStepSchema = z
       z.object({ type: z.literal('mysql'), sql: z.string(), datasource: z.string().default('default') }).strict(),
       z.object({ type: z.literal('qdrant'), collection: z.string(), query: z.string(), limit: z.int().min(1).max(500).default(50) }).strict(),
     ]),
-    as: VarNameSchema.default('row'),
+    /** 同 table.as：写进哪个变量。默认 `'rows'` 与既有行为一致（省略时照旧写 $rows） */
+    as: VarNameSchema.default('rows'),
     /** 行租约：防两个 run 抢同一行 */
     leaseRows: z.boolean().default(true),
   })

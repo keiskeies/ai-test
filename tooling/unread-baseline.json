@@ -321,11 +321,6 @@
       "reason": "数据驱动执行器未接（今天 dataSource 步骤有 case 但行租约/来源细节没消费）"
     },
     {
-      "id": "packages/ir/src/steps.ts#DataSourceStepSchema.leaseRows",
-      "milestone": "P2",
-      "reason": "数据驱动执行器未接（今天 dataSource 步骤有 case 但行租约/来源细节没消费）"
-    },
-    {
       "id": "packages/ir/src/steps.ts#DeviceStepSchema.allowManualHandoff",
       "milestone": "P3+",
       "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
@@ -505,5 +500,7 @@
       "milestone": "P1",
       "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
     }
-  ]
+  ],
+  "inconclusiveCeiling": 233,
+  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它的唯一正当办法是让字段名不再撞上高频标识符（as -> rowVariable 那种），抬高它要在旁边写清理由。"
 }

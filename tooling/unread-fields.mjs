@@ -251,18 +251,6 @@ export function extractFields(relPath, src) {
 
 /* ----------------------------------------------------------- 找消费者 */
 
-/** 一个文件里"被提到"的所有标识符：代码里的标识符 + 字符串字面量的内容拆词。 */
-export function mentionedTokens(src) {
-  const masked = maskNonCode(src);
-  const set = new Set();
-  for (const m of masked.matchAll(/[A-Za-z0-9_$]+/g)) set.add(m[0]);
-  // 字符串内容：给"按字段名查表"那类代码一个机会（脱敏规则表就是 `password` 这种字符串）。
-  for (const m of src.matchAll(/['"`]([^'"`\n]{1,120})['"`]/g)) {
-    for (const w of m[1].split(/[^A-Za-z0-9_$]+/)) if (w) set.add(w);
-  }
-  return set;
-}
-
 export function listTsFiles(dirAbs) {
   const out = [];
   if (!existsSync(dirAbs)) return out;
@@ -286,6 +274,79 @@ function addRead(readers, token, rec) {
   else readers.set(token, [rec]);
 }
 
+/*
+ * ── 证据分级 ─────────────────────────────────────────────────────────────
+ *
+ * 起因：`as` 这个字段名在消费者代码里有 **194 处裸词命中**（`x as Type` 的
+ * TypeScript 断言、`import ... as ...`），但只有个位数是"在读某个对象的 as 成员"。
+ * 用裸词判"读过"，`table.as` 与 `dataSource.as` 这两条**真·没人读**的字段会被算成
+ * "211 处读过"，扫描器对它们**永久失明**。而 IR 里字段名撞上高频词/关键字的不止这两个
+ * （`kind`/`name`/`type`/`id`/`path`/`mode`/`source`/`scope`/`rows`… 全中）。
+ *
+ * 于是分三级，**并且承认第三级判不了**：
+ *  - **read**：有强证据（成员访问 / 解构 / 下标），且这个名字只在一个 schema 里声明过
+ *    —— 能确定这条访问就是冲它来的。
+ *  - **inconclusive**：只有裸词命中，或者这个名字在多个 schema 里同名。
+ *    后一条是**结构性**的判不了：`s.as` 那唯一一处成员访问属于 forEach，
+ *    而 table/dataSource 的 `as` 一次都没被读 —— 词法层面**分不出这两个 as**。
+ *    要分只能上类型级（TypeScript 编译器 API 看变量的声明类型），记在 docs/08 当 P2。
+ *  - **unread**：一个命中都没有。这一级才是扫描器能负责的。
+ *
+ * 关键是**别让 inconclusive 冒充 read**：它冒充一次，那条字段就从此没人再看，
+ * 而"配了没生效"的缺陷正是靠这种"看起来有人管"活着（docs/08 §3 那个缺陷类）。
+ */
+
+/** 一个标识符在代码里的角色：成员访问 / 解构或对象键 / 下标字符串 / 裸词 */
+export function roleOf(masked, start, end) {
+  let p = start - 1;
+  while (p >= 0 && /\s/.test(masked[p])) p--;
+  const prev = p >= 0 ? masked[p] : '';
+  if (prev === '.') return 'member';
+  /*
+   * `[foo]` **不算证据**。掩码之后字符串内容已经空了，所以这里能看到的
+   * `[x]` 一定是 `arr[i]` 这种**把标识符当数组下标用**的写法 ——
+   * 它读的是那个下标变量，不是"某个对象的 foo 字段"。
+   * 早先把它算成强证据，实测会把 `path`/`key`/`id`/`name` 这些
+   * "恰好被拿来当索引"的名字判成读过（42 个标识符里有 9 个是 IR 字段名）。
+   * 判不出来就落到 bare，宁可多几条"判不出"。
+   */
+  let n = end;
+  while (n < masked.length && /\s/.test(masked[n])) n++;
+  const next = n < masked.length ? masked[n] : '';
+  // `{ foo` / `, foo` 后面跟 `,` `}` `:` —— 解构或对象字面量的键
+  if ((prev === '{' || prev === ',' || prev === '(') && (next === ',' || next === '}' || next === ':' || next === ')')) return 'binding';
+  return 'bare';
+}
+
+/** 强证据的两种角色。bare 不算：同名局部变量、TS 断言关键字都会造出一堆假命中。 */
+const STRONG_ROLES = new Set(['member', 'binding']);
+
+/**
+ * 收集一个文件里所有"标识符 + 它在代码里的角色"。
+ *
+ * 单独成函数是为了**能被测**：这段逻辑原先直接写在 scan() 的循环里，
+ * 于是想测它只能在测试里重抄一遍同样的正则 —— 重抄的那份和真正跑的那份
+ * 可以各自漂移，而测试永远是绿的（本仓那个缺陷类的测试侧镜像）。
+ */
+export function collectTokens(src, rel = '') {
+  const masked = maskNonCode(src);
+  // 一个计数器就够：maskNonCode 只把内容换成空格，长度与换行位置与原文完全一致，
+  // 所以掩码文本上的下标能直接用原文的行号表来查。
+  const lineOf = makeLineOf(src);
+  const out = [];
+  for (const m of masked.matchAll(/[A-Za-z0-9_$]+/g)) {
+    out.push({ token: m[0], role: roleOf(masked, m.index, m.index + m[0].length), file: rel, line: lineOf(m.index) });
+  }
+  for (const m of src.matchAll(/['"`]([^'"`\n]{1,120})['"`]/g)) {
+    for (const w of m[1].split(/[^A-Za-z0-9_$]+/)) {
+      if (!w) continue;
+      // 字符串里的词**永远只算弱证据**：脱敏规则表里有 'password' 不等于读了 password 字段
+      out.push({ token: w, role: 'bare', viaString: true, file: rel, line: lineOf(m.index) });
+    }
+  }
+  return out;
+}
+
 /** 跑一遍全量扫描。返回 { fields, unread, hits }。 */
 export function scan(root = ROOT) {
   const fields = [];
@@ -297,33 +358,36 @@ export function scan(root = ROOT) {
   const uniq = new Map();
   for (const f of fields) if (!uniq.has(f.id)) uniq.set(f.id, f);
 
-  const readers = new Map(); // token → [{file, line}]
+  const readers = new Map(); // token → [{file, line, role}]
   for (const dir of CONSUMER_DIRS) {
     for (const f of listTsFiles(join(root, dir))) {
-      const src = readFileSync(f, 'utf8');
-      const masked = maskNonCode(src);
       const rel = relative(root, f).split(sep).join('/');
-      // 一个计数器就够：maskNonCode 只把内容换成空格，长度与换行位置与原文完全一致，
-      // 所以掩码文本上的下标能直接用原文的行号表来查。
-      const lineOf = makeLineOf(src);
-      for (const m of masked.matchAll(/[A-Za-z0-9_$]+/g)) addRead(readers, m[0], { file: rel, line: lineOf(m.index) });
-      for (const m of src.matchAll(/['"`]([^'"`\n]{1,120})['"`]/g)) {
-        for (const w of m[1].split(/[^A-Za-z0-9_$]+/)) {
-          if (!w) continue;
-          addRead(readers, w, { file: rel, line: lineOf(m.index), viaString: true });
-        }
-      }
+      // 取词一律走 collectTokens —— 它是**被测的那一份**。
+      // 早先这里内联了一份同样的正则，而测试只能在测试里重抄第三份：
+      // 三份各自漂移也不会红，因为跑的这份没人测（本仓缺陷类的测试侧镜像）。
+      for (const t of collectTokens(readFileSync(f, 'utf8'), rel)) addRead(readers, t.token, t);
     }
   }
 
+  // 同一个字段名在几个 schema 里声明过。>1 时**任何命中都无法归到具体某一条**：
+  // `.as` 那一处访问属于 forEach，而 table/dataSource 的 as 一次都没被读 ——
+  // 词法层面分不出这两个 as（要分只能上类型级数据流，见 docs/08）。
+  const declCount = new Map();
+  for (const f of uniq.values()) declCount.set(f.key, (declCount.get(f.key) ?? 0) + 1);
+
   const unread = [];
+  const inconclusive = [];
   const hits = new Map();
   for (const [id, f] of uniq) {
-    const rec = readers.get(f.key);
-    if (rec && rec.length) hits.set(id, rec);
-    else unread.push(f);
+    const rec = readers.get(f.key) ?? [];
+    hits.set(id, rec);
+    if (!rec.length) { unread.push(f); continue; }
+    const strong = rec.filter((r) => STRONG_ROLES.has(r.role));
+    // 只有"强证据 + 这个名字全局唯一"才敢说读过
+    if (strong.length && (declCount.get(f.key) ?? 0) === 1) continue;
+    inconclusive.push(f);
   }
-  return { fields: [...uniq.values()], unread, hits, readers };
+  return { fields: [...uniq.values()], unread, inconclusive, hits, readers, declCount };
 }
 
 /* ------------------------------------------------------------ 对照豁免 */
@@ -364,11 +428,16 @@ export function loadBaseline(root = ROOT) {
 export function report(res, base, opts = {}) {
   const c = classify(res.fields, res.unread, base);
   const lines = [];
-  lines.push(`schema 字段 ${res.fields.length} 个，消费者未读 ${res.unread.length} 个（已豁免 ${c.ok.length}）`);
-  // 这句**无条件说**。它比任何一条未读列表都重要：parallel.maxConcurrency 那次
-  // 扫描器认为字段"有读者"（解释器读了它当 slice 下标用），而缺陷就在用法上。
-  lines.push('  注意：这里判的是"名字有没有被执行侧碰过"，**碰过不等于用对了** ——');
-  lines.push('  用法错了（当成下标、单位错、走错分支）这一层量不出来，只有测试与变异检查能答。');
+  const inc = res.inconclusive ?? [];
+  const read = res.fields.length - res.unread.length - inc.length;
+  lines.push(`schema 字段 ${res.fields.length} 个：读过 ${read}、未读 ${res.unread.length}（已豁免 ${c.ok.length}）、**判不出 ${inc.length}**`);
+  // 这句**无条件说**。它比任何一条未读列表都重要。
+  lines.push('  "读过"要求**强证据**（成员访问 / 解构 / 下标）且该字段名全局唯一；');
+  lines.push('  只有裸词命中、或同名字段出现在多个 schema 里（`.as` 分不清是 forEach 还是 table 的）');
+  lines.push('  都只算**判不出** —— 宁可承认判不出，也不要让"碰过"冒充"读过"：');
+  lines.push('  一条字段一旦被算成"有人管"，就从此没人再看，而那正是缺陷活着的方式。');
+  lines.push('  另外**碰过也不等于用对了**（parallel.maxConcurrency 就是读了当 slice 下标用）——');
+  lines.push('  用法对不对只有测试与变异检查能答。');
   if (opts.evidence) {
     const n = opts.evidenceN ?? 8;
     const sample = res.fields.filter((f) => (res.hits.get(f.id) ?? []).length).slice(0, n);
@@ -398,10 +467,41 @@ export function report(res, base, opts = {}) {
     lines.push(`~ 豁免指向不存在的字段 ${c.dangling.length} 个（改名/删字段后漏清，和漏一条新缺陷一样会静默留着）：`);
     for (const f of c.dangling) lines.push(`  ${f.id}`);
   }
-  if (!c.newUnread.length && !c.staleExempt.length && !c.dangling.length) {
-    lines.push('✓ 未读字段全部有豁免，且没有过期豁免');
+  /*
+   * 判不出的那些**不逐条要求豁免**（233 条会淹没新增未读），但要有**上限**：
+   * 新增一个字段名撞上高频词的字段（比如再来一个 `as`/`type`），它会静默落进
+   * 这个桶里、永远不会被追问 —— 上限就是专门抓这件事的。
+   * 收紧靠"给新字段起个不撞名的名字"，这是真能做到的：字段名是 IR 的一部分，
+   * 起得具体（rowVariable 而不是 as）本来就是更好的命名。
+   */
+  /*
+   * 上限**没登记就算失败**（当有判不出的字段时）。
+   * 早先写的是 `?? inc.length` —— 那是自我取消的检查：没登记时上限等于当前值，
+   * 永远不超标，加了等于没加。现在没登记就要求人去登记一次。
+   */
+  const hasCeiling = typeof base.inconclusiveCeiling === 'number';
+  const missingCeiling = !hasCeiling && inc.length > 0;
+  const overCeiling = hasCeiling && inc.length > base.inconclusiveCeiling;
+  if (missingCeiling) {
+    lines.push('');
+    lines.push(`✗ 有 ${inc.length} 个字段判不出，但 ${BASELINE_REL} 里没登记 inconclusiveCeiling。`);
+    lines.push('  登记一次当前值即可。不接受"省略就等于不检查"。');
   }
-  return { lines, c, failed: c.newUnread.length + c.staleExempt.length + c.dangling.length > 0 };
+  if (overCeiling) {
+    lines.push('');
+    lines.push(`✗ 判不出的字段 ${inc.length} 个，超过登记的 ${base.inconclusiveCeiling} 个：新加的字段名撞上了高频标识符，扫描器对它失明。`);
+    lines.push(`  做法：把字段名改具体（例：as -> rowVariable），或确实需要的话在 ${BASELINE_REL} 里`);
+    lines.push('  抬高 inconclusiveCeiling 并写清为什么。');
+    for (const f of inc.slice(0, 8)) lines.push(`    ~ ${f.id}`);
+    if (inc.length > 8) lines.push(`    …（共 ${inc.length} 条）`);
+  }
+  if (!c.newUnread.length && !c.staleExempt.length && !c.dangling.length && !overCeiling && !missingCeiling) {
+    lines.push('✓ 未读字段全部有豁免，没有过期豁免，判不出的数量未增长');
+  }
+  return {
+    lines, c,
+    failed: c.newUnread.length + c.staleExempt.length + c.dangling.length > 0 || overCeiling || missingCeiling,
+  };
 }
 
 function main() {

@@ -10,8 +10,15 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  maskNonCode, extractFields, classify, makeLineOf, mentionedTokens, scan, report, loadBaseline,
+  maskNonCode, extractFields, classify, makeLineOf, scan, report, loadBaseline, collectTokens,
 } from '../unread-fields.mjs';
+
+/**
+ * 哪些角色算"这个字段真的被读了"。**测试里写死字面量而不用工具导出的那份**：
+ * 用导出的那份的话，把 STRONG_ROLES 改成空集合，测试会跟着一起变松、照样全绿 ——
+ * 那条测试就只是在复读实现，而不是在守行为。
+ */
+const STRONG = new Set(['member', 'binding']);
 
 describe('掩码', () => {
   test('注释与字符串被抹掉，代码留着，长度与换行数一个不变', () => {
@@ -76,10 +83,14 @@ test('makeLineOf 与朴素的 slice+split 等价', () => {
   }
 });
 
-test('mentionedTokens 把字符串里的词也算进来（脱敏规则表那类按名查表的代码）', () => {
-  const t = mentionedTokens(`const RULES = ['password', 'api_key'];\nx.foo;`);
-  assert.ok(t.has('password'));
-  assert.ok(t.has('foo'));
+// 原先这条测的是 mentionedTokens，那个函数已被 collectTokens 取代
+// （两份取词逻辑留一份就够了，见 collectTokens 的注释）。行为本身仍然要守：
+// 字符串里的词必须查得到，否则"按字段名查表"的代码（脱敏规则表那种）会全被判成未读。
+test('collectTokens 把字符串里的词也算进来（脱敏规则表那类按名查表的代码）', () => {
+  const toks = new Set(collectTokens(`const RULES = ['password', 'api_key'];\nx.foo;`).map((t) => t.token));
+  assert.ok(toks.has('password'), '字符串里的词要能查到');
+  assert.ok(toks.has('api_key'));
+  assert.ok(toks.has('foo'), '代码里的标识符更要能查到');
 });
 
 describe('豁免对账', () => {
@@ -129,6 +140,70 @@ describe('输出', () => {
     assert.equal(r.failed, true);
     assert.ok(r.lines.join('\n').includes('新增未读字段'));
   });
+
+  test('有判不出的字段却没登记上限 → 失败（省略上限曾等于"永远不超标"）', () => {
+    const withInc = (n) => ({
+      fields: Array.from({ length: n }, (_, i) => ({ file: 'a', schema: 'S', key: `k${i}`, line: 1, id: `a#S.k${i}` })),
+      unread: [], inconclusive: Array.from({ length: n }, (_, i) => ({ file: 'a', schema: 'S', key: `k${i}`, id: `a#S.k${i}` })),
+      hits: new Map(), readers: new Map(),
+    });
+    assert.equal(report(withInc(3), { fields: [] }).failed, true, '没登记上限必须失败，否则这条检查白加');
+    assert.equal(report(withInc(3), { fields: [], inconclusiveCeiling: 3 }).failed, false);
+    assert.equal(report(withInc(4), { fields: [], inconclusiveCeiling: 3 }).failed, true, '超过上限要报');
+  });
+});
+
+/**
+ * 证据分级。这批测试存在的理由是一个具体的假结论：
+ * 字段名 `as` 在消费者代码里有 200+ 处裸词命中（`x as Type` 的 TS 断言），
+ * 用裸词判"读过"会把**真没人读**的 `table.as` 算成"读过"，扫描器对它永久失明。
+ */
+/**
+ * 证据分级。这批测试存在的理由是一个具体的假结论：
+ * 字段名 `as` 在消费者代码里有 200+ 处裸词命中（`x as Type` 的 TS 断言），
+ * 用裸词判"读过"会把**真没人读**的 `table.as` 算成"读过"，扫描器对它永久失明。
+ *
+ * 一律调 collectTokens —— **不在测试里重抄一遍取词逻辑**。
+ * 第一版就是重抄的（自己写了个 scanIn 跑同样的正则），那等于测了一份没人走的代码：
+ * 真正跑的 scan() 怎么坏都是绿的，正是本仓那个缺陷类的测试侧镜像。
+ */
+describe('证据分级', () => {
+  /** 取某个 token 在源码里的最强角色 */
+  const role = (src, token) => {
+    const hits = collectTokens(src).filter((t) => t.token === token);
+    if (!hits.length) return undefined;
+    return hits.some((h) => STRONG.has(h.role)) ? 'strong' : 'bare';
+  };
+
+  test('裸词命中算弱证据（TS 的 `x as Type` 会造出一堆假命中）', () => {
+    assert.equal(role('const y = (z as Foo).bar;', 'as'), 'bare');
+  });
+
+  test('.as 成员访问算强证据', () => {
+    assert.equal(role('return s.as;', 'as'), 'strong');
+    assert.equal(role('return s?.as;', 'as'), 'strong', '可选链同样是成员访问');
+  });
+
+  test('解构算强证据', () => {
+    assert.equal(role('const { maxIterations } = s;', 'maxIterations'), 'strong');
+  });
+
+  test('数组下标不算证据（掩码后 `[x]` 只可能是 arr[i]，读的是下标变量）', () => {
+    // 早先算强证据时，实测把 path/key/id/name 这些"恰好被拿来当索引"的名字判成读过
+    assert.equal(role('return arr[path];', 'path'), 'bare');
+  });
+
+  test('字符串里的词只算弱证据（脱敏规则表里有 password 不等于读了 password 字段）', () => {
+    const hits = collectTokens("const RULES = ['password'];");
+    assert.ok(hits.some((h) => h.token === 'password' && h.viaString === true), '字符串里的词要能查到');
+    assert.ok(hits.filter((h) => h.token === 'password').every((h) => h.role === 'bare'));
+  });
+
+  test('行号对得上（错行号比没行号更坏：按图索骥打开文件看到的是另一回事）', () => {
+    const hits = collectTokens('const a = 1;\nconst b = s.pollMs;\n');
+    const hit = hits.find((h) => h.token === 'pollMs');
+    assert.equal(hit?.line, 2);
+  });
 });
 
 describe('对真实仓库', () => {
@@ -136,6 +211,19 @@ describe('对真实仓库', () => {
 
   test('字段数有下限（第一版栽过的地方：抽不到任何东西时它报的是"干净"）', () => {
     assert.ok(res.fields.length > 300, `只抽出 ${res.fields.length} 个字段 —— 抽取环节坏了，别看后面的结论`);
+  });
+
+  test('table.as 与 dataSource.as 落在"判不出"而不是"读过"（这次修掉的缺陷）', () => {
+    // 分级之前它们被判成"211 处读过"，扫描器对一条真缺陷永久失明
+    for (const id of ['packages/ir/src/steps.ts#TableStepSchema.as', 'packages/ir/src/steps.ts#DataSourceStepSchema.as']) {
+      const isRead = !res.unread.some((f) => f.id === id) && !res.inconclusive.some((f) => f.id === id);
+      assert.ok(!isRead, `${id} 不该被判成"读过"：那 200+ 处命中全是 x as Type 这种断言`);
+    }
+  });
+
+  test('判不出的占比要能被看见（它一旦变成 0 或暴涨，说明分级坏了）', () => {
+    const pct = res.inconclusive.length / res.fields.length;
+    assert.ok(pct > 0.1 && pct < 0.8, `判不出占 ${Math.round(pct * 100)}% —— 分级可能坏了`);
   });
 
   test('每个 schema 文件都真的抽到了东西（单文件抽风式失败会被总数掩盖）', () => {

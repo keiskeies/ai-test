@@ -532,9 +532,11 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       }
       case 'table': {
         const rows = s.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, resolveValue(v)])));
-        vars.set('table', rows);
+        // 以前写死 'table'：`as` 声明了却没人读，两个 table 步骤互相覆盖同一个变量。
+        // schema 的默认值就是 'table'，所以省略 as 的场景行为一字未变。
+        vars.set(s.as, rows);
         vars.exportStep(s.id, { rows });
-        return { status: 'pass', summary: `${rows.length} 行数据表` };
+        return { status: 'pass', summary: `${rows.length} 行数据表 -> $${s.as}` };
       }
       case 'extract': {
         const src = vars.resolveRef(s.from);
@@ -580,9 +582,17 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (!adapters.db) return { status: 'error', summary: 'dataSource 需要 db adapter', cause: 'env-unavailable' };
         if (s.source.type !== 'mysql') return { status: 'error', summary: `P0 仅支持 mysql 数据源（收到 ${s.source.type}）`, cause: 'env-unavailable' };
         const rows = await adapters.db.query(s.source.datasource, s.source.sql, {}, execCtx('api'));
-        vars.set('rows', rows);
+        /*
+         * `leaseRows` 默认 true，而**行租约一行代码都没有** —— 那比"没这个字段"更坏：
+         * 写用例的人以为两个并发 run 不会抢到同一行，实际会。字段保留（P1 实现时接线），
+         * 但每次都在报告里说出来，而不是让它静默地"看起来已启用"。
+         */
+        if (s.leaseRows) {
+          emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'ROW_LEASE_NOT_IMPLEMENTED', detail: 'leaseRows=true，但行租约尚未实现：两个并发 run 可能取到同一行（P1 补）' } });
+        }
+        vars.set(s.as, rows);
         vars.exportStep(s.id, { rows, count: rows.length });
-        return { status: 'pass', summary: `数据源 ${rows.length} 行` };
+        return { status: 'pass', summary: `数据源 ${rows.length} 行 -> $${s.as}` };
       }
       case 'script':
         return { status: 'error', summary: 'script 节点在 P0 被禁用（沙箱未实现；它会绕过静态闸）', cause: 'env-unavailable' };

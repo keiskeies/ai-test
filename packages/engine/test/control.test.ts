@@ -220,10 +220,38 @@ describe('变量空间与引用', () => {
     assert.equal(r.status, 'pass', r.summary);
   });
 
-  test('dataSource + table 提供数据驱动的行集合', async () => {
+  test('table 提供数据驱动的行集合；省略 as 时写进 $table', async () => {
     const r = await run(scen([
       { ...b('t'), kind: 'table', rows: [{ sku: { expr: '"A"' } }, { sku: { expr: '"B"' } }] },
       { ...b('a'), kind: 'assert', against: '$table', jsonPath: { $: { minLength: 2 } } },
+    ]));
+    assert.equal(r.status, 'pass', r.summary);
+  });
+
+  /*
+   * 这条测试原先的**标题**写着「dataSource + table」，但正文里只有一个 table 步骤
+   * 加一个 assert —— 压根没有 dataSource。于是 `dataSource.as` 没人读（真实缺陷）
+   * 它一次也抓不到，而标题会让人以为这块测过了。
+   * 这就是本仓那个缺陷类的**测试侧镜像**：测试通过的原因与它想验的东西无关。
+   * 现在真的走一遍 dataSource（配一个假 db adapter）。
+   */
+  test('dataSource 的行集合写进 as 指定的变量', async () => {
+    let seen = '';
+    const r = await run(scen([
+      { ...b('d'), kind: 'dataSource', as: 'orders', source: { type: 'mysql', sql: 'select id from t', datasource: 'main' } },
+      { ...b('a'), kind: 'assert', against: '$orders', jsonPath: { $: { minLength: 1 } } },
+    ]), { adapters: { db: { async query(ds, sql) { seen = `${ds}:${sql}`; return [{ id: 1 }]; } } } });
+    assert.equal(r.status, 'pass', r.summary);
+    assert.equal(seen, 'main:select id from t', 'datasource/sql 要真的传进 adapter，否则"外部数据驱动"没有输入');
+  });
+
+  test('as 生效：写了 as 就不是 $table（原先 as 声明了没人读，两个 table 互相覆盖）', async () => {
+    const r = await run(scen([
+      { ...b('t1'), kind: 'table', as: 'users', rows: [{ n: 1 }, { n: 2 }] },
+      { ...b('t2'), kind: 'table', rows: [{ n: 3 }] },
+      { ...b('a1'), kind: 'assert', against: '$users', jsonPath: { $: { minLength: 2 } } },
+      // 省略 as 的那一支写进默认名 $table —— 两条**不该互相覆盖**
+      { ...b('a2'), kind: 'assert', against: '$table', jsonPath: { $: { minLength: 1 } } },
     ]));
     assert.equal(r.status, 'pass', r.summary);
   });
