@@ -65,12 +65,15 @@
 | 已完成 | 内容 |
 | --- | --- |
 | M0 / M0.5 / M1 / M2 / M3 / **M0.6** | `packages/ir`（场景 IR + zod schema + builder + **`baseline` 性能基线模型**）、`packages/engine`（引用/表达式/等待/断言/解释器/静态闸/**`StepExecutor` 两种执行形态**）、`packages/adapter-http`（OpenAPI 3 解析 + 确定性别名 + style 序列化 + ajv 双向校验 + spec 生成的 mock server）、`tooling/lint-layers`（分层与 node-free 强制） |
-| 测试 | **365 例**（`node:test`）。含「引擎在浏览器里能跑」的 esbuild+vm 行为验证、「引擎跑真实 IR 打到 spec 生成的 mock server」的端到端验证，以及「**功能形态与预编译形态逐步等价**」的 35 例（含 40 例随机树属性测试）。`npm test` 全绿、`npm run build` 与 `npm run lint:layers` 干净 |
+| **M6 / M7 判据侧** | `packages/store`（磁盘内容寻址 + 脱敏在序列化时发生 + 自研 zip + 证据包组装）、`packages/cli`（**`atest run/lint/gen/agent/init/evidence`** 六命令，七档退出码 + `--ci` 门禁闸）、`engine/report.ts`（`trace.jsonl` + JUnit XML + manifest/summary） |
+| 测试 | **506 例**（`node:test`）。含「引擎在浏览器里能跑」的 esbuild+vm 行为验证、「引擎跑真实 IR 打到 spec 生成的 mock server」的端到端验证、「**功能形态与预编译形态逐步等价**」的 35 例（含 40 例随机树属性测试），以及 M6 的**外部实现验产物**两类：JUnit XML 交给 CPython 的 expat 解析、`evidence.zip` 交给系统 `unzip -t`。`npm test` 全绿、`npm run build` / `npm run typecheck:test` / `npm run lint:layers` 干净 |
 
 M2 的判据是「打本地 mock server（mock 由 spec 生成）全绿」—— 现在引擎自测**不依赖任何真实后端**，
 CI 的可用性不外挂在别人的 staging 上（`docs/05` §6）。
 
-**尚未开工**：M6、M7。
+**已开工但未收口**：
+- **M7（判据侧）** —— `--ci` 下未冻结/缺 provenance **一个请求都不发**就拒绝；真 socket 跑 20 次断言逐条一致；证据包无条件带 `scenario.irSha`（全长 sha256，规范化投影见 `ir/src/scenario.ts` 的 `canonicalScenario`）。**仍缺 `versionId`**：本地文件没有"第几版"的概念，硬编一个号就是编一个 —— 它等 P1 的版本表，证据包里如实是 `undefined`。
+- **M6 里故意没做**：`atest agent` 是明确的"不可用"实现（给出替代路径，不是 `command not found`）；`--yes`（跳过人工确认）被拒绝，理由是 `docs/03` §5 的不可逆动作必须过白名单或人。生成器不产 `statefulSequence`/`authMatrix`/`contract`/`idempotency`/`perfSmoke` 五个策略，原因逐条写在 `cli/src/gen.ts` 的 `STRATEGIES` 表里。
 
 M0.6 交付的是**接口分离 + 等价性证据 + 基线模型**，**不是能压测**：
 预编译形态目前只支持纯计算与断言子集，`http` 一律拒绝（请求对象构造还长在解释器里，
@@ -79,7 +82,7 @@ M0.6 交付的是**接口分离 + 等价性证据 + 基线模型**，**不是能
 **M2 里故意没做**（`04` §M2 的落点与没做的部分 有完整表格）：鉴权层（bearer/apiKey/oauth2cc/cookie jar/签名 provider 全部未实现，现在能跑通只因为 mock 不检查鉴权）、契约车道的独立调度、`openapiCall` 的数组 query 未走 spec 声明的 style。
 **被环境阻塞**：M4/M5 需要支持 tool calling + structured output 的模型组（当前网关报 `tool_choice requires at least one available tool`）。
 
-**开工前请先读 `04` §「偏差与教训」** —— 那里记着本机环境造成的技术选型替换（npm 而非 pnpm、`node:test` 而非 vitest、自研 JSONPath 与 lint 而非引第三方），照文档正文去装会装不上。
+**开工前请先读 `04` §「与计划的偏离」与 §「M6 里新增的偏差」** —— 那里记着本机环境造成的技术选型替换（npm 而非 pnpm、`node:test` 而非 vitest、自研 JSONPath 与 lint 而非引第三方、**自研 argv 解析而非 Commander + @clack、OpenAPI 只吃本地 JSON 文件不吃 YAML/URL**），照文档正文去装会装不上。
 
 **代码与文档目前已知不一致的两处**（都记在 `08` §3，别当已实现）：`maxCostUsdPerResolve` 只是 schema 字段、执行侧无人读它；`assertions.ts` 断言响应时自动拆一层 `body`。
 
