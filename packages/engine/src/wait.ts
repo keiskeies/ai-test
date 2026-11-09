@@ -5,6 +5,7 @@
 import type { WaitPredicate, WaitCondition } from '@atest/ir';
 import { describePredicate } from '@atest/ir';
 import { queryOne } from './jsonpath.js';
+import { locatorGate } from './resolve.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 
 export interface WaitDeps {
@@ -87,8 +88,23 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
       const a = d.adapters.ui ?? d.adapters.device;
       if (!a || !('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');
       const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<{ confidence: number; handle: string }> }).resolve(c.target, d.ctx);
-      const present = Boolean(r.handle) && r.confidence > 0.5;
-      return c.state === 'gone' ? !present : present;
+      /*
+       * **「在不在」有两个方向，阈值不能共用一个数**（这里原先两边都用写死的 0.5）。
+       *
+       * 0.5 恰好是 `confidenceGate` 的 schema **下限**，也就是最宽松的那个值 ——
+       * 而 `c.target` 就是整份 `LocatorSpec`（steps.ts 里 uiPredicate 的 target 字段），
+       * 人写的门限一路传到这里，然后被丢掉。
+       *
+       * 分方向不是因为麻烦，是因为**两个方向上"宽松"的含义相反**：
+       *  - 问"在不在"（visible/attached/enabled）：按人声明的门限判，与解释器同一判据。
+       *    收紧只会让等待更久或超时，方向安全。
+       *  - 问"走了没"（gone）：如果也按门限判"在"，0.6 的弱匹配会被判成"已经不在了"
+       *    => **等待提前成功**。toast/Loading 消失这类用例最要的正是这种假绿，
+       *    所以这里反过来取最保守的一档：**adapter 报了任何匹配就算还在**。
+       *    代价是最坏情况多等到超时（红，看得见），比悄悄绿了便宜。
+       */
+      const matched = Boolean(r.handle);
+      return c.state === 'gone' ? !matched : matched && r.confidence >= locatorGate(c.target);
     }
     case 'template': {
       const a = d.adapters.device ?? d.adapters.ui;

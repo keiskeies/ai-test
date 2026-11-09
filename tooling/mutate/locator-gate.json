@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "定位器置信度门这一轮的变异集（tests: packages/engine/test/locator.test.ts）。",
+    "",
+    "**这一族最需要被钉住的地方，是它当初活下来的方式**：`confidenceGate` 全仓 0 处读它，",
+    "而两个调用点各抄了一个常数顶在它的位子上（解释器 0.99、wait.ts 的 uiPredicate 0.5，",
+    "恰好是 schema 下限=最宽松档）。改动前 `npm test` 759/759 全绿；把判据退回写死的 0.99 再跑，",
+    "**236 条引擎测试照样全绿**。也就是说这块路径原先**一条测试都没有**，",
+    "缺陷不是被漏掉的，是活在一块从没被测试碰过的地方。",
+    "",
+    "**为什么有常数顶着比彻底没有更隐蔽**：行为看起来是「按置信度判的」，",
+    "代码评审读过去也不会觉得少了一行。前几例（failFast / maxConcurrency）都是字段空转，",
+    "一眼能看出没接线；这一例得去问「这个 0.99 凭什么等于人写在 IR 里的那个值」。",
+    "",
+    "第 3、4 条专门区分 uiPredicate 的**两个方向**：问「在不在」按门限判，问「走了没」",
+    "任何匹配都算还在（否则 0.6 的弱匹配会被判成「已消失」=> 等待提前成功，",
+    "toast/Loading 消失那类用例的假绿）。实测过：把 gone 方向也接上门限，只有第 4 条红；",
+    "退回写死 0.5，只有第 3 条红。**两条各管一个方向，合成一条就有一个方向没人守**。",
+    "",
+    "第 5 条是**故意等价**的：把 gate 的兜底从 1 改成 0.85 在这里测不出来，",
+    "因为只有 app/logcat 这类**根本没有 locator** 的步骤会走兜底，而它们拿的是引擎合成的",
+    "confidence:1 —— 1 与 0.85 都比得过。所以这条标 equivalent，**它不是在为兜底值背书**，",
+    "只是如实记下「这个常数目前没有可观测差异」。真要改兜底语义，得先造出一个能观测到它的形状。"
+  ],
+  "cases": [
+    {
+      "label": "置信度门退回写死的 0.99（人写 confidenceGate:1.0 时 0.99 被判 pass，实测退出码 0）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const needsReview = resolved.confidence < gate || resolved.rung >= 6;",
+      "replace": "        const needsReview = resolved.confidence < 0.99; // 变异：无视人写的门限",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "掉级不再算自愈（rung>=6「必须被看见」那句注释退回空话）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const needsReview = resolved.confidence < gate || resolved.rung >= 6;",
+      "replace": "        const needsReview = resolved.confidence < gate; // 变异：只信门限，丢掉掉级",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "uiPredicate 退回写死 0.5（schema 下限=最宽松档，人写的门限一路传到这里被丢掉）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      return c.state === 'gone' ? !matched : matched && r.confidence >= locatorGate(c.target);",
+      "replace": "      { const present = matched && r.confidence > 0.5; return c.state === 'gone' ? !present : present; }",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "gone 方向也按门限判「在」（0.6 的弱匹配被判成已消失 => 等待提前成功，fail-open）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      return c.state === 'gone' ? !matched : matched && r.confidence >= locatorGate(c.target);",
+      "replace": "      { const present = matched && r.confidence >= locatorGate(c.target); return c.state === 'gone' ? !present : present; }",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "等价变异：locatorGate 的兜底 1 改成 0.85（目前没有形状能观测到它）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  return typeof g === 'number' ? g : 1;",
+      "replace": "  return typeof g === 'number' ? g : 0.85;",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/locator.test.ts"
+    }
+  ]
+}

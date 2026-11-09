@@ -181,11 +181,6 @@
       "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
     },
     {
-      "id": "packages/ir/src/locator.ts#LocatorSpecSchema.confidenceGate",
-      "milestone": "P2.5",
-      "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
-    },
-    {
       "id": "packages/ir/src/locator.ts#LocatorSpecSchema.fallbacks",
       "milestone": "P2.5",
       "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"

@@ -16,7 +16,7 @@ import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
-import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, type ValueScope } from './resolve.js';
+import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
@@ -876,12 +876,40 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           emit({ kind: 'locator.resolved', stepId: s.id, data: { ...resolved } });
         }
         if ('perform' in uiOrDev) await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<void> }).perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx)));
+        /*
+         * **置信度门取人在 IR 里写的那个值**（`LocatorSpec.confidenceGate`，schema 默认 0.85）。
+         *
+         * 这里原先写的是 `confidence < 0.99 ? 'healed' : 'pass'` —— 一个与声明无关的常数，
+         * 而 `confidenceGate` 全仓**没有任何地方读它**（`grep` 只命中 schema 与 lint 测试的 fixture）。
+         * 那就是本仓立过多次的那个缺陷类「schema 有字段、执行侧没人读」的又一例，
+         * 而且方向是**假绿**：写 `confidenceGate: 1.0`（"只接受完全匹配"）的人，
+         * 在 confidence=0.99 时按 0.99 判成 pass，按他自己写的门限则尚未毕业。
+         * 实测（device adapter 返回 0.99）：`gate=1.0` => `tap=pass`、退出码 **0**、
+         * attention 空、`tally.healed=0`。
+         *
+         * **status 与 healed 必须同源**。以前一个看 0.99、一个看 `rung >= 6`，
+         * 于是能产出 `status:'pass'` + `healed:true` 这种组合，而下游两处都只看 status：
+         * `tally` 按 `status==='healed'` 计数、门禁的 `healed` 集合也是按 status 过滤的，
+         * 于是那个旗标**在报告里等于不存在**（实测同上）。
+         * 阶梯掉到第 6 级以后本来就写着"必须被看见，否则自愈会慢慢把用例改成永远通过"，
+         * 而它当时是看不见的。
+         *
+         * **取不到 locator 时不需要兜底常数**：`app`/`logcat` 的 target 可选，
+         * 那种情况下 `resolved` 是上面的合成默认值（confidence 1、rung 0），
+         * `1 < gate` 对任何 gate ≤ 1 都为假 => pass。所以这里**不再抄一份 0.85**，
+         * 免得 schema 改默认值时又多一个不会跟着改的地方。
+         */
+        const gate = locatorGate(locator);
+        // 掉级（rung>=6）与低于门限是同一件事的两种说法："这次不是靠便宜可信的路径过的"，
+        // 所以合成一个判据而不是两个字段各算一遍 —— 分开算就是上面那个洞的成因。
+        const needsReview = resolved.confidence < gate || resolved.rung >= 6;
         return {
-          status: resolved.confidence < 0.99 ? 'healed' : 'pass',
-          summary: `${s.kind} ${resolved.resolvedBy}${resolved.confidence ? ` (${resolved.confidence.toFixed(2)})` : ''}`,
+          status: needsReview ? 'healed' : 'pass',
+          summary: `${s.kind} ${resolved.resolvedBy}${resolved.confidence ? ` (${resolved.confidence.toFixed(2)})` : ''}`
+            + (resolved.confidence < gate ? `，低于声明的置信度门 ${gate}` : ''),
           resolvedBy: resolved.resolvedBy, rung: resolved.rung || undefined, confidence: resolved.confidence,
           nonReplayable: resolved.nonReplayable,
-          healed: resolved.rung >= 6, // 阶梯 6 级以上说明便宜路径没命中，标记待人审
+          healed: needsReview,
         };
       }
       case 'device': {

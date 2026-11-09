@@ -127,6 +127,26 @@ export function flattenTimes(times: number, steps: Step[]): Step[] {
   return out;
 }
 
+/**
+ * 取定位器**自己声明的**置信度门（`LocatorSpec.confidenceGate`）。
+ *
+ * 为什么要有这个函数而不是各调用点自己 `locator.confidenceGate ?? 0.85`：
+ * 这个字段的失效方式正是"两处各抄一个常数、抄还抄得不一样"——
+ * 实测改动前解释器用写死的 `0.99`、`wait.ts` 的 uiPredicate 用写死的 `0.5`
+ * （恰好是 schema 的下限，也就是最宽松的那个值），而人在 IR 里写的值没人读。
+ * 抄第三份 `0.85` 也一样会漂：schema 改默认值时它不会跟着改。
+ *
+ * **取不到时的兜底是 1 而不是 0.85**：只有 `app`/`logcat` 这类**根本没有 locator**
+ * 的步骤会走到这里（它们的 target 是可选的），那种情况下 resolve 返回的是引擎
+ * 自己合成的 `{confidence: 1, rung: 0}`，用 1 判得到 pass，与"无定位器可言"一致。
+ * 反过来说，**真带 locator 的步骤永远读得到数**（schema 有 `.default(0.85)`，
+ * `defineScenario` 时就填上了），所以这个兜底不会悄悄把某个 strict 门限放宽。
+ */
+export function locatorGate(locator: unknown): number {
+  const g = (locator as { confidenceGate?: unknown } | null | undefined)?.confidenceGate;
+  return typeof g === 'number' ? g : 1;
+}
+
 /** switch 的比较。数字与数字字符串视为相等（spec 里 status 有时是 "200" 有时是 200）。 */
 export function looseEq(a: unknown, b: unknown): boolean {
   if (a === b) return true;
