@@ -1,0 +1,113 @@
+{
+  "_comment": [
+    "PARALLEL_VAR_RACE 这条 lint 规则的变异集（tests: packages/engine/test/lint.test.ts）。",
+    "价值集中在两件事上：",
+    "  1. **规则本身要能被改坏就红**（级别、stepId、message 里的名字与分支、fix、doc 各有几条）；",
+    "  2. **lint 与解释器必须共用一份判据** —— 那条对照测试把同一批 IR 同时喂给",
+    "     lintScenario 与 runScenario 并断言结论相同，所以任何让 lint 侧判据偏离引擎的改动",
+    "     （传错参数、只走 body、级别降成 warning）都会红。",
+    "所有变异都写成**同形可编译**的改动：编译不过只会得到 BUILD_BROKEN（无结论），",
+    "不代表测试抓到了（parallel.json 里记过这条教训）。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "级别从 error 降成 warning（atest lint 会放行，CI 照样跑到那一步吃运行时错误）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      push({ code: 'PARALLEL_VAR_RACE', level: 'error', stepId: s.id, ...raceText(h) });",
+      "replace": "      push({ code: 'PARALLEL_VAR_RACE', level: 'warning', stepId: s.id, ...text(h) });",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "整条规则失效（守卫改成恒早退，保留 kind 收窄）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (s.kind !== 'parallel') return;",
+      "replace": "    if (s.kind !== 'parallel' || s.steps.length >= 0) return;",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "两个写法都在这里栽过，都记着：① `|| true` 同形但**编译不过** —— `||` 右边要在收窄之外也能编译，而容器字段（`s.steps` / `s.maxConcurrency`）在那儿都是 TS2339，只会产出 BUILD_BROKEN（无结论），那不是「测试抓到了」。② 第二版写 `|| s.maxConcurrency < 0`，**跑出来是 survived**，而它确实该 survived：`< 0` 恒假，守卫行为一字未变，那是一条**真等价**变异，不是测试漏了。恒早退要写成 `>= 0`：非 parallel 那支靠短路照样早退，parallel 那支恒真 -> 直接 return -> 规则一次都不报。"
+    },
+    {
+      "label": "只走 body：setup / teardown 里的 parallel 不查（解释器对这三段都真跑分支）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {\n    if (s.kind !== 'parallel') return;",
+      "replace": "  walk([...scenario.body], (s) => {\n    if (s.kind !== 'parallel') return;",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "把容器自己当分支传进去（判据拿错参数 -> branches.length<2 -> 永远不报）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    for (const h of parallelHazards(s.steps)) {",
+      "replace": "    for (const h of parallelHazards([s])) {",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "这就是「lint 与引擎判据分叉」的形态：解释器传的是 s.steps。lint 侧哪天自己算、或算的对象不对，对照测试（lint 报 <=> 引擎拒）就该红，而不是只有命中测试红。"
+    },
+    {
+      "label": "报错不再 push（算了但没说）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      push({ code: 'PARALLEL_VAR_RACE', level: 'error', stepId: s.id, ...raceText(h) });",
+      "replace": "      void text(h);",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "stepId 不再指到并行容器",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      push({ code: 'PARALLEL_VAR_RACE', level: 'error', stepId: s.id, ...raceText(h) });",
+      "replace": "      push({ code: 'PARALLEL_VAR_RACE', level: 'error', stepId: undefined, ...text(h) });",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "message 丢掉撞名的变量名（只说「有竞态」等于让人自己找）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    message: `parallel 的分支 ${h.branches.join(' / ')} 都往 \"${h.name}\" 写",
+      "replace": "    message: `parallel 的分支 ${h.branches.join(' / ')} 之间存在变量竞态",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "message 只报第一支（另一支才是真正要改的那一处）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    message: `parallel 的分支 ${h.branches.join(' / ')} 都往 \"${h.name}\" 写",
+      "replace": "    message: `parallel 的分支 ${h.branches[0] ?? ''} 这一支往 \"${h.name}\" 写",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "fix 换成一句没法照做的空话",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    fix: `给各分支改用互不相同的名字（saveAs / assign 的键 / assignTo / outputVars）。要汇总结果就各写各的、在 parallel 之后用一条 set 合并；或把这几支拆成 sequence 顺序执行`,",
+      "replace": "    fix: `自己改一下`,",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "同形（还是一个 fix 字段、还是一个字符串），所以编译照过 —— 测的是测试有没有真的读 fix 的内容，而不是只 assert 它非空。"
+    },
+    {
+      "label": "LINT_DOCS 登记成空串（「每条报错都有出处」这条无条件的性质被破）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  PARALLEL_VAR_RACE: 'docs/08 §3、docs/02 §5',",
+      "replace": "  PARALLEL_VAR_RACE: '',",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "ir 侧 shared-write 从 >1 改成 >2（两支撞名不再拦，lint 与引擎一起漏）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "  for (const [name, bs] of owners) if (bs.length > 1) out.push({ kind: 'shared-write', name, branches: bs });",
+      "replace": "  for (const [name, bs] of owners) if (bs.length > 2) out.push({ kind: 'shared-write', name, branches: bs });",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "跨包变异（harness 会强制重建）。抓到说明「两支撞名」这件事在 lint 测试里也被独立钉住了，不只是引擎那边有 parallel.test.ts 守着。"
+    },
+    {
+      "label": "writtenNames 不再 walk 到底（嵌套里的写漏了，闸形同虚设）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "  walk(steps, (s) => {\n    const sites = STEP_WRITE_SITES[s.kind];",
+      "replace": "  steps.forEach((s) => {\n    const sites = STEP_WRITE_SITES[s.kind];",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "walk -> forEach（同形、只遍历顶层）。parallel.json 里同名变异跑过；这里确认 lint 侧那条「嵌套 sequence 里写同名」也确实依赖它。"
+    },
+    {
+      "label": "等价变异：三段遍历顺序换成 setup/teardown/body",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {\n    if (s.kind !== 'parallel') return;",
+      "replace": "  walk([...scenario.setup, ...scenario.teardown, ...scenario.body], (s) => {\n    if (s.kind !== 'parallel') return;",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "只在「同一次 lint 里有多个并行容器都命中」时才改变报错的**先后**，条数与内容都不变，而本文件每条用例只有一个容器。写在这里是为了让下一个人知道遍历顺序不是这条规则要守的性质，不必为它补测试。"
+    }
+  ]
+}

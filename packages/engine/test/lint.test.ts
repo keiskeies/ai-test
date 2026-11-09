@@ -10,7 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { lintScenario, toReport, type LintCode, type LintContext } from '../src/index.js';
-import { b, scen, getStep, tapStep, type StepDraft } from './helpers.js';
+import { b, scen, getStep, tapStep, run, res, type StepDraft } from './helpers.js';
 
 const codes = (body: StepDraft[], ctx: LintContext = {}, extra: object = {}): LintCode[] =>
   lintScenario(scen(body as never[], extra as never), ctx).map((i) => i.code);
@@ -230,6 +230,129 @@ describe('依赖关系', () => {
   });
 });
 
+describe('PARALLEL_VAR_RACE（lint 与运行时闸必须同一个结论）', () => {
+  /*
+   * 这条规则的存在理由不是"多一条检查"，而是**把引擎那道运行时闸提前到写的时候**：
+   * 判据直接调 ir 的 parallelHazards()，与解释器 `case 'parallel'` 用的是同一份。
+   * 所以本文件的判据落在**两者是否始终一致**上，而不只是"lint 会不会报"——
+   * 一条说"没问题"而引擎照样拒的 lint，比没有 lint 更坏（先信它、再白跑一遍，
+   * 而 parallel 之前的 POST 已经发出去了）。
+   *
+   * 因此下面既有"该响的响 / 不该响的不响"（每条 lint 规则的常规判据），
+   * 也有一条把**同一批 IR 同时喂给 lintScenario 与 runScenario** 的对照测试
+   * —— 那条才是"不许各写一份判据"的守卫：谁把 lint 侧改成自己算，它就红。
+   */
+  const par = (id: string, steps: StepDraft[], over: object = {}): StepDraft =>
+    ({ ...b(id), kind: 'parallel', failFast: true, maxConcurrency: 2, steps, ...over }) as StepDraft;
+  const setStep = (id: string, name: string, v: number): StepDraft => ({ ...b(id), kind: 'set', assign: { [name]: v } });
+  const race = (body: readonly unknown[], extra: object = {}): ReturnType<typeof lintScenario> =>
+    lintScenario(scen(body as never[], extra as never)).filter((i) => i.code === 'PARALLEL_VAR_RACE');
+
+  test('两支写同一个变量 -> error 级命中，且指到 parallel 容器而不是某一支', () => {
+    const i = race([par('p', [setStep('k0', 'shared', 1), setStep('k1', 'shared', 2)])])[0];
+    assert.ok(i, '两支撞名必须报');
+    assert.equal(i!.level, 'error', '必须是 error：warning 的话 `atest lint` 通过、CI 照跑，到那一步才吃运行时错误');
+    assert.equal(i!.stepId, 'p', '要指到并行容器 —— 撞名是分支之间的事，指到某一支会让人去改那一步的变量名而漏掉另一支');
+    // fix 要**能照做**。只 assert 非空等于给实现留了"随便写点什么"的活路 ——
+    // 邻居规则也都是 match 内容（SLEEP_USED 匹配 wait、HARDCODED_SECRET 匹配 secret:）
+    assert.match(i!.fix ?? '', /不同的名字|拆成 sequence|独立场景/, 'fix 必须给出具体动作，否则读者的下一步是关规则');
+    assert.ok(i!.doc);
+  });
+  test('报错要说清撞的是哪个名字、哪几支（只说"有竞态"等于让人自己找）', () => {
+    const i = race([par('p', [setStep('k0', 'total', 1), setStep('k1', 'total', 2)])])[0];
+    assert.match(i!.message, /total/);
+    assert.match(i!.message, /k0.*k1|k1.*k0/);
+  });
+  test('三支写同一个名字也报（判据不是"恰好两支"）', () => {
+    const found = race([par('p', [setStep('k0', 'w', 1), setStep('k1', 'w', 2), setStep('k2', 'w', 3)])]);
+    assert.equal(found.length, 1, `一个撞名报一条，实际 ${found.length} 条`);
+    assert.match(found[0]!.message, /k0.*k1.*k2/);
+  });
+  test('各支写各自不同的名字 -> 不报（没有这条对照组，"把所有 parallel 都拒掉"的实现也全绿）', () => {
+    assert.deepEqual(race([par('p', [setStep('k0', 'fromA', 1), setStep('k1', 'fromB', 2)])]).length, 0);
+  });
+  test('只有一支 -> 不报（没有"另一个分支"可串）', () => {
+    assert.equal(race([par('p', [setStep('k0', 'solo', 1)])]).length, 0);
+  });
+  test('两支各带 forEach、循环项名字不同 -> 不报（没有这条对照组，"把所有带循环的 parallel 都拒掉"的实现也全绿）', () => {
+    // 名字**不同**而不是相同：同名那一例的正确答案随"分支之间怎么隔离作用域"而变
+    // （共享一条帧栈时要报 frame-shadow，每支一份局部帧时不报），
+    // 而"闸不许误报到把功能废掉"这条判据不该跟着它一起翻 —— 用不同名，
+    // 两种作用域模型下答案都是"放行"，这条对照组才稳。
+    const c = race([
+      { ...b('seed'), kind: 'set', assign: { list: [1, 2] } },
+      par('p', [
+        { ...b('k0'), kind: 'forEach', items: 'list', as: 'rowA', steps: [{ ...b('n0'), kind: 'noop' }] },
+        { ...b('k1'), kind: 'forEach', items: 'list', as: 'rowB', steps: [{ ...b('n1'), kind: 'noop' }] },
+      ]),
+    ]);
+    assert.equal(c.length, 0, '误报的代价是把 parallel 废掉 —— 分支里带循环是并发最主要的用法');
+  });
+  test('分支里嵌套的写也算（判据要 walk 到底，只看直接子步骤等于闸形同虚设）', () => {
+    const found = race([par('p', [
+      { ...b('k0'), kind: 'sequence', steps: [{ ...b('k0a'), kind: 'set', assign: { deep: 1 } }] },
+      { ...b('k1'), kind: 'sequence', steps: [{ ...b('k1a'), kind: 'set', assign: { deep: 2 } }] },
+    ])]);
+    assert.equal(found.length, 1, '嵌套里的同名写漏了就不报');
+  });
+  test('setup / teardown 里的 parallel 一样要查（解释器对这三段都真跑分支）', () => {
+    const body: StepDraft[] = [{ ...b('body'), kind: 'noop' }];
+    const racing = [par('p', [setStep('k0', 'shared', 1), setStep('k1', 'shared', 2)])];
+    assert.equal(race(body, { setup: racing }).length, 1, 'setup 里的撞名漏了');
+    assert.equal(race(body, { teardown: racing }).length, 1, 'teardown 里的撞名漏了');
+  });
+  test('failFast=false 照样报（那个开关换不掉竞态，只是换一种不可复现的方式）', () => {
+    assert.equal(race([par('p', [setStep('k0', 'shared', 1), setStep('k1', 'shared', 2)], { failFast: false })]).length, 1);
+  });
+
+  /*
+   * **本文件最要紧的一条**：同一批 IR 形状同时喂给 lint 与引擎，两边的结论必须逐个相同。
+   *
+   * 为什么要有它，而不是只测 lint 自己：这条规则的全部价值是"与引擎不许 disagree"，
+   * 而"lint 有没有调用引擎那份判据"这件事，只看 lint 侧的实现是测不出来的 ——
+   * 有人在 lint 里另抄一份判据，两边今天都对、测试全绿，然后各自漂移，
+   * 最后的表现正是本条要防的"lint 放行、运行时拒"。把两边的输出直接对齐，
+   * 抄一份（哪怕抄得一模一样）也会在任何一个形状上被照出来。
+   *
+   * 形状是**两边各自的对照组**：前三条引擎放行、后四条引擎拒。
+   */
+  const shapes: [string, () => ReturnType<typeof scen>][] = [
+    ['两支各写不同名字', () => scen([par('p', [setStep('k0', 'a', 1), setStep('k1', 'b', 2)])])],
+    ['单支', () => scen([par('p', [setStep('k0', 'a', 1)])])],
+    ['两支各带 forEach 且循环项同名', () => scen([
+      { ...b('seed'), kind: 'set', assign: { list: [1, 2] } },
+      par('p', [
+        { ...b('k0'), kind: 'forEach', items: 'list', as: 'item', steps: [{ ...b('n0'), kind: 'noop' }] },
+        { ...b('k1'), kind: 'forEach', items: 'list', as: 'item', steps: [{ ...b('n1'), kind: 'noop' }] },
+      ]),
+    ])],
+    ['两支写同一个名字', () => scen([par('p', [setStep('k0', 'shared', 1), setStep('k1', 'shared', 2)])])],
+    ['嵌套 sequence 里写同名', () => scen([par('p', [
+      { ...b('k0'), kind: 'sequence', steps: [{ ...b('k0a'), kind: 'set', assign: { deep: 1 } }] },
+      { ...b('k1'), kind: 'sequence', steps: [{ ...b('k1a'), kind: 'set', assign: { deep: 2 } }] },
+    ])])],
+    ['三支写同一个名字', () => scen([par('p', [setStep('k0', 'w', 1), setStep('k1', 'w', 2), setStep('k2', 'w', 3)], { maxConcurrency: 3 })])],
+    ['failFast=false 两支同名', () => scen([par('p', [setStep('k0', 'shared', 1), setStep('k1', 'shared', 2)], { failFast: false })])],
+  ];
+  test('与解释器逐个形状对照：lint 报 <=> 引擎拒（判据必须是同一份）', async () => {
+    for (const [label, mk] of shapes) {
+      // 一份 IR 只造一次：造两次的话 lint 与引擎读的是两个对象，
+      // "同一份 IR 两边结论相同"这件事就没在测同一份东西了
+      const s = mk();
+      const flagged = race(s.body).length > 0;
+      const r = await run(s);
+      const refused = res(r, 'p').status === 'error';
+      assert.equal(flagged, refused, `${label}：lint=${flagged ? '报' : '放行'} 而引擎=${refused ? '拒' : '放行'}，两边判据分叉了`);
+    }
+  });
+
+  test('撞名场景在 CLI 眼里必须是不通过（error 而不是 warning 的实际后果）', () => {
+    const rep = toReport(lintScenario(scen([par('p', [setStep('k0', 'shared', 1), setStep('k1', 'shared', 2)])] as never[])));
+    assert.equal(rep.ok, false, 'warning 的话 `atest lint` 退出码是 0，CI 会照样把场景跑到那一步');
+    assert.ok(rep.errors.some((e) => e.code === 'PARALLEL_VAR_RACE'));
+  });
+});
+
 describe('报错质量（这条比规则数量更重要）', () => {
   // 故意写坏一份 IR，把尽量多的规则一次触发。
   // 注意**不能**在 describe 体里直接 lint：describe 体在文件加载时就执行，
@@ -253,7 +376,7 @@ describe('报错质量（这条比规则数量更重要）', () => {
   });
   test('规则码必须是已登记的枚举（防止拼错的码静默失效）', () => {
     const issues = dirty();
-    const KNOWN = new Set(['ASSERT_FREE_STEP','ASSERT_FREE_SCENARIO','SLEEP_USED','LOOP_UNBOUNDED','VAR_UNDEFINED','DEPENDENCY_CYCLE','LITERAL_OVERFIT','HARDCODED_SECRET','RESOURCE_LEASE_MISSING','TEARDOWN_DIRTY','CROSS_TARGET_MISSING_WAIT','STEP_BUDGET_EXCEEDED','EXPR_SYNTAX','DUPLICATE_STEP_ID','CLEARDATA_VS_PRESERVE_SESSION','PIXEL_ASSERT_ON_NONHIERARCHY','NEGATIVE_ASSERT_VISION_BASED','TEMPLATE_NOT_UNIQUE','TEMPLATE_NO_ROI','LLM_ASSERT_RATIO_HIGH','VISION_STEP_IN_CI_GATE','DEPRECATED_OPERATION','SELF_REFERENCING_CALL','INPUT_UNUSED']);
+    const KNOWN = new Set(['ASSERT_FREE_STEP','ASSERT_FREE_SCENARIO','SLEEP_USED','LOOP_UNBOUNDED','VAR_UNDEFINED','DEPENDENCY_CYCLE','LITERAL_OVERFIT','HARDCODED_SECRET','RESOURCE_LEASE_MISSING','TEARDOWN_DIRTY','CROSS_TARGET_MISSING_WAIT','STEP_BUDGET_EXCEEDED','EXPR_SYNTAX','DUPLICATE_STEP_ID','CLEARDATA_VS_PRESERVE_SESSION','PIXEL_ASSERT_ON_NONHIERARCHY','NEGATIVE_ASSERT_VISION_BASED','TEMPLATE_NOT_UNIQUE','TEMPLATE_NO_ROI','LLM_ASSERT_RATIO_HIGH','VISION_STEP_IN_CI_GATE','DEPRECATED_OPERATION','SELF_REFERENCING_CALL','INPUT_UNUSED','PARALLEL_VAR_RACE']);
     for (const i of issues) assert.ok(KNOWN.has(i.code), `未登记的 LintCode: ${i.code}`);
   });
   test('toReport 只在有 error 时判不通过（warning 不拦人）', () => {

@@ -16,6 +16,7 @@ import { formatErrors, parseArgv, type CommandSpec } from './args.js';
 import { CI_HINT, EXIT } from './exit.js';
 import { GENERATED_STRATEGY_IDS, STRATEGIES } from './gen.js';
 import { CliError } from './wiring.js';
+import { LINT_DOCS } from '@atest/engine';
 
 export const COMMANDS: CommandSpec[] = [
   {
@@ -47,7 +48,9 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     name: 'lint',
-    summary: '静态闸（24 条规则，docs/02 §7）：不执行任何东西',
+    // 条数从 LINT_DOCS 现算而不是写死：这个 enum 加一条规则而 help 里的数字没动，
+    // 用户按数字去数规则、数不出来就开始怀疑 help，而 help 是**唯一**告诉他有几道的地方。
+    summary: `静态闸（${Object.keys(LINT_DOCS).length} 条规则，docs/02 §7）：不执行任何东西`,
     usage: 'atest lint <场景 id 或文件路径>[…] [开关]',
     detail: 'CI 里建议放在 run 之前一步。lint 有 error 的退出码是 3，与"测出失败"（1）不同，便于流水线分开提示。',
     flags: [

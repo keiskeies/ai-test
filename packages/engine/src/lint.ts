@@ -7,8 +7,8 @@
  * 因为 IR 是结构化数据而非不透明脚本，这些检查才写得出来 ——
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
-import type { Scenario, Step, StepResult } from '@atest/ir';
-import { LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, walk } from '@atest/ir';
+import type { ParallelHazard, Scenario, Step, StepResult } from '@atest/ir';
+import { LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern } from '@atest/ir';
@@ -32,7 +32,7 @@ export type LintCode =
   | 'STEP_BUDGET_EXCEEDED' | 'EXPR_SYNTAX' | 'DUPLICATE_STEP_ID' | 'CLEARDATA_VS_PRESERVE_SESSION'
   | 'PIXEL_ASSERT_ON_NONHIERARCHY' | 'NEGATIVE_ASSERT_VISION_BASED' | 'TEMPLATE_NOT_UNIQUE'
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
-  | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED';
+  | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE';
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
@@ -135,7 +135,37 @@ export const LINT_DOCS: Record<LintCode, string> = {
   DEPRECATED_OPERATION: 'docs/05 §1',
   SELF_REFERENCING_CALL: 'docs/02 §2',
   INPUT_UNUSED: 'docs/02 §5',
+  PARALLEL_VAR_RACE: 'docs/08 §3、docs/02 §5',
 };
+
+/**
+ * 一条 hazard 的报错文案。**判据本身不在这里** —— 这里只把 ir 的 `ParallelHazard`
+ * 翻译成人话，判据永远是 `parallelHazards()` 那一份（lint 侧一条都不自己判）。
+ *
+ * 为什么写成 kind 三元 + 兜底，而不是 `Record<ParallelHazard['kind'], …>` 那种
+ * "漏一个 kind 就编译不过"的中心表（本仓的 `LINT_DOCS` / `STEP_WRITE_SITES` 都是那个形态）：
+ * 闸的判据集合正在动 —— 曾有的 `frame-shadow` 已随"每支一份局部作用域"退场，
+ * 中心表会把这种**收窄**也变成 lint 侧的编译错误（登记了一个已经不存在的 kind），
+ * 于是 lint 与 ir 必须同一轮改，而这两处本来就该各自演进。
+ * 兜底分支只用两种 hazard 都有的 `name`，所以两种 union 形态都能编译。
+ * 代价是"新增 kind 忘了写文案"不会编译报错 —— 但那种情况下报出来的是**兜底那句**
+ * （仍然带名字、仍然指到容器），不是静默漏报；而 LintCode 层的登记仍由
+ * `LINT_DOCS: Record<LintCode, string>` 强制，新增码不登记照样编译不过。
+ */
+const raceText = (h: ParallelHazard): { message: string; fix: string } =>
+  h.kind === 'shared-write'
+    ? {
+      // 两种同名写在 IR 上长得一模一样（两支都写这个名字），所以文案要把两种后果都说出来：
+      // 名字在 parallel 之前就有 -> 写的是同一份，谁后写谁赢；两支各自新声明 -> 不 flaky，
+      // 但收尾合并只能留一份。只写"结果随调度顺序变"的话，后一种作者会想
+      // "我这条不 flaky 啊"然后把这条报错划掉。
+      message: `parallel 的分支 ${h.branches.join(' / ')} 都往 "${h.name}" 写 —— 若它在 parallel 之前就已声明，那是"谁后写谁赢"的真竞态；若是两支各自新声明，收尾合并只能留一份，丢哪一份由分支声明顺序决定而不是你的意图`,
+      fix: `给各分支改用互不相同的名字（saveAs / assign 的键 / assignTo / outputVars）。要汇总结果就各写各的、在 parallel 之后用一条 set 合并；或把这几支拆成 sequence 顺序执行`,
+    }
+    : {
+      message: `parallel 的分支之间存在变量冲突，涉及 "${h.name}"`,
+      fix: '给各分支改用互不相同的变量名，或把这几支拆成 sequence 顺序执行 / 独立场景',
+    };
 
 /** 表达式语法错误的修法。两处（condition / when）共用，避免文案漂移 */
 const EXPR_SYNTAX_FIX = '支持：字面量、$.路径、算术、比较、and/or/not、in，以及 count/sum/avg/min/max/len/contains/matches 等函数';
@@ -338,6 +368,58 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     }
     if (loc && !loc.replayable && scenario.frozen) {
       push({ code: 'VISION_STEP_IN_CI_GATE', level: 'error', stepId: s.id, message: '不可回放步骤（纯视觉坐标）出现在已冻结场景里 —— 冻结意味着可进 CI', fix: '把该步骤编译成模板指纹，或改用层级定位', doc: 'docs/10 §5' });
+    }
+  });
+
+  /*
+   * ── parallel 分支之间的变量竞态 ────────────────────────────────
+   *
+   * **判据直接调 ir 的 parallelHazards()，也就是解释器 `case 'parallel'` 用的那一份**。
+   * 抄一份过来（哪怕一开始一模一样）都必然漂移，而漂移的方向是可预见的：改判据的人只改
+   * 引擎那一处（那边有 parallel.test.ts / scope.test.ts 盯着），lint 这份悄悄落后，
+   * 于是 `atest lint` 说"没问题"、CI 放行、跑到那一步才被运行时闸拒掉。
+   * 那比没有这条 lint 更坏：先信了 lint、再白跑一遍，而"白跑"在真实环境里意味着
+   * parallel 之前的 POST/下单已经发出去了。
+   *
+   * **级别是 error，不是 warning。这条不是风格选择，是实测出来的**：
+   *  - `run` 默认**不** lint（commands.ts 里写明是故意的：不把"IR 不对"与"产品坏了"
+   *    压成同一个退出码）。所以 warning 的实际后果是 `atest lint` 通过、`atest run` 照跑。
+   *  - 而"照跑"之后**不一定红**。实测一份"先一条断言、再一个撞名的 parallel"的场景：
+   *    运行摘要打到 `运行 … — error`、`计入 3 步：… 1 错误`，
+   *    紧跟着一句 `2 个断言全部通过。`，**退出码是 0**。
+   *    原因在 cli/gate.ts 的 gateAfterRun：errors/fails 都从 `leaves`
+   *    （`!CONTAINER_KINDS.includes(kind)`）里筛，而 `parallel` 是容器 ——
+   *    那道运行时闸记的 error **根本不进退出码判定**。
+   *    同一份场景把那条断言拿掉才落到 EXIT.INVALID(3)（走的是"0 个叶子步骤"那条分支）。
+   *    这条缺陷已单独上报，不在本轮修（gate.ts 不在我的改动范围内）。
+   *  - 所以现状是：**运行时那道闸拦得住"跑出错误答案"，但拦不住"CI 变绿"**。
+   *    lint 这一条是撞名场景目前**唯一**能给出非零退出码的入口
+   *    （`atest lint` 或 `atest run --strict`，两者都落 EXIT.INVALID(3)，
+   *    那一档的提示正好是"这是配置/用例问题，不是产品问题"）。
+   *    降成 warning 就等于把这个场景放回"全绿但有一步压根没测"的状态 ——
+   *    正是本仓反复记的那类"用例被丢了而报告显示它过了"。
+   * 同族的 SELF_REFERENCING_CALL / DEPENDENCY_CYCLE 也是"执行必然坏"所以是 error；
+   * 区别只在于它们没有运行时闸，而这条有（而且那道闸在退出码上是哑的）。
+   *
+   * **运行时那道闸为什么不因为这里有 lint 就删掉**：
+   *  1. 上面第 1 条：`run` 不 lint，`--strict` 是可选的；
+   *  2. `call` 的子场景是运行时由 CallResolver 取回来的（interpreter 的 call 分支），
+   *     被 lint 过的父文件不代表子场景干净；
+   *  3. engine 还以浏览器 bundle 的形态给前端做实时校验（browser.test.ts 守的就是这个），
+   *     调用方**可以**先 lint，但没人强制它 lint。
+   * 一句话：lint 负责"写的时候早知道"（并且是唯一能拦下 CI 的那一环），
+   * 运行时闸负责"绕过 lint 也不会跑出错误答案"。两个职责不重叠，删哪个都留一个洞。
+   *
+   * 遍历走 setup+body+teardown 而不是只 body：解释器对这三段都真跑 parallel 分支，
+   * 只查 body 等于"前置里并发准备数据时撞名"照样漏到运行时。
+   */
+  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
+    if (s.kind !== 'parallel') return;
+    // **刻意不看 failFast**：两支写同一个名字，failFast=true 给出"哪支先输由交错顺序决定"，
+    // false 给出"谁后完成谁算" —— 都不能重跑两次拿同一个答案。把同一条缺陷按一个
+    // 与语义无关的开关切成两种严重度，只会让人以为改开关能绕过它。
+    for (const h of parallelHazards(s.steps)) {
+      push({ code: 'PARALLEL_VAR_RACE', level: 'error', stepId: s.id, ...raceText(h) });
     }
   });
 
