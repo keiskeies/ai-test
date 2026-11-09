@@ -180,7 +180,7 @@ export async function evalLlmAssert(payload: { question: string; evidenceFrom: s
   );
   deps.addCost(r.costUsd);
   const gate = payload.gatePolicy;
-  if (r.passed) return { status: 'pass', summary: `语义判定：是（¥${r.costUsd.toFixed(4)}）`, keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
+  if (r.passed) return { status: 'pass', summary: `语义判定：是（$${r.costUsd.toFixed(4)}）`, keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
   if (gate === 'blocking') return { status: 'fail', summary: `语义判定：否（已设为门禁，需人复核）`, cause: 'product-bug', keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
   // report-only / triage：不影响门禁
   return { status: 'triaged', summary: `语义判定：否（report-only，不计入通过率）`, keyContext: { evidence: r.evidence }, costUsd: r.costUsd };

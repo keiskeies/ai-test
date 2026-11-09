@@ -13,11 +13,12 @@ import type { Step, Scenario, Lease } from '@atest/ir';
 import { countsTowardPassRate, LEASE_REQUIRED, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
-import { VarError, VarSpace, redact } from './vars.js';
+import { VarError, VarSpace } from './vars.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
 import { resolveValue as resolveValueShared, toIterable, flattenTimes, looseEq, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
+import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
 export interface RunOptions {
   scenario: Scenario;
@@ -87,7 +88,9 @@ interface StepCtx {
 export async function runScenario(opts: RunOptions): Promise<RunReport> {
   const { scenario, adapters, clock } = opts;
   const runId = opts.runId ?? `run_${clock.now().toString(36)}`;
-  const vars = new VarSpace({ inputs: opts.inputs, env: opts.env, secretResolver: opts.secretResolver });
+  // inputDefs 传 scenario.inputs：声明了 default 的输入要能被兜住，
+  // 否则 IR 里的 default 是个没人读字段（详见 vars.ts 的 applyInputDefaults）
+  const vars = new VarSpace({ inputs: opts.inputs, inputDefs: scenario.inputs, env: opts.env, secretResolver: opts.secretResolver });
   const events: TraceEvent[] = [];
   const results: StepResult[] = [];
   let seq = 0;
@@ -108,9 +111,21 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     clock,
     emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, durMs: e.durMs, data: e.data }),
     saveArtifact: async (kind: string, data: Uint8Array | string, stepId: string) => {
-      const sha = shaish(typeof data === 'string' ? data : String(data));
-      const id = `art_${sha.slice(0, 12)}_${kind}`;
-      emit({ kind: 'artifact.saved', stepId, data: { id, kind, bytes: typeof data === 'string' ? data.length : data.byteLength } });
+      // id **由存储侧算，引擎不自己编**。
+      // 早先这里是 `art_${shaish(...).slice(0,12)}_${kind}` —— shaish 是把 32 位 FNV-1a
+      // 重复四遍拼成 64 个十六进制字符的**伪 sha256**，看着像、实际只有 2^32 的空间。
+      // 更糟的是它**压根没存任何东西**就返回了一个 id：StepResult.artifactIds 里
+      // 躺着一串永远取不到内容的哈希，而 evidence 包看起来是完整的。
+      // 内容寻址的"址"必须由真正落地的那一方给出，否则引擎与存储各自算一遍，
+      // 迟早算出两个不同的值（一边按 UTF-16 码元哈希、一边按 UTF-8 字节哈希）。
+      if (!adapters.artifactStore) {
+        // **拒绝而不是给个假 id**。返回 id 的话 StepResult.artifactIds 里会躺着一串
+        // 取不到内容的哈希，evidence 包看起来完整、实际是空的 —— 而空证据包在
+        // 三天后的排查里表现为"平台没存东西"，没人会想到是存储没接。
+        throw new EnvMissing(`未配置证据存储（adapters.artifactStore 缺失），无法为步骤 "${stepId}" 保存 ${kind} 证据`);
+      }
+      const id = await adapters.artifactStore.save(kind, data, stepId);
+      emit({ kind: 'artifact.saved', stepId, data: { id, kind, bytes: typeof data === 'string' ? byteLen(data) : data.byteLength } });
       return id;
     },
     capabilities: (t: string) => adapters.capabilities?.(t),
@@ -118,10 +133,22 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
 
   const execCtx = (target: ExecContext['target']): ExecContext => ({ ...ctxBase, target });
 
+  /**
+   * 自动证据（响应体等）的落盘入口。没配存储时**记事件并跳过**，
+   * 与 ctxBase.saveArtifact（用例显式要求，没存储就抛）的区别见 makeAutoEvidence。
+   */
+  const autoEvidence = makeAutoEvidence({
+    hasStore: Boolean(adapters.artifactStore),
+    emit,
+    artifactIdFor: (kind, data, stepId) => ctxBase.saveArtifact(kind, data, stepId),
+  });
+
   /** 成本熔断。超出即中断 run —— 静默跳过会让预算形同虚设 */
   const addCost = (n: number): void => {
     costUsd += n;
-    if (costUsd > maxCost) throw new RunAborted(`成本上限超出：¥${costUsd.toFixed(4)} > ¥${maxCost.toFixed(4)}，已中断`);
+    // 单位跟着字段名走（maxCostUsd → 美元）。写了 ¥ 的话，人会把 docs/03 里按美元定的
+    // 预算数直接填进来，熔断阈值当场差一个汇率
+    if (costUsd > maxCost) throw new RunAborted(`成本上限超出：$${costUsd.toFixed(4)} > $${maxCost.toFixed(4)}，已中断`);
   };
 
   const stepCtx: StepCtx = { watchers: [] };
@@ -178,6 +205,8 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         cause: outcome.cause, resolvedBy: outcome.resolvedBy, rung: outcome.rung,
         confidence: outcome.confidence, healed: outcome.healed, nonReplayable: outcome.nonReplayable,
         keyContext: outcome.keyContext, costUsd: outcome.costUsd ?? 0,
+        // 不传就得留空数组：finish 的默认已经是 []，这里只在有证据时覆盖
+        ...(outcome.artifactIds?.length ? { artifactIds: outcome.artifactIds } : {}),
       });
     } catch (e) {
       if (e instanceof RunAborted) throw e;
@@ -228,6 +257,9 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     status: StepStatus; summary?: string; cause?: StepResult['cause'];
     resolvedBy?: string; rung?: number; confidence?: number; healed?: boolean; nonReplayable?: boolean;
     keyContext?: Record<string, unknown>; costUsd?: number;
+    /** 本步骤产出的证据 id。**由 dispatch 交回来**，不在 finish 里凭空造：
+     *  证据是否真落盘取决于存储侧，finish 无从知道，在那里填等于编造。 */
+    artifactIds?: string[];
   }
 
   const runChildren = async (steps: Step[], path: string[]): Promise<Outcome> => {
@@ -308,6 +340,9 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const child = await sub;
         const childVars = new VarSpace({
           inputs: Object.fromEntries(Object.entries(s.args).map(([k, v]) => [k, resolveValue(v)])),
+          // 子场景自己的 inputs 声明：call.args 没给全时由子场景的 default 兜。
+          // 用 child.inputs 而不是父场景的 —— default 属于被调用方
+          inputDefs: child.inputs,
           env: opts.env, secretResolver: opts.secretResolver,
         });
         const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0 });
@@ -390,7 +425,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           got[rule.var] = v;
         }
         vars.exportStep(s.id, got);
-        return { status: 'pass', summary: `提取 ${Object.keys(got).join(', ')}`, keyContext: redact(got) as Record<string, unknown> };
+        return { status: 'pass', summary: `提取 ${Object.keys(got).join(', ')}`, keyContext: redactForDisk(got, 0, CONTEXT_LIMITS) as Record<string, unknown> };
       }
       case 'dataSource': {
         if (!adapters.db) return { status: 'error', summary: 'dataSource 需要 db adapter', cause: 'env-unavailable' };
@@ -419,7 +454,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const exports = { resp: { status: res.status, body: res.body, bodyText: res.bodyText, headers: res.headers, durationMs: res.durationMs }, status: res.status, body: res.body };
         vars.exportStep(s.id, exports);
         if (s.saveAs) vars.set(s.saveAs, res.body);
-        return { status: 'pass', summary: `${s.request.method} ${res.status} ${res.durationMs}ms`, keyContext: { status: res.status, bytes: res.bytes, truncated: res.truncated } };
+        return { status: 'pass', summary: `${s.request.method} ${res.status} ${fmtMs(res.durationMs)}`, keyContext: { status: res.status, bytes: res.bytes, truncated: res.truncated } };
       }
       case 'openapiCall': {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
@@ -481,7 +516,31 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         }
         vars.exportStep(s.id, { resp: { status: res.status, body: res.body, bodyText: res.bodyText, headers: res.headers, durationMs: res.durationMs }, status: res.status, body: res.body, strategy: s.strategy });
         if (s.saveAs) vars.set(s.saveAs, res.body);
-        return { status: 'pass', summary: `${op.method} ${res.status} ${res.durationMs}ms`, keyContext: { status: res.status, strategy: s.strategy } };
+        // **响应体落证据**。这一句之前不存在：saveArtifact 端口定义了却没人调用，
+        // 于是 evidence.zip 里**没有响应体** —— 而失败排查第一个要看的就是它。
+        // M6 的判据是"一次失败 run 产出可独立打开的 evidence.zip"，
+        // 一个不含响应的证据包只是四份元数据，打开它什么也查不出来。
+        //
+        // 为什么在这里**无条件存**（而不是"失败才存"）：
+        // 步骤级"失败"经常不在 http 这一步 —— 200 回来后由 assert 步骤判红。
+        // 按"这步没过才存"就会正好漏掉那些响应体。
+        // 保留策略**归存储层**（它能看磁盘、能按 run 收尾清理），
+        // 不在引擎里加 if：引擎只负责说"这是证据"。
+        //
+        // 存的是 bodyText（**原始文本**）而不是 body（已 JSON.parse 的对象）：
+        // 重新 stringify 出来的东西和线上发的字节不再相等（键序、空格、数字精度、
+        // 未引号化的 key 全可能变），而"后端到底发了什么字节"常常就是问题本身。
+        const artifactId = await autoEvidence(s.id, 'http-response', res.bodyText);
+        return {
+          status: 'pass',
+          summary: `${op.method} ${res.status} ${fmtMs(res.durationMs)}`,
+          // 传输细节走 keyContext：step.finished 事件会把它带进 trace.jsonl，
+          // 这正是 docs/05 §4 要的"截断要在 trace 里标 truncated"的落点。
+          // （早先这信息由 adapter 自己发一条 kind:'http' 的事件承载，
+          //  而那个 kind 不合法、trace 读回时被丢弃 —— 等于这条要求静默失效。）
+          keyContext: { status: res.status, strategy: s.strategy, bytes: res.bytes, ...(res.truncated ? { truncated: true } : {}) },
+          ...(artifactId ? { artifactIds: [artifactId] } : {}),
+        };
       }
 
       // ── Web / 设备（P2/P4 实现，此处保证语义与状态正确）────────
@@ -618,13 +677,31 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   return {
     runId, status, startedAt, durMs: clock.mono() - t0, results, events,
     outputs: vars.outputs, costUsd, tally,
-    summary: `${status} · ${counted} 步计入通过率 · ${rate}% 通过 · ${tally.healed} 自愈待审 · ¥${costUsd.toFixed(4)}`,
+    summary: `${status} · ${counted} 步计入通过率 · ${rate}% 通过 · ${tally.healed} 自愈待审 · $${costUsd.toFixed(4)}`,
   };
 }
 
 // ── 辅助 ─────────────────────────────────────────────────────────────────
 
 class AssertionFailure extends Error {}
+
+/**
+ * 耗时写进**人读摘要**时的固定格式。
+ *
+ * 不格式化会出两件坏事：
+ *  1. 摘要里出现 `POST 201 4.305087999999955ms`。CI 日志与 PR 评论里这是噪音，
+ *     而且没人能扫一眼比较两次运行。
+ *  2. 更要紧的：**证据不再可比**。trace.jsonl 是逐行 JSON，summary 字段里
+ *     一个 17 位浮点数意味着同一个场景跑两次，trace 的字节必然不同 ——
+ *     M7 的"同一冻结场景跑 20 次断言结果一致"以及
+ *     `diff <(unzip -p a.zip trace.jsonl) <(unzip -p b.zip trace.jsonl)` 全部失效。
+ *     真实耗时本身是波动的，这一点改不了；能改的是**别把波动的位数扩散到
+ *     本来该稳定的字段里**。要精确耗时的场景走 durMs 数值字段（那里如实保留）。
+ */
+export function fmtMs(ms: number): string {
+  const v = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+  return `${v.toFixed(1)}ms`;
+}
 
 function strMap(o: Record<string, unknown> | undefined, resolve: (v: unknown) => unknown): Record<string, string> {
   const out: Record<string, string> = {};
@@ -695,10 +772,42 @@ function firstFrames(e: unknown): string {
   return st.split('\n').slice(1, 4).join(' | ').slice(0, 400);
 }
 /** 内容寻址用的轻量 hash（真实现要用 crypto，但引擎不许 import node:） */
-function shaish(s: string): string {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return (h >>> 0).toString(16).padStart(8, '0').repeat(4);
+/**
+ * 引擎**自动**产证据（响应体、提取前的原始文本…）的统一出口。
+ *
+ * 与 ctx.saveArtifact 的区别是错误处理，而这个区别是刻意的：
+ *  - `ctx.saveArtifact` 是**用例显式要求**存的证据，没存储就抛 —— 用户要的东西给不了，
+ *    必须炸在步骤上，不能悄悄没存。
+ *  - 这里（自动证据）没存储时**记一条事件然后跳过，不判步骤失败**：
+ *    "没接证据盘"是部署配置问题，不该让每个 HTTP 步骤变红，
+ *    否则第一次接平台的人看到的是"所有用例都 error"，
+ *    而真实原因（没配 artifactStore）藏在摘要里。
+ *    但**绝不静默**：没证据的话 M6 那个 evidence.zip 会是个只有元数据的空壳，
+ *    而它看起来是打开成功的 —— 所以每个 run 至少要吼一声。
+ */
+function makeAutoEvidence(opts: {
+  hasStore: boolean; emit: (e: EmitIn) => void; artifactIdFor: (kind: string, data: string, stepId: string) => Promise<string>;
+}) {
+  let warned = false;
+  const warnOnce = (stepId: string): void => {
+    if (warned) return;
+    warned = true;
+    // 只报一次：一个 200 步的套件会刷出 200 条同样的事件，把人淹掉
+    opts.emit({ kind: 'lint.reported', stepId, data: { code: 'ARTIFACT_STORE_MISSING', detail: '未配置证据存储（adapters.artifactStore），本次运行的响应体等自动证据**没有落盘**，evidence 包将只含元数据' } });
+  };
+  return async (stepId: string, kind: string, data: string): Promise<string | undefined> => {
+    if (!opts.hasStore) { warnOnce(stepId); return undefined; }
+    return opts.artifactIdFor(kind, data, stepId);
+  };
+}
+
+/**
+ * UTF-8 字节数。**不用 string.length**：那是 UTF-16 码元数，
+ * 一个中文响应体会把 3 字节算成 1 字节，于是 10MB 上限实际放行约 30MB，
+ * docs/05 §4 那条"失控导出接口撑爆证据盘"的防线在中文接口上静默失效。
+ */
+function byteLen(s: string): number {
+  return new TextEncoder().encode(s).byteLength;
 }
 
 /** 子场景执行入口（call 节点用）。与主流程共用 emit/adapters 以保成本与事件的连续性。 */

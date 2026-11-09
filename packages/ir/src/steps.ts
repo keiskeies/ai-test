@@ -404,6 +404,24 @@ export const STEP_TARGET: Record<Step['kind'], 'api' | 'web' | 'mobile' | 'any'>
   manualHandoff: 'mobile', useIdentity: 'any',
 };
 
+/**
+ * 容器步骤的 kind（承载控制流结论，不是业务结论）。
+ *
+ * 放在这里而不是各消费方各写一份，是因为**这份清单错了会同时污染两个对外契约**：
+ * JUnit 的 tests 计数（多报容器会让"用例数/覆盖率"全废）与 CI 的退出码
+ * （把容器的 fail 当成一条失败用例，一次循环失败会数出 N 次）。
+ * 原先 engine/report.ts 与 cli/gate.ts 各有一份，后者还多写了个根本不存在的
+ * kind `retry`（retry 是步骤上的字段，不是 kind）—— 那属于"看起来在过滤，实际漏一个"。
+ *
+ * 与 CHILD_KEYS 的关系：CHILD_KEYS 是**遍历入口**（哪些字段可能藏子步骤），
+ * 本表是**语义分类**（哪些 kind 不该被当成一条用例）。两者刻意不合并：
+ * `call` 有子场景但不是容器结论，`assert` 没子步骤却是结论。合并会把这两个
+ * 正交的问题搅在一起，然后有人开始往 CHILD_KEYS 里加 assert。
+ */
+export const CONTAINER_KINDS: readonly Step['kind'][] = [
+  'sequence', 'if', 'switch', 'forEach', 'while', 'repeat', 'parallel',
+];
+
 /** 需要设备租约的步骤（RESOURCE_LEASE_MISSING 规则的依据） */
 export const LEASE_REQUIRED: Step['kind'][] = ['app', 'tap', 'input', 'swipe', 'key', 'logcat', 'assertUi', 'manualHandoff'];
 

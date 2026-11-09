@@ -66,7 +66,31 @@ const LAYER_RULES = [
     // 反过来讲：一旦 adapter 之外出现 fetch/fs，引擎就再也跑不进浏览器与 Worker 了。
     forbidNodeBuiltins: false,
     forbidPackages: ['store', 'llm', 'server', 'web', 'cli'],
-    reason: 'adapter 只依赖 ir + engine 的接口，不得反向认识服务端/UI/LLM（docs/01 §1，docs/04 M2）',
+    reason: '本层是**网络**副作用的唯一归属地（放行 node:net/http 等），引擎的纯净全靠副作用集中在这里；依赖方向上它只依赖 ir + engine 的接口，不得反向认识服务端/UI/LLM（docs/01 §1，docs/04 M2）',
+    exempt: '/test/',
+  },
+  {
+    pkg: 'packages/store',
+    // 与 adapter-http 同理：这层的职责就是磁盘（内容寻址证据 + evidence.zip），
+    // 所以允许 node:fs / node:crypto。**引擎侧只留 ArtifactStore 端口**，
+    // 那条"引擎无副作用"的约束靠的是端口在这里、实现在这里，而不是靠大家自觉。
+    forbidNodeBuiltins: false,
+    forbidPackages: ['llm', 'server', 'web', 'cli', 'adapter-http'],
+    reason: '本层的职责就是**磁盘**（内容寻址证据 + evidence.zip），所以放行 node:fs/crypto；引擎侧只留 ArtifactStore 端口。依赖方向上它只认 ir + engine 的数据形状，不得认识服务端/UI/CLI，也不得依赖某个具体 adapter（docs/01 §1）',
+    exempt: '/test/',
+  },
+  {
+    pkg: 'packages/cli',
+    // CLI 是最外面那层：它可以认识所有下层，但没有更低层可认识了。
+    // 这里规则的意义不在"禁 node"（它必须碰磁盘与进程），而在**依赖面的形状**：
+    // CLI 是第一个被允许同时依赖 store 与 adapter-http 的包 ——
+    // 装配一次运行需要把「证据存储 + http adapter + 引擎」三者拼起来，
+    // 而这个装配逻辑必须与 run 命令在同一处，否则 GUI/服务端/CI 各装一套，
+    // "本地绿而 CI 红"就有了藏身处。也正因为它是唯一的全知层，
+    // 反过来（store/adapter 依赖 cli）必须由它们各自的规则拦住。
+    forbidNodeBuiltins: false,
+    forbidPackages: ['server', 'web'],
+    reason: 'CLI 必然碰**磁盘与进程**（读 IR 文件、写证据包、按退出码向 CI 汇报），所以放行 node 内置模块；副作用集中在这一层正是引擎能保持纯净的前提。它也是唯一被允许同时装配 engine+adapter-http+store 的层。不得认识服务端/UI：那会让"能不开服务端就在本地跑"这条失效（docs/01 §1、docs/04 M6）',
     exempt: '/test/',
   },
 ];

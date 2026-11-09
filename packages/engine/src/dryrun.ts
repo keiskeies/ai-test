@@ -49,8 +49,9 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
   };
   visit([...scenario.setup, ...scenario.body, ...scenario.teardown]);
 
-  // 变量空间只做结构初始化，确认 inputs/env 能建起来（构造期报错说明 IR 有问题）
-  new VarSpace({ inputs, env: scenario.env });
+  // 变量空间只做结构初始化，确认 inputs/env 能建起来（构造期报错说明 IR 有问题）。
+  // 带上 inputs 声明，好让 VAR_UNDEFINED 不把"有 default 的输入"报成未定义
+  new VarSpace({ inputs, inputDefs: scenario.inputs, env: scenario.env });
 
   let steps = 0;
   const count = (arr: unknown[]): void => {

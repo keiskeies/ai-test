@@ -23,7 +23,7 @@
 import type { Scenario, Step, StepStatus } from '@atest/ir';
 import { compileExpr, truthy } from './expr.js';
 import { evalStructAssert } from './assertions.js';
-import { VarError, VarSpace, type VarSpace as VarSpaceT } from './vars.js';
+import { VarError, VarSpace, type InputDef, type VarSpace as VarSpaceT } from './vars.js';
 import { PathError } from './jsonpath.js';
 import { flattenTimes, looseEq, resolveValue, toIterable, type ValueScope } from './resolve.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
@@ -72,6 +72,13 @@ export class PrecompileRefused extends Error {
 /** 计划上下文。一次迭代一份，压测里每个 VU 各一份。 */
 export interface PlanContext {
   inputs?: Record<string, unknown>;
+  /**
+   * `scenario.inputs` 那一份**声明**（带 default）。由 compilePlan 在编译期闭包进来，
+   * 不是每次迭代传：default 是场景的属性，不是某一次迭代的属性。
+   * 预编译形态若漏了它，同一条用例在解释器里能靠 default 跑通、在压测形态里报
+   * 「引用未定义」—— 那就是 M0.6 等价性判据要拦的那种分叉。
+   */
+  inputDefs?: readonly InputDef[];
   env?: Record<string, unknown>;
   clock: Clock;
   adapters?: AdapterRegistry;
@@ -138,7 +145,7 @@ class FastState {
   readonly steps: ExecOutcome['steps'] = [];
   private readonly scope: ValueScope;
   constructor(private readonly ctx: PlanContext) {
-    this.vars = new VarSpace({ inputs: ctx.inputs, env: ctx.env });
+    this.vars = new VarSpace({ inputs: ctx.inputs, inputDefs: ctx.inputDefs, env: ctx.env });
     this.scope = { vars: this.vars, clock: ctx.clock };
   }
   aborted(): boolean {
@@ -165,7 +172,10 @@ class FastState {
   assert(s: Step): StepStatus {
     const ctx: ExecContext = {
       target: 'api', runId: 'precompiled', env: this.ctx.env ?? {}, secret: () => '', clock: this.ctx.clock,
-      emit: () => {}, saveArtifact: async () => '', capabilities: () => undefined,
+      // 预编译形态**不产证据**（这正是它快的那个原因）。
+      // saveArtifact 直接抛而不是返回 ''：返回空串会让调用方以为存成功了，
+      // 然后往 artifactIds 里塞一个空字符串 —— 静默的假证据。
+      emit: () => {}, saveArtifact: async () => { throw new Error('预编译形态不产证据（压测热路径跳过证据落盘）'); }, capabilities: () => undefined,
     };
     const r = evalStructAssert(s as unknown as Parameters<typeof evalStructAssert>[0], {
       vars: this.vars, adapters: this.ctx.adapters ?? {}, ctx, clock: this.ctx.clock,
@@ -376,7 +386,8 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
     get refs() { return [...refs]; },
     refused,
     run(ctx: PlanContext): ExecOutcome {
-      const st = new FastState(ctx);
+      // default 在**编译期**从 scenario 闭包进来（见 PlanContext.inputDefs）
+      const st = new FastState({ ...ctx, inputDefs: ctx.inputDefs ?? scenario.inputs });
       try {
         const r = runSeq(body, st);
         for (const o of outputs) {

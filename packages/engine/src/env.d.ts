@@ -22,4 +22,17 @@ declare global {
     append(name: string, value: string): void;
     toString(): string;
   }
+
+  /**
+   * 编码器。**加进白名单的理由要说清**：证据字节数必须按 **UTF-8 字节**算，
+   * 不能用 `string.length` —— 那是 UTF-16 码元数，一个中文响应体会把"3 字节/字"
+   * 算成"1 字节/字"，于是 docs/05 §4 那个 10MB 响应上限实际放行 30MB 的内容，
+   * 截断行为在中文接口上静默失效（浏览器与 Node 都会犯，因为两边 length 都是码元数）。
+   *
+   * 注意这是**编码器**，不是 IO：它不碰磁盘也不碰网络，引擎仍然无副作用。
+   */
+  class TextEncoder {
+    encode(input?: string): Uint8Array;
+    readonly encoding: string;
+  }
 }

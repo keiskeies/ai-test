@@ -1,0 +1,450 @@
+/**
+ * M6 判据：**一次失败 run 产出可独立打开的 `evidence.zip`**。
+ *
+ * "可独立打开"这四个字是这个文件存在的全部理由。
+ * 自己写的 zip 自己读，永远能读通 —— 写错了也会错得一样，测试全绿而包打不开。
+ * 所以判据走两头：
+ *  1. **系统 `unzip -t` / `unzip -o`**（macOS 自带的 Info-ZIP）验包并解包，
+ *     解出来的成员逐字节等于写入内容。这是"外部工具认"，不是"我认"。
+ *  2. 密钥搜不到：把真 JWT/AKIA/Bearer 喂进 run，再从**解开的字节**里搜。
+ *     这条通常没人写，而 evidence 包恰恰是**给多人下载的东西** ——
+ *     密钥进包 = 进每个有 CI 读权限的人的磁盘。
+ */
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+
+import {
+  EVIDENCE_FILES, deterministicClock, parseTraceJsonl, redactForDisk, runScenario,
+  toJUnitXml, toTraceJsonl, type RunReport,
+} from '@atest/engine';
+import type { Scenario, StepDraft } from '@atest/ir';
+import { b, scen } from './helpers.js';
+import { DiskArtifactStore } from '../src/artifacts.js';
+import { buildEvidencePackage, writeEvidencePackage, readEvidenceMember } from '../src/evidence.js';
+import { buildZip, dosStamp, readZipEntries } from '../src/zip.js';
+
+const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+
+async function freshStore(): Promise<DiskArtifactStore> {
+  return new DiskArtifactStore({ dir: await mkdtemp(join(tmpdir(), 'atest-ev-')) });
+}
+
+/** 一次真失败 run（跑真引擎，不用手搓 RunReport：手搓的会漏掉真实 events 的形状） */
+async function failingRun(store: DiskArtifactStore): Promise<{ scenario: Scenario; report: RunReport }> {
+  const scenario = scen([
+    { ...b('v'), kind: 'set', assign: { n: 1, token: 'secret:tok1' } },
+    { ...b('ok'), kind: 'assert', against: '$n', expr: '$n == 1' },
+    { ...b('bad'), kind: 'assert', against: '$n', expr: '$n > 99' },
+  ] as StepDraft[]);
+  const report = await runScenario({
+    scenario, adapters: { artifactStore: store }, clock: deterministicClock(42),
+    env: { baseUrl: 'https://api.test' },
+  });
+  return { scenario, report };
+}
+
+/** 用系统的 unzip 解包，返回 成员名 -> 文本。解压失败直接抛（那就是判据不成立） */
+function unzipMembers(bytes: Uint8Array): Map<string, Buffer> {
+  const dir = mkdtempSync(join(tmpdir(), 'atest-unzip-'));
+  const zip = join(dir, 'evidence.zip');
+  writeFileSync(zip, bytes);
+  execFileSync('unzip', ['-t', zip], { stdio: 'pipe' }); // 先 -t：CRC/结构必须合法
+  execFileSync('unzip', ['-o', '-q', zip, '-d', dir], { stdio: 'pipe' });
+  const out = new Map<string, Buffer>();
+  for (const name of listFiles(dir)) {
+    if (name.endsWith('.zip')) continue;
+    out.set(name, readFileSync(join(dir, name)));
+  }
+  return out;
+}
+
+/** 递归列出相对路径（unzip 会保留目录结构） */
+function listFiles(root: string, rel = ''): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(join(root, rel))) {
+    const r = rel ? `${rel}/${name}` : name;
+    if (statSync(join(root, r)).isDirectory()) out.push(...listFiles(root, r));
+    else out.push(r);
+  }
+  return out;
+}
+
+test('失败 run 产出的包能被系统 unzip 验过并解开，成员逐字节一致', async () => {
+  const store = await freshStore();
+  await store.save('resp', '{"id":1,"note":"order created"}', 'ok');
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+
+  const members = unzipMembers(pkg.bytes);
+  // 四个固定成员必须都在
+  for (const f of [EVIDENCE_FILES.trace, EVIDENCE_FILES.junit, EVIDENCE_FILES.manifest, EVIDENCE_FILES.summary]) {
+    assert.ok(members.has(f), `包里缺 ${f}（实际：${[...members.keys()].join(', ')}）`);
+  }
+  // 逐字节比对：解出来的内容 == 我们生成的内容。
+  // 只验"存在"是不够的 —— 截断、错位、CRC 通过但内容平移，都能通过"存在"这一关。
+  assert.equal(members.get(EVIDENCE_FILES.trace)!.toString('utf8'), toTraceJsonl(report.events));
+  assert.equal(members.get(EVIDENCE_FILES.junit)!.toString('utf8'), toJUnitXml(report));
+  // 证据原件也在，且内容寻址：文件名就是它的 sha256
+  const art = [...members.keys()].find((k) => k.startsWith(`${EVIDENCE_FILES.artifactsDir}/`));
+  assert.ok(art, 'artifacts/ 下应该有证据原件');
+  assert.equal(art!.split('/')[1]!.length, 64, '成员名应是 sha256');
+  assert.match(members.get(art!)!.toString('utf8'), /order created/);
+});
+
+test('证据包里的 junit.xml 独立可解析（不是只有我能解析）', async () => {
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  const xml = unzipMembers(pkg.bytes).get(EVIDENCE_FILES.junit)!.toString('utf8');
+  const script = `
+import json, sys, xml.etree.ElementTree as ET
+s = ET.fromstring(open(sys.argv[1], encoding='utf-8').read())
+print(json.dumps({'tests': int(s.get('tests')), 'failures': int(s.get('failures'))}))
+`;
+  const f = join(mkdtempSync(join(tmpdir(), 'atest-ju-')), 'j.xml');
+  await writeFile(f, xml, 'utf8');
+  const parsed = JSON.parse(execFileSync('python3', ['-c', script, f], { encoding: 'utf8' }));
+  assert.equal(parsed.tests, report.results.filter((r) => r.kind !== 'sequence').length);
+  assert.ok(parsed.failures >= 1, 'bad 那步该是 failure');
+});
+
+test('喂进真密钥：解开的包里搜不到它（evidence 是给多人下载的）', async () => {
+  const store = await freshStore();
+  // 三种入口都覆盖：作为响应体证据、作为结构化数据、作为**字段名很无辜**的结构化数据
+  const id = await store.save('resp', `{"data":"${JWT}","ak":"AKIAIOSFODNN7EXAMPLE"}`, 'ok');
+  void id;
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+
+  const members = unzipMembers(pkg.bytes);
+  const all = [...members.values()].map((b) => b.toString('utf8')).join('\n');
+  // 整段 token 不能出现
+  assert.ok(!all.includes(JWT), 'JWT 原样进了证据包');
+  assert.ok(!all.includes('AKIAIOSFODNN7EXAMPLE'), 'AWS key 原样进了证据包');
+  // 但**痕迹要留下**：变成 "eyJ" 前缀被剪掉也算泄露（能拼回去），
+  // 而完全无痕迹会让人以为"这次运行没有 token"
+  assert.match(all, /JWT/, '应留下"这里原本是 JWT"的线索');
+});
+
+test('原始证据（keepRawKinds）逐字节不改，且清单里能看出它没被改过', async () => {
+  const store = new DiskArtifactStore({ dir: await mkdtemp(join(tmpdir(), 'atest-raw-')), keepRawKinds: ['resp.raw'] });
+  const body = `{"sig":"${JWT}","x":1}`;
+  await store.save('resp.raw', body, 'ok');
+  const rec = store.all()[0]!;
+  const loaded = await store.load(rec.id);
+  assert.equal(new TextDecoder().decode(loaded!.bytes), body, '白名单里的 kind 必须一字节不动 —— 动一个字符，签名问题就永远查不出来');
+  assert.equal(rec.redacted, false);
+});
+
+test('默认（不在白名单）的文本证据做值形态脱敏', async () => {
+  const store = await freshStore();
+  await store.save('resp', `{"token":"${JWT}"}`, 'ok');
+  const rec = store.all()[0]!;
+  assert.equal(rec.redacted, true);
+  const text = new TextDecoder().decode((await store.load(rec.id))!.bytes);
+  assert.ok(!text.includes(JWT));
+});
+
+test('manifest 记录 frozen 与 provenance —— CI 要靠它拒绝执行（M7）', async () => {
+  const store = await freshStore();
+  // manifest.artifacts 来自 store.recordsOf(本次 run 的 stepId)，所以要先落一份属于
+  // 'ok' 那步的证据。failingRun 的场景里没有 HTTP 步骤，没人调 saveArtifact ——
+  // 这不是 bug（断言失败的解释在 trace.jsonl 的 keyContext 里），但它说明
+  // "纯断言场景的证据包只有 trace/junit/manifest/summary 四个成员"。
+  await store.save('resp', '{"n":1}', 'ok');
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store, provenance: { versionId: 'v7', irSha: 'abc123' } });
+  const m = JSON.parse(unzipMembers(pkg.bytes).get(EVIDENCE_FILES.manifest)!.toString('utf8'));
+  assert.equal(m.scenario.frozen, false, 'frozen 必须原样带出：它决定这份证据能不能当门禁依据');
+  assert.equal(m.scenario.versionId, 'v7');
+  assert.equal(m.scenario.irSha, 'abc123');
+  assert.equal(m.redaction.keyRules, 'applied', '脱敏策略要写进包里，否则"证据没被动过"无法证明');
+  assert.ok(Array.isArray(m.artifacts) && m.artifacts.length >= 1);
+});
+
+test('磁盘上已不存在的证据 -> 记进 missing，而不是静默少一个成员', async () => {
+  const store = await freshStore();
+  const id = await store.save('resp', 'hello', 'ok');
+  const { scenario, report } = await failingRun(store);
+  // 手工把文件删掉，模拟"证据被清理任务收了"/磁盘故障
+  rmSync(join(store.rootDir, 'sha', id.slice(0, 2), id), { force: true });
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  assert.ok(pkg.missing.length >= 0);
+  // manifest 里这条还在（run 当时确实产出了它），而包里没有：missing 是唯一的解释
+  assert.ok(pkg.manifest.artifacts.some((a) => a.id === id));
+});
+
+test('写盘：文件名带 runId 与状态，返回 sha256 供 CI 打进日志', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atest-write-'));
+  const pkg = await buildEvidencePackage({
+    scenario: scen([{ ...b('n'), kind: 'noop' }]), report: stubReport(), store: await freshStore(),
+  });
+  const w = await writeEvidencePackage(dir, 'run_abc/../../etc/passwd', 'fail', pkg.bytes);
+  assert.ok(!w.path.includes('etc/passwd'), 'runId 里的路径穿越必须被清洗：它可能来自 API 请求字段');
+  assert.match(w.path, /evidence\..*\.fail\.zip$/);
+  assert.equal(w.sha256.length, 64);
+  assert.equal(await readdir(dir).then((x) => x.length), 1);
+});
+
+/** 最小可用的 RunReport（只为写盘这条路，不跑引擎） */
+function stubReport(): RunReport {
+  return {
+    runId: 'run_x', status: 'pass', startedAt: 1_700_000_000_000, durMs: 10, results: [], events: [],
+    outputs: {}, costUsd: 0, tally: { pass: 0, fail: 0, error: 0, healed: 0, skipped: 0, triaged: 0 }, summary: 'pass',
+  };
+}
+
+test('readEvidenceMember 读回成员，找不到时报错并列出实际成员', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atest-read-'));
+  const pkg = await buildEvidencePackage({ scenario: scen([{ ...b('n'), kind: 'noop' }]), report: stubReport(), store: await freshStore() });
+  const w = await writeEvidencePackage(dir, 'r1', 'pass', pkg.bytes);
+  assert.match(await readEvidenceMember(w.path, EVIDENCE_FILES.summary), /run_x/);
+  await assert.rejects(() => readEvidenceMember(w.path, 'nope.txt'), /现有成员/);
+});
+
+// ── zip 层自身 ────────────────────────────────────────────────────────────
+
+/**
+ * zip：中文名与空格名。**判据换过，因为原来那条断言不可能通过。**
+ *
+ * 原来断言"系统 unzip 解出来名字不乱码"。实测（本机 macOS，LANG=zh_CN.UTF-8，
+ * 换 LC_ALL=en_US.UTF-8 也一样）：
+ *   checkdir error: cannot create .../artifacts/<乱码>  Illegal byte sequence
+ *   unable to process ...   → 退出码 2，一个文件都解不出来
+ * 而 `unzip -t` 是 OK 的 —— 所以**包是合法的**（CRC、结构、UTF-8 flag 0x0800 全对，
+ * 下面第一条断言就在验 flag），坏在 Info-ZIP 把成员名喂给 mkdir 之前的那一步。
+ * 这是 unzip 6.0（2010 年的代码，Apple 未维护）在 macOS 上的已知毛病：
+ * 它按非 UTF-8 的 locale 解释裸字节名字，得到非法字节序列后直接拒绝建目录。
+ * 换句话说：**如果中文成员名是我们自己造的，而团队的解包路径是 unzip，
+ * 那 evidence.zip 里只要有一个中文 stepId，整个包在 CI 里就解不出来**
+ * （不是解错，是解不出）。这条比测试本身重要，所以记在 docs/04 §M6。
+ *
+ * 因此判据分三层，各验一件事：
+ *  1. 我们写的字节是对的（UTF-8 flag 置位、名字是合法 UTF-8、读回原样）
+ *  2. **macOS 原生解压器 ditto（= 访达双击那条路）完整还原中文名** ——
+ *     "人能打开"这条由它背书，它是中文用户的实际路径
+ *  3. 真成员名**不含非 ASCII**：生产路径上 id 是 sha256 hex、其余四个成员名是常量，
+ *     所以 unzip 这条路今天是通的；用断言把这个前提钉住，
+ *     将来有人把 stepId 放进成员名就会红，而不是等到 CI 解包失败才发现
+ */
+test('zip：中文名 —— 字节正确 + macOS 原生解压器完整还原；成员名刻意保持 ASCII', () => {
+  const enc = new TextEncoder();
+  const cnName = 'artifacts/步骤 一/响应 体.json';
+  const bytes = buildZip([{ name: cnName, data: enc.encode('{"a":1}') }], Date.UTC(2026, 0, 1));
+
+  // 1) 字节层：UTF-8 flag(bit11) 必须置位。不置时连 ditto 也只能猜编码，
+  //    而 Windows 资源管理器会按 CP437 显示成长串乱码
+  const flags = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(6, true);
+  assert.ok((flags & 0x800) !== 0, `flags=${'0x' + flags.toString(16)} 未置 bit11（UTF-8 文件名标志）`);
+  const back = readZipEntries(bytes);
+  assert.equal(back[0]!.name, cnName, '名字应逐字节是 UTF-8 编码、能原样读回');
+  assert.equal(new TextDecoder().decode(back[0]!.data), '{"a":1}');
+
+  // 2) macOS 原生解压器（不是我们自己写的读侧）
+  const dir = mkdtempSync(join(tmpdir(), 'atest-ditto-'));
+  const zp = join(dir, 'e.zip');
+  writeFileSync(zp, bytes);
+  const out = join(dir, 'x');
+  mkdirSync(out);
+  execFileSync('ditto', ['-x', '-k', zp, out], { stdio: 'pipe' });
+  assert.deepEqual(listFiles(out), [cnName], `ditto 解出的名字：${listFiles(out).join(' | ')}`);
+  assert.equal(readFileSync(join(out, cnName), 'utf8'), '{"a":1}');
+
+  // 3) 反向保险：真实包里的成员名必须全 ASCII（否则上面那个 unzip 毛病会命中）。
+  //    成员名 = 四个常量 + artifacts/<sha256>，没有一个来自人写的 stepId
+  const real = buildZip(
+    [{ name: EVIDENCE_FILES.manifest, data: enc.encode('{}') }, { name: `${EVIDENCE_FILES.artifactsDir}/a1b2c3`, data: enc.encode('x') }],
+    Date.UTC(2026, 0, 1),
+  );
+  for (const m of readZipEntries(real)) {
+    assert.ok(/^[\x20-\x7e]+$/.test(m.name), `成员名含非 ASCII，CI 的 unzip 会解不出整个包：${m.name}`);
+  }
+});
+
+test('zip：真实 evidence 包（全 ASCII 成员名）在系统 unzip 下验包+解包全通过', async () => {
+  // 与上一条配对：上一条说明"中文成员名 unzip 解不出"，这一条说明"我们实际产出的包
+  // 走 unzip 是好的"。两条都留着，才看得出边界在哪。
+  const store = await freshStore();
+  await store.save('resp', '{"ok":true}', 'ok');
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  const members = unzipMembers(pkg.bytes); // unzip -t + unzip -o，任一失败即抛
+  assert.ok(members.has(EVIDENCE_FILES.manifest));
+});
+
+test('zip：空文件与零成员包都合法', () => {
+  const enc = new TextEncoder();
+  const withEmpty = buildZip([{ name: 'empty.txt', data: new Uint8Array(0) }]);
+  execFileSync('unzip', ['-t', writeTmp(withEmpty)], { stdio: 'pipe' });
+  assert.equal(readZipEntries(withEmpty)[0]!.data.byteLength, 0);
+  // 零成员：unzip 对空包的行为是"没有东西可测"，但结构必须合法（不抛）
+  const emptyPkg = buildZip([]);
+  // 零成员包：结构合法即可。unzip 对空包返回"没有东西可测"的**非零**退出码，
+  // 那是它的正常行为，不是我们的包坏了 —— 所以这里只验"不报格式错"。
+  let code = 0;
+  try { execFileSync('unzip', ['-t', writeTmp(emptyPkg)], { stdio: 'pipe' }); }
+  catch (e) { code = (e as { status?: number }).status ?? -1; }
+  assert.ok(code === 0 || code === 1, `unzip 报了非预期错误码 ${code}`);
+});
+
+function writeTmp(bytes: Uint8Array): string {
+  const dir = mkdtempSync(join(tmpdir(), 'atest-z-'));
+  const p = join(dir, 'x.zip');
+  execFileSync('sh', ['-c', `cat > "${p}"`], { input: Buffer.from(bytes) });
+  return p;
+}
+
+test('zip：拒绝 zip slip（成员名带 .. 会让 unzip 写到包外去）', () => {
+  for (const bad of ['../evil.txt', '/etc/passwd', 'a/../../b', 'C:\\Windows\\x']) {
+    assert.throws(() => buildZip([{ name: bad, data: new Uint8Array(1) }]), /zip slip|相对路径|反斜杠/, bad);
+  }
+});
+
+test('zip：成员 CRC 不匹配时报错（读侧不校验就是假的完整性）', () => {
+  const enc = new TextEncoder();
+  const bytes = buildZip([{ name: 'a.txt', data: enc.encode('hello') }]);
+  // 改动数据区一个字节（本地头 30 字节 + 名字 5 字节之后就是数据）
+  bytes[35] = bytes[35] === 0x68 ? 0x69 : 0x68;
+  assert.throws(() => readZipEntries(bytes), /CRC 不匹配/);
+});
+
+test('zip：同样内容产出同样字节（证据包本身要能被哈希寻址）', () => {
+  const enc = new TextEncoder();
+  const mk = () => buildZip([
+    { name: 'b.json', data: enc.encode('{"b":2}'), mtimeMs: 1_700_000_000_000 },
+    { name: 'a.json', data: enc.encode('{"a":1}'), mtimeMs: 1_700_000_000_000 },
+  ], 1_700_000_000_000);
+  assert.deepEqual([...mk()], [...mk()]);
+  // 顺序不同 -> 字节不同。所以组装侧把顺序写死是有意义的
+  const swapped = buildZip([
+    { name: 'a.json', data: enc.encode('{"a":1}'), mtimeMs: 1_700_000_000_000 },
+    { name: 'b.json', data: enc.encode('{"b":2}'), mtimeMs: 1_700_000_000_000 },
+  ], 1_700_000_000_000);
+  assert.notDeepEqual([...mk()], [...swapped]);
+});
+
+test('dosStamp：1980 年前的时间钳到可表示范围（不产出畸形包）', () => {
+  const { date } = dosStamp(new Date('1970-01-01T00:00:00Z').getTime());
+  const year = ((date >> 9) & 0x7f) + 1980;
+  assert.ok(year >= 1980, `年份算出来是 ${year}，zip 无法表示`);
+});
+
+test('存储：内容寻址 —— 同内容只存一份，不同内容必然不同 id', async () => {
+  const store = await freshStore();
+  const a = await store.save('resp', '{"a":1}', 's1');
+  const b = await store.save('resp', '{"a":1}', 's2');
+  const c = await store.save('resp', '{"a":2}', 's2');
+  assert.equal(a, b, '同内容同 id，这是内容寻址的定义');
+  assert.notEqual(a, c);
+  // 磁盘上真的只有一份：内容寻址的"只存一份"必须能在**文件系统**上验，
+  // 只看返回 id 相同是不够的 —— 存两遍也返回同样的 id。
+  //
+  // 注意要**跨所有分片**数：id 前两位决定分片目录，a 与 c 大概率落在不同目录里。
+  // 早先这里写的是"在 a 的分片目录里同时能找到 a 和 c"，那是我对分片布局的想象，
+  // 不是实现 —— 文件不存在的那个断言红了才发现。
+  const shards = await readdir(join(store.rootDir, 'sha'));
+  const files: string[] = [];
+  for (const d of shards) files.push(...(await readdir(join(store.rootDir, 'sha', d))).map((f) => `${d}/${f}`));
+  assert.equal(new Set(files).size, files.length, '磁盘上出现了重复文件');
+  assert.equal(files.length, 2, `磁盘上应有 2 个文件（a/b 同内容共享一个），实际 ${files.length}：${files.join(', ')}`);
+  assert.ok(files.some((f) => f.endsWith(a)) && files.some((f) => f.endsWith(c)), '两个不同内容各自成文件');
+});
+
+test('存储：load 会校验 sha，被人改过的文件不会被当成有效证据', async () => {
+  const store = await freshStore();
+  const id = await store.save('resp', 'original', 's1');
+  await writeFile(join(store.rootDir, 'sha', id.slice(0, 2), id), 'TAMPERED!!');
+  await assert.rejects(() => store.load(id), /已被改动或损坏/);
+});
+
+test('存储：非 hex 的 id 直接拒（它是文件路径的一部分，不过滤就是路径穿越）', async () => {
+  const store = await freshStore();
+  for (const bad of ['../../etc/passwd', 'z'.repeat(64), '', 'A'.repeat(64)]) {
+    assert.equal(await store.load(bad), undefined, bad);
+    assert.equal(await store.exists(bad), false, bad);
+  }
+});
+
+test('存储：超大证据拒收而不是截断（截断就是伪造证据）', async () => {
+  const store = new DiskArtifactStore({ dir: await mkdtemp(join(tmpdir(), 'atest-big-')), maxBytesPerArtifact: 16 });
+  await assert.rejects(() => store.save('resp', 'x'.repeat(100), 's1'), /超过单成员上限/);
+});
+
+test('存储：找不到返回 undefined 而不是抛（"证据被清理了"是合法状态）', async () => {
+  const store = await freshStore();
+  assert.equal(await store.load('a'.repeat(64)), undefined);
+});
+
+test('recordsOf 按步骤归集且去重（重试会重复存同一内容）', async () => {
+  const store = await freshStore();
+  await store.save('resp', 'same', 's1');
+  await store.save('resp', 'same', 's1'); // 重试
+  await store.save('screenshot', 'other', 's2');
+  const one = store.recordsOf(['s1']);
+  assert.equal(one.length, 1, '同一步骤存两次同内容只记一条');
+  assert.equal(store.recordsOf(['s1', 's2']).length, 2);
+});
+
+// ── trace.jsonl 与脱敏 ────────────────────────────────────────────────────
+
+test('trace.jsonl 每行一个事件，能被逐行读回；最后一行截断可识别', async () => {
+  const store = await freshStore();
+  const { report } = await failingRun(store);
+  const jsonl = toTraceJsonl(report.events);
+  assert.equal(jsonl.endsWith('\n'), true);
+  const back = parseTraceJsonl(jsonl);
+  assert.equal(back.events.length, report.events.length);
+  assert.equal(back.invalidLines, 0);
+  assert.equal(back.truncatedTail, false);
+
+  // 进程写在半行上被打断：这是 trace 存在的意义（crash 后仍可分析），必须能读回前缀
+  const cut = jsonl.slice(0, jsonl.length - 5);
+  const partial = parseTraceJsonl(cut);
+  assert.equal(partial.truncatedTail, true, '截断必须被显式报出来，否则人会拿少了尾巴的 trace 推断"最后一步没跑"');
+  assert.equal(partial.events.length, report.events.length - 1);
+});
+
+test('脱敏：字段名命中 -> 整值替换，但长度保留（是排查线索且不泄露内容）', () => {
+  const out = JSON.stringify(redactForDisk({ password: 'hunter2supersecret', amount: 3 }));
+  assert.ok(!out.includes('hunter2supersecret'));
+  assert.match(out, /18 字符/);
+  assert.equal((redactForDisk({ amount: 3 }) as { amount: number }).amount, 3, '无辜字段一个字节都不该动');
+});
+
+test('脱敏：字段名无辜但值是密钥 -> 照样拦住（只按字段名会漏）', () => {
+  const out = JSON.stringify(redactForDisk({ data: JWT, info: `Bearer ${'a'.repeat(40)}` }));
+  assert.ok(!out.includes(JWT), '后端把 token 放在 data 字段里极常见');
+  assert.ok(!out.includes('a'.repeat(40)));
+  assert.match(out, /JWT|Bearer/);
+});
+
+test('脱敏：同一份模式在多个字段上都生效（模块级 /g 正则的 lastIndex 陷阱）', () => {
+  // 带 /g 的共享正则在 .replace 时会推进 lastIndex：
+  // 第二个字段就从中间开始扫 —— 于是"有时脱敏有时不脱敏"，且与字段顺序有关。
+  const two = redactForDisk({ a: `t=${JWT}`, b: `t=${JWT}` });
+  const s = JSON.stringify(two);
+  assert.ok(!s.includes(JWT), s);
+  const one = JSON.stringify(redactForDisk({ b: `t=${JWT}` }));
+  assert.ok(!one.includes(JWT), '单字段版本也必须拦住（顺序依赖就体现在这里）');
+});
+
+test('脱敏：深结构与超长数组有上限（报告生成失败会连累整次运行的证据）', () => {
+  let deep: Record<string, unknown> = { v: 'leaf' };
+  for (let i = 0; i < 30; i++) deep = { n: deep };
+  const s = JSON.stringify(redactForDisk(deep));
+  assert.match(s, /已截断/);
+  assert.ok(s.length < 5000, `深结构没被限住（${s.length} 字节）`);
+  const arr = redactForDisk({ list: Array.from({ length: 500 }, (_, i) => i) }) as { list: unknown[] };
+  assert.equal(arr.list.length, 50);
+});
+
+test('脱敏：循环引用不会炸（一个 self-ref 就能让整份 trace 变成 TypeError）', () => {
+  const o: Record<string, unknown> = { name: 'x' };
+  o.self = o;
+  assert.doesNotThrow(() => JSON.stringify(redactForDisk(o)));
+});

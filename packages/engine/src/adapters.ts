@@ -6,6 +6,7 @@
  *   否则测出来的是自己 IO 的天花板（docs/09 §4.2）。在解释器里加 `if (perfMode)`
  *   是这类系统最常见的架构腐化点。
  */
+import type { StepStatus, TraceEventKindT } from '@atest/ir';
 
 /** 引擎对外的唯一副作用出口。所有网络/设备/DB 访问都经这里。 */
 export interface ExecContext {
@@ -25,9 +26,25 @@ export interface ExecContext {
 }
 
 export interface EmitInput {
-  kind: string;
+  /**
+   * 事件类型。**是封闭枚举，不是 string**。
+   *
+   * 原先这里写 `kind: string`，而引擎侧 `emit` 里有一句
+   * `kind: e.kind as TraceEvent['kind']` 把类型擦掉了。后果不是"风格不好"：
+   * adapter 发了一条 `kind: 'http'`（不在 TraceEventKind 里），
+   * `toTraceJsonl` 照常把它写进 trace.jsonl，而 `parseTraceJsonl` 用 schema 读回时
+   * **静默丢掉这一行** —— 于是 trace 里看不见请求什么时候发的、耗时多少，
+   * 而文件看起来是完整的、行数也对得上。写侧不校验、读侧才校验，
+   * 坏数据就永远到不了写它的人眼前。
+   *
+   * 改成枚举后这类问题在 **adapter 里编译期就报**，
+   * 而不是在三天后有人问"trace 里怎么没有 http 事件"时才发现。
+   */
+  kind: TraceEventKindT;
   stepId?: string;
-  status?: string;
+  /** 步骤/断言的六态。**别把 HTTP 状态码塞这里**（那是 data.statusCode 的活）。
+   *  之前 adapter 传的 `status: String(res.status)` 会因为不是合法状态被整行丢弃 */
+  status?: StepStatus;
   durMs?: number;
   data?: Record<string, unknown>;
 }
@@ -93,8 +110,30 @@ export interface DeviceExec {
   query?(sql: string, vars: Record<string, unknown>, ctx: ExecContext): Promise<unknown[]>;
 }
 
+/**
+ * 证据存储端口（M6）。
+ *
+ * **id 由存储侧算，不由引擎编**。早先引擎自己拼 `art_<哈希>_<kind>` 然后返回，
+ * 而那个哈希是把 32 位 FNV-1a 重复四遍凑成 64 个十六进制字符的**伪 sha256** ——
+ * 看着像 sha256，实际只有 2^32 空间；更要命的是**压根没存任何东西就返回了 id**，
+ * 于是 `StepResult.artifactIds` 里躺着一串永远取不到内容的哈希，
+ * 而 evidence 包看起来是完整的。内容寻址的"址"必须由真正落地那一方给出：
+ * 两边各算一遍迟早不同（一边按 UTF-16 码元、一边按 UTF-8 字节）。
+ *
+ * 引擎不 import node:fs / node:crypto，所以真实现来自 adapter 或 CLI。
+ */
+export interface ArtifactStore {
+  /** 落一份证据，返回**可用于取回**的 id（约定为内容寻址，同内容同 id） */
+  save(kind: string, data: Uint8Array | string, stepId: string): Promise<string>;
+  /** 取回。找不到返回 undefined（不抛）——"证据被清理了"是合法状态，不是程序异常 */
+  load(id: string): Promise<{ kind: string; bytes: Uint8Array; sha256: string } | undefined>;
+}
+
 /** 注册表。引擎只认这个，不认 Playwright/Appium。 */
 export interface AdapterRegistry {
+  /** 证据存储。缺省时**任何 saveArtifact 调用都会失败**（而不是返回一个假 id）：
+   *  拿不到存储就把 id 记进 artifactIds，等于让证据包看起来完整而实际取不到东西 */
+  artifactStore?: ArtifactStore;
   http?: HttpExec;
   ui?: UiExec;
   device?: DeviceExec;

@@ -1,0 +1,21 @@
+{
+  // CLI 这层碰磁盘与进程（读 IR、写证据包、设退出码），所以 types 里有 node。
+  // 与 store 同理：**约束在 ir/engine 那两层（types: []），不在这里** ——
+  // "引擎能在浏览器里跑"靠的是端口留在 engine、实现放在 store/cli，
+  // 而不是靠大家不在引擎里写 fs。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "../../.tsbuild/cli.tsbuildinfo",
+    "types": ["node"],
+    "lib": ["ES2023"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../ir" },
+    { "path": "../engine" },
+    { "path": "../adapter-http" },
+    { "path": "../store" }
+  ]
+}

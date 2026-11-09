@@ -1,0 +1,23 @@
+{
+  "name": "@atest/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "atest": "./bin/atest.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@atest/adapter-http": "*",
+    "@atest/engine": "*",
+    "@atest/ir": "*",
+    "@atest/store": "*"
+  }
+}

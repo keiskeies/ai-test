@@ -15,14 +15,56 @@
  * secret.* 换成不透明占位符，真实值只在 adapter 发请求那一刻取。
  */
 import { PathError, parsePath, queryOne, setPath } from './jsonpath.js';
+import { CONTEXT_LIMITS, SECRET_PLACEHOLDER, redactForDisk } from './redact.js';
 
-export const SECRET_PLACEHOLDER = '«secret:未暴露»';
+/** 单一策略在 redact.ts。这里只是**再导出**，不是又写一份 ——
+ *  两份脱敏规则各自演化的后果见 redact.ts 顶部。 */
+export { SECRET_PLACEHOLDER } from './redact.js';
 
 export class VarError extends Error {
   constructor(message: string, public readonly varName: string) {
     super(`${message}（变量：${varName}）`);
     this.name = 'VarError';
   }
+}
+
+/** scenario.inputs 里我们关心的那部分。刻意不用 ir 的类型（引擎不反向依赖 schema 细节） */
+export interface InputDef {
+  name: string;
+  default?: unknown;
+  required?: boolean;
+}
+
+/**
+ * 把 `scenario.inputs[].default` 兜进运行输入。
+ *
+ * **这行代码之前是不存在的**，后果不是"少一个便利功能"而是行为与声明相反：
+ * IR 里写 `inputs:[{name:"q", default:"DEF"}]`，作者以为不传就是 DEF，
+ * 实际得到的是 `引用未定义（变量：$q）`；而 UI 的表单按 IR 的 default 预填了值，
+ * 于是**从 UI 跑能过、从 CI 跑必炸** —— 同一份 IR 两种行为，
+ * 正是 docs/00 §6.6 里 Apifox GUI↔CLI 那类分裂的具体形态。
+ *
+ * 这是本仓反复出现的「schema 有字段、执行侧没人读」缺陷类的第 5 例
+ * （前 4 例：maxCostUsdPerResolve、wait.onTimeout:'error'、assertPerf.maxRegressionRatio、
+ * Match.unordered —— 见 docs/08 §3 的清扫方法）。
+ *
+ * 三条语义决定：
+ *  1. **只有"根本没传这个键"才用 default**，`{q: undefined}` 也算传了。
+ *     区分不出来就会出现"传 null 想清掉默认值，结果又被兜回 DEF"。
+ *  2. default **不做类型校验**。IR 的 ParamDef.type 由 lint/解析期保证，
+ *     运行期再校一遍是在信任边界内又建一道更弱的信任边界。
+ *  3. default 与传入值**同放一层**（都在 run.inputs 下），不做"外层遮蔽内层"：
+ *     二者不是两个来源的同名冲突，而是同一个输入的两个取值，
+ *     分两层会让 `$.run.inputs` 的遍历结果出现重名键。
+ */
+export function applyInputDefaults(defs: readonly InputDef[] | undefined, given: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(given ?? {}) };
+  if (!defs) return out;
+  for (const d of defs) {
+    if (!d || typeof d.name !== 'string') continue;
+    if (!(d.name in out)) out[d.name] = d.default;
+  }
+  return out;
 }
 
 /**
@@ -48,8 +90,17 @@ export class VarSpace {
   private writes: { name: string; frame: string; scopeId?: string }[] = [];
   private loopStack: unknown[] = [];
 
-  constructor(init: { inputs?: Record<string, unknown>; env?: Record<string, unknown>; secretResolver?: (ref: string) => string } = {}) {
-    this.runRoot = { inputs: { ...(init.inputs ?? {}) }, outputs: {} };
+  /**
+   * @param inputDefs `scenario.inputs`（声明带 default 的那一份）。传了就把 default 兜进去，
+   *   见 {@link applyInputDefaults} —— 不传就等于声明了 default 也没人兜。
+   */
+  constructor(init: {
+    inputs?: Record<string, unknown>;
+    inputDefs?: readonly InputDef[];
+    env?: Record<string, unknown>;
+    secretResolver?: (ref: string) => string;
+  } = {}) {
+    this.runRoot = { inputs: applyInputDefaults(init.inputDefs, init.inputs), outputs: {} };
     this.envMap = init.env ?? {};
     this.secretResolver = init.secretResolver;
   }
@@ -242,10 +293,14 @@ export class VarSpace {
   snapshotForAgent(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (let i = 0; i < this.frames.length; i++) {
-      for (const [k, v] of this.frames[i]!.vars) out[k] = redact(v);
+      // 走 redact.ts 那一份策略（键名 + 值形态 + 深度上限）。
+      // 这个视图是**交给模型**的，所以值形态判据尤其重要：
+      // 一个把 token 放在 data 字段里的响应，按字段名的规则拦不住，
+      // 于是密钥会进 Agent 上下文 —— 而 Agent 能把它 echo 进生成的用例正文里提交上去。
+      for (const [k, v] of this.frames[i]!.vars) out[k] = redactForDisk(v, 0, CONTEXT_LIMITS);
     }
-    out.__run = { inputs: redact(this.inputs), outputs: redact(this.outputs) };
-    out.__env = redact(this.envMap);
+    out.__run = { inputs: redactForDisk(this.inputs, 0, CONTEXT_LIMITS), outputs: redactForDisk(this.outputs, 0, CONTEXT_LIMITS) };
+    out.__env = redactForDisk(this.envMap, 0, CONTEXT_LIMITS);
     return out;
   }
 
@@ -283,21 +338,7 @@ function name0(frames: Frame[]): string {
   return frames[frames.length - 1]?.name ?? '(空)';
 }
 
-const SECRET_KEY_RE = /(password|passwd|secret|token|authorization|apikey|api_key|accesskey|idcard|id_card|phone|mobile)/i;
 
-/** 按字段名规则脱敏。**在序列化那一刻做，不是在展示层做**（docs/05 §4） */
-export function redact(v: unknown, depth = 0): unknown {
-  if (depth > 6) return '…';
-  if (Array.isArray(v)) return v.slice(0, 20).map((x) => redact(x, depth + 1));
-  if (v && typeof v === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      out[k] = SECRET_KEY_RE.test(k) ? SECRET_PLACEHOLDER : redact(val, depth + 1);
-    }
-    return out;
-  }
-  return v;
-}
 
 function structuredCloneish<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;

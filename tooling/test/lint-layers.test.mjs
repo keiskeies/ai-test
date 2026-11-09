@@ -105,8 +105,14 @@ describe('规则表本身', () => {
     for (const r of LAYER_RULES) {
       assert.ok(r.reason && r.reason.length > 10, `${r.pkg} 缺理由`);
       if (!r.forbidNodeBuiltins) {
-        // 放行 node 内置模块的包只有 adapter 一类，理由必须指向"副作用归属"这件事
-        assert.match(r.reason, /adapter|副作用|网络/, `${r.pkg} 放行了 node 内置模块但没说清依据`);
+        // 放行 node 内置模块的包，理由必须**点名它碰的是哪种副作用**。
+        // 原来的正则是 /adapter|副作用|网络/，而 store 的理由里"adapter"这个词出现于
+        // "不得依赖某个具体 adapter" —— 那句话讲的是**不**碰谁，跟"为什么能碰 fs"毫无关系，
+        // 却把检查过了。这就是"测试通过的原因和它想验的东西无关"的典型形态：
+        // 加一个碰磁盘的新包、理由里顺口提一句 adapter，检查就点头了。
+        // 所以现在要求出现的是**副作用本身的名词**（磁盘/网络/进程/子进程），
+        // 并且不再接受光秃秃的 "adapter"。
+        assert.match(r.reason, /磁盘|网络|子进程|进程|副作用/, `${r.pkg} 放行了 node 内置模块但没说清依据（要点名它碰哪类副作用）`);
       }
     }
   });

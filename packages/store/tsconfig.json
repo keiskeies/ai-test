@@ -1,0 +1,28 @@
+{
+  // types 给 node 是**故意**的：这一层的职责就是磁盘（内容寻址证据 + evidence.zip）。
+  // 真正的约束在 engine/ir 那边（types: []，见其 env.d.ts）——
+  // 别把这个例外扩大到那里。引擎侧只留 ArtifactStore 端口，实现在这里。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "../../.tsbuild/store.tsbuildinfo",
+    "types": [
+      "node"
+    ],
+    "lib": [
+      "ES2023"
+    ]
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../ir"
+    },
+    {
+      "path": "../engine"
+    }
+  ]
+}

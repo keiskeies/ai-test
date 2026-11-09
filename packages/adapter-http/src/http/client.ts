@@ -215,7 +215,15 @@ export function asHttpExec(client: HttpClient, docs?: DocProvider): HttpExec {
         maxBytes: req.maxBytes,
         followRedirects: req.followRedirects,
       });
-      ctx.emit({ kind: 'http', stepId: undefined, status: String(r.status), durMs: r.durationMs, data: { bytes: r.bytes, truncated: r.truncated } });
+      // 这里**不发事件**。原先发的是 `ctx.emit({ kind: 'http', status: String(r.status) })`，
+      // 两个字段都不合法：'http' 不在 TraceEventKind 枚举里，
+      // 而 status 是六态机（pass/fail/...）不是 HTTP 状态码。
+      // 引擎侧的 emit 有一句 `kind as TraceEvent['kind']` 把它擦掉了，于是
+      // trace.jsonl 写得出、读不回（parseTraceJsonl 按 schema 丢掉整行）——
+      // 请求耗时与 truncated 就这么从 trace 里消失了，而文件看起来完好。
+      // 现在 kind 是封闭枚举，这类事在**这里**编译期就报。
+      // 传输细节（bytes/truncated/状态码）由引擎的 step.finished 带进 trace，
+      // 那才是它们该在的地方：一次步骤一条记录，而不是两条对不齐的。
       if (r.error) throw new Error(`HTTP 请求失败：${r.error.kind} — ${r.error.message}`);
       return { status: r.status, headers: r.headers, body: r.body, bodyText: r.bodyText, durationMs: r.durationMs, bytes: r.bytes, truncated: r.truncated };
     },
