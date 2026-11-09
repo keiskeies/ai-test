@@ -1,0 +1,29 @@
+# 依赖与构建产物。dist 必须忽略：它是 tsc -b 的产物，且**跨包测试 import 的就是 dist**
+# （见 docs/04 的 pretest 说明）。把 dist 提交进仓库 = 把"测试跑的是旧产物"这个坑
+# 永久固化下来：改了 src 忘了 build，CI 依然绿，因为仓库里躺着一份旧 dist。
+node_modules/
+dist/
+.tsbuild/
+*.tsbuildinfo
+
+# 运行期产物：证据盘与 trace 落盘位置（M6）。
+# 这里面是**跑出来的真实响应体**，可能含未脱敏的个人信息与业务数据，
+# 一旦误提交，删除也不会从历史里消失 —— 证据要进对象存储，不进 git。
+tmp/
+evidence/
+*.trace.jsonl
+evidence.zip
+
+# 本地环境与密钥。密钥只该有不透明引用（secret:<ref>），任何形态的真值都不许进库。
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.keystore
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,24 @@
+{
+  "//": [
+    "ir 包测试的类型检查配置。",
+    "",
+    "为什么单独一份：packages/ir/test 此前**从来没被类型检查过** ——",
+    "typecheck:test 只列了 engine 与 adapter-http，而 npm test 用 tsx 跑，",
+    "tsx 只剥类型不检查类型。于是 ir 的测试里写错字段名、少个参数、",
+    "把可选当必填，一律'通过'。测试自己不带类型检查，就等于",
+    "用一把没刻度的尺子去量精度。",
+    "",
+    "types 带 node 是因为测试要用内置的 node:test / node:assert（本机装不上第三方框架）。",
+    "这不违反'ir 禁止 node 内置模块'那条规则：受约束的是 src，",
+    "lint-layers 里那条规则显式声明了 exempt: '/test/'。"
+  ],
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "composite": false,
+    "types": ["node"]
+  },
+  "include": ["test/**/*.ts"],
+  "references": [{ "path": "./" }]
+}

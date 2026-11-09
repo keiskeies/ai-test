@@ -1,0 +1,258 @@
+/**
+ * 断言求值（docs/02 §4）。
+ * 三条原则在这里执行：结构化优先、模糊默认、语义不参与门禁。
+ */
+import type { Match, Step } from '@atest/ir';
+import type { StepResult, TraceEvent } from '@atest/ir';
+import { query, queryOne, PathError } from './jsonpath.js';
+import { compileExpr } from './expr.js';
+import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
+
+export interface AssertOutcome {
+  status: StepResult['status'];
+  summary?: string;
+  cause?: StepResult['cause'];
+  keyContext?: Record<string, unknown>;
+  costUsd?: number;
+}
+
+interface Deps {
+  vars: { resolveRef(p: string): { found: boolean; value: unknown }; asExprRoot(): Record<string, unknown>; visible(): Record<string, unknown> };
+  adapters: AdapterRegistry;
+  ctx: ExecContext;
+  clock: Clock;
+  addCost: (n: number) => void;
+  emit: (e: { kind: string; stepId?: string; data?: Record<string, unknown> }) => void;
+}
+
+/**
+ * 单个 Match 子句求值。
+ *
+ * `now` 是**注入的时间源**（必填，不给默认值）：nearNow 这类断言必须走它。
+ * 给一个 `= Date.now` 的默认值等于把漏洞写进签名里 —— 每个忘记传参的调用点
+ * 都会安静地读墙上时间，于是「冻结时钟后结果可复现」这条只在有人记得传参时成立。
+ * 强迫每个调用点自己写 `() => 0` 或 `clock.now`，正是我们要的摩擦。
+ */
+export function evalMatch(actual: unknown, m: Match, present: boolean, now: () => number): { ok: boolean; why?: string } {
+  if (m.ignore) return { ok: true };
+  if (!present) return { ok: false, why: '路径未命中（该字段不存在）' };
+  if (m.notNull && (actual === null || actual === undefined)) return { ok: false, why: '期望非空，实际为空' };
+  if (m.isNull && actual !== null && actual !== undefined) return { ok: false, why: `期望 null，实际 ${JSON.stringify(actual)?.slice(0, 40)}` };
+  if (m.type) {
+    const t = Array.isArray(actual) ? 'array' : actual === null ? 'null' : typeof actual;
+    if (t !== m.type) return { ok: false, why: `期望类型 ${m.type}，实际 ${t}` };
+  }
+  if (typeof m.exact !== 'undefined') {
+    if (String(actual) !== String(m.exact)) return { ok: false, why: `期望精确等于 ${JSON.stringify(m.exact)}，实际 ${JSON.stringify(actual)?.slice(0, 60)}` };
+  }
+  if (typeof m.eq === 'number' && Number(actual) !== m.eq) return { ok: false, why: `期望 ${m.eq}，实际 ${String(actual)}` };
+  if (typeof m.gt === 'number' && !(Number(actual) > m.gt)) return { ok: false, why: `期望 > ${m.gt}，实际 ${String(actual)}` };
+  if (typeof m.gte === 'number' && !(Number(actual) >= m.gte)) return { ok: false, why: `期望 >= ${m.gte}，实际 ${String(actual)}` };
+  if (typeof m.lt === 'number' && !(Number(actual) < m.lt)) return { ok: false, why: `期望 < ${m.lt}，实际 ${String(actual)}` };
+  if (typeof m.lte === 'number' && !(Number(actual) <= m.lte)) return { ok: false, why: `期望 <= ${m.lte}，实际 ${String(actual)}` };
+  if (typeof m.contains === 'string') {
+    const hay = typeof actual === 'string' ? actual : JSON.stringify(actual) ?? '';
+    if (!hay.includes(m.contains)) return { ok: false, why: `期望包含 "${m.contains}"` };
+  }
+  if (typeof m.matches === 'string') {
+    if (!new RegExp(m.matches, m.regexFlags ?? 's').test(String(actual ?? ''))) return { ok: false, why: `不匹配正则 ${m.matches}` };
+  }
+  if (m.shape) {
+    const r = checkShape(actual, m.shape);
+    if (!r.ok) return r;
+  }
+  if (typeof m.minLength === 'number') {
+    const len = Array.isArray(actual) ? actual.length : String(actual ?? '').length;
+    if (len < m.minLength) return { ok: false, why: `长度 ${len} < 最小 ${m.minLength}` };
+  }
+  if (typeof m.maxLength === 'number') {
+    const len = Array.isArray(actual) ? actual.length : String(actual ?? '').length;
+    if (len > m.maxLength) return { ok: false, why: `长度 ${len} > 最大 ${m.maxLength}` };
+  }
+  if (m.isArray && !Array.isArray(actual)) return { ok: false, why: '期望数组' };
+  if (m.each && Array.isArray(actual)) {
+    for (let i = 0; i < actual.length; i++) {
+      const r = evalMatch(actual[i], m.each, true, now);
+      if (!r.ok) return { ok: false, why: `[${i}] ${r.why}` };
+    }
+  }
+  if (m.nearNow) {
+    const t = typeof actual === 'number' ? actual : Date.parse(String(actual));
+    if (!Number.isFinite(t)) return { ok: false, why: '不是可比时间' };
+    const diff = Math.abs(now() - t);
+    if (diff > m.nearNow.withinMs) return { ok: false, why: `与当前时间差 ${diff}ms > ${m.nearNow.withinMs}ms` };
+  }
+  return { ok: true };
+}
+
+const SHAPE_RE: Record<string, RegExp> = {
+  uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  oid: /^[0-9a-f]{24}$/i,
+  date: /^\d{4}-\d{2}-\d{2}$/,
+  datetime: /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/,
+  email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/,
+  'phone-cn': /^1[3-9]\d{9}$/,
+  'idcard-cn': /^\d{17}[\dXx]$/,
+  url: /^https?:\/\/\S+$/,
+  hex: /^(0x)?[0-9a-fA-F]+$/,
+  digits: /^\d+$/,
+  snowflake: /^\d{15,19}$/,
+};
+
+export function checkShape(v: unknown, shape: string): { ok: boolean; why?: string } {
+  if (shape === 'nonEmpty') return v && String(v).length ? { ok: true } : { ok: false, why: '期望非空字符串' };
+  const re = SHAPE_RE[shape];
+  if (!re) return { ok: false, why: `未知结构模式 ${shape}` };
+  if (v === null || v === undefined) return { ok: false, why: `期望 ${shape} 形态，实际为空` };
+  return re.test(String(v)) ? { ok: true } : { ok: false, why: `不符合 ${shape} 形态：${String(v).slice(0, 40)}` };
+}
+
+/** 结构化断言求值 */
+export function evalStructAssert(payload: { against: string; status?: number | number[]; jsonPath?: Record<string, Match>; expr?: string; exprExpected?: boolean; durationMs?: { gte?: number; lte?: number; eq?: number } }, deps: Deps): AssertOutcome {
+  const src = deps.vars.resolveRef(payload.against);
+  if (!src.found) return { status: 'error', summary: `断言源未找到：${payload.against}`, cause: 'case-stale' };
+  const value = src.value as Record<string, unknown>;
+  const failures: string[] = [];
+  const checked: string[] = [];
+
+  if (payload.status !== undefined) {
+    const actual = Number(value?.status ?? value);
+    const want = Array.isArray(payload.status) ? payload.status : [payload.status];
+    checked.push('status');
+    if (!want.includes(actual)) failures.push(`HTTP 状态期望 ${want.join('/')}，实际 ${actual}`);
+  }
+  if (payload.durationMs) {
+    const d = Number(value?.durationMs ?? NaN);
+    const c = payload.durationMs;
+    checked.push('durationMs');
+    if (Number.isNaN(d)) failures.push('缺少 durationMs');
+    else if (c.lte !== undefined && d > c.lte) failures.push(`耗时 ${d}ms > ${c.lte}ms`);
+    else if (c.gte !== undefined && d < c.gte) failures.push(`耗时 ${d}ms < ${c.gte}ms`);
+  }
+  const body = value?.body ?? value;
+  for (const [path, clause] of Object.entries(payload.jsonPath ?? {})) {
+    checked.push(path);
+    try {
+      const r = query(body, path.startsWith('$') ? path : `$.${path}`);
+      if (r.values.length === 0) {
+        const one = evalMatch(undefined, clause, false, deps.clock.now);
+        if (!one.ok) failures.push(`${path}: ${one.why}`);
+        continue;
+      }
+      for (let i = 0; i < r.values.length; i++) {
+        const one = evalMatch(r.values[i], clause, true, deps.clock.now);
+        if (!one.ok) { failures.push(`${r.paths[i] ?? path}: ${one.why}`); break; }
+      }
+    } catch (e) {
+      if (e instanceof PathError) return { status: 'error', summary: `断言路径错误：${e.message}`, cause: 'case-stale' };
+      throw e;
+    }
+  }
+  if (payload.expr) {
+    checked.push('expr');
+    const got = compileExpr(payload.expr).eval({ root: deps.vars.asExprRoot(), vars: deps.vars.visible(), now: () => deps.clock.now() });
+    const want = payload.exprExpected ?? true;
+    if (Boolean(got) !== want) failures.push(`表达式 ${payload.expr} 期望 ${want}，实际 ${got}`);
+  }
+
+  if (failures.length) {
+    return {
+      status: 'fail',
+      summary: failures.join('；'),
+      cause: 'product-bug',
+      keyContext: { checked, failures, actualStatus: value?.status, actualBodyPreview: preview(body) },
+    };
+  }
+  return { status: 'pass', summary: `断言通过（${checked.length || 1} 项）`, keyContext: { checked } };
+}
+
+/** 语义断言。report-only 时**绝不返回 fail**，只返回 triaged（docs/02 §4） */
+export async function evalLlmAssert(payload: { question: string; evidenceFrom: string; gatePolicy: 'report-only' | 'blocking' | 'triage'; requireEvidenceQuote: boolean }, deps: Deps): Promise<AssertOutcome> {
+  const src = deps.vars.resolveRef(payload.evidenceFrom);
+  if (!src.found) return { status: 'error', summary: `语义断言证据源未找到：${payload.evidenceFrom}`, cause: 'case-stale' };
+  if (!deps.adapters.llm) {
+    deps.emit({ kind: 'lint.reported', data: { code: 'LLM_ADAPTER_MISSING', detail: '语义断言未执行（无 llm adapter）' } });
+    return { status: 'skipped', summary: '语义断言跳过（无 llm adapter）' };
+  }
+  const r = await deps.adapters.llm.judge(
+    { question: payload.question, evidence: src.value, requireQuote: payload.requireEvidenceQuote },
+    deps.ctx,
+  );
+  deps.addCost(r.costUsd);
+  const gate = payload.gatePolicy;
+  if (r.passed) return { status: 'pass', summary: `语义判定：是（¥${r.costUsd.toFixed(4)}）`, keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
+  if (gate === 'blocking') return { status: 'fail', summary: `语义判定：否（已设为门禁，需人复核）`, cause: 'product-bug', keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
+  // report-only / triage：不影响门禁
+  return { status: 'triaged', summary: `语义判定：否（report-only，不计入通过率）`, keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
+}
+
+/** 界面断言（依赖 ui/device adapter 的 assertUi） */
+export async function evalUiAssert(s: Step, deps: Deps): Promise<AssertOutcome> {
+  const p = s as unknown as { assertKind: string; target?: string; contains?: unknown; expected?: unknown; ariaYaml?: string };
+  const adapter = deps.adapters.ui ?? deps.adapters.device;
+  if (!adapter || !('assertUi' in adapter)) {
+    return { status: 'error', summary: `${s.kind} 需要 ui/device adapter 提供 assertUi`, cause: 'env-unavailable' };
+  }
+  const r = await (adapter as unknown as { assertUi: (p: unknown, c: ExecContext) => Promise<{ passed: boolean; actual: unknown; expected: unknown }> }).assertUi(p, deps.ctx);
+  if (!r.passed) {
+    const negative = p.assertKind === 'absent' || p.assertKind === 'templateMiss';
+    return {
+      status: 'fail',
+      summary: `界面断言不成立（${p.assertKind}）：期望 ${JSON.stringify(r.expected)?.slice(0, 60)}，实际 ${JSON.stringify(r.actual)?.slice(0, 60)}`,
+      // 否定断言失败要格外可疑：视觉模型倾向过度报告存在（docs/10 §4）
+      cause: negative ? 'untriaged' : 'product-bug',
+      keyContext: { actual: r.actual, expected: r.expected, negative },
+    };
+  }
+  return { status: 'pass', summary: `界面断言通过（${p.assertKind}）` };
+}
+
+export async function evaluateAssertions(s: Step, deps: Deps): Promise<AssertOutcome> {
+  switch (s.kind) {
+    case 'assert': return evalStructAssert(s as unknown as Parameters<typeof evalStructAssert>[0], deps);
+    case 'assertLlm': return evalLlmAssert(s as unknown as Parameters<typeof evalLlmAssert>[0], deps);
+    case 'assertPage': case 'assertUi': return evalUiAssert(s, deps);
+    case 'assertPerf': {
+      const p = s as unknown as { against: string; percentile: number; lte?: number; maxRegressionRatio?: number; errorRateLte?: number };
+      const src = deps.vars.resolveRef(p.against);
+      if (!src.found) return { status: 'error', summary: `性能指标源未找到：${p.against}`, cause: 'case-stale' };
+      const metrics = src.value as Record<string, number>;
+      const pctl = Number(metrics[`p${p.percentile}`] ?? metrics.p95 ?? NaN);
+      if (!Number.isFinite(pctl)) return { status: 'error', summary: `缺少 p${p.percentile} 指标（性能断言需要 adapter 产出分位数）`, cause: 'env-unavailable' };
+      const fails: string[] = [];
+      if (p.lte !== undefined && pctl > p.lte) fails.push(`p${p.percentile}=${pctl}ms > ${p.lte}ms`);
+      if (p.errorRateLte !== undefined && (metrics.errorRate ?? 0) > p.errorRateLte) fails.push(`错误率 ${(metrics.errorRate ?? 0).toFixed(4)} > ${p.errorRateLte}`);
+      if (p.maxRegressionRatio !== undefined) {
+        // **写了阈值却没拿到基线，必须报错而不是跳过**。
+        // 早先是 `&& metrics.baselinePctl` —— 基线缺失时整条判据静默不跑，
+        // 断言照样 pass。于是"性能回归门禁"在基线表为空的那半年里
+        // 一直在绿灯放行，而看板上一片绿，没人知道它拦过什么（0 次）。
+        // 这与 docs/09 §4.3 里"没基线 -> unknown"是同一条原则：
+        // 判不出来要说判不出来，不能给通过。
+        const bPctl = Number(metrics.baselinePctl ?? NaN);
+        if (!Number.isFinite(bPctl) || bPctl <= 0) {
+          return {
+            status: 'error',
+            summary: `声明了 maxRegressionRatio=${p.maxRegressionRatio}，但指标里没有有效的 baselinePctl（当前 ${String(metrics.baselinePctl ?? '缺失')}）。性能回归判据没有跑 —— 这不是通过`,
+            cause: 'case-stale',
+            keyContext: { metrics },
+          };
+        }
+        const ratio = (pctl - bPctl) / bPctl;
+        if (ratio > p.maxRegressionRatio) fails.push(`相对基线退化 ${(ratio * 100).toFixed(1)}% > 阈值 ${(p.maxRegressionRatio * 100).toFixed(0)}%`);
+      }
+      return fails.length
+        ? { status: 'fail', summary: fails.join('；'), cause: 'product-bug', keyContext: { metrics } }
+        : { status: 'pass', summary: `p${p.percentile}=${pctl}ms`, keyContext: { metrics } };
+    }
+    default:
+      return { status: 'error', summary: `不是断言节点：${s.kind}`, cause: 'env-unavailable' };
+  }
+}
+
+function preview(v: unknown): string {
+  const s = typeof v === 'string' ? v : JSON.stringify(v) ?? '';
+  return s.length > 400 ? `${s.slice(0, 400)}…` : s;
+}
+
+export type { TraceEvent };

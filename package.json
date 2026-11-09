@@ -1,0 +1,30 @@
+{
+  "name": "ai-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "测试领域的 Claude Code —— API / Web / Android 可编程测试平台",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/ir packages/engine packages/adapter-http",
+    "clean": "tsc -b --clean packages/ir packages/engine packages/adapter-http",
+    "lint:layers": "node tooling/lint-layers.mjs",
+    "lint": "tsc -b packages/ir packages/engine packages/adapter-http && node tooling/lint-layers.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test \"packages/*/test/**/*.test.ts\" \"tooling/test/**/*.test.mjs\"",
+    "typecheck:test": "tsc -p packages/ir/tsconfig.test.json && tsc -p packages/engine/tsconfig.test.json && tsc -p packages/adapter-http/tsconfig.test.json",
+    "pretest": "tsc -b packages/ir packages/engine packages/adapter-http"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "tsx": "4.23.0",
+    "typescript": "6.0.3"
+  }
+}
