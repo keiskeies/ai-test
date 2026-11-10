@@ -9,7 +9,7 @@
  * 真 IO 在 packages/store。这样 CI、本地 CLI、服务端 worker 三条路径
  * 产出的报告**必然逐字节一致**，不会出现"本地能打开、CI 打不开"。
  */
-import type { StepResult, TraceEvent } from '@atest/ir';
+import type {EnvFingerprint, StepResult, TraceEvent} from '@atest/ir';
 import type { RunReport } from './interpreter.js';
 import { StepResultSchema, TraceEventSchema, CONTAINER_KINDS, flakyAttempts, isFlakyPass } from '@atest/ir';
 
@@ -352,6 +352,18 @@ export interface EvidenceManifest {
   redaction: { keyRules: 'applied'; valueRules: 'applied'; rawArtifacts: 'unmodified'; note: string };
   /** 引擎与 IR 版本。回放不一致时第一个要看的就是这个 */
   versions: { engine: string; ir: string };
+  /**
+   * **执行环境指纹**（视口/DPR/locale/时区/平台/被测版本/时钟模式）。
+   *
+   * 为什么必须在包里，而不是只在服务端 runs 表里：
+   * docs/06 §1 那条"响应式断点相关的用例今天过明天挂且查不出来"，
+   * 排查动作是**拿两次 run 的指纹比一比**。而 evidence.zip 是给别人下载的东西，
+   * 拿到包的人连不上数据库 —— 少了这一栏，他只能得出"用例自己漂了"。
+   *
+   * 可选：调用方没给时**不写这一栏**，而不是写一个空对象。
+   * 空对象会被读成"这次运行没有环境差异"，与"没记环境"是两个结论。
+   */
+  envFingerprint?: EnvFingerprint;
 }
 
 /** 清单序列化。脱敏在这里做（而不是在上游），因为清单**就是要落盘** */

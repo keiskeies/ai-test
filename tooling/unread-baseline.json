@@ -466,52 +466,7 @@
       "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
     },
     {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.appSha",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.clockMode",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.deviceScaleFactor",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
       "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.llmProfileHash",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.locale",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.platform",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.randomSeed",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.runnerVersion",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.timezone",
-      "milestone": "P1",
-      "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
-    },
-    {
-      "id": "packages/ir/src/trace.ts#EnvFingerprintSchema.viewport",
       "milestone": "P1",
       "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
     }

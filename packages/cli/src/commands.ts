@@ -18,6 +18,7 @@ import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidence
 
 import { formatErrors, type ParsedArgs } from './args.js';
 import { CI_HINT, EXIT } from './exit.js';
+import { buildEnvFingerprint } from './fingerprint.js';
 import { gateAfterRun, gateBeforeRun, isTriage } from './gate.js';
 import { generateScenarios, renderScenarioJson, strategyOf, STRATEGIES, GENERATED_STRATEGY_IDS } from './gen.js';
 import { findConfig, resolveEnvFile, resolveScenarioPath, writeConfig, DEFAULT_CONFIG, CONFIG_FILE, type ProjectConfig } from './paths.js';
@@ -206,6 +207,13 @@ async function runOne(o: {
   }
 
   const inputs = parseInputs(a.multi.input ?? []);
+  /*
+   * envRevision **算一次，两处共用**（装配与指纹都要它）。
+   * 各算一遍的话，将来某处加了"从环境文件里读默认修订"而另一处没加，
+   * 就会出现 run 记录里是 7、指纹里是 0 —— 而指纹的唯一用途就是两次 run 对比，
+   * 这种不一致的表现是"基线永远判环境不同"，离这两行很远。
+   */
+  const envRevision = str(a, 'env-revision') ? Number(a.flags['env-revision']) : undefined;
   const assembled = await assemble({
     scenario, env: o.env, registry: o.registry,
     // 子场景解析器。`path` 可能在项目外（--scenario /tmp/x.json），
@@ -213,7 +221,7 @@ async function runOne(o: {
     callScenario: makeCallResolver({ cfg: o.cfg, cwd: io.cwd, scenarioDir: dirname(path) }),
     evidenceDir: join(o.evidenceDir, 'artifacts'),
     clock: o.clock,
-    envRevision: str(a, 'env-revision') ? Number(a.flags['env-revision']) : undefined,
+    envRevision,
     inputs,
     runId: str(a, 'run-id'),
     maxCostUsd: str(a, 'max-cost') ? Number(a.flags['max-cost']) : undefined,
@@ -240,6 +248,21 @@ async function runOne(o: {
   // 各算一遍迟早不一致，而人只会拿其中一份去追问"到底哪个数对"
   const pkg = await buildEvidencePackage({
     scenario, report, store: assembled.store,
+    /*
+     * 环境指纹。**每次都建**，不是"Web 场景才建" ——
+     * 平台/被测版本/时钟模式这几维对 API 用例同样关键（同一份 IR 在
+     * linux 容器与 mac 上跑，性能数字本来就不可比）。
+     * Web 那几维在没起浏览器时自然缺着（字段都是 optional），
+     * 缺与"记了但值不同"在比较时是两种结论，不能混。
+     */
+    envFingerprint: buildEnvFingerprint({
+      environmentRef: scenario.env.environmentRef,
+      env: o.env,
+      envRevision,
+      ...(assembled.web ? { web: assembled.web } : {}),
+      clock: o.clock,
+      ...(str(a, 'seed') ? { randomSeed: Number(a.flags['seed']) } : {}),
+    }),
     // 不再按"有没有 provenance"决定给不给：irSha 由存储层无条件算，
     // 这里只负责传版本 id（P1 才有，现在多半是 undefined，如实缺着）
     provenance: { versionId: str(a, 'version-id') },

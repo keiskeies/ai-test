@@ -127,6 +127,26 @@ test('失败 run 产出的包能被系统 unzip 验过并解开，成员逐字�
     '包里的证据必须是本次 run 产出的那一条；按 stepId 反查存储会把别的 run/别的场景的证据也捞进来');
 });
 
+test('envFingerprint：**没给就不写这一栏**，给了就整份进清单', async () => {
+  /*
+   * 判据的重点在"没给就不写"这一半。
+   * 写一个空对象会被下游读成"这次运行没有环境差异"，
+   * 而真相是"根本没记环境" —— 两个结论指向完全不同的下一步动作。
+   * （这与 artifact.bytes 的处理同一条纪律：宁可不写，也不写一个看起来合法的值。）
+   */
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+
+  const bare = JSON.parse(unzipMembers((await buildEvidencePackage({ scenario, report, store })).bytes)
+    .get(EVIDENCE_FILES.manifest)!.toString('utf8'));
+  assert.ok(!('envFingerprint' in bare), '没传指纹时清单里不该出现这一栏（空对象会被读成"无环境差异"）');
+
+  const fp = { environmentRef: 'staging', envRevision: 3, runnerVersion: '0.0.0', platform: 'darwin', viewport: '1280x720', clockMode: 'live' as const };
+  const withFp = JSON.parse(unzipMembers((await buildEvidencePackage({ scenario, report, store, envFingerprint: fp })).bytes)
+    .get(EVIDENCE_FILES.manifest)!.toString('utf8'));
+  assert.deepEqual(withFp.envFingerprint, fp, '指纹要逐字段进清单 —— 它是排查"两次 run 差在哪"的唯一依据');
+});
+
 test('证据包里的 junit.xml 独立可解析（不是只有我能解析）', async () => {
   const store = await freshStore();
   const { scenario, report } = await failingRun(store);

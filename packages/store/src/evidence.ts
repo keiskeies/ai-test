@@ -24,7 +24,7 @@ import {
   type EvidenceManifest, type JUnitOptions,
 } from '@atest/engine';
 import type { RunReport } from '@atest/engine';
-import type { Scenario } from '@atest/ir';
+import type { EnvFingerprint, Scenario } from '@atest/ir';
 import { buildZip, readZipEntries, type ZipEntry } from './zip.js';
 import type { DiskArtifactStore } from './artifacts.js';
 import { irShaOf } from './ir-hash.js';
@@ -43,6 +43,8 @@ export interface BuildEvidenceOptions {
   engineVersion?: string;
   irVersion?: string;
   junit?: JUnitOptions;
+  /** 执行环境指纹（见 EvidenceManifest.envFingerprint 那条注释）。缺省不写这一栏 */
+  envFingerprint?: EnvFingerprint;
 }
 
 export interface EvidencePackage {
@@ -183,6 +185,9 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
       note: '结构化数据（trace/manifest/JUnit）按字段名 + 值形态双规则脱敏；artifacts/ 下的原始体只替换值形态命中的密钥段（JWT/AKIA/sk-/私钥/Bearer），字段名规则不适用于无结构的原始体。keepRawKinds 白名单里的 kind 完全不改。',
     },
     versions: { engine: o.engineVersion ?? '0.0.0', ir: o.irVersion ?? '0.0.0' },
+    // 只在调用方给了的时候写。写一个 undefined 字段与不写，在 JSON 里等价，
+    // 但**写一个空对象不等价于不写** —— 那会被读成"没有环境差异"
+    ...(o.envFingerprint ? { envFingerprint: o.envFingerprint } : {}),
   };
 
   const junit = toJUnitXml(report, o.junit);
