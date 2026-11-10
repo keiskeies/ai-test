@@ -304,6 +304,20 @@ export const EVIDENCE_FILES = {
   artifactsDir: 'artifacts',
 } as const;
 
+/**
+ * 包里的**成员文件**名（不含 `artifacts/` 那个目录）。
+ *
+ * 为什么要单独有一份、而且**从 EVIDENCE_FILES 算出来而不是手抄**：
+ * 这个清单今天被两处需要 —— html 报告的链接白名单、CLI 的 `evidence show` 用法提示。
+ * 两处各抄一遍的话，"加一个成员"就变成"记得改三个地方"，
+ * 而忘改的那一处**不会报错**：白名单漏了表现为"页面上那个链接点不动"，
+ * 用法提示漏了表现为"人不知道能 show 它"。本仓这一类的名字就叫"下半截没人接"。
+ * `html` 那一格就是本轮新加的成员，它恰好是**手抄那份漏掉的那一格**（实测）。
+ */
+export const EVIDENCE_MEMBERS: string[] = Object.entries(EVIDENCE_FILES)
+  .filter(([k]) => k !== 'artifactsDir')
+  .map(([, v]) => v);
+
 export interface EvidenceManifest {
   runId: string;
   status: string;

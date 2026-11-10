@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { run, scen, b, res, type StepDraft } from './helpers.js';
-import { toHtmlReport, toJUnitXml } from '../src/index.js';
+import { toHtmlReport, toJUnitXml, EVIDENCE_FILES, EVIDENCE_MEMBERS } from '../src/index.js';
 import type { StepResult } from '@atest/ir';
 
 /** 造一份只含给定 artifactIds 的报告并渲染。多个测试要"看链接长什么样"，共用一份 */
@@ -264,6 +264,34 @@ test('属性位置不接收不可信文本（转义纪律的**构造性**防线�
 function a1Draft(): StepDraft {
   return { ...b('a1'), kind: 'set', assign: { n: 1 } } as StepDraft;
 }
+
+test('页脚的同包链接与 EVIDENCE_MEMBERS 同步（加成员不用改三处）', async () => {
+  // 这条钉的是**派生**这件事本身。页脚那份清单原先是手抄的四个名字，
+  // 而本轮加 report.html 时它就少了一格 —— 症状不是报错，是"页面上少一个链接"，
+  // 与它同类的还有 CLI 那句 `evidence show` 的用法提示（同样手抄、同样漏了 html）。
+  // 现在两处都从 EVIDENCE_MEMBERS 派生，所以判据必须是"成员集合 == 页面链接集合"，
+  // 而不是"这四个名字在不在"（后者对手抄和派生给出同样的绿，等于没测）。
+  const report = await run(scen([{ ...a1Draft() }] as StepDraft[]));
+  const html = toHtmlReport(report, {});
+  const hrefs = new Set([...html.matchAll(/href="\.\/([^"]*)"/g)].map((m) => m[1]!));
+  // 除自己以外的全部成员都要有链接
+  const want = EVIDENCE_MEMBERS.filter((n) => n !== EVIDENCE_FILES.html);
+  for (const m of want) assert.ok(hrefs.has(m), `页脚缺同包链接 ${m}（成员清单与渲染脱节了）`);
+  assert.ok(!hrefs.has(EVIDENCE_FILES.html), '不该给本页自己做一个链接');
+  // 反向：页面上不该出现成员清单之外的链接（防止有人往 hrefs 里加硬编码项）
+  for (const h of hrefs) {
+    assert.ok(EVIDENCE_MEMBERS.includes(h), `页脚出现了不在成员清单里的链接：${h}`);
+  }
+  /*
+   * **这条测试的边界要说清**（两步变异实测出来的）：
+   *  - 把页脚退回手抄的四个名字，测试**仍然绿** —— 因为今天那四个恰好就是全部成员，
+   *    两种写法在这一刻行为相同。所以它**不是在验"代码是派生的"**。
+   *  - 再往 EVIDENCE_FILES 加第 6 个成员（模拟"下次加成员忘了改页脚"），测试**变红**。
+   * 也就是说它守的是**漂移发生的那一刻**，而不是"写法必须派生"。
+   * 这正是我要的那条：派生只是手段，"加了成员页面自动跟上"才是要的性质。
+   * 别把它读成"已经保证不会有人手抄"—— 那种性质只能靠不导出可写的清单来保证。
+   */
+});
 
 test('六态之外的状态不会静默借用别人的颜色', async () => {
   // stateOf 的兜底分支（未知状态）在真实 RunReport 里不可达（status 是 zod 枚举），

@@ -579,3 +579,19 @@ test('内部错误不被伪装成用法错（CliError 之外的异常要带堆�
     assert.ok(io.stderr.join('\n').length > 0, '出错却不写 stderr，CI 日志里就只剩一个数字');
   } finally { await f.close(); }
 });
+
+test('evidence 缺参数时的成员清单里真的有 report.html（提示别只列抄来的那几个）', async () => {
+  // 判据**故意写死字面量**而不是拿 EVIDENCE_MEMBERS 去比 ——
+  // 那样是"用派生验派生"，两边一起漂移也不会红（本仓那个缺陷类的测试侧镜像）。
+  // 这条要抓的是具体那次失效：加 report.html 进包时，CLI 的用法提示没跟着加，
+  // 症状是"人不知道能 show 它"，不报错、不变红。
+  const io = ioCapture();
+  const code = await main(['evidence'], io);
+  assert.equal(code, EXIT.USAGE);
+  const text = [...io.stdout, ...io.stderr].join('\n');
+  for (const m of ['manifest.json', 'junit.xml', 'trace.jsonl', 'summary.txt', 'report.html']) {
+    assert.ok(text.includes(m), `用法提示里缺成员 ${m}：${text}`);
+  }
+  // 顺手验 list 真能把 report.html 数列出来（提示说了，得真做得到）
+  assert.match(text, /list/, '要同时给出 list 这条路，人拿不准时可以先列');
+});

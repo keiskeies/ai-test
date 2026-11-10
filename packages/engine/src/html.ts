@@ -31,7 +31,7 @@ import type { RunReport } from './interpreter.js';
 import type { StepResult } from '@atest/ir';
 import { CONTAINER_KINDS, ASSERTION_KINDS, flakyAttempts, isFlakyPass } from '@atest/ir';
 import { redactForDisk } from './redact.js';
-import { EVIDENCE_FILES, type EvidenceManifest } from './report.js';
+import { EVIDENCE_FILES, EVIDENCE_MEMBERS, type EvidenceManifest } from './report.js';
 
 export interface HtmlOptions {
   /**
@@ -128,10 +128,7 @@ function htmlAttr(s: string): string {
  * 一个"要靠记住转义、且错了也没人发现"的白名单，比一个"结构上不可能宽松"的白名单差。
  * Set.has 是精确字符串相等，**没有元字符这个概念**，也就没有"忘了转义"这个失败模式。
  */
-const SAFE_MEMBERS = new Set<string>([
-  EVIDENCE_FILES.manifest, EVIDENCE_FILES.junit, EVIDENCE_FILES.trace,
-  EVIDENCE_FILES.summary, EVIDENCE_FILES.html,
-]);
+const SAFE_MEMBERS = new Set<string>(EVIDENCE_MEMBERS);
 const ARTIFACT_PREFIX = `${EVIDENCE_FILES.artifactsDir}/`;
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -352,14 +349,20 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
     : '';
 
 
-  const manifestLinks = [
-    memberHref(EVIDENCE_FILES.manifest), memberHref(EVIDENCE_FILES.junit),
-    memberHref(EVIDENCE_FILES.trace), memberHref(EVIDENCE_FILES.summary),
-  ].filter((x): x is string => Boolean(x));
+  /*
+   * 同包文件的链接。**从 EVIDENCE_MEMBERS 派生**而不是手抄一份清单 ——
+   * 手抄那份就漏过一格：加 report.html 的时候，页脚这四个名字里少写了一个成员，
+   * 症状是"页面上少一个链接、没人报错"（本仓那个"下半截没人接"的缺陷类）。
+   * 唯一的过滤是**不给自己做链接**（本页就是 report.html，链到自己纯属噪声）。
+   */
+  const siblingLinks = EVIDENCE_MEMBERS
+    .filter((n) => n !== EVIDENCE_FILES.html)
+    .map((n) => memberHref(n))
+    .filter((x): x is string => Boolean(x));
 
   const foot = `<div class="foot">
     <div class="hint">断言结论 ${assertions.length} 条 · 叶子步骤 ${leaf.length} 条 · 成本 $${report.costUsd.toFixed(4)}</div>
-    <div class="hint">同包文件：${manifestLinks.map((l) => `<a href="${htmlAttr(l)}">${esc(l.replace('./', ''))}</a>`).join(' · ')}</div>
+    <div class="hint">同包文件：${siblingLinks.map((l) => `<a href="${htmlAttr(l)}">${esc(l.replace('./', ''))}</a>`).join(' · ')}</div>
     <div class="hint">本页零脚本、零外部请求；证据原件不内嵌，只按 <code>${EVIDENCE_FILES.artifactsDir}/&lt;sha256&gt;</code> 指名。
     字段级密钥在**写盘那一刻**已按字段名 + 值形态双规则脱敏。</div>
   </div>`;

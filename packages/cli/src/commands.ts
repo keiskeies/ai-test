@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path';
 
 import {
   EVIDENCE_FILES, lintScenario, runScenario, toHtmlReport, toJUnitXml, toReport, toTraceJsonl, summaryText,
-  type AdapterRegistry, type RunReport,
+  type AdapterRegistry, type RunReport, EVIDENCE_MEMBERS
 } from '@atest/engine';
 import { defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
 import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidencePackage } from '@atest/store';
@@ -566,12 +566,21 @@ export async function cmdInit(a: ParsedArgs, io: Io): Promise<CommandResult> {
   return { code: EXIT.OK, summary: `已初始化 ${root}` };
 }
 
+/**
+ * `evidence show` 的用法提示里那份成员清单。**从 EVIDENCE_MEMBERS 派生**而不是手抄：
+ * 手抄那份在本轮加 report.html 时就漏了一格，症状是"人不知道能 show 它"，
+ * 不报错、不变红 —— 与它同类的还有 html 报告里那份白名单与页脚链接。
+ */
+function memberHint(): string {
+  return `${EVIDENCE_MEMBERS.join(' / ')} / ${EVIDENCE_FILES.artifactsDir}/<sha256>`;
+}
+
 export async function cmdEvidence(a: ParsedArgs, io: Io): Promise<CommandResult> {
   const sub = a.positionals[0];
   const file = a.positionals[1];
   if (!sub || !file) {
     throw new CliError('用法：atest evidence show <evidence.zip> [成员名] | atest evidence list <evidence.zip>', EXIT.USAGE,
-      `成员名可选：${EVIDENCE_FILES.manifest} / ${EVIDENCE_FILES.junit} / ${EVIDENCE_FILES.trace} / ${EVIDENCE_FILES.summary} / artifacts/<sha256>`);
+      `成员名可选：${memberHint()}。拿不准就先跑 list`);
   }
   if (sub === 'list') {
     const names = await listMembers(file);
