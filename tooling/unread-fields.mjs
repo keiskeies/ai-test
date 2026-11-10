@@ -322,6 +322,94 @@ export function roleOf(masked, start, end) {
 const STRONG_ROLES = new Set(['member', 'binding']);
 
 /**
+ * 只抹注释、**保留字符串与模板内容**的那一份掩码。
+ *
+ * 为什么需要第二份掩码（而不是复用 maskNonCode）：collectTokens 的字符串取词
+ * 原先跑在**原文**上，于是注释里的引号词也算命中。这不是理论问题 —— 实测有 157 个
+ * token 只活在注释的引号里，其中 5 个是 IR 字段名，于是 4 条**真·没人读**的字段
+ * （OperationSchema.amount / ScenarioVersionMetaSchema.ver /
+ *  LocatorRuleSchema.role / DeviceRequirementSchema.requires）被算成"碰过"，
+ * 从 unread 掉进 inconclusive 而躲过门禁。本工具存在的目的正是抓这一类，
+ * 结果它自己被这一类糊住了。
+ *
+ * 触发它的是一次改名：为了躲开 `opts.scenarioId` 的假强证据，我在 html.ts
+ * 写了一段解释"为什么别叫 scenarioId"的注释，而注释里带着 `scenarioId` 的反引号 ——
+ * 于是判不出桶 +1，撞破登记的天花板。**写注释把字段本身藏得更深**，这个方向必须堵。
+ *
+ * 保留字符串内容是为了不丢真证据：脱敏规则表 `['password','api_key']`
+ * 那种"按字段名查表"的写法是合法的消费者（见 test 里那条同名用例）。
+ */
+export function maskCommentsOnly(src) {
+  const n = src.length;
+  const out = src.split('');
+  let prev = '';
+  const regexOkHere = () => prev === '' || '(=,:[!&|?{};+-*%~^<>'.includes(prev);
+  const blank = (from, to) => {
+    for (let i = Math.max(from, 0); i < Math.min(to, n); i++) if (src[i] !== '\n') out[i] = ' ';
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const c2 = src[i + 1];
+    if (c === '/' && c2 === '/') {
+      let j = src.indexOf('\n', i);
+      if (j < 0) j = n;
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      let j = src.indexOf('*/', i + 2);
+      j = j < 0 ? n : j + 2;
+      blank(i, j);
+      i = j;
+      continue;
+    }
+    // 字符串/模板/正则：整段**跳过**（不抹），但要走过去，
+    // 否则字符串里出现的 `//` 或 `/*` 会被当注释起点（`url.includes('http://x')` 就是这种）
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === c) { j++; break; }
+        j++;
+      }
+      prev = c;
+      i = j;
+      continue;
+    }
+    if (c === '`') {
+      let j = i + 1;
+      let depth = 0;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === '`' && depth === 0) { j++; break; }
+        if (src[j] === '$' && src[j + 1] === '{') { depth++; j += 2; continue; }
+        if (src[j] === '}' && depth > 0) { depth--; j++; continue; }
+        j++;
+      }
+      prev = '`';
+      i = j;
+      continue;
+    }
+    if (c === '/' && regexOkHere()) {
+      let j = i + 1;
+      let closed = -1;
+      while (j < n && src[j] !== '\n') {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === '[') { j++; while (j < n && src[j] !== ']' && src[j] !== '\n') { if (src[j] === '\\') j++; j++; } continue; }
+        if (src[j] === '/') { closed = j; break; }
+        j++;
+      }
+      if (closed > 0) { i = closed + 1; prev = '/'; continue; }
+    }
+    if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') prev = c;
+    i++;
+  }
+  return out.join('');
+}
+
+/**
  * 收集一个文件里所有"标识符 + 它在代码里的角色"。
  *
  * 单独成函数是为了**能被测**：这段逻辑原先直接写在 scan() 的循环里，
@@ -337,10 +425,17 @@ export function collectTokens(src, rel = '') {
   for (const m of masked.matchAll(/[A-Za-z0-9_$]+/g)) {
     out.push({ token: m[0], role: roleOf(masked, m.index, m.index + m[0].length), file: rel, line: lineOf(m.index) });
   }
-  for (const m of src.matchAll(/['"`]([^'"`\n]{1,120})['"`]/g)) {
+  /*
+   * 字符串里的词**永远只算弱证据**：脱敏规则表里有 'password' 不等于读了 password 字段。
+   * 而且取词跑在 **maskCommentsOnly** 上而不是原文上 —— 注释里的引号词不算命中
+   * （理由与被堵掉的 4 条字段一起写在 maskCommentsOnly 上）。
+   * 模板串不参与：maskNonCode 那侧已经把 ${} 洗掉了，而模板正文里的裸词
+   * 走的是上面那条 identifier 通路，角色由 roleOf 定。
+   */
+  const noComment = maskCommentsOnly(src);
+  for (const m of noComment.matchAll(/['"`]([^'"`\n]{1,120})['"`]/g)) {
     for (const w of m[1].split(/[^A-Za-z0-9_$]+/)) {
       if (!w) continue;
-      // 字符串里的词**永远只算弱证据**：脱敏规则表里有 'password' 不等于读了 password 字段
       out.push({ token: w, role: 'bare', viaString: true, file: rel, line: lineOf(m.index) });
     }
   }
@@ -392,27 +487,51 @@ export function scan(root = ROOT) {
 
 /* ------------------------------------------------------------ 对照豁免 */
 
-/** baseline 与扫描结果对账。三种不一致都算门失败。 */
-export function classify(fields, unread, baseline) {
+/**
+ * baseline 与扫描结果对账。
+ *
+ * @param fields    全量字段
+ * @param unread    一个命中都没有的字段
+ * @param baseline  豁免表
+ * @param buckets   { inconclusive }。**不传就当没有**（老签名调用方行为不变）
+ */
+export function classify(fields, unread, baseline, buckets = {}) {
   const exempt = new Map((baseline?.fields ?? []).map((e) => [e.id, e]));
   const present = new Set(fields.map((f) => f.id));
-  const out = { newUnread: [], staleExempt: [], dangling: [], ok: [] };
+  const inconclusive = new Set((buckets.inconclusive ?? []).map((f) => f.id));
+  const out = { newUnread: [], staleExempt: [], dangling: [], exemptInconclusive: [], ok: [] };
   for (const f of unread) {
     const e = exempt.get(f.id);
     if (e) out.ok.push({ ...f, reason: e.reason, milestone: e.milestone });
     else out.newUnread.push(f);
   }
-  // 豁免表里的每一条都要能对上号，对不上就必须说出来。三种情形各有各的修法：
+  // 豁免表里的每一条都要能对上号，对不上就必须说出来。几种情形各有各的修法：
   //  - id 根本不在字段表里 → **悬空**（字段被删了，或整个 schema 被改名了）
   //  - id 在字段表里、且仍然没人读、但没登记在未读里 → 不可能出现，忽略
   //  - id 在字段表里、现在**有人读了** → **过期**（把豁免删掉；留着的话，
   //    将来这个字段被改回不读时扫描会闭嘴，等于自己把自己的闸拆了）
-  // 原先这里在判悬空之前先拿 e.schema 去替换 id 里的 "(匿名)"，意图是容忍
-  // "内联对象改了归属"。但它同时会把"字段被挪到别的 schema"这条真实漂移洗掉 ——
+  //  - id 在字段表里、现在**判不出** → 进 exemptInconclusive，**不算过期**
+  //
+  // 最后一条是实测补的（漏判方向是"把还需要的豁免删掉"，比多留一条危险得多）：
+  // 原先的判据是 `!unread.some(id)`，而"不在 unread 里"包含两种完全不同的意思 ——
+  // "**有强证据说它被读了**"和"**只是碰上了裸词、扫描器看不出**"。后者被当成前者，
+  // 就会让人去删一条仍然需要的豁免：删掉之后那条字段一旦落回 unread，
+  // 门禁直接红，而人看到的报错是"新增未读字段"，不是"你刚删的那条豁免本来管的是它"。
+  // 这与文件头第 2 条是同一条纪律：**宁可承认判不出，也不要让"碰过"冒充"读过"** ——
+  // 那条纪律写在 scan() 里，原先却没管到 classify()，等于只在产出侧守、在处置侧漏。
+  //
+  // 具体触发例：写 packages/engine/src/html.ts 时，模板里的 `<meta name="viewport">`
+  // 给 EnvFingerprintSchema.viewport 造了一处**裸词**命中，于是它从 unread
+  // 挪进 inconclusive，豁免被判成"过期"。那个字段仍然没人读（消费者是服务端的 run 表）。
+  //
+  // 另外：判悬空之前**不再**拿 e.schema 去替换 id 里的 "(匿名)"。原先那层替换意图是
+  // 容忍"内联对象改了归属"，但它同时会把"字段被挪到别的 schema"这条真实漂移洗掉 ——
   // 豁免静默失效与本仓那个缺陷类是同一件事。宁可让 id 严格全等。
   for (const [id, e] of exempt) {
     if (!present.has(id)) { out.dangling.push({ id, reason: e.reason }); continue; }
-    if (!unread.some((f) => f.id === id)) out.staleExempt.push({ id, reason: e.reason });
+    if (unread.some((f) => f.id === id)) continue;
+    if (inconclusive.has(id)) { out.exemptInconclusive.push({ id, reason: e.reason }); continue; }
+    out.staleExempt.push({ id, reason: e.reason });
   }
   return out;
 }
@@ -426,9 +545,9 @@ export function loadBaseline(root = ROOT) {
 /* ---------------------------------------------------------------- main */
 
 export function report(res, base, opts = {}) {
-  const c = classify(res.fields, res.unread, base);
-  const lines = [];
   const inc = res.inconclusive ?? [];
+  const c = classify(res.fields, res.unread, base, { inconclusive: inc });
+  const lines = [];
   const read = res.fields.length - res.unread.length - inc.length;
   lines.push(`schema 字段 ${res.fields.length} 个：读过 ${read}、未读 ${res.unread.length}（已豁免 ${c.ok.length}）、**判不出 ${inc.length}**`);
   // 这句**无条件说**。它比任何一条未读列表都重要。
@@ -459,8 +578,22 @@ export function report(res, base, opts = {}) {
   }
   if (c.staleExempt.length) {
     lines.push('');
-    lines.push(`~ 豁免已过期 ${c.staleExempt.length} 个（字段现在已经有人读，把豁免条目删掉）：`);
+    lines.push(`~ 豁免已过期 ${c.staleExempt.length} 个（字段现在已经**有强证据**被读，把豁免条目删掉）：`);
     for (const f of c.staleExempt) lines.push(`  ${f.id}`);
+  }
+  /*
+   * "豁免的字段现在落进判不出桶"单独列一句，**不算失败也不算通过不提**。
+   * 不提的代价是误判会伪装成"豁免过期"（就是这一条 bug 的来源）：现在既然分开了，
+   * 就要让人看见"这条豁免还在生效，只是扫描器暂时看不出它没被读" ——
+   * 否则它会静默待在 ok 之外的某个角落，而 ok 的数量看起来少了 1，
+   * 人就会开始猜"少了的那条去哪了"。
+   */
+  if (c.exemptInconclusive.length) {
+    lines.push('');
+    lines.push(`~ 豁免中的字段现在有**裸词**命中（判不出，仍按豁免处理，别删） ${c.exemptInconclusive.length} 个：`);
+    for (const f of c.exemptInconclusive) lines.push(`  ${f.id}`);
+    lines.push('  裸词命中可能是同名局部变量、CSS/HTML 里的字面词，也可能真是读了 —— 词法层面分不出。');
+    lines.push('  要让它脱离"判不出"：把命中的那个标识符改成不撞名的写法（例：html 里的入参别叫 IR 字段名）。');
   }
   if (c.dangling.length) {
     lines.push('');
@@ -509,7 +642,7 @@ function main() {
   const opts = { json: argv.includes('--json'), evidence: argv.includes('--evidence') };
   const res = scan();
   if (opts.json) {
-    process.stdout.write(JSON.stringify({ total: res.fields.length, unread: res.unread, exempt: classify(res.fields, res.unread, loadBaseline()).ok }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ total: res.fields.length, unread: res.unread, inconclusive: res.inconclusive, exempt: classify(res.fields, res.unread, loadBaseline(), { inconclusive: res.inconclusive }).ok }, null, 2) + '\n');
     return;
   }
   // 打印与判定都出自 report() 一处。main 里再补一段的话，--evidence 的输出

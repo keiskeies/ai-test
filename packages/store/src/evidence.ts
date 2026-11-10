@@ -12,6 +12,7 @@
  * junit.xml        CI 门禁读它
  * manifest.json    机器可读清单：证据、指纹、脱敏策略、版本
  * summary.txt      给人看的。CI 日志与 PR 评论直接贴这段
+ * report.html      给人排障的那一屏（零脚本、零外部请求，双击能开）
  * artifacts/<id>   内容寻址的证据原件（文件名 = sha256）
  * ```
  */
@@ -19,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  EVIDENCE_FILES, toJUnitXml, toTraceJsonl, manifestJson, summaryText,
+  EVIDENCE_FILES, toJUnitXml, toTraceJsonl, manifestJson, summaryText, toHtmlReport,
   type EvidenceManifest, type JUnitOptions,
 } from '@atest/engine';
 import type { RunReport } from '@atest/engine';
@@ -187,12 +188,20 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
   const junit = toJUnitXml(report, o.junit);
   const trace = toTraceJsonl(report.events);
   const summary = summaryText(report, manifest);
+  // 给人看的那一份。参数从 manifest 取而不是从 o 取：manifest 是"这次 run 的对外契约"，
+  // 让报告标题与清单里的 frozen/id 从同一个对象出来，就不会出现
+  // "清单说未冻结、页面上写着已冻结"这种两处各信一份的分裂
+  const html = toHtmlReport(report, {
+    suiteId: manifest.scenario.id, scenarioName: manifest.scenario.name,
+    frozen: manifest.scenario.frozen, summary: report.summary,
+  });
 
   const entries: ZipEntry[] = [
     // 顺序固定：让同样内容产出同样字节（zip 里成员顺序会影响整体哈希，
     // 而证据包本身也要能被哈希寻址）
     { name: EVIDENCE_FILES.manifest, data: enc.encode(manifestJson(manifest)), mtimeMs: report.startedAt },
     { name: EVIDENCE_FILES.summary, data: enc.encode(summary), mtimeMs: report.startedAt },
+    { name: EVIDENCE_FILES.html, data: enc.encode(html), mtimeMs: report.startedAt },
     { name: EVIDENCE_FILES.trace, data: enc.encode(trace), mtimeMs: report.startedAt },
     { name: EVIDENCE_FILES.junit, data: enc.encode(junit), mtimeMs: report.startedAt },
     ...members,

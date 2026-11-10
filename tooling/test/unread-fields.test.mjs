@@ -93,6 +93,40 @@ test('collectTokens 把字符串里的词也算进来（脱敏规则表那类按
   assert.ok(toks.has('foo'), '代码里的标识符更要能查到');
 });
 
+test('注释里的引号词**不算**命中（这条曾经把 4 条真·未读字段永久遮住）', () => {
+  // 判据两侧都要测到，否则会一边漏：
+  //  - 字符串里的词**算**（上一条）：脱敏规则表那种按名查表是真消费者
+  //  - 注释里的引号词**不算**（本条）：注释是给人读的，不是代码
+  // 漏第二侧的实测代价（改之前就在这个仓里）：157 个 token 只活在注释的引号里，
+  // 其中 5 个是 IR 字段名，于是 OperationSchema.amount / ScenarioVersionMetaSchema.ver /
+  // LocatorRuleSchema.role / DeviceRequirementSchema.requires 这四条**一行执行代码都没读过**
+  // 的字段被算成"碰过"，从 unread 掉进 inconclusive 而躲过门禁。
+  // 本工具存在的目的正是抓"schema 有字段、执行侧没人读"，结果它自己被这一类糊住了。
+  const src = [
+    '// 这里的 viewport 只出现在注释的引号里：\'viewport\'',
+    '/* 块注释里也一样：\'healed\' */',
+    'const unrelated = 1;',
+  ].join('\n');
+  const toks = collectTokens(src);
+  assert.ok(!toks.some((t) => t.token === 'viewport'), '行注释里的引号词不该算命中');
+  assert.ok(!toks.some((t) => t.token === 'healed'), '块注释里的引号词不该算命中');
+  assert.ok(toks.some((t) => t.token === 'unrelated'), '代码里的标识符照常算');
+  // 反向守：不能为了堵注释把字符串也一起堵掉（那会让脱敏规则表那类真消费者变成误报，
+  // 而误报的修法通常是"给规则表加个例外"，那就把真防线谈掉了）
+  const both = collectTokens(`// 说明：'viewport'\nconst RULES = ['password'];`);
+  assert.ok(both.some((t) => t.token === 'password' && t.viaString), '字符串里的词必须仍然算');
+  assert.ok(!both.some((t) => t.token === 'viewport'), '同一份文本里注释的那个不算');
+});
+
+test('字符串里的 `//` 不会被当成注释起点（url 字面量后面还有代码时不能吞掉）', () => {
+  // maskCommentsOnly 必须**走过**字符串而不是在字符串内部找注释。
+  // 写成"先按注释抹、再取字符串词"的话，下面这行的 `//x'; …` 会被当行注释抹掉，
+  // 于是 password 消失 —— 那是一条**看起来更安全**的错法（抹得越多越"干净"），
+  // 所以专门留一条：它的症状是漏证据，而漏证据在这个工具里意味着门禁闭嘴。
+  const toks = collectTokens(`const u = 'http://example.com/a';\nconst RULES = ['password'];`);
+  assert.ok(toks.some((t) => t.token === 'password'), 'url 字符串之后的字符串词不该被吞掉');
+});
+
 describe('豁免对账', () => {
   const fields = [
     { file: 'a.ts', schema: 'S', key: 'gone', id: 'a.ts#S.gone' },
@@ -112,6 +146,31 @@ describe('豁免对账', () => {
     const c = classify(fields, [], { fields: [{ id: 'a.ts#S.gone', reason: 'x' }] });
     assert.deepEqual(c.staleExempt.map((f) => f.id), ['a.ts#S.gone']);
     assert.deepEqual(c.dangling, []);
+  });
+  test('字段只是"判不出"（裸词命中）→ **不算过期**，豁免继续生效', () => {
+    // 这条是实测补的，起因是真的差点把两条还在用的豁免删掉：
+    // 写 packages/engine/src/html.ts 时，模板里的 `<meta name="viewport">`
+    // 给 EnvFingerprintSchema.viewport 造了一处**裸词**命中，于是它从 unread
+    // 挪进 inconclusive。原先的判据是 `!unread.some(id)`，把"扫描器看不出"
+    // 当成"有人读了"，于是报"豁免已过期，删掉它"。
+    // 删掉的后果是**把闸拆了**：那条字段仍然没人读（消费者是服务端的 run 表），
+    // 一旦裸词命中消失（那次重构把 CSS 挪走）它就落回 unread，
+    // 而那时人看到的报错是"新增未读字段"，不会想到是自己刚删的豁免。
+    // 判据与文件头第 2 条同一条纪律：宁可承认判不出，也不让"碰过"冒充"读过"。
+    const c = classify(fields, [], { fields: [{ id: 'a.ts#S.gone', reason: 'x' }] },
+      { inconclusive: [{ id: 'a.ts#S.gone', key: 'gone' }] });
+    assert.deepEqual(c.staleExempt, [], '判不出不等于被读了，不能催人删豁免');
+    assert.deepEqual(c.newUnread, []);
+    assert.deepEqual(c.dangling, []);
+    assert.deepEqual(c.exemptInconclusive.map((f) => f.id), ['a.ts#S.gone'], '但也要说出来，别让它静默消失在 ok 之外');
+  });
+  test('豁免的字段既不在 unread 也不在 inconclusive → 仍然报过期（新参数不能变成免死金牌）', () => {
+    // 反向守：加了 buckets 参数之后，如果实现写成"只要传了 inconclusive 就不报过期"，
+    // 那 staleExempt 就整条失效了 —— 而失效方向和上面那条误报相反，同样坏。
+    const c = classify(fields, [], { fields: [{ id: 'a.ts#S.gone', reason: 'x' }] },
+      { inconclusive: [{ id: 'a.ts#S.used', key: 'used' }] });
+    assert.deepEqual(c.staleExempt.map((f) => f.id), ['a.ts#S.gone']);
+    assert.deepEqual(c.exemptInconclusive, []);
   });
   test('豁免指向已经不存在的字段 → 报"悬空"', () => {
     const c = classify(fields, [], { fields: [{ id: 'a.ts#S.ghost', reason: 'x' }] });

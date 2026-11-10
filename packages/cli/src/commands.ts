@@ -10,7 +10,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
-  EVIDENCE_FILES, lintScenario, runScenario, toJUnitXml, toReport, toTraceJsonl, summaryText,
+  EVIDENCE_FILES, lintScenario, runScenario, toHtmlReport, toJUnitXml, toReport, toTraceJsonl, summaryText,
   type AdapterRegistry, type RunReport,
 } from '@atest/engine';
 import { defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
@@ -253,9 +253,12 @@ async function runOne(o: {
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, EVIDENCE_FILES.trace), toTraceJsonl(report.events), 'utf8');
   await writeFile(join(outDir, EVIDENCE_FILES.junit), toJUnitXml(report, { suiteName: scenario.id, classname: scenario.id }), 'utf8');
+  await writeFile(join(outDir, EVIDENCE_FILES.html), toHtmlReport(report, {
+    suiteId: scenario.id, scenarioName: scenario.name, frozen: scenario.frozen, summary: report.summary,
+  }), 'utf8');
   const written = await writeEvidencePackage(outDir, report.runId, report.status, pkg.bytes);
   io.out('');
-  io.out(`产物：\n  ${join(outDir, EVIDENCE_FILES.junit)}\n  ${join(outDir, EVIDENCE_FILES.trace)}\n  ${written.path}`);
+  io.out(`产物：\n  ${join(outDir, EVIDENCE_FILES.html)}\n  ${join(outDir, EVIDENCE_FILES.junit)}\n  ${join(outDir, EVIDENCE_FILES.trace)}\n  ${written.path}`);
   io.out(`  证据包 sha256=${written.sha256}`);
   if (pkg.missing.length) io.err(`注意：有 ${pkg.missing.length} 个证据在磁盘上已经取不到了（被清理或写盘失败），包里少它们：${pkg.missing.join('、')}`);
   if (flag(a, 'print-junit')) io.out(toJUnitXml(report, { suiteName: scenario.id }));

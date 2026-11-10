@@ -176,6 +176,11 @@
       "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
     },
     {
+      "id": "packages/ir/src/locator.ts#LocatorRuleSchema.role",
+      "milestone": "P2.5",
+      "reason": "role/name 这一档（无障碍语义定位）的消费者是 web 与 adb adapter，都还没写：仓里没有任何 UiExec 实现，连 scroll 这类操作都没人分发（grep 全仓无 'scroll' 处理处）。这条是扫描器修好\"注释里的引号词也算命中\"之后**新露出来**的 —— 之前被 locator.ts 注释里的 role 一词遮住了"
+    },
+    {
       "id": "packages/ir/src/locator.ts#LocatorRuleSchema.within",
       "milestone": "P2.5",
       "reason": "定位器阶梯未开工。同组已有 maxCostUsdPerResolve 一条挂在 docs/08 §3。**同组刚出过真缺陷**（parallel.maxConcurrency），所以这一组下次要逐个看，不能整组放过"
@@ -249,6 +254,11 @@
       "id": "packages/ir/src/scenario.ts#ScenarioVersionMetaSchema.createdAt",
       "milestone": "P1",
       "reason": "版本与溯源的进阶字段（固定环境修订、版本元数据、provenance 的模型侧）。agent 生成（M5）打通后 modelId/promptHash 才有值可写；今天 gen.ts 只写 origin/specHash，那是如实的"
+    },
+    {
+      "id": "packages/ir/src/scenario.ts#ScenarioVersionMetaSchema.ver",
+      "milestone": "P1",
+      "reason": "版本表未落地。同组 createdAt/createdBy/healedFromVersion 一起挂着；今天 versionId 恒为 undefined（cli/src/commands.ts 顶部记着这件事）。这条是扫描器修好\"注释里的引号词也算命中\"之后新露出来的"
     },
     {
       "id": "packages/ir/src/scenario.ts#ScenarioVersionMetaSchema.createdBy",
@@ -421,6 +431,11 @@
       "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
     },
     {
+      "id": "packages/ir/src/targets.ts#DeviceRequirementSchema.requires",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写。requires 尤其要注意：它 default([])，所以**不读它也会得到一个空数组**，看起来完全像\"已按要求过滤、只是没要求\" —— 比 undefined 更难发现。扫描器修好注释取词后新露出来"
+    },
+    {
       "id": "packages/ir/src/targets.ts#DeviceRequirementSchema.udid",
       "milestone": "P3+",
       "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
@@ -429,6 +444,11 @@
       "id": "packages/ir/src/targets.ts#OperationSchema.keepKeyboard",
       "milestone": "P3+",
       "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写"
+    },
+    {
+      "id": "packages/ir/src/targets.ts#OperationSchema.amount",
+      "milestone": "P3+",
+      "reason": "设备端能力/租约/快照。消费者是 web 与 adb adapter，都还没写。全仓 grep 不到 'scroll' 的分发处，所以 amount 现在**不可能**被读。扫描器修好注释取词后新露出来"
     },
     {
       "id": "packages/ir/src/targets.ts#SessionSchema.stateRef",
@@ -496,6 +516,6 @@
       "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
     }
   ],
-  "inconclusiveCeiling": 233,
-  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它的唯一正当办法是让字段名不再撞上高频标识符（as -> rowVariable 那种），抬高它要在旁边写清理由。"
+  "inconclusiveCeiling": 229,
+  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它 normally 靠让字段名不再撞上高频标识符（as -> rowVariable 那种）；**另一种正当情形是扫描器本身修好了**（这次从 233 降到 229 就是：collectTokens 原先在原文上取字符串词，注释里的引号词也算命中，堵掉之后 5 条字段回到 unread/已豁免，其中 4 条是**真·没人读**却被遮住的，见 unread-fields.test.mjs 里那条同名测试）。但这种情况**必须写明是哪次修复、动了哪几条** —— 因为'测量变准了'和'测量变瞎了'在数字上长得一模一样，只有抽不到字段的扫描器会报告干净。抬高它要在旁边写清理由。"
 }

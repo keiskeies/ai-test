@@ -1,0 +1,103 @@
+{
+  "_comment": [
+    "report.html（packages/engine/src/html.ts）的变异集。tests: packages/engine/test/html.test.ts。",
+    "",
+    "这批的来龙去脉要先记清楚，因为**它和前几批不一样**：html.test.ts 的初版 6 条",
+    "是本会话写完报告后补的，初跑 7 个手改变异里 **4 个存活**（h2/h3/h6/h8）。",
+    "逐个查下去是三种不同的病：",
+    "  - h6/h8：**测试真缺**。redactForDisk 调用删掉全绿（html.ts 注释里明明写着",
+    "    '在这里脱敏而不是指望调用方'——注释里的纪律没有测试守着，比没写更危险），",
+    "    shortId 的形态校验删掉也全绿（旧测试只验'没有链接'，不验列出来的名字长什么样）。",
+    "    各补一条端到端测试，现在都被抓到。",
+    "  - h3（成员名正则不转义）：**测不到**。memberHref 的调用方要么喂",
+    "    `artifacts/<id>`（走不到成员名那一支）、要么喂 EVIDENCE_FILES 常量，",
+    "    没有任何输入能打到转义那段。处置不是补测试，是**改构造**：大正则换成",
+    "    Set 精确相等 + hex 形态两支（SAFE_MEMBERS），'忘了转义'这个失败模式整个消失。",
+    "    下面 set 那条就是把 Set 换回宽松正则——它存活是**如实的**（见 expect 说明）。",
+    "  - h2（htmlAttr 不转引号）：同样**无可达输入**。href 都过白名单、title 都是",
+    "    STATE 表里的中文，不可信文本进不了属性位置。所以它标 equivalent，",
+    "    另有一条'属性位置不接收不可信文本'的测试守**构造本身**（解析器视角扫全部",
+    "    属性，出现 payload 或 on* 属性就红）——哪天有人写 title=\"${esc(...)}\"，",
+    "    红的是那条，而不是要求今天就有一条能打死 h2 的测试。",
+    "",
+    "写这份 spec 时踩到的：memberHref 只被 `artifacts/${id}` 与前缀常量两类调用，",
+    "所以'往 artifactId 里塞 manifest.json'也想指到包内成员——拼完前缀是",
+    "'artifacts/manifest.json'，两支都不命中。这个分工是 hex 与 prefix 两条变异的靶子。"
+  ],
+  "cases": [
+    {
+      "label": "memberHref 不做白名单校验（任何东西都能进 href）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  if (SAFE_MEMBERS.has(target)) return `./${target}`;",
+      "replace": "  if (true) return `./${target}`;",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "hex 形态校验拿掉（artifacts/ 后面什么都收）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  if (target.startsWith(ARTIFACT_PREFIX) && HEX64.test(target.slice(ARTIFACT_PREFIX.length))) return `./${target}`;",
+      "replace": "  if (target.startsWith(ARTIFACT_PREFIX)) return `./${target}`;",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "目录前缀拿掉（裸 64hex 也给链接，指向包外相对路径）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  if (target.startsWith(ARTIFACT_PREFIX) && HEX64.test(target.slice(ARTIFACT_PREFIX.length))) return `./${target}`;",
+      "replace": "  if (HEX64.test(target)) return `./${target}`;",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "keyContext 不再走 redactForDisk（显示层假设上游已脱敏——本仓反复出现的失效）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "    const scrubbed = redactForDisk(r.keyContext ?? {});",
+      "replace": "    const scrubbed = r.keyContext ?? {};",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "shortId 不做形态校验（非 id 字符串截成看着像 sha 的样子）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  return /^[0-9a-f]{64}$/.test(id) ? id.slice(0, 12) : '非内容寻址 id';",
+      "replace": "  return id.slice(0, 12);",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "容器过滤拿掉（HTML 用例数与 JUnit 对不上）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  const leaf = report.results.filter((r) => !CONTAINER_SET.has(r.kind));",
+      "replace": "  const leaf = report.results;",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "子场景段删掉'不计入用例数'（页面用例数与 CI 对不上且没说为什么）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "（不计入上面的用例数）",
+      "replace": "（子运行明细）",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "esc 不再转 < >（正文注入面）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
+      "replace": "  return s.replace(/&/g, '&amp;');",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "htmlAttr 退化成 esc（属性可提前闭合）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "function htmlAttr(s: string): string {",
+      "replace": "function htmlAttr(s: string): string { return esc(s); }\nfunction _htmlAttrUnused(s: string): string {",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/html.test.ts",
+      "why": "无可达输入：href 全过 memberHref 白名单、title 取 STATE 表中文、class 取表内 token——不可信字符串今天进不了属性位置。这不是'测试没写好'，是构造使然（初版测试想打死它只能正则扫原文，而那条正则会把正文里合法的裸引号误判成属性——踩过一次）。守构造的是'属性位置不接收不可信文本'那条：它用真解析器枚举全部属性，将来任何把 esc() 用进属性位的 diff 都会让它红，那时 h2 会从 equivalent 变成 caught。"
+    },
+    {
+      "label": "成员名白名单从 Set 换成宽松正则（/^[a-z.]+$/）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  if (SAFE_MEMBERS.has(target)) return `./${target}`;",
+      "replace": "  if (/^[a-z.]+$/.test(target)) return `./${target}`;",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/html.test.ts",
+      "why": "这正是 h3 那个病的镜像证据：memberHref 的成员名分支只有 EVIDENCE_FILES 常量这一个入口（另一支调用方永远带 artifacts/ 前缀），所以把它换成任何'看着像但更宽'的判定都观察不到行为差。结论与 h3 同一句：这一支的正确性不靠测试守，靠'不可达'守。它留在 spec 里的价值是——哪天 memberHref 多了新的不可信入口，这条会立刻变成 caught，等于一个'入口扩张'报警器。"
+    }
+  ]
+}

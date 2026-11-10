@@ -21,6 +21,7 @@ export * from './dryrun.js';
 export * from './resolve.js';
 export * from './executor.js';
 export * from './report.js';
+export * from './html.js';
 // 脱敏策略。导出给存储层用：证据写盘前要走**同一份**规则，
 // 在 store 里再写一份就是"某处加了关键词、另两处照旧明文"的分叉源头。
 export * from './redact.js';

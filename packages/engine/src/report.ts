@@ -296,6 +296,11 @@ export const EVIDENCE_FILES = {
   junit: 'junit.xml',
   manifest: 'manifest.json',
   summary: 'summary.txt',
+  /**
+   * 给人看的那一份（自包含单文件，零脚本）。
+   * JUnit 给解析器、trace 给机器、summary 只六行 —— 排障要的是把它们摆同一屏。
+   */
+  html: 'report.html',
   artifactsDir: 'artifacts',
 } as const;
 
