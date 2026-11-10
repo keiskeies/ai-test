@@ -240,7 +240,15 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     capabilities: (t: string) => adapters.capabilities?.(t),
   };
 
-  const execCtx = (target: ExecContext['target']): ExecContext => ({ ...ctxBase, target });
+  /**
+   * 给 adapter 的执行上下文。`stepId` 是**后加的**：见 adapters.ts 里 ExecContext.stepId
+   * 那条注释（adapter 自己编步骤 id 会把证据记到错误的步骤名下）。
+   * 传不传是**逐调用点决定**的，不是统一塞一个：
+   *  - 步骤内调用 => 传 s.id；
+   *  - runWatchers（步骤之间跑，不属于任何步骤）=> 传 'watcher'，与它 emit 时用的同一个合成坐标；
+   *  - run 结束时的租约释放 => 不传（那一刻真没有步骤，编一个就是撒谎）。
+   */
+  const execCtx = (target: ExecContext['target'], stepId?: string): ExecContext => ({ ...ctxBase, target, stepId });
 
   /**
    * 自动证据（响应体等）的落盘入口。没配存储时**记事件并跳过**，
@@ -273,13 +281,13 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     for (const w of stepCtx.watchers) {
       for (const rule of w.rules) {
         if (rule.hit >= rule.maxTimes) continue;
-        const snap = await adapters.device.snapshot(execCtx('android'));
+        const snap = await adapters.device.snapshot(execCtx('android', 'watcher'));
         const hit = matchesHierarchy(snap.data, rule.match);
         if (!hit) continue;
         rule.hit++;
         emit({ kind: 'step.finished', stepId: 'watcher', status: 'pass', data: { action: rule.action, matched: hit, hitCount: rule.hit } });
         if (rule.action === 'click' && hit) {
-          await adapters.device.perform({ op: 'click' }, { handle: hit, resolvedBy: 'watcher', rung: 1, confidence: 1, nonReplayable: false }, execCtx('android'));
+          await adapters.device.perform({ op: 'click' }, { handle: hit, resolvedBy: 'watcher', rung: 1, confidence: 1, nonReplayable: false }, execCtx('android', 'watcher'));
         }
       }
     }
@@ -819,7 +827,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           clock,
           evalExpr: (e) => evalBool(e, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }),
           resolveRef: (ref) => vars.resolveRef(ref).value,
-          adapters, ctx: execCtx(targetOf(s, stepCtx)),
+          adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
         });
         if (!r.satisfied) {
           if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}` };
@@ -893,7 +901,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       case 'dataSource': {
         if (!adapters.db) return { status: 'error', summary: 'dataSource 需要 db adapter', cause: 'env-unavailable' };
         if (s.source.type !== 'mysql') return { status: 'error', summary: `P0 仅支持 mysql 数据源（收到 ${s.source.type}）`, cause: 'env-unavailable' };
-        const rows = await adapters.db.query(s.source.datasource, s.source.sql, {}, execCtx('api'));
+        const rows = await adapters.db.query(s.source.datasource, s.source.sql, {}, execCtx('api', s.id));
         /*
          * `leaseRows` 默认 true，而**行租约一行代码都没有** —— 那比"没这个字段"更坏：
          * 写用例的人以为两个并发 run 不会抢到同一行，实际会。字段保留（P1 实现时接线），
@@ -931,7 +939,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           auth: s.auth || identityFor(s.identity)
             ? { ref: s.auth, identity: identityFor(s.identity) }
             : undefined,
-        }, execCtx('api'));
+        }, execCtx('api', s.id));
         // bodyText 一并导出：regex 提取需要原始文本（HTML/文本接口）。见 extract 的 regex 分支。
         const exports = { resp: { status: res.status, body: res.body, bodyText: res.bodyText, headers: res.headers, durationMs: res.durationMs }, status: res.status, body: res.body };
         vars.exportStep(s.id, exports);
@@ -1034,7 +1042,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           // 这类 bug 读代码看不出来（变量确实"被使用"了，用在上一行的字面量里），
           // 只有断言"send 收到的第二参里有它"才拦得住。
           auth: authIntent,
-        }, execCtx('api'));
+        }, execCtx('api', s.id));
         // 响应侧符合性检查：**只在环境显式声明 spec 可信时做**，且**只上报**。
         // 两条都来自 docs/05 §1.1，弄反任何一条都会烧掉红绿的可信度：
         //  - 默认开 -> schema 与实现的小出入刷红几千次 -> 团队关掉整个门禁；
@@ -1082,10 +1090,10 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const locator = 'locator' in s ? s.locator : 'target' in s ? s.target : undefined;
         let resolved = { resolvedBy: 'n/a', rung: 0, confidence: 1, nonReplayable: false, handle: '' };
         if (locator && 'resolve' in uiOrDev) {
-          resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<typeof resolved> }).resolve(locator, execCtx(targetOf(s, stepCtx)));
+          resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<typeof resolved> }).resolve(locator, execCtx(targetOf(s, stepCtx), s.id));
           emit({ kind: 'locator.resolved', stepId: s.id, data: { ...resolved } });
         }
-        if ('perform' in uiOrDev) await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<void> }).perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx)));
+        if ('perform' in uiOrDev) await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<void> }).perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id));
         /*
          * **置信度门取人在 IR 里写的那个值**（`LocatorSpec.confidenceGate`，schema 默认 0.85）。
          *
@@ -1124,7 +1132,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       }
       case 'device': {
         if (!adapters.device) return { status: 'error', summary: 'device adapter 未注册（P4）', cause: 'env-unavailable' };
-        const l = await adapters.device.lease(s.require, execCtx(s.target));
+        const l = await adapters.device.lease(s.require, execCtx(s.target, s.id));
         stepCtx.lease = { id: l.id, deviceRef: l.deviceRef, target: s.target, state: 'leased', acquiredAt: new Date(clock.now()).toISOString(), expiresAt: new Date(l.expiresAt).toISOString(), holder: runId, renewable: true };
         emit({ kind: 'lease.acquired', stepId: s.id, data: { device: l.deviceRef, lease: l.id } });
         return { status: 'pass', summary: `设备 ${l.deviceRef}` };
@@ -1165,13 +1173,13 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // 传的是**分支作用域**那一份（dispatch 的 vars 形参），不是 vars：
         // 断言里 `$xxx` 读的是这一支看得见的变量。写成 vars 的话，
         // "parallel 分支里断言自己那一支刚算出来的值"会读到共享帧那份或干脆读不到。
-        const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, stepCtx)), clock, addCost, emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
+        const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id), clock, addCost, emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
         vars.exportStep(s.id, { assertion: r });
         return r;
       }
       case 'db': {
         if (!adapters.db) return { status: 'error', summary: 'db adapter 未注册', cause: 'env-unavailable' };
-        const rows = await adapters.db.query(s.datasource, s.sql, strMap(s.vars, (v) => resolveValue(v, vars)), execCtx('api'));
+        const rows = await adapters.db.query(s.datasource, s.sql, strMap(s.vars, (v) => resolveValue(v, vars)), execCtx('api', s.id));
         if (s.assignTo) vars.set(s.assignTo, rows);
         vars.exportStep(s.id, { rows, count: rows.length });
         return { status: 'pass', summary: `DB ${rows.length} 行` };

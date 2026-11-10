@@ -37,6 +37,21 @@ export class TransportError extends Error {
 export interface ExecContext {
   target: 'api' | 'web' | 'android' | 'ios' | 'harmony';
   runId: string;
+  /**
+   * 当前正在跑的步骤 id。**由引擎在 execCtx() 那一刻填，adapter 只读。**
+   *
+   * 为什么要有这一格：`saveArtifact(kind, data, stepId)` 要求调用方给 stepId，
+   * 而 UI/设备 adapter 是唯一会**自己**产证据的（截图、hierarchy、AX 快照）——
+   * 它们手里压根没有步骤坐标，只能自己编一个。编出来的 id 会进
+   * `artifact.saved` 事件与 `StepResult.artifactIds`，于是证据包把 A 步的截图
+   * 记在 B 步名下。**这正是 evidence.ts 里"按 stepId 反查存储"那个缺陷的另一半**：
+   * 那边是引擎猜归属，这边是 adapter 猜，两个都表现为"包里的东西看着都在"。
+   *
+   * 可选（`undefined`）而不是必填：`runWatchers` 那两处不在任何步骤里
+   * （守望规则在步骤之间跑），它们沿用 'watcher' 这个合成坐标。
+   * 留空时 adapter **不许自己编** —— 见 web adapter 里 capture 的处置。
+   */
+  stepId?: string;
   /** 环境（已解析到具体修订） */
   env: Record<string, unknown>;
   /** 密钥解析。只有 adapter 拿得到；Agent 上下文永远拿不到（docs/02 §5） */
@@ -133,8 +148,22 @@ export interface HttpExec {
   validateResponse?(ref: { docRef: string; operationId?: string }, status: number, body: unknown): Promise<{ ok: boolean; violations: string[] }>;
 }
 
+/**
+ * Web 端的执行端口。
+ *
+ * **这里原先还声明着 `navigate(url, waitUntil, ctx)`，本轮删掉了**。
+ * 理由不是整理风格：解释器把 navigate 走的是 `perform({op:'navigate', url, waitUntil})`
+ * （见 interpreter.ts 的 opOf），所以那个方法**零调用方** ——
+ * 而接口上摆着一个引擎从不调用的方法，下一个写 adapter 的人一定会去实现它，
+ * 然后疑惑"我写了 navigate 为什么没被调"。docs/14 §4.7 对这种东
+ * 的处理是删，不是加一句注释留着。
+ * 与 DeviceExec 对齐也是同一个方向：那边从来只有 perform。
+ *
+ * 反方向的改法（让解释器改调 navigate）也想过，不选：那会让 web 与 device 两侧
+ * 各有一套派发方式，而 hitTargetCheck / expectResponse 这些前置检查就得写两遍。
+ * 现在这套是"所有动作一个入口，op 里带参数"。
+ */
 export interface UiExec {
-  navigate(url: string, waitUntil: string, ctx: ExecContext): Promise<void>;
   perform(op: unknown, target: unknown, ctx: ExecContext): Promise<void>;
   snapshot(ctx: ExecContext): Promise<{ kind: string; data: string; sha: string }>;
   /** 返回实际使用的定位策略与级别，供 flaky 治理统计（docs/00 §5.11） */
