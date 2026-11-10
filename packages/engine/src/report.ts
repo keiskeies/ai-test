@@ -157,6 +157,44 @@ export interface JUnitOptions {
 }
 
 /**
+ * call 步骤失败时，把**子场景里真正出问题的那一步**找出来。
+ *
+ * 为什么需要：call 步骤的摘要长这样
+ * `子场景 下单：fail · 3 步计入通过率 · 67% 通过` —— 它说的是"子里有东西坏了"，
+ * 而值班人要的是"哪一步坏了"。以前只能去 trace.jsonl 里按 path 翻。
+ *
+ * 只**报**、不**数**：子场景的结论仍然不进 tests 计数（一次子场景失败在父侧
+ * 由 call 步骤带上来，见 CONTAINER_KINDS 与 gate.ts 的同一条理由），
+ * 这里只是把父侧那一条 failure 的正文写清楚。
+ * "什么算一条用例"全仓只有一个答案，这个函数不新增第二个。
+ *
+ * 往下钻而不是只报直接子层：A→B→C 而断言在 C 时，B 里 failing 的那行是它自己的
+ * call 步骤，只报一层会停在"下单流程这个子场景挂了"。钻到最深那一层才是根因所在。
+ * visited 防环（IR 的自引用在 lint 里有 CALL_SELF_REFERENCE 规则，但报告器不能
+ * 靠"lint 一定跑过"来保证自己不死循环）。
+ */
+function childFailureOf(report: RunReport, callStepId: string): string | undefined {
+  const chain = report.childRuns ?? [];
+  const visited = new Set<string>();
+  let stepId: string | undefined = callStepId;
+  let out: string | undefined;
+  while (stepId && !visited.has(stepId)) {
+    visited.add(stepId);
+    const entry = chain.find((c) => c.callStepId === stepId);
+    if (!entry) break;
+    // 只认 fail/error。不写 `find((r) => r.cause)`：
+    // 那样一个**已通过的**步骤只要带着 cause（例如带归因的 fail→重试后 pass 的残留）
+    // 就会被当成根因，把人说向一个没坏的地方。
+    const bad = entry.results.find((r) => r.status === 'fail' || r.status === 'error');
+    if (!bad) break;
+    out = `${entry.scenario.id}/${bad.stepId}=${bad.status}${bad.cause ? `(${bad.cause})` : ''}${bad.assertionSummary ? ` ${bad.assertionSummary}` : ''}`;
+    // 这一行自己就是 call => 根因还在下面一层
+    stepId = bad.kind === 'call' ? bad.stepId : undefined;
+  }
+  return out;
+}
+
+/**
  * RunReport → JUnit XML。
  *
  * 三个容易做错、做错就"解析失败而不是显示失败"的点：
@@ -218,9 +256,15 @@ export function toJUnitXml(report: RunReport, opts: JUnitOptions = {}): string {
     const tag = bucket;
     // type 用 cause：CI 界面通常把它单独显示成一行，写"product-bug"/"case-stale"
     // 比写 "AssertionError" 有用 —— 前者直接告诉值班人该找谁
+    const childBad = r.kind === 'call' && (bucket === 'failure' || bucket === 'error')
+      ? childFailureOf(report, r.stepId)
+      : undefined;
     const detail = [
       `step=${r.stepId}`, `kind=${r.kind}`, `status=${r.status}`,
       r.cause ? `cause=${r.cause}` : '', r.assertionSummary ?? '',
+      // 只有父侧这一条的正文里出现子场景步骤 id：**不另开 testcase**，
+      // 所以 CI 侧按 `<testcase>` 数的"用例数"不会被子场景虚增
+      childBad ? `根因在子场景步骤：${childBad}` : '',
       Object.keys(r.keyContext ?? {}).length ? `context=${JSON.stringify(redactForDisk(r.keyContext ?? {}))}` : '',
       r.artifactIds.length ? `artifacts=${r.artifactIds.join(',')}` : '',
     ].filter(Boolean).join('\n');
@@ -264,8 +308,26 @@ export interface EvidenceManifest {
   scenario: { id: string; name: string; versionId?: string; frozen: boolean; irSha?: string };
   tally: RunReport['tally'];
   costUsd: number;
-  /** 每个证据的 kind / 字节 / sha256 / 所属步骤。内容寻址，同内容同 id */
-  artifacts: Array<{ id: string; kind: string; stepId?: string; bytes: number; sha256: string }>;
+  /**
+   * 每个证据的 kind / 字节 / sha256 / 所属步骤。内容寻址，同内容同 id。
+   *
+   * **这一栏是"这次 run 声明了什么"，不是"zip 里有什么"** —— 两者可以不一致，
+   * 差异由 `missing` 解释。写成后者会出这种事：磁盘上的证据被清理任务收走之后，
+   * 清单变成"这个场景没产证据"，而真相是"产了、现在取不到"。
+   * 人拿着包排查时，这两个结论指向完全不同的下一步动作（查平台 vs 查清理策略）。
+   *
+   * `bytes` 可选：磁盘上的文件已经取不到、且本进程没写过它（回放/换进程）时无从得知。
+   * **宁可不写，也不写 0** —— 0 字节是个合法值，会被读成"响应体是空的"。
+   */
+  artifacts: Array<{ id: string; kind: string; stepId?: string; bytes?: number; sha256: string }>;
+  /**
+   * 声明了但**没能装进包**的证据 id（被清理、写盘失败、磁盘故障）。
+   *
+   * 必须进包，不能只留在 CLI 的 stderr：evidence.zip 是**给别人下载**的东西，
+   * 拿到包的人看不到 CI 那行"注意：有 N 个证据取不到"，于是他只会看到
+   * "artifacts 里没有这一步的响应体"，最自然的结论是"平台没存"。
+   */
+  missing?: string[];
   /** 脱敏策略。**必须写进包里**：拿到包的人要能知道"内容被改过、按什么规则改的"，
    *  否则证据不能当事故复盘的依据（"你怎么证明响应体没被动过"） */
   redaction: { keyRules: 'applied'; valueRules: 'applied'; rawArtifacts: 'unmodified'; note: string };

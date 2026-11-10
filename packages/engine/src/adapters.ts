@@ -6,7 +6,7 @@
  *   否则测出来的是自己 IO 的天花板（docs/09 §4.2）。在解释器里加 `if (perfMode)`
  *   是这类系统最常见的架构腐化点。
  */
-import type { StepStatus, TraceEventKindT } from '@atest/ir';
+import type { Scenario, StepStatus, TraceEventKindT } from '@atest/ir';
 
 /** 传输层失败的种类。与 adapter 侧的 SendResult.error.kind 同一套词，刻意不另起名字。 */
 export type TransportKind = 'timeout' | 'network' | 'aborted';
@@ -183,6 +183,20 @@ export interface AdapterRegistry {
   device?: DeviceExec;
   db?: { query(datasource: string, sql: string, vars: Record<string, unknown>, ctx: ExecContext): Promise<unknown[]> };
   llm?: { judge(req: unknown, ctx: ExecContext): Promise<{ passed: boolean; evidence?: unknown; costUsd: number }> };
+  /**
+   * `call` 步骤的子场景解析器：把 `scenarioRef`（`id@version`）换回一份 IR。
+   *
+   * **它以前不在本类型上** —— 引擎里靠
+   * `(adapters as unknown as { callScenario: ... }).callScenario(ref)` 取用。
+   * 后果实测过：测试里把它拼错/漏掉，`tsc` 一声不响（`as never` 全覆盖），
+   * 运行时才拿到 `adapters.callScenario is not a function`，
+   * 于是"子场景没跑"这件事以 error 形态出现在**被测产品**的结论里，
+   * 而它其实是接线错误。端口进了类型之后，少注入是编译错误，不是环境错误。
+   *
+   * 返回 `undefined` 表示"这个 ref 解析不到"（版本不存在 / 没权限看）——
+   * 引擎按 env-unavailable 报，不猜、不静默跳过。
+   */
+  callScenario?(ref: string): Promise<Scenario | undefined>;
   capabilities?(target: string): { snapshotKind: string; locatorBy: string[]; templateMatch: boolean } | undefined;
 }
 

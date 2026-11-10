@@ -434,6 +434,96 @@ test('缺 spec 时的报错给出可照抄的开关，而不是引擎内部术�
   } finally { await f.close(); }
 });
 
+test('call 子场景：CLI 真能解析到磁盘上的另一个文件（这个端口以前压根没接）', async () => {
+  // 这条存在的全部理由：引擎的 call 分支早就写全了（子变量空间、成本汇总、childRuns），
+  // 但 assemble 从来没装配过解析器 —— 于是 `atest run` 上任何带 call 的场景都跑不了。
+  // 单元测试抓不到，因为它们都手工注入 callScenario；而 e2e 的其它用例都是单文件场景。
+  // 这就是本仓那个缺陷类的标准形态：**上半截很完整，下半截没人接，而绿色测试一片**。
+  const f = await fixture();
+  try {
+    const childPath = join(f.dir, 'child.json');
+    await writeFile(childPath, JSON.stringify({
+      schemaVersion: '1', id: 'sub.login', name: '子：下单', env: { environmentRef: 'unit' },
+      body: [{ id: 'cg', kind: 'http', request: { method: 'POST', url: '/orders', body: { sku: 'A-9' } } }],
+    }), 'utf8');
+    const casePath = await writeCase(f.dir, [
+      // 用 id 引用而不是路径：IR 里的 scenarioRef 是 `id@version`，
+      // 作者不该关心子场景落在哪个目录（那是平台的约定，不是用例的）
+      // assignTo 是 IR 给 call 的**唯一**取值出口（docs/02 §步骤表）：
+      // 子的 outputs 是一份聚合对象，不像 http 步骤那样有单一的 $.step.<id> 响应
+      { id: 'c1', kind: 'call', scenarioRef: 'sub.login@1', assignTo: 'loginOut' },
+      { id: 'a', kind: 'assert', against: '$loginOut', jsonPath: { $: { notNull: true } } },
+    ]);
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', join(f.dir, 'callEv'), '--clock', 'deterministic'], io);
+    const log = io.stdout.join('\n') + io.stderr.join('\n');
+    assert.equal(code, EXIT.OK, `call 应能跑通。${log}`);
+    // **真发过请求**是唯一能证明子场景真的跑了的证据。
+    // 只看退出码不行：解析失败现在也只是一步 error，而退出码取决于门禁怎么看它
+    assert.ok(f.requests() >= 1, '退出码 0 而一个请求都没发 = 假绿');
+    assert.doesNotMatch(log, /is not a function|未注入/, `接线错误不该出现。${log}`);
+
+    // 子里那份响应体也要进包（evidence 是排查现场，"父跑了子没痕迹"不可接受）
+    const runDir = await onlyRunDir(join(f.dir, 'callEv'));
+    // trace 里该出现**带 path 前缀**的子步骤事件 —— 这是"子场景真的跑了、
+    // 而且平台知道它在哪条调用链上"的机器可读证据（stdout 摘要只列失败项，
+    // 所以不能在 stdout 上找"子场景"三个字：那测的是文案不是行为）
+    const trace = await readFile(join(runDir, 'trace.jsonl'), 'utf8');
+    assert.match(trace, /"path":\["body","c1"\][^\n]*"stepId":"cg"/,
+      `trace 里该有子步骤 cg 且 path 带上父侧的 c1。${trace}`);
+    // 文件名带 runId（同一目录里可能有过多次 run），所以按前缀找而不是写死名字
+    const zipName = (await readdir(runDir)).find((n) => n.startsWith('evidence.') && n.endsWith('.zip'));
+    assert.ok(zipName, `${runDir} 下没有 evidence*.zip`);
+    const entries = readZipEntries(new Uint8Array(await readFile(join(runDir, zipName!))));
+    const arts = entries.filter((e) => e.name.startsWith('artifacts/'));
+    assert.equal(arts.length, 1, `子里的响应体该在包里，实际 ${arts.length} 件`);
+    const manifest = JSON.parse(new TextDecoder().decode(entries.find((e) => e.name === 'manifest.json')!.data));
+    assert.deepEqual(manifest.artifacts.map((a: { stepId: string }) => a.stepId), ['sub.login/cg'],
+      '归属要带上子场景 id：步骤 id 只在自己的场景里唯一');
+  } finally { await f.close(); }
+});
+
+test('已知缺口：scenarioRef 的 @version 今天不参与解析（版本表落地时要删这条）', async () => {
+  // 这条断言的是**当前的**行为，不是期望的行为。它存在的意义是把这个缺口
+  // 放在测试套件里而不是只放在注释里：`sub.login@9` 与 `sub.login@1` 现在
+  // 落到同一个文件，而作者写 `@9` 时心里想的是"我要那个版本"。
+  // 平台还没有版本表（证据包里的 versionId 也还是 undefined），
+  // 所以文件系统里"一个 id 一个文件"就是当前唯一的版本形态。
+  // **版本表落地的那天，这条会变红 —— 那是它该有的结局，删掉它并改成按版本解析。**
+  const f = await fixture();
+  try {
+    await writeFile(join(f.dir, 'child.json'), JSON.stringify({
+      schemaVersion: '1', id: 'sub.login', name: '子', env: { environmentRef: 'unit' },
+      body: [{ id: 'cg', kind: 'http', request: { method: 'POST', url: '/orders', body: { sku: 'A-9' } } }],
+    }), 'utf8');
+    const casePath = await writeCase(f.dir, [
+      { id: 'c1', kind: 'call', scenarioRef: 'sub.login@99', assignTo: 'o' },
+      { id: 'a', kind: 'assert', against: '$o', jsonPath: { $: { notNull: true } } },
+    ]);
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', join(f.dir, 'verEv'), '--clock', 'deterministic'], io);
+    const log = io.stdout.join('\n') + io.stderr.join('\n');
+    assert.equal(code, EXIT.OK, `带 @99 也解析到了那个文件（这就是缺口本身）。${log}`);
+    assert.ok(f.requests() >= 1, '前提：子场景真的跑了');
+    assert.doesNotMatch(log, /解析不到|不存在/, `@99 今天是**被忽略**而不是被拒。${log}`);
+  } finally { await f.close(); }
+});
+
+test('call 指向不存在的子场景：报错点名 ref，退出码不是 0', async () => {
+  const f = await fixture();
+  try {
+    const casePath = await writeCase(f.dir, [{ id: 'c1', kind: 'call', scenarioRef: 'sub.ghost@1' }]);
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', join(f.dir, 'ghostEv'), '--clock', 'deterministic'], io);
+    const log = io.stdout.join('\n') + io.stderr.join('\n');
+    assert.notEqual(code, EXIT.OK, `解析不到子场景绝不能算通过。${log}`);
+    assert.match(log, /sub\.ghost/, `要让人看到是哪个 ref 解析不到。${log}`);
+  } finally { await f.close(); }
+});
+
 test('--help 每条命令都能打，且退出码 0（帮助文本里少一个开关=用户不会知道它有）', async () => {
   for (const c of ['run', 'lint', 'gen', 'agent', 'init', 'evidence']) {
     const io = ioCapture();

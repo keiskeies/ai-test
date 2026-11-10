@@ -33,6 +33,23 @@ export interface RunOptions {
   /** 成本上限（美元）。超出即中断并落盘证据，不是事后台账（docs/03 §2） */
   maxCostUsd?: number;
   signal?: { aborted: boolean };
+  /**
+   * 已经在调用链上的场景 id（**由 call 分支自己维护并往下传**，调用方不用填）。
+   *
+   * 存在的全部理由：`call` 成环时**什么都不会发生**。实测 A→B→A：
+   * 每一层都在 `await` 下一层，所以既不会栈溢出、也不会超时，进程只是永远转下去
+   * —— CI 表现为"这条用例卡住一小时后被 kill"，本地表现为"run 不返回"。
+   *
+   * lint 里的 `DEPENDENCY_CYCLE` 挡不住它：那条规则要 `ctx.scenarioGraph`，
+   * 而**没有任何调用方填过这个字段**（只有 lint 自己的测试在用）。
+   * 也就是说它是"看着有一道闸、实际闸没接线"的又一个实例。运行期这道闸不依赖
+   * 谁先跑过 lint，也不依赖文件系统里有没有整张依赖图（resolver 只解析得到
+   * 它被问到的那几个 ref）。
+   *
+   * 按**场景 id** 判而不是按 ref 判：`A@1 → B@1 → A@2` 也是环
+   * （版本不同不代表不再互相调用），按 ref 判会漏这一条。
+   */
+  callStack?: string[];
 }
 
 /**
@@ -134,6 +151,12 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
    * 「字段在 IR 里、注释讲得很对、执行侧没人接」缺陷类的又一个入口。
    */
   const childRuns: ChildRun[] = [];
+  /**
+   * 本次运行的调用链，**含自己**（见 RunOptions.callStack）。
+   * 根运行就是 `[scenario.id]`；子场景拿到 `[...父链, 子的 id]`。
+   * 含自己是让"场景 call 自身"与"A→B→A"共用同一条判据，不用各写一遍。
+   */
+  const callStack = opts.callStack?.length ? opts.callStack : [scenario.id];
   let seq = 0;
   let costUsd = 0;
   const maxCost = opts.maxCostUsd ?? scenario.config.maxCostUsd;
@@ -732,9 +755,37 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         return { status: allIdle ? 'skipped' : 'pass', summary: tail };
       }
       case 'call': {
-        if (!adapters.http && !('callScenario' in adapters)) return { status: 'error', summary: '子场景解析器未注入（CallResolver）', cause: 'env-unavailable' };
-        const sub = (adapters as unknown as { callScenario: (ref: string) => Promise<Scenario> }).callScenario(s.scenarioRef);
-        const child = await sub;
+        /*
+         * 解析器缺失必须**独立**报错。以前写的是
+         * `if (!adapters.http && !('callScenario' in adapters))` —— `&&` 意味着
+         * 只要注册了 http adapter 就跳过这条，于是"没注入解析器"这个接线错误
+         * 一路走到下一行的方法调用，变成 `adapters.callScenario is not a function`
+         * （实测：一个纯 call 步骤 + 只有 http 适配器的 run => error / 那句 TypeError）。
+         * 那句会作为**被测产品**的 env-unavailable 结论进报告与门禁，
+         * 而真相是"平台没接线"——两者下一步动作完全不同。
+         */
+        if (!adapters.callScenario) return { status: 'error', summary: '子场景解析器未注入（adapters.callScenario 缺失），无法执行 call 步骤', cause: 'env-unavailable' };
+        const child = await adapters.callScenario(s.scenarioRef);
+        // 解析不到不是"跳过"。skip 会让这一步从通过率分母里消失，
+        // 于是"引用了一个不存在的版本"的场景可以一路全绿 —— 它压根没测任何东西。
+        if (!child) return { status: 'error', summary: `子场景解析不到：${s.scenarioRef}（不存在、未冻结、或当前身份无权限）`, cause: 'env-unavailable' };
+        /*
+         * **环必须在跑之前挡掉**。不挡的实测行为是"什么都不会发生"：
+         * A→B→A 时每一层都在 await 下一层，既不栈溢出也不报错，进程永远转 ——
+         * CI 里表现为这条用例卡死到被 kill，日志里连一行异常都没有。
+         *
+         * lint 的 DEPENDENCY_CYCLE 靠 `ctx.scenarioGraph`，而那个字段
+         * 除了 lint 自己的测试**没有任何调用方填过**，所以它今天挡不住任何东西。
+         * 判据按场景 id 而不是 ref：`A@1 → B@1 → A@2` 也是环。
+         */
+        if (callStack.includes(child.id)) {
+          return {
+            status: 'error',
+            summary: `call 依赖成环：${[...callStack, child.id].join(' → ')}（步骤 ${s.id} 引用 ${s.scenarioRef}）`,
+            cause: 'case-stale',
+            keyContext: { callChain: callStack, ref: s.scenarioRef },
+          };
+        }
         const childVars = new VarSpace({
           inputs: Object.fromEntries(Object.entries(s.args).map(([k, v]) => [k, resolveValue(v, vars)])),
           // 子场景自己的 inputs 声明：call.args 没给全时由子场景的 default 兜。
@@ -742,7 +793,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           inputDefs: child.inputs,
           env: opts.env, secretResolver: opts.secretResolver,
         });
-        const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0 });
+        const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0, secretResolver: opts.secretResolver, envRevision: opts.envRevision, callStack: [...callStack, child.id] });
         /**
          * 把"这次 call 跑的是哪份 IR、跑出什么"记进父报告。
          *
@@ -1422,10 +1473,40 @@ async function runScenarioIn(a: {
   scenario: Scenario; vars: VarSpace; adapters: AdapterRegistry; clock: Clock;
   emit: (e: EmitIn) => void;
   ctxBase: unknown; execCtx: (t: ExecContext['target']) => ExecContext; addCost: (n: number) => void; stepCtx: StepCtx; depth: number;
+  /**
+   * 密钥解析器，**必须从父运行带下来**。这里以前硬编码 `secretResolver: undefined`。
+   *
+   * 后果（实测）：子场景里 `$secret.pw` 拿到的是占位符 `«secret:未暴露»`，
+   * 而**步骤状态照样是 pass** —— 请求带着占位符发出去了，登录接口大概率 401，
+   * 于是这一步被归因成产品问题（或更糟： mock 环境下真的通过了）。
+   * 真值永远取不到，人看到的却是一个绿灯 + 一个说不清的失败，
+   * 而"缺哪个变量"这句本该在跑之前就直说的话压根没说。
+   *
+   * 顺带说清**为什么值仍然是安全的**：解析出的真值只进 `resolveValue` 的返回值
+   * （也就是"发出去的那一跳"），Agent 上下文、trace、keyContext、证据一律走
+   * redactForDisk，看不到它。这里透传的是**解析能力**，不是值。
+   */
+  secretResolver?: (ref: string) => string;
+  /**
+   * 环境名之外的运行配置。`envRevision` 以前没往下传，
+   * 于是子场景的证据里"这次跑的是第几版环境"是空的 —— 回放时无法复现。
+   */
+  envRevision?: number;
+  /** 调用链（见 RunOptions.callStack）。不透传就等于环检测只在**最外层**生效 */
+  callStack: string[];
 }): Promise<RunReport> {
   const rep = await runScenario({
-    scenario: a.scenario, inputs: a.vars.inputs, env: a.vars.env, secretResolver: undefined,
-    adapters: a.adapters, clock: a.clock, maxCostUsd: Number.MAX_SAFE_INTEGER,
+    scenario: a.scenario, inputs: a.vars.inputs, env: a.vars.env,
+    secretResolver: a.secretResolver, envRevision: a.envRevision, callStack: a.callStack,
+    adapters: a.adapters, clock: a.clock,
+    /*
+     * 子场景**不单独设预算**，但成本照常往上汇总（`addCost`）。
+     * MAX_SAFE_INTEGER 不是"子场景可以随便花钱"，而是"熔断由谁做"的选择：
+     * 由父做。父在 addCost 里累计后触发，于是熔断点仍然是"这一次 run 一共花了多少"，
+     * 而不是"某个子场景恰好花了多少"——后者会让一条贵子场景在深层被单独掐掉，
+     * 报出来像个偶发环境错误。
+     */
+    maxCostUsd: Number.MAX_SAFE_INTEGER,
   });
   a.addCost(rep.costUsd);
   for (const e of rep.events) a.emit({ kind: e.kind, stepId: e.stepId, status: e.status, durMs: e.durMs, data: e.data, path: e.path });

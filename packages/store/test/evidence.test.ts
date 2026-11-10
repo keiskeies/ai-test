@@ -35,18 +35,46 @@ async function freshStore(): Promise<DiskArtifactStore> {
   return new DiskArtifactStore({ dir: await mkdtemp(join(tmpdir(), 'atest-ev-')) });
 }
 
-/** 一次真失败 run（跑真引擎，不用手搓 RunReport：手搓的会漏掉真实 events 的形状） */
-async function failingRun(store: DiskArtifactStore): Promise<{ scenario: Scenario; report: RunReport }> {
-  const scenario = scen([
+/** 一次真失败 run（跑真引擎，不用手搓 RunReport：手搓的会漏掉真实 events 的形状）
+ *
+ * **证据必须由这次 run 自己产出**（走 http 步骤的自动落盘），不能在跑完之后
+ * 直接 `store.save(...)` 塞进存储。理由：包里的证据来自「结果里声明的 artifactIds +
+ * 落盘事件」，而不是「存储里恰好有哪些按 stepId 索引的东西」——
+ * 后者会把**别的场景/别的 run 写的**证据按同名 stepId 捞进本包（串档），
+ * 而按 stepId 反查恰好遮蔽了"adapter 落了盘却忘了把 id 带进结果"这个漏。
+ * 手塞的 fixture 测的是那套旧机制，所以一并改掉。
+ */
+async function failingRun(
+  store: DiskArtifactStore,
+  opts: { responseBody?: string } = {},
+): Promise<{ scenario: Scenario; report: RunReport }> {
+  const body = opts.responseBody ?? '{"id":1,"note":"order created"}';
+  const steps = [
+    { ...b('hit'), kind: 'http', request: { method: 'GET', url: 'https://api.test/orders' }, saveAs: 'res' },
     { ...b('v'), kind: 'set', assign: { n: 1, token: 'secret:tok1' } },
     { ...b('ok'), kind: 'assert', against: '$n', expr: '$n == 1' },
     { ...b('bad'), kind: 'assert', against: '$n', expr: '$n > 99' },
-  ] as StepDraft[]);
+  ] as StepDraft[];
+  const scenario = scen(steps);
   const report = await runScenario({
-    scenario, adapters: { artifactStore: store }, clock: deterministicClock(42),
+    scenario,
+    adapters: {
+      artifactStore: store,
+      http: {
+        async send() {
+          return { status: 200, headers: {}, body: JSON.parse(body), bodyText: body, bytes: body.length, truncated: false, durationMs: 3 };
+        },
+      },
+    } as never,
+    clock: deterministicClock(42),
     env: { baseUrl: 'https://api.test' },
   });
   return { scenario, report };
+}
+
+/** 这次 run 真正落盘的那些证据 id（不读 store.all()：那包含本进程写过的一切） */
+function producedIds(report: RunReport): string[] {
+  return report.results.flatMap((r) => r.artifactIds);
 }
 
 /** 用系统的 unzip 解包，返回 成员名 -> 文本。解压失败直接抛（那就是判据不成立） */
@@ -77,7 +105,6 @@ function listFiles(root: string, rel = ''): string[] {
 
 test('失败 run 产出的包能被系统 unzip 验过并解开，成员逐字节一致', async () => {
   const store = await freshStore();
-  await store.save('resp', '{"id":1,"note":"order created"}', 'ok');
   const { scenario, report } = await failingRun(store);
   const pkg = await buildEvidencePackage({ scenario, report, store });
 
@@ -95,6 +122,9 @@ test('失败 run 产出的包能被系统 unzip 验过并解开，成员逐字�
   assert.ok(art, 'artifacts/ 下应该有证据原件');
   assert.equal(art!.split('/')[1]!.length, 64, '成员名应是 sha256');
   assert.match(members.get(art!)!.toString('utf8'), /order created/);
+  // 成员名 == 这次 run 声明的那个 id（不是"存储里恰好有的一条"）
+  assert.equal(art!.split('/')[1], producedIds(report)[0],
+    '包里的证据必须是本次 run 产出的那一条；按 stepId 反查存储会把别的 run/别的场景的证据也捞进来');
 });
 
 test('证据包里的 junit.xml 独立可解析（不是只有我能解析）', async () => {
@@ -116,10 +146,12 @@ print(json.dumps({'tests': int(s.get('tests')), 'failures': int(s.get('failures'
 
 test('喂进真密钥：解开的包里搜不到它（evidence 是给多人下载的）', async () => {
   const store = await freshStore();
-  // 三种入口都覆盖：作为响应体证据、作为结构化数据、作为**字段名很无辜**的结构化数据
-  const id = await store.save('resp', `{"data":"${JWT}","ak":"AKIAIOSFODNN7EXAMPLE"}`, 'ok');
-  void id;
-  const { scenario, report } = await failingRun(store);
+  // 三种入口都覆盖：作为**真响应体证据**（走引擎的自动落盘，不是手塞进存储）、
+  // 作为结构化数据、作为**字段名很无辜**的结构化数据
+  const { scenario, report } = await failingRun(store, {
+    responseBody: `{"data":"${JWT}","ak":"AKIAIOSFODNN7EXAMPLE"}`,
+  });
+  assert.ok(producedIds(report).length >= 1, '前提：这次 run 确实把带密钥的响应体落了盘，否则这条什么都没测');
   const pkg = await buildEvidencePackage({ scenario, report, store });
 
   const members = unzipMembers(pkg.bytes);
@@ -153,11 +185,9 @@ test('默认（不在白名单）的文本证据做值形态脱敏', async () =>
 
 test('manifest 记录 frozen 与 provenance —— CI 要靠它拒绝执行（M7）', async () => {
   const store = await freshStore();
-  // manifest.artifacts 来自 store.recordsOf(本次 run 的 stepId)，所以要先落一份属于
-  // 'ok' 那步的证据。failingRun 的场景里没有 HTTP 步骤，没人调 saveArtifact ——
-  // 这不是 bug（断言失败的解释在 trace.jsonl 的 keyContext 里），但它说明
-  // "纯断言场景的证据包只有 trace/junit/manifest/summary 四个成员"。
-  await store.save('resp', '{"n":1}', 'ok');
+  // manifest.artifacts 来自「本次 run 声明的 artifactIds」，而 failingRun 里那条 http 步骤
+  // 会自动把响应体落盘，所以这里不再手塞证据（手塞的那条属于存储、不属于这次 run，
+  // 新规则下它不该进包 —— 详见 failingRun 的注释）。
   const { scenario, report } = await failingRun(store);
   const pkg = await buildEvidencePackage({ scenario, report, store, provenance: { versionId: 'v7' } });
   const m = JSON.parse(unzipMembers(pkg.bytes).get(EVIDENCE_FILES.manifest)!.toString('utf8'));
@@ -213,8 +243,9 @@ test('irSha 对"同一份 IR 的两种书写"给同一个值（规范化真被�
 
 test('磁盘上已不存在的证据 -> 记进 missing，而不是静默少一个成员', async () => {
   const store = await freshStore();
-  const id = await store.save('resp', 'hello', 'ok');
   const { scenario, report } = await failingRun(store);
+  const id = producedIds(report)[0]!;
+  assert.ok(id, '前提：这次 run 确实落了盘，否则"取不到"这一条压根没被测到');
   // 手工把文件删掉，模拟"证据被清理任务收了"/磁盘故障
   rmSync(join(store.rootDir, 'sha', id.slice(0, 2), id), { force: true });
   const pkg = await buildEvidencePackage({ scenario, report, store });
@@ -318,7 +349,6 @@ test('zip：真实 evidence 包（全 ASCII 成员名）在系统 unzip 下验�
   // 与上一条配对：上一条说明"中文成员名 unzip 解不出"，这一条说明"我们实际产出的包
   // 走 unzip 是好的"。两条都留着，才看得出边界在哪。
   const store = await freshStore();
-  await store.save('resp', '{"ok":true}', 'ok');
   const { scenario, report } = await failingRun(store);
   const pkg = await buildEvidencePackage({ scenario, report, store });
   const members = unzipMembers(pkg.bytes); // unzip -t + unzip -o，任一失败即抛
@@ -428,14 +458,18 @@ test('存储：找不到返回 undefined 而不是抛（"证据被清理了"是�
   assert.equal(await store.load('a'.repeat(64)), undefined);
 });
 
-test('recordsOf 按步骤归集且去重（重试会重复存同一内容）', async () => {
+test('同内容存两次只产一条记录（内容寻址去重，重试很常见）', async () => {
+  // 原先这条测的是 recordsOf(['s1'])。recordsOf 已删 —— 按 stepId 反查正是
+  // "跨场景同名步骤互相染色"的机制本身（步骤 id 只在自己的场景里唯一），
+  // 而它**今天能在单场景测试里给出完全正确的答案**，所以留着比删掉更危险。
+  // 这里保留的才是真正要守的性质：id 由内容决定，同内容必然同 id。
   const store = await freshStore();
-  await store.save('resp', 'same', 's1');
-  await store.save('resp', 'same', 's1'); // 重试
-  await store.save('screenshot', 'other', 's2');
-  const one = store.recordsOf(['s1']);
-  assert.equal(one.length, 1, '同一步骤存两次同内容只记一条');
-  assert.equal(store.recordsOf(['s1', 's2']).length, 2);
+  const a = await store.save('resp', 'same', 's1');
+  const b = await store.save('resp', 'same', 's1'); // 重试：同一步骤同内容
+  assert.equal(a, b, '同内容不同次必须同 id（否则重试会在磁盘上留两份"证据"）');
+  const c = await store.save('screenshot', 'other', 's2');
+  assert.notEqual(a, c);
+  assert.equal(new Set(store.all().map((r) => r.id)).size, 2, '存储里确实只有两份');
 });
 
 // ── trace.jsonl 与脱敏 ────────────────────────────────────────────────────

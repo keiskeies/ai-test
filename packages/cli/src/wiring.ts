@@ -434,6 +434,18 @@ export interface AssembleOptions {
   inputs?: Record<string, unknown>;
   runId?: string;
   maxCostUsd?: number;
+  /**
+   * `call` 步骤的子场景解析器。**由调用方构造后注入**，不在这里造，理由有两条：
+   *  1. `paths.ts` 从本文件 import（CliError / stripJsonComments），
+   *     这里再 import 回去就是循环依赖；
+   *  2. 更重要的是**装配点才知道场景从哪来**：`run --scenario <路径>` 的搜索根是那个
+   *     文件所在目录，而 `agent` 生成的场景可能压根没落盘。把"怎么找子场景"
+   *     留在调用方，本层只管把它交给引擎。
+   *
+   * 缺省时 `call` 步骤会报"解析器未注入"（error，不是跳过）—— 引擎侧那条
+   * 以前是个 `adapters.callScenario is not a function` 的 TypeError。
+   */
+  callScenario?: AdapterRegistry['callScenario'];
 }
 
 export interface Assembled {
@@ -458,6 +470,7 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
   const store = new DiskArtifactStore({ dir: o.evidenceDir });
 
   const adapters: AdapterRegistry = { artifactStore: store };
+  if (o.callScenario) adapters.callScenario = o.callScenario;
 
   /**
    * 鉴权装配（凭证解析 + hook + client）。**建在最前面**，

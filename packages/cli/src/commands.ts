@@ -7,11 +7,11 @@
  * 告警混进 stdout 会让那份文件变成没法机器解析的东西。
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   EVIDENCE_FILES, lintScenario, runScenario, toJUnitXml, toReport, toTraceJsonl, summaryText,
-  type RunReport,
+  type AdapterRegistry, type RunReport,
 } from '@atest/engine';
 import { defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
 import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidencePackage } from '@atest/store';
@@ -20,7 +20,7 @@ import { formatErrors, type ParsedArgs } from './args.js';
 import { CI_HINT, EXIT } from './exit.js';
 import { gateAfterRun, gateBeforeRun, isTriage } from './gate.js';
 import { generateScenarios, renderScenarioJson, strategyOf, STRATEGIES, GENERATED_STRATEGY_IDS } from './gen.js';
-import { findConfig, resolveEnvFile, resolveScenarioPath, writeConfig, DEFAULT_CONFIG, CONFIG_FILE } from './paths.js';
+import { findConfig, resolveEnvFile, resolveScenarioPath, writeConfig, DEFAULT_CONFIG, CONFIG_FILE, type ProjectConfig } from './paths.js';
 import {
   assemble, buildAuthLayer, CliError, DocRegistry, loadScenarioFile, makeClock, startLocalMock, buildEnv, secretEnvKey,
 } from './wiring.js';
@@ -31,6 +31,74 @@ export interface Io {
   err(s: string): void;
   cwd: string;
   env: Record<string, string | undefined>;
+}
+
+/**
+ * `call` 步骤的子场景解析器：把 `scenarioRef`（`id@version`）换成磁盘上另一份 IR。
+ *
+ * **以前 CLI 压根没接这个端口** —— 引擎里的 `call` 分支早就写全了（子变量空间、
+ * 成本汇总、childRuns…），而 `atest run` 从来装配不出解析器，于是任何带 `call` 的
+ * 场景都跑不了。这类"下半截没人接"是本仓反复出现的缺陷类，之所以一直没暴露：
+ * 所有 e2e 用例都是单文件场景，`call` 只在引擎的单测里被手工注入过。
+ *
+ * 三个刻意的选择：
+ *  1. **解析失败返回 undefined，不抛**。引擎据此报 env-unavailable 并带上 ref，
+ *     比这里抛一个 CliError 好：那时错误发生在装配期，人只知道"某个 ref 有问题"，
+ *     而运行期报错带着**是哪一步**的 call 失败了。
+ *     （只有 `--scenario -` 这种没目录可搜的情况除外，那种在装配期就能说清。）
+ *  2. **缓存按 ref**。同一个子场景被 call 十次只解析一次；也顺带让
+ *     "同一份 IR 的两次 call 用的是同一棵对象"这件事成立（引擎按 id 判环，
+ *     但缓存避免每次重读磁盘，间接少一批 IO 失败面）。
+ *  3. **子场景的 frozen 不在这里判**。CI 只跑 frozen 场景这条闸由 gateBeforeRun
+ *     在**入口场景**上判；子场景是入口场景的一部分，它的 frozen 与否跟着入口走。
+ *     在这里再判一次会出现"父冻结、子没冻结 => 整条跑不了"，
+ *     而作者压根没打算单独跑那个子场景。
+ */
+export function makeCallResolver(o: {
+  cfg: ProjectConfig | undefined;
+  cwd: string;
+  /**
+   * 入口场景**所在的目录**。`--scenario /somewhere/else/x.json` 时子场景
+   * 往往和它放在一起，而项目配置指向的是另一个仓库根 —— 只搜配置根会找不到。
+   */
+  scenarioDir?: string;
+}): AdapterRegistry['callScenario'] {
+  const cache = new Map<string, Promise<Scenario | undefined>>();
+  return (ref: string) => {
+    const hit = cache.get(ref);
+    if (hit) return hit;
+    const id = ref.split('@')[0]!;
+    /*
+     * **`@version` 今天被忽略**，只按 id 找文件 —— `sub.login@2` 与 `sub.login@1`
+     * 落到同一个文件。这是**已知缺口**而不是设计：平台还没有版本表（证据包里的
+     * `versionId` 同样还是 `undefined`，见 docs/14 §5），本地文件系统里
+     * "一个 id 一个文件"就是当前唯一的版本形态。
+     *
+     * 之所以**不**在这里报错或忽略整个 ref：作者写 `@2` 说明他心里有"版本"这个概念，
+     * 今天静默忽略它比告诉他"版本还不参与解析"坏得多 —— 他会以为 CI 跑的是第 2 版。
+     * 版本表落地时要一起改的还有 call 的解析与证据里的 versionId，别只改这一处。
+     */
+    const p = (async () => {
+      // resolveScenarioPath 内部已经按 [cfg.irDir, cfg.root, 递归按内部 id 找] 搜过，
+      // 所以带 cfg 调一次就覆盖整个项目；没配置时退到 cwd，最后再退到入口文件旁边。
+      // 不写成"对每个根各调一次带 cfg"：那会把同一批目录搜三遍，纯浪费 IO。
+      const attempts: Array<{ cfg: ProjectConfig | undefined; cwd: string }> = [
+        { cfg: o.cfg, cwd: o.cwd },
+        // 入口文件在旁边：--scenario /tmp/x.json 而子场景和它放一起（没项目配置时
+        // 第一条退到 cwd，通常就够；有配置时这条覆盖"场景放在项目外"的情况）
+        ...(o.scenarioDir && o.scenarioDir !== o.cwd ? [{ cfg: o.cfg, cwd: o.scenarioDir }] : []),
+      ];
+      for (const a of attempts) {
+        try {
+          const path = await resolveScenarioPath(a.cfg, id, a.cwd);
+          return (await loadScenarioFile(path)).scenario;
+        } catch { /* 换下一个。找不到最终由引擎报"解析不到 + ref"，那里知道是哪一步 */ }
+      }
+      return undefined;
+    })();
+    cache.set(ref, p);
+    return p;
+  };
 }
 
 export interface CommandResult {
@@ -140,6 +208,9 @@ async function runOne(o: {
   const inputs = parseInputs(a.multi.input ?? []);
   const assembled = await assemble({
     scenario, env: o.env, registry: o.registry,
+    // 子场景解析器。`path` 可能在项目外（--scenario /tmp/x.json），
+    // 所以把入口文件所在目录也交给它当搜索根
+    callScenario: makeCallResolver({ cfg: o.cfg, cwd: io.cwd, scenarioDir: dirname(path) }),
     evidenceDir: join(o.evidenceDir, 'artifacts'),
     clock: o.clock,
     envRevision: str(a, 'env-revision') ? Number(a.flags['env-revision']) : undefined,

@@ -59,8 +59,6 @@ export class DiskArtifactStore implements ArtifactStore {
   private readonly maxBytes: number;
   /** 本次进程写过哪些。evidence 包组装时按 runId 取，不靠扫目录（扫目录会把别人的 run 扫进来） */
   private readonly written = new Map<string, StoredArtifact>();
-  /** stepId -> 该步骤写了哪些 id。artifactIds 要按步骤列出来 */
-  private readonly byStep = new Map<string, string[]>();
 
   constructor(opts: DiskStoreOptions) {
     if (!opts.dir) throw new Error('DiskArtifactStore 需要显式的 dir（绝对路径）。留空会让证据落到 CWD，而 CI 的 CWD 是随机的');
@@ -99,9 +97,6 @@ export class DiskArtifactStore implements ArtifactStore {
     }
     const rec: StoredArtifact = { id: sha, kind, stepId, bytes: bytes.byteLength, sha256: sha, redacted: !keepRaw && typeof data === 'string' };
     this.written.set(sha, rec);
-    const list = this.byStep.get(stepId) ?? [];
-    // 同一步骤重复存同一内容（重试场景很常见）只记一次
-    if (!list.includes(sha)) this.byStep.set(stepId, [...list, sha]);
     return sha;
   }
 
@@ -121,21 +116,19 @@ export class DiskArtifactStore implements ArtifactStore {
     }
   }
 
-  /** 某步骤产出的证据记录。给 evidence 包清单与 JUnit 的 artifacts 属性用 */
-  recordsOf(stepIds: Iterable<string>): StoredArtifact[] {
-    const out: StoredArtifact[] = [];
-    const seen = new Set<string>();
-    for (const sid of stepIds) {
-      for (const id of this.byStep.get(sid) ?? []) {
-        if (seen.has(id)) continue;
-        const r = this.written.get(id);
-        if (r) { out.push(r); seen.add(id); }
-      }
-    }
-    return out;
-  }
-
-  /** 本次进程写过的全部证据 */
+  /**
+   * 本次进程写过的全部证据。
+   *
+   * **没有 recordsOf(stepIds)** —— 它本轮被删，因为它是刚修掉那个缺陷的**机制本身**：
+   * 步骤 id 只在自己的场景里唯一，父和子都叫 `c1` 完全合法，于是
+   * "按 stepId 反查我写过哪些证据"会把子的响应体记到父那一步名下（实测多捞一条）。
+   * 这个索引还是**进程级**的：同一进程连跑两个场景时互相捞到对方的东西。
+   *
+   * 正确的取法一直是**声明式的**：`StepResult.artifactIds` 由引擎在落盘那一刻填，
+   * 天然带对场景归属。留着一个"方便的反查"，下一个人赶时间时一定会去用它 ——
+   * 与 `docs/14` §4.7「永不到达的分支不要留」是同一条判据，只是这里到达得了，
+   * 所以更危险：它今天能在单场景测试里给出完全正确的答案。
+   */
   all(): StoredArtifact[] {
     return [...this.written.values()];
   }

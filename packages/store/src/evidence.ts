@@ -25,7 +25,7 @@ import {
 import type { RunReport } from '@atest/engine';
 import type { Scenario } from '@atest/ir';
 import { buildZip, readZipEntries, type ZipEntry } from './zip.js';
-import { DiskArtifactStore } from './artifacts.js';
+import type { DiskArtifactStore } from './artifacts.js';
 import { irShaOf } from './ir-hash.js';
 
 export interface BuildEvidenceOptions {
@@ -65,15 +65,88 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
   const { scenario, report, store } = o;
   const enc = new TextEncoder();
 
-  const stepIds = report.results.map((r) => r.stepId);
-  const records = store.recordsOf(stepIds);
-  const missing: string[] = [];
+  /**
+   * 本次 run 产出的证据 id：**从结果里声明的 artifactIds 取，不按 stepId 反查存储**。
+   *
+   * 原先是 `store.recordsOf(report.results.map(r => r.stepId))`，两个实测后果：
+   *  1. **子场景的证据静默消失**。call 步骤自己那份 results 不含子场景的步骤，
+   *     于是子里 http 步骤落的响应体既不在 `artifacts/` 里、也不在 `missing` 里 ——
+   *     排查的人看到"缺 0 个"，而磁盘上明明有两条。missing 存在的唯一理由就是
+   *     "别让少一件东西看起来像什么都没少"，这条路径恰好绕开它。
+   *  2. **跨场景的 stepId 串档**。步骤 id 只在自己的场景里唯一（父和子都叫 `c1`
+   *     完全合法，实测父步骤的 artifactIds 里躺着 `004851`，而 `recordsOf(['c1'])`
+   *     捞出 `004851,3134a2` —— 第二条是子的）。反查会**多报**：把别人的响应体
+   *     写进这一步名下，比少报更难发现，因为包里的东西看着都在。
+   *
+   * 所以改成"谁产出的证据，谁自己带着 id"：artifactIds 是 StepResult 上的字段，
+   * 由引擎在落盘那一刻填，天然带对了场景归属。
+   * （存储侧那个 `recordsOf(stepIds)` 与它的 stepId 索引已一并删除 —— 它就是这个缺陷的机制，
+   * 而且是**进程级**的：同一进程连跑两个场景还会互相捞到对方的东西。理由写在 artifacts.ts 的 all() 上。）
+   *
+   * 顺序按结果出现次序，id 去重（重试/循环会重复存同一内容，内容寻址下同 id）。
+   * 归属取**声明这个 id 的那一步**（同样是为了不串档）；子场景那一步带上场景 id，
+   * 因为"哪个步骤"在跨场景之后不再是唯一坐标。
+   */
+  const wanted = new Map<string, string>();
+  const push = (id: string, owner: string): void => { if (!wanted.has(id)) wanted.set(id, owner); };
+  for (const r of report.results) for (const id of r.artifactIds) push(id, r.stepId);
+  // 子场景的结果只进**证据枚举**，不进 tally / JUnit 计数 / 门禁结论：
+  // 一次子场景失败在父侧由 call 步骤带上来（gate.ts 同处有对应注释），
+  // "什么算一条用例"这个问题全仓只允许有一个答案。
+  // 归属这里带上场景 id，因为"哪个步骤"在跨场景之后不再是唯一坐标。
+  for (const c of report.childRuns ?? []) {
+    for (const r of c.results) for (const id of r.artifactIds) push(id, `${c.scenario.id}/${r.stepId}`);
+  }
+  /*
+   * **兜底：落过盘但没被任何一步声明的证据**。
+   *
+   * `ctx.saveArtifact(kind, data, stepId)` 是 adapter 自己调的（adb 截图、UI hierarchy
+   * 都从这里走），它**返回 id 而不强制 adapter 把 id 放进 StepResult.artifactIds** ——
+   * 忘了放的那个 adapter 不会报错，只会让证据从包里消失。而按 stepId 反查存储
+   * 正好"顺手"盖住这个漏（连同一个更坏的串档问题），所以那套做法不能留：
+   * 用一个错误的机制去遮蔽另一个错误，两个都修不掉。
+   *
+   * 这里用**已经存在的事实**兜底：每次落盘都发过一条 artifact.saved 事件
+   * （interpreter.ts 的 ctxBase.saveArtifact），事件里的 id 是存储给的真 id。
+   * 于是"没声明"不再等于"没有"，而是进包并带 `未归属` 前缀 —— 让人一眼看出
+   * 是哪个 adapter 忘了带 id，而不是让人以为那次运行没产证据。
+   */
+  for (const e of report.events) {
+    if (e.kind !== 'artifact.saved') continue;
+    const id = (e.data as { id?: unknown } | undefined)?.id;
+    if (typeof id !== 'string' || wanted.has(id)) continue;
+    push(id, `未归属:${e.stepId ?? '?'}`);
+  }
 
+  /**
+   * 落盘事件里的元数据（id -> kind/字节）。唯一用途：**文件已经取不到时，
+   * 清单里仍然要说得出"这是什么、多大"**。
+   * 取不到就不写这两项（字段可选），而不是填 'unknown'/0 ——
+   * 0 字节是合法值，会被读成"响应体是空的"，而真相是"文件被清理任务收走了"。
+   */
+  const meta = new Map<string, { kind: string; bytes: number }>();
+  for (const e of report.events) {
+    if (e.kind !== 'artifact.saved') continue;
+    const d = e.data as { id?: unknown; kind?: unknown; bytes?: unknown } | undefined;
+    if (typeof d?.id !== 'string' || typeof d.kind !== 'string') continue;
+    if (!meta.has(d.id)) meta.set(d.id, { kind: d.kind, bytes: typeof d.bytes === 'number' ? d.bytes : 0 });
+  }
+
+  const missing: string[] = [];
+  const declared: EvidenceManifest['artifacts'] = [];
   const members: ZipEntry[] = [];
-  for (const r of records) {
-    const loaded = await store.load(r.id);
-    if (!loaded) { missing.push(r.id); continue; }
-    members.push({ name: `${EVIDENCE_FILES.artifactsDir}/${r.id}`, data: loaded.bytes, mtimeMs: report.startedAt });
+  for (const [id, owner] of wanted) {
+    // 声明过的一律进清单（"这次 run 产出了什么"），装不下的同时进 missing。
+    // 二分法不能塌成一份：少了它就等于把"取不到"改写成"没产过"。
+    const known = meta.get(id);
+    const loaded = await store.load(id);
+    if (!loaded) {
+      missing.push(id);
+      declared.push({ id, kind: known?.kind ?? 'unknown', stepId: owner, ...(known ? { bytes: known.bytes } : {}), sha256: id });
+      continue;
+    }
+    declared.push({ id, kind: loaded.kind, stepId: owner, bytes: loaded.bytes.byteLength, sha256: id });
+    members.push({ name: `${EVIDENCE_FILES.artifactsDir}/${id}`, data: loaded.bytes, mtimeMs: report.startedAt });
   }
 
   const manifest: EvidenceManifest = {
@@ -96,7 +169,10 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
     },
     tally: report.tally,
     costUsd: report.costUsd,
-    artifacts: records.map((r) => ({ id: r.id, kind: r.kind, stepId: r.stepId, bytes: r.bytes, sha256: r.sha256 })),
+    // 顺序 = 步骤出现次序。**含取不到的那几条**（它们同时进 missing），
+    // 所以"清单里有、包里没"是声明与实装的差，不是"没产过"
+    artifacts: declared,
+    missing,
     // 把策略写进包：拿到包的人要能回答"响应体被改过吗、按什么规则改的"。
     // 没这段，evidence 不能当事故复盘的依据。
     redaction: {
