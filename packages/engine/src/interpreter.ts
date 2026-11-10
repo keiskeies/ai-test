@@ -1093,7 +1093,18 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<typeof resolved> }).resolve(locator, execCtx(targetOf(s, stepCtx), s.id));
           emit({ kind: 'locator.resolved', stepId: s.id, data: { ...resolved } });
         }
-        if ('perform' in uiOrDev) await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<void> }).perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id));
+        /*
+         * **接住 perform 的返回值**。原先是 `await ....perform(...)` 直接丢掉，
+         * 于是 adapter 在动作里落的证据（capture 的截图、tap 后的 hierarchy）
+         * 没有任何通道进 StepResult.artifactIds —— 真跑一次 Web 的 capture 步骤，
+         * evidence 清单里那个前缀是 `未归属:shot`。
+         * 归属不该由"adapter 有没有自己 emit 过一条事件"决定，
+         * 那是兜底路径；正常路径是**谁产的谁带回来**。
+         */
+        const performed = 'perform' in uiOrDev
+          ? await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<{ artifactIds?: string[] } | void> })
+            .perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id))
+          : undefined;
         /*
          * **置信度门取人在 IR 里写的那个值**（`LocatorSpec.confidenceGate`，schema 默认 0.85）。
          *
@@ -1128,6 +1139,12 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           resolvedBy: resolved.resolvedBy, rung: resolved.rung || undefined, confidence: resolved.confidence,
           nonReplayable: resolved.nonReplayable,
           healed: needsReview,
+          // adapter 这次动作产的证据。**去重**：内容寻址下同内容同 id，
+          // 而重试/循环会让同一次动作跑两遍，重复 id 进 artifactIds 会让
+          // 证据包与 JUnit 里"这一步产了几份证据"这个数虚高
+          ...(performed?.artifactIds?.length
+            ? { artifactIds: [...new Set(performed.artifactIds)] }
+            : {}),
         };
       }
       case 'device': {

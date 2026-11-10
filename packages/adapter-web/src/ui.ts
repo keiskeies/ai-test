@@ -21,7 +21,7 @@
  */
 import { createHash } from 'node:crypto';
 
-import type { ExecContext, UiExec } from '@atest/engine';
+import type { ExecContext, PerformResult, UiExec } from '@atest/engine';
 import type { LocatorSpec, Operation, UiAssertPayload } from '@atest/ir';
 
 import { BadLocator, UnsupportedLocator, confidenceOf, ladder, rungOf, translate, xpathStr } from './locator.js';
@@ -243,8 +243,19 @@ export async function createWebAdapter(opts: WebAdapterOptions = {}): Promise<We
           }
           const shot = await s.screenshot();
           const id = await ctx.saveArtifact('screenshot', shot, stepId);
-          ctx.emit({ kind: 'artifact.saved', stepId, data: { artifactId: id, kind: 'screenshot', bytes: shot.byteLength } });
-          return;
+          /*
+           * **这里原本还自己 emit 了一条 artifact.saved，删掉了。**
+           * 引擎的 ctxBase.saveArtifact 内部已经发过一条（interpreter.ts:237），
+           * 而它带的是 `data.id`；我那条写的是 `data.artifactId`。
+           * 后果不是"多一条日志"：evidence.ts 的兜底枚举读的是 `data.id`，
+           * 所以我那条**永远不会被读到** —— 它看起来在做证据归属，实际什么都没做，
+           * 而真正的归属靠引擎那条兜住了。写侧发一种字段名、读侧认另一种，
+           * 坏数据永远到不了写它的人眼前（与 EmitInput.kind 那个注释记的是同一件事）。
+           */
+          // 把 id 带回给引擎（PerformResult.artifactIds）。
+          // **不带回的话证据包会把这个截图标成 `未归属:shot`** —— 那是兜底给
+          // "忘了带 id 的 adapter"用的标签，正常路径不该长期住在兜底里。
+          return { artifactIds: [id] };
         }
         default:
           throw new Error(`Web 端不支持动作 "${o.op}"`);

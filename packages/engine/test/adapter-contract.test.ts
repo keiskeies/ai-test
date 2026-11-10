@@ -110,3 +110,41 @@ test('步骤之外的事不编 stepId：收尾释放租约时它是 undefined', 
   assert.ok(!seen.some((s) => s !== undefined && s !== 'd1'),
     `冒出不在场景里的步骤 id：${JSON.stringify(seen)}`);
 });
+
+test('adapter 在动作里产的证据必须进 StepResult.artifactIds（否则归属落到"未归属"）', async () => {
+  /*
+   * 这条是被**真跑一次 Web capture 步骤**逼出来的：evidence 清单里那个前缀是
+   * `stepId: "未归属:shot"`。`未归属` 本来是兜底给"忘了带 id 的 adapter"的标签，
+   * 但因为 perform 返回 void、id 没有任何通道回来，它成了**正常路径的唯一标签** ——
+   * 每一张 Web 截图都被标成归属不明，而那一步明明知道自己是谁。
+   *
+   * 判据用假 adapter 记账是**不够**的（它只能证明"我传了什么"），
+   * 所以这里断的是**引擎交出去的那份 StepResult**：那才是 evidence.ts 读的东西。
+   */
+  const ui = {
+    async perform(_o: unknown, _t: unknown, ctx: ExecContext) {
+      const id = await ctx.saveArtifact('screenshot', 'PNGDATA', ctx.stepId ?? '?');
+      return { artifactIds: [id, id] }; // 故意重复：同一次动作产同内容两次
+    },
+    async snapshot() { return { kind: 'aria', data: '', sha: 'x' }; },
+    async resolve() { return { resolvedBy: 'testid', rung: 1, confidence: 1, nonReplayable: false, handle: 'h1' }; },
+    async assertUi() { return { passed: true, actual: '', expected: '' }; },
+  };
+  // 必须给 artifactStore：ctx.saveArtifact 在没存储时是**故意抛**的
+  // （返回假 id 会让证据包看起来完整而实际取不到东西），所以少了它这一步直接 error，
+  // 我要断的 artifactIds 压根不会被填 —— 那时测试会以"0 !== 1"失败，
+  // 看起来像合并逻辑坏了，实际是夹具缺一个端口。
+  const artifactStore = { async save() { return 'a'.repeat(64); }, async load() { return undefined; } };
+  const r = await run(scen([{ ...b('cap9'), kind: 'capture', mode: 'screenshot', on: 'always' } as StepDraft]), { adapters: { ui, artifactStore } });
+  const x = r.results.find((y) => y.stepId === 'cap9');
+  // 先判状态：夹具缺端口时这一步会 error，那时 artifactIds 为空是**另一个原因**，
+  // 不加这条的话报错会把人引向"合并逻辑写错了"
+  assert.equal(x?.status, 'pass', `步骤本身要成功才有归属可谈：${x?.assertionSummary}`);
+  assert.equal(x?.artifactIds.length, 1, `该带回 1 个 id（重复的要并掉）：${JSON.stringify(x?.artifactIds)}`);
+  assert.match(String(x?.artifactIds[0] ?? ''), /^[0-9a-f]{64}$/, '必须是存储给的真 id，不是 adapter 编的');
+  // **反向**：一条不产证据的动作不该凭空多出 artifactIds
+  const quiet = { ...ui, async perform() { return; } };
+  const r2 = await run(scen([{ ...b('cap8'), kind: 'capture', mode: 'screenshot', on: 'always' } as StepDraft]), { adapters: { ui: quiet, artifactStore } });
+  assert.deepEqual(r2.results.find((y) => y.stepId === 'cap8')?.artifactIds ?? [], [],
+    'perform 返回 void 时不该有 artifactIds（那是"没产证据"，与"产了没说"由兜底前缀区分）');
+});

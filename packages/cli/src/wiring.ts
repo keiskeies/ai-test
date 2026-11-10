@@ -20,8 +20,9 @@ import {
   AuthHook, CredentialTable, TokenSource, normalizeSecuritySchemes,
   type AuthConfigRaw, type ParsedDoc, type MockServer,
 } from '@atest/adapter-http';
+import { createWebAdapter, type WebAdapter } from '@atest/adapter-web';
 import { DiskArtifactStore } from '@atest/store';
-import { parseScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
+import { deriveTargets, parseScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
 
 import { EXIT } from './exit.js';
 
@@ -453,6 +454,10 @@ export interface Assembled {
   store: DiskArtifactStore;
   /** 起了 mock 才有；调用方必须在结束时关掉 */
   mock?: MockServer;
+  /** 场景用到 Web 步骤时才建。**调用方必须在结束时 close** ——
+   *  不关就是每次 run 留一个 Chrome 进程 + 一个几百 MB 的临时 profile，
+   *  而症状（跑到第 N 条变慢/磁盘涨）离原因是两步远 */
+  web?: WebAdapter;
   /** 装配期发现的告警（密钥缺失、mock 提示等），统一在 run 后打印 */
   warnings: string[];
   /** 没解析到真实值的密钥 ref。命令侧用它决定"这次失败该不该归因于环境" */
@@ -470,6 +475,7 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
   const store = new DiskArtifactStore({ dir: o.evidenceDir });
 
   const adapters: AdapterRegistry = { artifactStore: store };
+  let builtWeb: WebAdapter | undefined;
   if (o.callScenario) adapters.callScenario = o.callScenario;
 
   /**
@@ -505,6 +511,50 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
   // 单测里没抓到，是因为 e2e 用例都会传 --doc；而手工写 http 步骤这条路没人走过。
   adapters.http = asHttpExec(auth.client, o.registry.empty() ? undefined : o.registry.provider(), auth.hook);
 
+  /*
+   * **Web adapter 按需建**（场景里有 web 档的步骤才建）。
+   *
+   * 三条理由，都不涉及性能：
+   *  1. 起一个 Chrome 要 1~2s 并占几百 MB，纯 API 场景不该付这个钱；
+   *  2. 更重要：**没装浏览器的机器上，纯 API 用例必须照跑**。
+   *     无条件建的话 ATEST_BROWSER_BIN 缺失会让所有 run 一起失败，
+   *     那等于用一个端的配置问题去阻塞另一个端；
+   *  3. 判据用 STEP_TARGET 而不是"扫一下有没有 navigate"。后者要认 kinds，
+   *     而 kinds 与端的对应关系已经在 IR 里写过一遍 —— 再扫一份就是两份会漂移的表
+   *     （这个仓库为这类漂移记过不止一次账）。
+   */
+  if (needsWeb(o.scenario)) {
+    const bin = process.env.ATEST_BROWSER_BIN;
+    if (!bin) {
+      // **装配期报错，不进 run**。理由与 requireAdapters 同源：浏览器没配是一个
+      // 确定的配置缺失，让它以 env-unavailable 的身份进退出码，流水线就会照
+      // CI_HINT 重试一次 —— 而配置缺失重试一万次也不会好。
+      // 报错里不打印任何 ATEST_SECRET_* 之类的环境值，只说该设哪个变量。
+      throw new CliError(
+        '本次场景用到 Web 步骤，但没配浏览器：设环境变量 ATEST_BROWSER_BIN=<chrome/chromium 路径>。',
+        EXIT.ENV,
+        '本工具不自动探测浏览器安装路径：静默挑一个，等于让"用的是哪个浏览器版本"变成不可复现的事',
+      );
+    }
+    try {
+      const web = await createWebAdapter({
+        bin,
+        // 视口/语言/时区全部来自环境配置，并且**记进 meta 供环境指纹用**。
+        // docs/06 §1 那条"响应式断点相关的用例今天过明天挂且查不出来"，
+        // 治法就是把这三样固定下来并写进 run 指纹，而不是让它们随机器默认值漂
+        ...(typeof o.env.viewport === 'string' ? parseViewport(o.env.viewport) : {}),
+        ...(typeof o.env.locale === 'string' ? { locale: o.env.locale } : {}),
+        ...(typeof o.env.timezoneId === 'string' ? { timezoneId: o.env.timezoneId } : {}),
+      });
+      adapters.ui = web.ui;
+      builtWeb = web;
+    } catch (e) {
+      // 浏览器路径写错/起不来同样是**装配期**的配置问题（见上）。
+      // adapter 那边已经把 spawn error 收敛成正常异常了，这里只补一句上下文
+      throw new CliError(`起浏览器失败：${e instanceof Error ? e.message : String(e)}`, EXIT.ENV);
+    }
+  }
+
   const runOptions: RunOptions = {
     scenario: o.scenario,
     adapters,
@@ -524,7 +574,32 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
     );
   }
 
-  return { runOptions, store, warnings, missingSecrets };
+  return { runOptions, store, warnings, missingSecrets, ...(builtWeb ? { web: builtWeb } : {}) };
+}
+
+/**
+ * 场景是否用到 Web 端的步骤。
+ *
+ * 直接用 IR 的 **deriveTargets**（那张 kind → 端 的表的唯一权威消费者），
+ * 不自己扫 kind 列表，也不自己写递归。三个理由同一个形状：
+ *  - 列一份 `['navigate','act','capture','assertPage']` 会一直"对"到某天新增一个
+ *    web kind，之后它安静地不再命中，症状是"新 kind 报 ui adapter 未注册"；
+ *  - 自己写递归会漏 switch 的 cases（CHILD_KEYS 之外），漏了的表现与清单漂移一样；
+ *  - STEP_TARGET 与 CHILD_KEYS 都在 IR，本层重抄一份就是本仓记过多次的
+ *    "两处各一份，迟早只更新其中一处"。
+ */
+export function needsWeb(scenario: Scenario): boolean {
+  return deriveTargets(scenario.body).includes('web');
+}
+
+/** 环境里的 `viewport: "1440x900@2"` -> adapter 的参数。写错就报错，不猜默认值 */
+function parseViewport(v: string): { viewport: { width: number; height: number; deviceScaleFactor?: number } } {
+  const m = /^(\d+)x(\d+)(?:@(\d+(?:\.\d+)?))?$/.exec(v.trim());
+  if (!m) throw new CliError(`env.viewport 要写成 "宽x高" 或 "宽x高@倍率"，实际是 "${v}"`, EXIT.ENV);
+  return { viewport: {
+    width: Number(m[1]), height: Number(m[2]),
+    ...(m[3] ? { deviceScaleFactor: Number(m[3]) } : {}),
+  } };
 }
 
 /** `--local` 起的 mock：让"clone 完第一条命令就能跑出证据包"成立。

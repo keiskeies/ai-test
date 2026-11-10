@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@atest/adapter-http": "*",
+    "@atest/adapter-web": "*",
     "@atest/engine": "*",
     "@atest/ir": "*",
     "@atest/store": "*"

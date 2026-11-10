@@ -225,6 +225,14 @@ async function runOne(o: {
     report = await runScenario(assembled.runOptions);
   } finally {
     await mock?.close();
+    /*
+     * Web adapter 必须关。不关的代价不是"泄漏一点内存"这么抽象：
+     * 每次 run 留一个 Chrome 进程 + 一个 mkdtemp 出来的临时 profile（几百 MB），
+     * 而症状是"CI 机器跑到第 30 条用例开始变慢 / 磁盘涨"，离原因两步远。
+     * 放 finally 而不是成功路径之后：用例失败时**更要**关 —— 失败的 run 往往
+     * 正被人连着重跑几十次。
+     */
+    await assembled.web?.close();
   }
 
   // 产物先组装（下面既要用 manifest 打摘要，也要写包）。

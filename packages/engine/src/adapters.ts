@@ -149,6 +149,26 @@ export interface HttpExec {
 }
 
 /**
+ * perform 的返回值。
+ *
+ * **为什么要有这一格**（原先是 `Promise<void>`）：UI/设备 adapter 在一次动作里
+ * 自己产证据（capture 步骤的截图、hierarchy 快照），而 `saveArtifact` 只把 id
+ * 还给 adapter —— 没有任何通道把它带回 `StepResult.artifactIds`。
+ * 后果实测过（Web 端 capture 步骤真跑一次）：evidence 包清单里写着
+ * `stepId: "未归属:shot"`。那个前缀是**兜底机制**给"忘了带 id 的 adapter"留的，
+ * 结果成了正常路径的唯一标签 —— 也就是说每一张 Web 截图都被标成"归属不明"，
+ * 而它是明确知道属于自己的那一步的。兜底成了默认，就等于兜底在替一个缺失的接口背书。
+ *
+ * 返回 `void`（不返回东西）仍然合法：那是"这个动作没产证据"，与"产了但没说"
+ * 在类型上分不开，但**分不开这件事由证据侧的 `未归属` 前缀说出来**，
+ * 而不是靠这里加一个必填字段逼所有 adapter 每次都构造一个空对象。
+ */
+export interface PerformResult {
+  /** 本次动作落进证据存储的 id（`saveArtifact` 的返回值）。**只放自己这次产的** */
+  artifactIds?: string[];
+}
+
+/**
  * Web 端的执行端口。
  *
  * **这里原先还声明着 `navigate(url, waitUntil, ctx)`，本轮删掉了**。
@@ -164,7 +184,7 @@ export interface HttpExec {
  * 现在这套是"所有动作一个入口，op 里带参数"。
  */
 export interface UiExec {
-  perform(op: unknown, target: unknown, ctx: ExecContext): Promise<void>;
+  perform(op: unknown, target: unknown, ctx: ExecContext): Promise<PerformResult | void>;
   snapshot(ctx: ExecContext): Promise<{ kind: string; data: string; sha: string }>;
   /** 返回实际使用的定位策略与级别，供 flaky 治理统计（docs/00 §5.11） */
   resolve(locator: unknown, ctx: ExecContext): Promise<{ resolvedBy: string; rung: number; confidence: number; nonReplayable: boolean; handle: string }>;
@@ -177,7 +197,9 @@ export interface DeviceExec {
   release(lease: { id: string }, ctx: ExecContext): Promise<void>;
   app(action: string, args: Record<string, unknown>, ctx: ExecContext): Promise<unknown>;
   snapshot(ctx: ExecContext): Promise<{ kind: string; data: string; sha: string }>;
-  perform(op: unknown, target: unknown, ctx: ExecContext): Promise<void>;
+  /** 同 UiExec.perform：设备端 tap/app 也会自己产证据（截图、hierarchy），
+   *  没有这个返回值就只能让证据归属落到 `未归属:` 兜底上 */
+  perform(op: unknown, target: unknown, ctx: ExecContext): Promise<PerformResult | void>;
   resolve(locator: unknown, ctx: ExecContext): Promise<{ resolvedBy: string; rung: number; confidence: number; nonReplayable: boolean; handle: string }>;
   /** DB 行等待条件也归到 adapter 侧（引擎不碰网络） */
   query?(sql: string, vars: Record<string, unknown>, ctx: ExecContext): Promise<unknown[]>;
