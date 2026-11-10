@@ -19,12 +19,13 @@
  * （服务端/流水线设它，本地默认跳过）。
  */
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { launchBrowser, parseDevtoolsUrl } from '../src/cdp.js';
+// 浏览器查找 / 跳过策略 / 夹具页面全在 browser.ts。
+// **原先这些在本文件里，第二个用浏览器的测试文件出现时就成了两份**：
+// 两份搜索顺序会漂移，然后出现"同一套件里一半跑 1217、一半跑 1181"
+import { browserBin, browserTest, fixture } from './browser.js';
 
 // ── A. 纯函数与失败路径 ───────────────────────────────────────────────────
 
@@ -76,66 +77,10 @@ test('二进制路径写错时是**这一次 run 失败**，不是整个进程�
   // 走到这里就说明进程没被带崩 —— 上面若是 uncaughtException，这条测试根本到不了结尾
 });
 
-// ── B. 真浏览器 ────────────────────────────────────────────────────────────
-
-/**
- * 找浏览器。**只在测试里**找；产品侧故意不自动探测
- * （静默挑一个浏览器，等于让"用的是哪个版本"变成不可复现的事）。
- */
-function findBrowser(): string | undefined {
-  const fromEnv = process.env.ATEST_BROWSER_BIN;
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
-  const roots = [
-    // playwright 的缓存（本机实测存在，是这台开发机上唯一现成的 Chromium 系）
-    join(homedir(), 'Library', 'Caches', 'ms-playwright'),
-    '/Applications',
-  ];
-  const wants = [
-    'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    'Google Chrome.app/Contents/MacOS/Google Chrome',
-    'Chromium.app/Contents/MacOS/Chromium',
-  ];
-  for (const root of roots) {
-    if (!existsSync(root)) continue;
-    // ms-playwright 下有多个 chromium-<rev>，按版本号**降序**取最新：
-    // 升序会拿到最旧的那个，然后某天旧 rev 被清掉，测试从"稳定通过"变成"偶发找不到浏览器"
-    let names: string[] = [];
-    try { names = readdirSync(root).sort().reverse(); } catch { continue; }
-    for (const n of names) {
-      for (const w of wants) {
-        const p = join(root, n, 'chrome-mac-x64', w);
-        if (existsSync(p)) return p;
-        const p2 = join(root, n, w);
-        if (existsSync(p2)) return p2;
-      }
-    }
-  }
-  return undefined;
-}
-
-const BROWSER = findBrowser();
-const REQUIRE = process.env.ATEST_REQUIRE_BROWSER === '1';
-if (!BROWSER && REQUIRE) {
-  // 强制模式下**必须失败**：CI 上"跳过"与"通过"在汇总里长得一样，
-  // 而 web adapter 一旦静默不再被跑，它就等于不存在
-  test('ATEST_REQUIRE_BROWSER=1 但找不到浏览器', () => {
-    assert.fail('流水线说必须有浏览器，那就不能跳过。检查镜像里装了 Chrome/Chromium，'
-      + '或把路径写进 ATEST_BROWSER_BIN');
-  });
-} else if (!BROWSER) {
-  process.stderr.write('[adapter-web] 没找到 Chrome/Chromium：真浏览器的 4 条测试跳过。'
-    + '设 ATEST_BROWSER_BIN 可跑；流水线设 ATEST_REQUIRE_BROWSER=1 会让跳过变成失败。\n');
-}
-
-const browserTest = BROWSER && existsSync(BROWSER) ? test : test.skip;
-
-/** 夹具页面。**必须带 charset=utf-8**：裸 data URL 里的中文会被按非 UTF-8 解，
- *  断言双方都拿到乱码时更是"全绿但读的是乱码"（docs/14 §4.11 那条实测） */
-const fixture = (html: string): string =>
-  `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+// ── B. 真浏览器（夹具与跳过策略见 test/browser.ts）──────────────────────────
 
 browserTest('起浏览器 → flatten 会话 → 导航 → AX 树里能拿到中文的 role+name', async () => {
-  const b = await launchBrowser({ bin: BROWSER });
+  const b = await launchBrowser({ bin: browserBin() });
   try {
     assert.ok(b.pid, '要拿得到进程 id（排查僵尸进程时唯一的坐标）');
     const t = await b.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
@@ -161,7 +106,7 @@ browserTest('起浏览器 → flatten 会话 → 导航 → AX 树里能拿到�
 });
 
 browserTest('导航未完成时 Page 事件真的推过来（expectResponse 靠的就是这个）', async () => {
-  const b = await launchBrowser({ bin: BROWSER });
+  const b = await launchBrowser({ bin: browserBin() });
   try {
     const t = await b.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
     const a = await b.send<{ sessionId: string }>('Target.attachToTarget', { targetId: t.result!.targetId, flatten: true });
@@ -182,7 +127,7 @@ browserTest('导航未完成时 Page 事件真的推过来（expectResponse 靠�
 browserTest('连接关掉之后在飞的命令必须失败，而不是永远挂着', async () => {
   // docs/14 §4.10 那条教训的正面实现：没有报错、只是不再返回，
   // 在 CI 里表现为"这条用例卡到被 kill"，日志里一个异常都没有。
-  const b = await launchBrowser({ bin: BROWSER });
+  const b = await launchBrowser({ bin: browserBin() });
   const t = await b.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
   const a = await b.send<{ sessionId: string }>('Target.attachToTarget', { targetId: t.result!.targetId, flatten: true });
   const inflight = b.send('Runtime.evaluate', { expression: '1+1' }, a.result!.sessionId);
@@ -202,7 +147,7 @@ browserTest('evaluate 取回的中文与送进去的逐字符相同（两次独�
   // 上面那条 navigate 只验"最后是对的"，抓不到那种"改了不该改的东西然后侥幸通过"。
   // 这条把两头都钉住：送进去的字面值 == 浏览器里读回来的字面值，
   // 而且**同时**验一次纯 DOM 往返（不经 URL），这样 URL 编码那一层出问题时会分得清是谁坏了。
-  const b = await launchBrowser({ bin: BROWSER });
+  const b = await launchBrowser({ bin: browserBin() });
   try {
     const t = await b.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
     const a = await b.send<{ sessionId: string }>('Target.attachToTarget', { targetId: t.result!.targetId, flatten: true });
