@@ -47,7 +47,7 @@ const LAYER_RULES = [
   {
     pkg: 'packages/ir',
     forbidNodeBuiltins: true,
-    forbidPackages: ['engine', 'store', 'llm', 'server', 'web', 'cli', 'adapter-http'],
+    forbidPackages: ['engine', 'store', 'llm', 'server', 'web', 'cli', 'adapter-http', 'adapter-web'],
     reason: 'IR 必须是纯数据 + 纯函数，浏览器/Node/CI 三处共用（docs/02, docs/09 §1）',
     // 测试目录例外：node:test / node:assert 是内置的，装不上第三方测试框架正好用它们。
     // 例外必须**显式声明**在这里 —— 否则「测试能 import node:test」会让人以为规则有洞。
@@ -56,7 +56,7 @@ const LAYER_RULES = [
   {
     pkg: 'packages/engine',
     forbidNodeBuiltins: true,
-    forbidPackages: ['store', 'llm', 'server', 'web', 'cli', 'adapter-http'],
+    forbidPackages: ['store', 'llm', 'server', 'web', 'cli', 'adapter-http', 'adapter-web'],
     reason: '引擎禁止副作用：副作用全在 adapter，这是「一个执行引擎、GUI 只是它的一个视图」的唯一保证（docs/01 §8.2）',
     exempt: '/test/',
   },
@@ -67,6 +67,18 @@ const LAYER_RULES = [
     forbidNodeBuiltins: false,
     forbidPackages: ['store', 'llm', 'server', 'web', 'cli'],
     reason: '本层是**网络**副作用的唯一归属地（放行 node:net/http 等），引擎的纯净全靠副作用集中在这里；依赖方向上它只依赖 ir + engine 的接口，不得反向认识服务端/UI/LLM（docs/01 §1，docs/04 M2）',
+    exempt: '/test/',
+  },
+  {
+    pkg: 'packages/adapter-web',
+    // 与 adapter-http 同层：这一层的职责就是**浏览器**副作用（起进程、发 CDP），
+    // 所以放行 node:child_process/fs。引擎侧只留 UiExec 端口 ——
+    // "引擎无副作用"靠的是端口在引擎、实现在这里，而不是靠自觉。
+    forbidNodeBuiltins: false,
+    forbidPackages: ['store', 'llm', 'server', 'web', 'cli', 'adapter-http', 'adapter-web'],
+    reason: '本层是**浏览器**副作用的唯一归属地（起进程 + CDP）。它不得认识服务端/UI/LLM，'
+      + '也**不得依赖 adapter-http**：跨 adapter 共用 HTTP 客户端会让 Web 端的请求绕过'
+      + ' 引擎侧那套 SSRF/密钥纪律（docs/05 §4）。需要发请求时走引擎的 http 步骤，不是在这里 import',
     exempt: '/test/',
   },
   {

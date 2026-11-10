@@ -11,16 +11,16 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/ir packages/engine packages/adapter-http packages/store packages/cli",
-    "clean": "tsc -b --clean packages/ir packages/engine packages/adapter-http packages/store packages/cli",
+    "build": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli",
+    "clean": "tsc -b --clean packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli",
     "lint:layers": "node tooling/lint-layers.mjs",
     "lint:fields": "node tooling/unread-fields.mjs",
-    "lint": "tsc -b packages/ir packages/engine packages/adapter-http packages/store packages/cli && node tooling/lint-layers.mjs && node tooling/unread-fields.mjs",
+    "lint": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli && node tooling/lint-layers.mjs && node tooling/unread-fields.mjs",
     "test": "node --disable-warning=ExperimentalWarning --import tsx --test \"packages/*/test/**/*.test.ts\" \"tooling/test/**/*.test.mjs\"",
-    "typecheck:test": "tsc -p packages/ir/tsconfig.test.json && tsc -p packages/engine/tsconfig.test.json && tsc -p packages/adapter-http/tsconfig.test.json && tsc -p packages/store/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json",
+    "typecheck:test": "tsc -p packages/ir/tsconfig.test.json && tsc -p packages/engine/tsconfig.test.json && tsc -p packages/adapter-http/tsconfig.test.json && tsc -p packages/adapter-web/tsconfig.test.json && tsc -p packages/store/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json",
     "mutate": "node tooling/mutate.mjs",
     "cli": "node packages/cli/bin/atest.mjs",
-    "pretest": "tsc -b packages/ir packages/engine packages/adapter-http packages/store packages/cli"
+    "pretest": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli"
   },
   "dependencies": {
     "zod": "4.6.7"
