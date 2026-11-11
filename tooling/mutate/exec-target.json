@@ -1,0 +1,97 @@
+{
+  "_comment": [
+    "运行时那一步**属于哪一端**（ExecContext.target）。缺陷在 docs/15 §3.4。",
+    "",
+    "这一族的坏法不是\"报错了\"，是\"报了一个像样的端而它是假的\"：改前纯 Web 场景里",
+    "assertPage 那一步的 ctx.target 就是 'android'（P3），**一次 run 里报告与 adapter",
+    "各自转述一件没发生过的事**，而两边都 pass。它一直没被发现，只因为",
+    "**没有任何 adapter 读 ctx.target**（adapter-web 的 assertUi 那个参数是 _ctx）。",
+    "\"碰巧没人读\"不能推出\"值是对的\" —— 见 adapters.ts 里 ExecTarget 那段。",
+    "",
+    "**M1/M2/M3 是同一个函数的三个不同错法**，都要留：",
+    " M1 = 不看表、写死兜底（P3 的原样，web 档会被洗成 android）；",
+    " M2 = 查了表但把 web 那档也放过去（只修 mobile 的半吊子改法）；",
+    " M3 = 表与租约的**顺序**反了（有租约时以租约为准 ⇒ 混合场景里 web 步报 android）。",
+    "只测一个的话另外两个可以悄悄写回去 —— 与 lease-slot.json 里 T1/T8/T9 同一条理由。",
+    "",
+    "**M4 是本轮真正想钉的那一族**：`platformOf(slot)` → `platformOf(runSlot)`。",
+    "这就是 §3.3 那个嵌套 parallel 缺陷（少继承一层）在本轮新代码上的**重演**，",
+    "而且编译器管不了 —— slot 与 runSlot 都在作用域里，都是合法的 LeaseSlot。",
+    "实测结果写在 tooling 输出里：它**只有**在\"租约是在并行分支/子层里申请的\"那种",
+    "形状下才现形（那种形状下 runSlot 压根没有租约 ⇒ 报 'any'）。",
+    "",
+    "**M5 守望那处写回 'android'**（缺陷原样的第二处）。与 M4 分开的理由同 ui-assert-world",
+    "里 W1/W2：两处都破坏\"按端选\"，但破坏点不同，只守一处另一处能悄悄写回去。",
+    "",
+    "**M6 是刻意等价**（`s.kind === 'device'` 这一行今天走不到，探针实测 0 次）：",
+    "它记的是\"这个函数对 device 步的答案\"。别补测试把它钉住 —— 理由写在",
+    "interpreter.ts 的 targetOf 注释里（删掉不改变今天任何输出，改变的是以后答什么）。",
+    "",
+    "**M7 与 M1 是两只不同的手**：M1 在引擎算端的地方算错，M7 在断言层**覆盖**已经算对的端。",
+    "evalLlmAssert 把 ctx 原样递给**模型**（assertions.ts 里只有两处透传 deps.ctx：这一处与 evalUiAssert 给 adapter 的那处），\n所以 M7 有语义后果 —— 模型会以为这份",
+    "证据来自一台安卓机。**\"端\"这件事一旦出到模型眼前，写错就不只是日志难看了。**"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "M1 兜底写回 android（缺陷原样：算不出端就编一个真实端）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  return ctx.lease?.target ?? 'any';",
+      "replace": "  return ctx.lease?.target ?? 'android';",
+      "testFile": "packages/engine/test/adapter-contract.test.ts"
+    },
+    {
+      "label": "M2 查了表但 web 档不认（半吊子改法：只补了移动端那一侧）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  if (world === 'web') return 'web';",
+      "replace": "  if (world === 'web' && false) return 'web';",
+      "testFile": "packages/engine/test/adapter-contract.test.ts"
+    },
+    {
+      "label": "M3 表与租约顺序反了（有租约时以租约为准 ⇒ 混合场景里 web 步报 android）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  if (world === 'web') return 'web';",
+      "replace": "  if (world === 'web' && !ctx.lease) return 'web';",
+      "testFile": "packages/engine/test/adapter-contract.test.ts"
+    },
+    {
+      "label": "M4 守望读整场那一层而不是这一层（§3.3 少继承一层在本轮新代码上的重演）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    const target = platformOf(slot);",
+      "replace": "    const target = platformOf(runSlot);",
+      "testFile": "packages/engine/test/adapter-contract.test.ts"
+    },
+    {
+      "label": "M5 守望那处写死 android（缺陷原样的第二处，与 M1 是两行）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    const target = platformOf(slot);",
+      "replace": "    const target: ExecTarget = 'android';",
+      "testFile": "packages/engine/test/adapter-contract.test.ts"
+    },
+    {
+      "label": "M6 删掉 device 那一行（**刻意等价**：这一行今天走不到）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  if (s.kind === 'device') return s.target;",
+      "replace": "  // 删掉：device 步自己用 execCtx(s.target)，不经这里",
+      "testFile": "packages/engine/test/adapter-contract.test.ts",
+      "expect": "equivalent",
+      "_note": "探针实测 device 出现在 targetOf 调用记录里 0 次，所以删了同解。留这一条是记\"这个函数对 device 步也有答案\"这件事 —— 它的代价要到 device 步改走通用派发那天才现形（STEP_TARGET['device'] 是 'mobile'，查表会把平台洗掉）。"
+    },
+    {
+      "label": "M7 evalLlmAssert 不给模型透传 ctx，而是现编一个端",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "    deps.ctx,",
+      "replace": "    { ...deps.ctx, target: 'android' as const },",
+      "testFile": "packages/engine/test/adapter-contract.test.ts",
+      "_note": "与 M1 的区别不是\"另一个 bug\"，是**另一个人的手**：M1 在引擎算端的地方算对算错是一回事，M7 在断言层**覆盖**已经算好的端。assertions.ts 里只有两处把 deps.ctx 原样交出去（这一处给模型、evalUiAssert 那处给 adapter），所以这两处各钉一条 M7/M8 就够。M7 的坏法带着语义后果 —— 模型会以为这份证据来自一台安卓机，而它可能来自一段 aria 快照。守它的是「assertLlm 送给模型的 ctx 同样是 any」那条。"
+    },
+    {
+      "label": "M8 evalUiAssert 覆盖已经算好的端（另一半透传点：交给 adapter 的那一份）",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "  const r = await (adapter as unknown as { assertUi: (p: unknown, c: ExecContext) => Promise<{ passed: boolean; actual: unknown; expected: unknown }> }).assertUi(p, deps.ctx);",
+      "replace": "  const r = await (adapter as unknown as { assertUi: (p: unknown, c: ExecContext) => Promise<{ passed: boolean; actual: unknown; expected: unknown }> }).assertUi(p, { ...deps.ctx, target: 'android' as const });",
+      "testFile": "packages/engine/test/adapter-contract.test.ts",
+      "_note": "M7 的姊妹：两处透传点各一条。注意它与 M1 都能被 assertPage 那条抓到，但**破坏点不同** —— M1 是算错，M8 是算对了再覆盖掉。只留 M1 的话，将来有人在 evalUiAssert 里加一句\"顺手规范化一下 target\"就能悄悄回到 android。"
+    }
+  ]
+}

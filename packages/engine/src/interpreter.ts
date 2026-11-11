@@ -10,11 +10,11 @@
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
 import type { Step, Scenario, Lease, ForEachStep, WhileStep, Retry, FlakyAttempt } from '@atest/ir';
-import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, parallelHazards, walk, hintOnTimeout, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parallelHazards, walk, hintOnTimeout, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
-import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ResolveResult } from './adapters.js';
+import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ExecTarget, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
 import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
@@ -425,18 +425,36 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   };
 
   /** 守望规则执行（docs/00 §5.5）：在步骤之间弹掉干扰弹窗，容器级生效 */
-  const runWatchers = async (): Promise<void> => {
+  const runWatchers = async (slot: LeaseSlot): Promise<void> => {
     if (!stepCtx.watchers.length || !adapters.device) return;
+    /*
+     * **端从这一层的槽位读，不写死 `'android'`**（本轮改；探针
+     * `.scratch/probe-watcher.mts`）。原先这两处写死，而守望点的是**真机**：
+     * ios 场景里一次 run 报出两个端 ——
+     *   snapshot@android、perform@android，而紧挨着的那一步 tap 是 perform@ios。
+     * 与 §3.1 里 `release` 写死 `'android'` 是同一个根（运行时的端从步骤种类
+     * 现推 / 干脆写死，而不是从租约读），而这两处比 release 更糟：release 只在
+     * 收尾出现一次，守望是**每步之后**都跑，等于每一轮都按错误的端去点一次屏幕。
+     *
+     * 为什么这一处以前从未暴露：`adapter-web` 与 `adapter-http` 都不读 `ctx.target`，
+     * 而 ADB adapter 还没写（docs/14）。所以这是个确实存在、还没有消费者的坏值 ——
+     * "没人读"从来不能推出"值是对的"（同一句话见 adapters.ts 的 ExecTarget）。
+     *
+     * 端取**这一层**的槽位而不是 runSlot：守望跟着触发它的那一步走，
+     * 与 §3.3 那个嵌套 parallel 的教训同一条 —— 祖先那一层不等于这一层。
+     * 没有租约时是 `'any'`（守望规则在 device 步之前注册、但可能先于任何租约跑）。
+     */
+    const target = platformOf(slot);
     for (const w of stepCtx.watchers) {
       for (const rule of w.rules) {
         if (rule.hit >= rule.maxTimes) continue;
-        const snap = await adapters.device.snapshot(execCtx('android', 'watcher'));
+        const snap = await adapters.device.snapshot(execCtx(target, 'watcher'));
         const hit = matchesHierarchy(snap.data, rule.match);
         if (!hit) continue;
         rule.hit++;
         emit({ kind: 'step.finished', stepId: 'watcher', status: 'pass', data: { action: rule.action, matched: hit, hitCount: rule.hit } });
         if (rule.action === 'click' && hit) {
-          await adapters.device.perform({ op: 'click' }, { handle: hit, resolvedBy: 'watcher', rung: 1, confidence: 1, nonReplayable: false }, execCtx('android', 'watcher'));
+          await adapters.device.perform({ op: 'click' }, { handle: hit, resolvedBy: 'watcher', rung: 1, confidence: 1, nonReplayable: false }, execCtx(target, 'watcher'));
         }
       }
     }
@@ -541,7 +559,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     try {
       const outcome = await dispatch(s, path, vars, window, slot);
       // 守望在步骤之后跑一次，处理「上一步触发的弹窗」
-      await runWatchers();
+      await runWatchers(slot);
       return finish(s, path, outcome.status, stepStart, outcome.summary, {
         cause: outcome.cause, resolvedBy: outcome.resolvedBy, rung: outcome.rung,
         confidence: outcome.confidence, healed: outcome.healed, nonReplayable: outcome.nonReplayable,
@@ -2157,11 +2175,79 @@ function resolveUrl(url: string, env: Record<string, unknown>): string {
   if (!base) throw new EnvMissing(`环境（${JSON.stringify(Object.keys(env))}）里没有 baseUrl，而用例地址是相对路径 "${url}"。IR 不写死域名是刻意的（docs/05 §1）`);
   return base.replace(/\/$/, '') + (url.startsWith('/') ? url : `/${url}`);
 }
-function targetOf(s: Step, ctx: LeaseSlot): ExecContext['target'] {
+/**
+ * 平台那一维（android / ios / harmony），从**这一层槽位上的租约**读。
+ *
+ * 单独成一个函数只为了一个理由：`targetOf` 与守望（`runWatchers`）需要同一个答案，
+ * 而守望那侧没有步骤可查表。两处各写一份 `ctx.lease?.target ?? 'any'`
+ * 就是本仓反复记的那族"两处各一份，迟早只更新其中一处"。
+ *
+ * 注意它**只回答平台**：`'api'` / `'web'` 这两档不在租约里（租约只有真机），
+ * 那两档要走 `STEP_TARGET`，见 `targetOf`。
+ *
+ * 传进来的一直是**当前那一层**的槽位而不是闭包里的 `runSlot` —— 这不是顺手，
+ * 而是 §3.3 那个嵌套 parallel 缺陷（`newLeaseSlot(runSlot.lease)` 少继承一层）
+ * 的同一件事：这一族代码只能靠"谁把哪个变量传进来"来保证正确，而编译器管不了
+ * （`slot` 是必填形参，只能逼调用方传个槽位，逼不了它传对那一个）。
+ */
+function platformOf(ctx: LeaseSlot): ExecTarget {
+  return ctx.lease?.target ?? 'any';
+}
+
+function targetOf(s: Step, ctx: LeaseSlot): ExecTarget {
+  /**
+   * **这一步属于哪一端。**
+   *
+   * 三档（api / web / 平台）里前两档**去读 IR 那张权威表** `STEP_TARGET`，
+   * 只有平台那一维现推 —— 因为 `STEP_TARGET` 把 android/ios/harmony 合成一档
+   * `'mobile'`（`deriveTargets` 靠读 `s.target` 再细分），而运行时恰恰需要那个细分。
+   * 所以这里是"查表 + 读租约"，**不是**整份换成 `deriveTargets(scenario.body)`：
+   * 那是场景级的集合，回答不了"这一步在哪台平台上"（docs/15 §3.4 的"修法有一处
+   * 不能 delegate"那句）。
+   *
+   * **缺陷的形状**（docs/15 §3.4）：原先这里不查表，重抄了两份清单 ——
+   * `['navigate','act','capture']` 与 `['http','openapiCall','db']`，
+   * 而 IR 那张表**已经和它对不上**：表里 `assertPage: 'web'`，抄的那份没有它，
+   * 于是 assertPage 落到"其余"那一支、没有租约 ⇒ `?? 'android'`
+   * （**P3：纯 Web 场景里 assertPage 那一步的 `ctx.target` 就是 `'android'`**）；
+   * 表里 `db: 'any'`，抄的那份写死 `'api'`。重抄一份就是本仓记过多次的
+   * "两处各一份，迟早只更新其中一处"。
+   *
+   * **哪些行今天走不到（探针实测，`.scratch/probe-targetof.mts` +
+   * `.scratch/probe-targetof-mobile.mts`，两次分别灌 Web 形状与移动/混合形状）：**
+   * 实测走到过这个函数的 kind 一共九个（两次的并集）——
+   * navigate / act / capture / assertPage（web 档）
+   * 与 app / tap / assertUi / wait / assert（有租约那侧）。**没有** device，也
+   * **没有** http / openapiCall / db：
+   *  - `case 'device'` 自己用 `execCtx(s.target, s.id)`，续租用
+   *    `execCtx(slot.lease.target, …)`，替换旧租约用 `execCtx(prev.target, …)`；
+   *    （**这里故意不写行号** —— 写第一轮就发现自己标的三处里两处已经被本轮的
+   *    改动挪走了。行号是第三份会漂的副本，函数名 + 实参才是查得到的坐标。）
+   *  - http / openapiCall / db 三处在 `execCtx('api', s.id)` 处直接给端。
+   * 所以 `device` 那一行与 `world === 'api'` 那一支**都是死支**。
+   *
+   * 留着它们，并且要说清这与上面 `finally` 那段里"为不存在的路径写守卫，会让下一个人
+   * 以为那条路径存在"**不是同一件事**：那条禁的是为**不可能的状态**加条件
+   * （例：`runSlot && runSlot.owns` —— 今天没有任何路径会让 runSlot 装着借来的租约）。
+   * 这两行不是条件守卫，是这个**全函数**对那两个 kind 的**答案**：
+   * `targetOf(device 步)` 的正确回答是 IR 里那个 `s.target`，而不是"槽位里碰巧
+   * 那台"（`STEP_TARGET['device']` 是 `'mobile'`，查表会把平台洗掉）；
+   * `targetOf(http 步)` 的正确答案是 `'api'`。删掉它们不会改变今天任何一次输出，
+   * 改变的是**这个函数以后答什么** —— 而本轮改它的唯一理由正是"别再自己猜 kinds，
+   * 去读那张表"（docs/15 §3.4）。
+   *
+   * 下一轮如果要清死支，先问"这个函数还会不会被新调用点用到"；答"不会"就连
+   * 整个函数一起收（调用点各写各的），别只删中间一行 —— 只删一行会让
+   * 这个映射**看起来**完整、实际缺两行。
+   *
+   * 兜底 `'any'` 而不是 `'android'`：算不出端就说算不出（取值含义见 `ExecTarget`）。
+   */
   if (s.kind === 'device') return s.target;
-  if (['navigate', 'act', 'capture'].includes(s.kind)) return 'web';
-  if (['http', 'openapiCall', 'db'].includes(s.kind)) return 'api';
-  return (ctx.lease?.target as ExecContext['target']) ?? 'android';
+  const world = STEP_TARGET[s.kind];
+  if (world === 'web') return 'web';
+  if (world === 'api') return 'api';
+  // mobile 档与 any 档都走这里：平台那一维的唯一实现在 platformOf
+  return platformOf(ctx);
 }
 function opOf(s: Step): unknown {
   if (s.kind === 'act') return { op: s.action, value: s.value };

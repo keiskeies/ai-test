@@ -33,9 +33,33 @@ export class TransportError extends Error {
   }
 }
 
+/**
+ * `ExecContext.target` 的取值域。**定义与 ExecContext 分不开，所以就在下面那格里。**
+ *
+ * `'any'` 读作"这一步不属于任何一端"（与 IR 的 `TargetRefSchema` 同一个词，
+ * 见 `ir/src/values.ts`：`z.enum(['any', ...TargetKindSchema.options])`），
+ * **不是**"哪一端都行"。
+ *
+ * 这一档是本轮加的，因为不加的话只剩两条路，而另一条本仓已经走过一遍：
+ * 算不出端时原先一律写死 `'android'`，于是**纯 Web 场景里 assertPage 那一步的
+ * `ExecContext.target` 今天就是 `'android'`**（docs/15 §3.4 的 P3，本轮在改前的
+ * 树上重跑复现过）。那个值一直没被发现，只因为**没有任何 adapter 读它**
+ * （`adapter-web` 的 `assertUi` 签名里那个参数是 `_ctx`，划掉的）——
+ * 而 docs/09 §1.1 约束 3 说的"能力探测决定路由"落地那天，第一个读它的代码
+ * 就会拿到 `'android'`。**"碰巧没人读"不是"值是对的"**：它不进 CI、不进报告，
+ * 只在很久以后的某一天变成一个查了三天的问题。少一个真实端不要紧，错一个端才要紧。
+ *
+ * 加这一个成员的成本实测为零：这个联合在全仓只出现一处（就是下面那行），
+ * 没有任何 `switch (ctx.target)` 会被新成员打破，`TargetKindSchema` 是 IR 的
+ * 场景级 `targets` 字段在用、与运行时这一维无关（两者对不上是刻意的：
+ * 运行时那一维要能表达"不属于任何端"，场景级的那个不能）。
+ */
+export type ExecTarget = 'api' | 'web' | 'android' | 'ios' | 'harmony' | 'any';
+
 /** 引擎对外的唯一副作用出口。所有网络/设备/DB 访问都经这里。 */
 export interface ExecContext {
-  target: 'api' | 'web' | 'android' | 'ios' | 'harmony';
+  /** 这一步（或这件步骤外的事）属于哪一端。取值含义见 {@link ExecTarget}。 */
+  target: ExecTarget;
   runId: string;
   /**
    * 当前正在跑的步骤 id。**由引擎在 execCtx() 那一刻填，adapter 只读。**
