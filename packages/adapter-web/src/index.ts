@@ -16,7 +16,11 @@
  *  - iframe / shadow 作用域（定位器 scope 非 page 时明确报错，不在 page 里瞎查）
  *  - nth / anchor / 模板匹配 / 视觉定位（locator.ts 里逐个点名拒实现）
  *  - ariaYaml、attribute 两档断言（前者缺 YAML 解析，后者缺 IR 侧收 LocatorSpec）
- *  - expectResponse / expectNewPage / hitTargetCheck=false
+ *  - **expectResponse 已经能用**（本 adapter 供响应流，判据在引擎）：
+ *    观测口是 `Session.responsesSince` -> `WebAdapter.responsesSince` -> `adapters.network`，
+ *    `network.test.ts` 在真 Chrome 上确认过**真的有条目进流**（这条不是可选的：
+ *    引擎侧那 19 条全用假流，假流证明不了"有人供数"，见那份文件的头注释）。
+ *    仍然**没有**的是 expectNewPage 与 hitTargetCheck=false
  *    （IR 有字段，本 adapter 还没读它们 —— 登记在 docs/14 §5，不是"忘了写测试"）
  *  - storageState 复用与登录态（docs/06 §5，P2 的硬骨头）
  */

@@ -272,8 +272,8 @@
     },
     {
       "id": "packages/ir/src/steps.ts#ActStepSchema.expectResponse",
-      "milestone": "P3+",
-      "reason": "Act 步骤属于设备端（web/adb adapter 未开工）"
+      "milestone": "已实现（扫描器归不出）",
+      "reason": "**已被解释器读**（interpreter.ts 的 expectPattern，与 wait{response} 共用同一判据）。留在豁免里不是因为\"没人读\"，而是因为**这个名字在 ActStepSchema 与 NavigateStepSchema 里各声明一次**，扫描器按字段名统计（declCount>1 时任何命中都无法归到具体某一条），所以只能算判不出。改名能让它脱离判不出，但**不该改**：两处刻意共用同一个 ExpectResponseSchema，为一个词法扫描器的可视性把\"一个概念一个约束\"拆成两个字段，是让测量形状反过来决定产品形状。"
     },
     {
       "id": "packages/ir/src/steps.ts#ActStepSchema.hitTargetCheck",
@@ -367,8 +367,8 @@
     },
     {
       "id": "packages/ir/src/steps.ts#NavigateStepSchema.expectResponse",
-      "milestone": "P3+",
-      "reason": "Navigate 步骤属于设备端（web/adb adapter 未开工）"
+      "milestone": "已实现（扫描器归不出）",
+      "reason": "**已被解释器读**（interpreter.ts 的 expectPattern，与 wait{response} 共用同一判据）。留在豁免里不是因为\"没人读\"，而是因为**这个名字在 ActStepSchema 与 NavigateStepSchema 里各声明一次**，扫描器按字段名统计（declCount>1 时任何命中都无法归到具体某一条），所以只能算判不出。改名能让它脱离判不出，但**不该改**：两处刻意共用同一个 ExpectResponseSchema，为一个词法扫描器的可视性把\"一个概念一个约束\"拆成两个字段，是让测量形状反过来决定产品形状。"
     },
     {
       "id": "packages/ir/src/steps.ts#ScriptStepSchema.inputRefs",
@@ -466,6 +466,6 @@
       "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
     }
   ],
-  "inconclusiveCeiling": 229,
-  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它 normally 靠让字段名不再撞上高频标识符（as -> rowVariable 那种）；**另一种正当情形是扫描器本身修好了**（这次从 233 降到 229 就是：collectTokens 原先在原文上取字符串词，注释里的引号词也算命中，堵掉之后 5 条字段回到 unread/已豁免，其中 4 条是**真·没人读**却被遮住的，见 unread-fields.test.mjs 里那条同名测试）。但这种情况**必须写明是哪次修复、动了哪几条** —— 因为'测量变准了'和'测量变瞎了'在数字上长得一模一样，只有抽不到字段的扫描器会报告干净。抬高它要在旁边写清理由。"
+  "inconclusiveCeiling": 230,
+  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它 normally 靠让字段名不再撞上高频标识符（as -> rowVariable 那种）；**另一种正当情形是扫描器本身修好了**（这次从 233 降到 229 就是：collectTokens 原先在原文上取字符串词，注释里的引号词也算命中，堵掉之后 5 条字段回到 unread/已豁免，其中 4 条是**真·没人读**却被遮住的，见 unread-fields.test.mjs 里那条同名测试）。但这种情况**必须写明是哪次修复、动了哪几条** —— 因为'测量变准了'和'测量变瞎了'在数字上长得一模一样，只有抽不到字段的扫描器会报告干净。抬高它要在旁边写清理由。 229->230 这一格是 wait{response}/expectResponse 接线带来的，具体三条：进两条 steps.ts#ActStepSchema.expectResponse 与 #NavigateStepSchema.expectResponse（解释器确实读了，但同名字段在两个 step schema 里各声明一次 -> declCount>1 -> 只能判不出；  对应的豁免**保留**，理由已改成\"归不出\"而不是\"没人读\"），出一条 waits.ts#WaitConditionSchema.urlPattern（以前没人读、现在 wait.ts 真的用它匹配）。净 +1。**这条涨格不是因为代码变差，是因为\"没人读\"变成了\"读了但扫描器归不出\"** —— 两者在数字上都算判不出，只有把三条 id 列出来才分得清。"
 }

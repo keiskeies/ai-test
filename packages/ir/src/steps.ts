@@ -243,8 +243,21 @@ const OpenApiCallStepSchema = z
   .strict();
 
 // Web
+/**
+ * `expectResponse` 的匹配串（navigate 与 act 两处共用**同一个 schema**，
+ * 与 waits.ts 的 `urlPattern` 同一口径：子串包含，见 engine/src/responses.ts）。
+ *
+ * **为什么 min(1)**：空串在子串匹配下 `url.includes('')` **恒为真**，
+ * 于是 `expectResponse: ''` 会匹配窗口里的**任何**一条响应 ——
+ * 一条"我声明了要等某个接口"的断言变成"只要页面发过任何东西就算过"，
+ * 是标准的假绿形状。`urlPattern` 那边本来就写着 min(1)，
+ * 这两处曾经一个是 min(1)、一个是什么都收 —— 同一概念两套约束。
+ */
+const ExpectResponseSchema = z.string().min(1).max(2000).optional();
+
+// Web
 const NavigateStepSchema = z
-  .object({ kind: z.literal('navigate'), ...Base, url: z.string().min(1), waitUntil: z.enum(['load', 'dom', 'idle']).default('load'), expectResponse: z.string().optional() })
+  .object({ kind: z.literal('navigate'), ...Base, url: z.string().min(1), waitUntil: z.enum(['load', 'dom', 'idle']).default('load'), expectResponse: ExpectResponseSchema })
   .strict();
 const ActStepSchema = z
   .object({
@@ -256,7 +269,7 @@ const ActStepSchema = z
     /** hover 才能出现的元素需原子组合，否则两步必然 flaky（docs/06 §2） */
     hoverThen: z.enum(['click', 'fill', 'none']).default('none'),
     expectNewPage: z.boolean().default(false),
-    expectResponse: z.string().optional(),
+    expectResponse: ExpectResponseSchema,
     /** 点击前可交互性检查：被遮挡/disabled 直接进自愈而非干等 30s */
     hitTargetCheck: z.boolean().default(true),
   })

@@ -18,6 +18,7 @@ import { TransportError, type AdapterRegistry, type Clock, type ExecContext, typ
 import { evaluateAssertions } from './assertions.js';
 import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
+import { ResponseLedger, ResponseWindow } from './responses.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
 export interface RunOptions {
@@ -50,6 +51,15 @@ export interface RunOptions {
    * （版本不同不代表不再互相调用），按 ref 判会漏这一条。
    */
   callStack?: string[];
+  /**
+   * 页面内响应的观测账（见文件内 responseLedger 那条与 responses.ts 的 ResponseLedger）。
+   *
+   * **调用方一般不用填**：只有 `call` 分支需要把父 run 的账传进子场景，
+   * 因为页面内的响应流是**同一个流**（同一个浏览器会话），而子场景默认从 0 起账
+   * 会把"父在前面步骤发过的接口"算成子里的命中 => 假绿。
+   * 不传就是新账，这对独立运行（CLI 一次一个场景）是正确的。
+   */
+  responseLedger?: ResponseLedger;
 }
 
 /**
@@ -319,8 +329,34 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     }
   };
 
+  /**
+   * 页面内响应的观测账（引擎侧）。见 `responses.ts` 的 `ResponseLedger`：
+   * 它存在的唯一理由是"开窗起点不能是会话开头"，否则上一步发过的接口
+   * 会让下一步的 `wait{response}` 立刻假绿。
+   *
+   * `opts.responseLedger` 让**子场景与父场景共用同一本账**（call 分支透传）。
+   * 不给的话子场景从 0 起账，而流是同一个流 —— 于是"父场景第 2 步发过的接口"
+   * 在子场景里算命中，正是那个假绿换了个地方活着。
+   */
+  const responseLedger = opts.responseLedger ?? new ResponseLedger();
+
+  /**
+   * 给一步造观测窗口。**在 runStep 的调用方造、以入参往下传**，两件事各有理由：
+   *
+   *  - 起点取"本步开始时"而不是"会话开头"：上一步发过的接口不该让本步的等待假绿。
+   *  - **在 withRetry 之外造**：一次重试的多次尝试必须共用一个窗口。
+   *    每次尝试各开一个的话，第一次尝试读到的条目会被账位划到窗口之外，
+   *    于是 `wait{allOf[接口A, 接口B]}` 第一次拿到 A 没拿到 B => 重试 =>
+   *    **第二次连 A 也看不见了** => 配了重试反而更难过。
+   *  - **不放在闭包变量里**：`parallel` 的分支各自跑自己的步骤，共享一个闭包变量的话
+   *    后进的那支会覆盖先进的那支的起点，A 支的等待会拿到 B 支的窗口起点。
+   *    做成入参之后"忘了传"是编译错误，而不是又一条静默的分叉。
+   */
+  const newResponseWindow = (): ResponseWindow =>
+    new ResponseWindow(responseLedger.snapshot(), (cursorAfter) => responseLedger.observe(cursorAfter));
+
   /** 单个步骤的执行。返回 StepResult，异常一律在此收敛成 error 状态。 */
-  const runStep = async (s: Step, path: string[], vars: VarSpace = rootVars): Promise<StepResult> => {
+  const runStep = async (s: Step, path: string[], vars: VarSpace, window: ResponseWindow): Promise<StepResult> => {
     checkAbort();
     for (const w of stepCtx.watchers) void w;
     const stepStart = clock.mono();
@@ -341,7 +377,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     }
 
     try {
-      const outcome = await dispatch(s, path, vars);
+      const outcome = await dispatch(s, path, vars, window);
       // 守望在步骤之后跑一次，处理「上一步触发的弹窗」
       await runWatchers();
       return finish(s, path, outcome.status, stepStart, outcome.summary, {
@@ -605,7 +641,14 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     const identityBefore = currentIdentity;
     try {
       for (const c of steps) {
-        const r = await withRetry(c, path, () => runStep(c, path, vars));
+        /*
+         * **每步一个新窗口，同一步的多次重试共用它**。
+         * 新窗口 => 起点是此刻的账位（上一步消费过的响应不再算命中）；
+         * 共用 => 重试不会因为"上一次尝试已经把它们读走了"而看不见。
+         * 顺序上必须在 withRetry **外面**建，见 newResponseWindow 的注释。
+         */
+        const window = newResponseWindow();
+        const r = await withRetry(c, path, () => runStep(c, path, vars, window));
         rs.push(r);
         if (r.status === 'fail' || r.status === 'error') {
           if (c.onError === 'continue') continue;
@@ -620,7 +663,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     return { status: healed ? 'healed' : 'pass', summary: `${rs.length} 个子步骤` };
   };
 
-  const dispatch = async (s: Step, path: string[], vars: VarSpace = rootVars): Promise<Outcome> => {
+  const dispatch = async (s: Step, path: string[], vars: VarSpace, window: ResponseWindow): Promise<Outcome> => {
     switch (s.kind) {
       // ── 控制流 ────────────────────────────────────────────────
       case 'sequence': return runChildren(s.steps, [...path, s.id], vars);
@@ -750,7 +793,16 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             const branch = vars.forkBranch(c.id);
             scopes.set(c.id, branch);
             try {
-              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id], branch));
+              /*
+               * 分支步骤**各开自己的窗口**（与 runChildren 同一做法）。
+               * 并发分支共享一个窗口的话，两支会互相把对方 poll 到的条目算进自己的命中，
+               * 症状是"A 支的等待被 B 支发的接口满足了" —— 那是一条假绿，
+               * 而且只在并发时出现（单跑必过），正是本仓最难查的那一类。
+               * 账位（ledger）是共享的，但用的是 max 而非求和，所以两支读到同一批条目
+               * 不会把账推到流前面（见 ResponseLedger 的"为什么是 max"）。
+               */
+              const branchWindow = newResponseWindow();
+              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id], branch, branchWindow));
               done.push({ status: 'fulfilled', value: r });
             } catch (e) {
               // RunAborted（外部取消/超时）必须能掀翻整个 run，不能被吞成"这支失败了"——
@@ -845,7 +897,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           inputDefs: child.inputs,
           env: opts.env, secretResolver: opts.secretResolver,
         });
-        const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0, secretResolver: opts.secretResolver, envRevision: opts.envRevision, callStack: [...callStack, child.id] });
+        const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0, secretResolver: opts.secretResolver, envRevision: opts.envRevision, callStack: [...callStack, child.id], responseLedger });
         /**
          * 把"这次 call 跑的是哪份 IR、跑出什么"记进父报告。
          *
@@ -886,6 +938,9 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           // 这是必填字段），因为"忘接成本"的症状是**总账不动、熔断永不触发**，
           // 而那正是这条预算存在的理由。
           addCost,
+          // 响应观测：数据只有浏览器看得见，引擎只判"哪个算命中"。
+          // 传 undefined 是合法的（没起浏览器），但谓词里有 response 条件就会报错。
+          network: adapters.network, window,
         });
         if (!r.satisfied) {
           if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}` };
@@ -1190,6 +1245,62 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           ? await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<{ artifactIds?: string[] } | void> })
             .perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id))
           : undefined;
+        /*
+         * **`expectResponse`：这一步的动作必须真的触发那个接口**（docs/06 §3）。
+         *
+         * 这个字段以前也是"IR 有、没人读"（`navigate` 与 `act` 两处都有它，
+         * `opOf` 压根不搬，adapter 也就拿不到），所以"点了查询，等那个接口回来"
+         * 这条 Web 侧最有价值的断言从未生效。
+         *
+         * **走的是 `waitUntil` + 同一个 `response` 条件，不是另写一份判据。**
+         * 这不是省代码：如果动作步骤自己 `window.any(...)` 判一次，
+         * 就有两处决定"什么算命中"，迟早出现"同一个 pattern 在等待里算命中、
+         * 在动作步骤里不算"。复用条件之后两条路共用 `responseMatches` 与同一个窗口对象。
+         *
+         * 起点是**本步开始时**的窗口（不是 perform 之后）：我们要抓的正是"点击触发、
+         * 在 perform 期间落地"的那条响应；而本步之前的同类接口不算命中。
+         *
+         * **没等到判 fail + product-bug**，与定位超预算那一条相反：
+         * 这里没有"已经花掉的钱要再花一遍"的风险，而"点了按钮但那个接口没发出来"
+         * 就是被测产品的行为与用例声明不符 —— 报 env-unavailable 会让人去查接线，
+         * 报 case-stale 会让人去改一条其实写对了的用例。
+         * （接线缺失是另一件事：没配 `adapters.network` 时 `NoNetworkObserver`
+         *  会从这里抛出去，落到 error + env-unavailable，方向正确。）
+         */
+        const expectPattern = s.kind === 'navigate' || s.kind === 'act' ? s.expectResponse : undefined;
+        if (expectPattern !== undefined) {
+          const pattern = expectPattern;
+          const r = await waitUntil({
+            predicate: { type: 'response', urlPattern: pattern },
+            // 默认 10s 与 wait 步骤同一档（不新造一个数）。作者写了 timeoutMs 就用他的。
+            timeoutMs: s.timeoutMs ?? 10_000,
+            clock, evalExpr: () => { throw new Error('response 条件不该走表达式求值'); },
+            resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
+            addCost, network: adapters.network, window,
+          });
+          const hits = window.matchCount(pattern);
+          if (!r.satisfied || hits === 0) {
+            return {
+              status: 'fail', cause: 'product-bug',
+              summary: `${s.kind} 声明了 expectResponse "${pattern}"，但窗口内 ${window.seenCount} 条响应里没有它`
+                + `（等了 ${r.waitedMs}ms / ${r.polls} 次轮询）`,
+              keyContext: { expectResponse: pattern, seenResponses: window.seenCount, waitedMs: r.waitedMs },
+            };
+          }
+          // 命中数与状态进 keyContext（会进 JUnit 的 context= 与 HTML 报告）。
+          // **不走 emit 一条 lint.reported 事件**：门禁不读 events（这条纪律见
+          // interpreter 里 noteNeverRun 的注释），发一条"看着像提醒、实际谁也不读"的
+          // 事件正是本仓禁止的那种装饰；而 LintCode 那一族是要配 LINT_DOCS 与文档的，
+          // 为一个纯信息项加一条码会把"lint 码 = 需要人处理的事"这个口径弄浑。
+          // 另外这里**不给 URL**：URL 可能带 token/手机号，而 redactForDisk 的
+          // 值形态规则判不出查询串里的密钥（只认 JWT/AKIA/sk-/Bearer 形状）。
+          // 状态码不是敏感值，够定位问题了。
+          return {
+            status: 'pass',
+            summary: `${s.kind} 的 expectResponse "${pattern}" 命中 ${hits} 条（状态 ${window.matchedStatuses(pattern).join('/')}）`,
+            keyContext: { expectResponse: pattern, expectResponseHits: hits, expectResponseStatuses: window.matchedStatuses(pattern) },
+          };
+        }
         /*
          * **置信度门取人在 IR 里写的那个值**（`LocatorSpec.confidenceGate`，schema 默认 0.85）。
          *
@@ -1604,10 +1715,20 @@ async function runScenarioIn(a: {
   envRevision?: number;
   /** 调用链（见 RunOptions.callStack）。不透传就等于环检测只在**最外层**生效 */
   callStack: string[];
+  /**
+   * 父 run 的响应观测账。**必填**（不像上面几个可选项）。
+   *
+   * 理由与上面 secretResolver 那条坑同源：可选参数一旦"忘了传也编译得过"，
+   * 漏传的症状是子场景从 0 起账 —— 而页面内的响应流是**同一个流**（同一个浏览器会话），
+   * 于是"父在前面步骤里发过的接口"会在子里的 wait{response} 里算命中，即假绿。
+   * 这里让它必填，"忘了接"回到编译错误，而不是留一条要靠测试去追的静默分叉。
+   */
+  responseLedger: ResponseLedger;
 }): Promise<RunReport> {
   const rep = await runScenario({
     scenario: a.scenario, inputs: a.vars.inputs, env: a.vars.env,
     secretResolver: a.secretResolver, envRevision: a.envRevision, callStack: a.callStack,
+    responseLedger: a.responseLedger,
     adapters: a.adapters, clock: a.clock,
     /*
      * 子场景**不单独设预算**，但成本照常往上汇总（`addCost`）。

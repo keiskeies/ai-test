@@ -547,6 +547,15 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
         ...(typeof o.env.timezoneId === 'string' ? { timezoneId: o.env.timezoneId } : {}),
       });
       adapters.ui = web.ui;
+      /*
+       * 页面内请求观测口。**起了浏览器就必须接上**：`wait{response}` 与
+       * `expectResponse` 只有这一条路能拿到数据（引擎不许碰网络）。
+       * 漏接的后果不是"这两个字段不生效"那么安静 —— 它们会抛 NoNetworkObserver，
+       * 报成 error + env-unavailable（"平台没接线"），这是**如实**的结论；
+       * 但既然浏览器就在手边，让它如实报错不如让它接上。
+       * （以前这里的症状是"永远超时 + 摘要说接口没回来"，把接线缺失说成产品问题。）
+       */
+      adapters.network = { responsesSince: (s) => web.responsesSince(s) };
       builtWeb = web;
     } catch (e) {
       // 浏览器路径写错/起不来同样是**装配期**的配置问题（见上）。

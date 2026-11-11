@@ -6,7 +6,8 @@ import type { WaitPredicate, WaitCondition } from '@atest/ir';
 import { describePredicate } from '@atest/ir';
 import { queryOne } from './jsonpath.js';
 import { locatorGate, chargeResolve, LocatorBudgetError } from './resolve.js';
-import type { AdapterRegistry, Clock, ExecContext, ResolveResult } from './adapters.js';
+import { NoNetworkObserver, ResponseWindow } from './responses.js';
+import type { AdapterRegistry, Clock, ExecContext, NetworkObserver, ResolveResult } from './adapters.js';
 
 export interface WaitDeps {
   predicate: WaitPredicate;
@@ -26,6 +27,19 @@ export interface WaitDeps {
    * 而报告照样写"成本 $0.0000"。缺失时宁可编译不过。
    */
   addCost: (n: number) => void;
+  /** 页面内请求观测口（透传自 adapters.network）。**必填**，同理：
+   *  可选的话"忘了接"编译得过，`wait{response}` 就退回本轮修掉的那个洞。
+   *  没网络观测时传 `undefined` 是合法的 —— 但谓词里有 response 条件就会报错。 */
+  network: NetworkObserver | undefined;
+  /**
+   * 响应观测窗口。**必填**。
+   *
+   * 为什么由调用方造而不是本函数内部 `new`：窗口的**起点**决定哪些响应算命中
+   * （"会话开头"会让上一步之前发过的接口假绿，见 responses.ts 顶部），
+   * 而只有解释器知道"上一步是什么时候开始的"。
+   * 内部造 = 每次都从 0 开始 = 那个假绿照旧存在，且这次连"没人传起点"的痕迹都没有。
+   */
+  window: ResponseWindow;
 }
 
 export interface WaitResult {
@@ -62,6 +76,20 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
        * 因为 error 走退出码 5、而 CI_HINT 教 CI 重试一次 = 再花一遍）。
        */
       if (e instanceof LocatorBudgetError) throw e;
+      /*
+       * **"没接网络观测口"也不是"条件还没成立"**，同理必须往外抛。
+       *
+       * 本轮修的就是这个：`wait{response}` 以前恒为假（读一个没人写的变量），
+       * 而"恒为假"被这条**本身正确**的纪律收成"再等一轮"，最后变成一次普通超时。
+       * 于是"平台侧压根没接数据"与"被测页面确实没发这个请求"给出**逐字节相同**的结论。
+       * 抛出去之后由 runStep 收成 error + env-unavailable（"去查接线"），
+       * 而不是 fail + env-unavailable 的超时（"去查接口"）。
+       *
+       * 为什么不在等待开始前做一次"谓词里有没有 response 条件"的预检：
+       * 那要遍历谓词树，而**新增一种需要网络的条件时没人会记得回来加一项** ——
+       * 漏加的那一种就又回到"被吞成超时"。求值时判一次，覆盖的是**真实走到的**分支。
+       */
+      if (e instanceof NoNetworkObserver) throw e;
       // 条件求值本身报错（变量未定义/adapter 缺失）不能当成「还没满足」干等到超时 ——
       // 那会把一个配置错误伪装成一次超时，是最难查的一类 flake
       return { satisfied: false, waitedMs: d.clock.mono() - t0, polls, describe: `${describe}（求值报错：${(e as Error).message}）` };
@@ -158,9 +186,20 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
       const second = await (a as unknown as { snapshot: (c: ExecContext) => Promise<{ sha: string }> }).snapshot(d.ctx);
       return first.sha === second.sha;
     }
-    case 'response':
-      // 响应监听由 ui adapter 内部维护（引擎不碰网络）
-      return d.evalExpr(`__responses != null && count(filter(__responses, "url =~ '${c.urlPattern}'")) > 0`);
+    case 'response': {
+      /*
+       * 真数据来自 `adapters.network`（见 responses.ts 顶部：这一支以前读的是一个
+       * **没有任何生产者**的 `__responses` 变量，于是恒为假）。
+       *
+       * **拉取发生在每一次 poll**（`evalCondition` 每轮都会被调到），
+       * 而**判据在引擎**：pattern 怎么算命中由 `ResponseWindow.any` 定，
+       * 与 `expectResponse` 共用同一个函数 —— 两处各写一份匹配口径，
+       * 迟早出现"同一个 pattern 在等待里算命中、在动作步骤里不算"。
+       */
+      if (!d.network) throw new NoNetworkObserver();
+      await d.window.poll(d.network);
+      return d.window.any(c.urlPattern, c.status);
+    }
     default:
       throw new Error(`未知等待条件类型 ${(c as { type: string }).type}`);
   }

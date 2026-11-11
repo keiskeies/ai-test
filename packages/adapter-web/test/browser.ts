@@ -19,6 +19,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import type { ExecContext } from '@atest/engine';
+
 /**
  * 找浏览器。**只在测试里**找；产品侧故意不自动探测
  * （静默挑一个浏览器，等于让"用的是哪个版本"变成不可复现的事）。
@@ -95,6 +97,39 @@ export async function fixtureUrl(html: string): Promise<string> {
   if (!server) {
     server = createServer((req, res) => {
       const id = decodeURIComponent((req.url ?? '/').replace(/^\//, ''));
+      /*
+       * 一个最小的"后端"路由，给响应观测的测试用：`api/<名字>?status=NNN`
+       * 回那个状态码与一小段 JSON。
+       *
+       * 为什么要在夹具服务里加这一条而不是让页面 fetch 一个不存在的地址：
+       * 404 也能进响应流，但**测不出状态筛选**（"等 200 而实际 404"与
+       * "压根没发请求"在只有一种状态码的服务里长得一样），而状态筛选那条
+       * 判据的失效方向很要紧 —— 把报错接口等成"成功"是假绿。
+       * 另外 fetch 一个**外站**地址会把测试挂在网络上（本机 registry 不可达，
+       * 外网也不该依赖），所以这个"后端"必须在同进程里。
+       */
+      if (id.startsWith('api/')) {
+        /*
+         * 用 split 而不是 new URL(id, ...)：id 已经是 decodeURIComponent 的结果，
+         * 再走一次 URL 解析会把 query 里的 %25 二次解码，
+         * 于是"状态码是 200 还是 2%300"这种边界取决于解码次数 —— 夹具不该有这种性质。
+         */
+        const [path = '', query = ''] = id.split('?');
+        const params = new URLSearchParams(query);
+        /*
+         * `abort=1`：**不写任何响应头**直接把连接打断。
+         * 给"请求失败不该被当成响应"那条测试用 —— 那正是 `status <= 0`
+         * 过滤要挡的情形（CDP 的 responseReceived 只在真拿到响应头时发，
+         * 挂掉的请求走的是 loadingFailed）。夹具必须能在**端口层**造出失败，
+         * 否则那条性质只能在假流上测，而假流的条目是我自己照着过滤条件写的。
+         */
+        if (params.get('abort') === '1') { res.socket?.destroy(); return; }
+        const status = Number(params.get('status') ?? '200');
+        res.writeHead(Number.isInteger(status) && status >= 100 && status <= 599 ? status : 200,
+          { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: status < 400, path }));
+        return;
+      }
       const body = PAGES.get(id);
       if (body === undefined) { res.statusCode = 404; res.end('no such fixture'); return; }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -117,6 +152,34 @@ export async function fixtureUrl(html: string): Promise<string> {
   const id = `p${PAGES.size}`;
   PAGES.set(id, html);
   return `${serverUrl}${id}`;
+}
+
+/**
+ * 最小 ExecContext。**放这里而不是各测试文件里各写一份**：
+ * 这个桩里每一项都是端口要求的（`secret` 必须抛、`saveArtifact` 必须返回 64 位十六进制、
+ * `clock.mode` 必须是 'frozen'），抄第二遍就会有一遍抄漏 ——
+ * 而抄漏的表现是端口那侧的行为悄悄变了却没被测到（本仓那一族）。
+ *
+ * stepId 显式给，因为**证据归属**就靠它（见 capture 那条测试）。
+ */
+export function stubCtx(over: Partial<ExecContext> = {}): {
+  ctx: ExecContext;
+  saved: Array<{ kind: string; stepId: string; bytes: number }>;
+} {
+  const saved: Array<{ kind: string; stepId: string; bytes: number }> = [];
+  const ctx = {
+    target: 'web', runId: 'r1', stepId: 's1', env: {},
+    secret: () => { throw new Error('这条测试不该取密钥'); },
+    clock: { now: () => 0, mono: () => 0, sleep: async () => {}, random: () => 0.5, mode: 'frozen' as const },
+    emit: () => {},
+    saveArtifact: async (kind: string, data: Uint8Array | string, stepId: string) => {
+      saved.push({ kind, stepId, bytes: typeof data === 'string' ? data.length : data.byteLength });
+      return 'a'.repeat(64);
+    },
+    capabilities: () => undefined,
+    ...over,
+  } as unknown as ExecContext;
+  return { ctx, saved };
 }
 
 /**

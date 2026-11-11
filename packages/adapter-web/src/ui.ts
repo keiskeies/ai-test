@@ -21,7 +21,7 @@
  */
 import { createHash } from 'node:crypto';
 
-import type { ExecContext, PerformResult, UiExec } from '@atest/engine';
+import type { ExecContext, ObservedResponse, PerformResult, UiExec } from '@atest/engine';
 import type { LocatorSpec, Operation, UiAssertPayload } from '@atest/ir';
 
 import { BadLocator, UnsupportedLocator, confidenceOf, ladder, rungOf, translate, xpathStr } from './locator.js';
@@ -44,6 +44,17 @@ export interface WebAdapter {
   readonly dialogs: Session['dialogs'];
   readonly pageErrors: Session['pageErrors'];
   readonly meta: { viewport: Session['viewport']; locale?: string; timezoneId?: string };
+  /**
+   * 页面内请求的响应流（透传 Session 的同名方法，语义见那边：
+   * **绝对下标、只增不减**，供引擎的 `wait{response}` / `expectResponse` 开窗）。
+   *
+   * 挂在 adapter 上而不是挂在 UiExec 端口上，与 `eval` 同一条理由：
+   * 端口是引擎唯一能看见的东西，而"取一批响应"这件事**不该被步骤层直接调** ——
+   * 引擎侧唯一的入口是 wait 条件与 expectResponse 那两处（共用同一个匹配判据）。
+   * 挂进端口的话，下一个加 UI 动作的人会顺手拿它自己判命中，
+   * 于是"什么算命中"就有了第二份实现（本仓那一族）。
+   */
+  responsesSince(s: number): Promise<ObservedResponse[]>;
   /**
    * 在被测页里求值。端口（UiExec）上**刻意没有**这一项：
    * IR 里唯一像"执行代码"的步骤是 `script`，而引擎直接拒掉它
@@ -359,6 +370,7 @@ export async function createWebAdapter(opts: WebAdapterOptions = {}): Promise<We
     pageErrors: s.pageErrors,
     meta: { viewport: s.viewport, ...(opts.locale ? { locale: opts.locale } : {}), ...(opts.timezoneId ? { timezoneId: opts.timezoneId } : {}) },
     eval: (expression) => s.evalPage<unknown>(expression),
+    responsesSince: (n) => s.responsesSince(n),
     close: () => s.close(),
   };
 }

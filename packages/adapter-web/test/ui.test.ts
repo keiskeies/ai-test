@@ -16,25 +16,7 @@ import { createWebAdapter } from '../src/ui.js';
 import type { ExecContext } from '@atest/engine';
 import type { LocatorSpec, UiAssertPayload } from '@atest/ir';
 
-import { browserBin, browserTest, fixtureUrl } from './browser.js';
-
-/** 最小 ExecContext。stepId 显式给，因为**证据归属**就靠它（见 capture 那条） */
-function ctxWith(over: Partial<ExecContext> = {}): { ctx: ExecContext; saved: Array<{ kind: string; stepId: string; bytes: number }> } {
-  const saved: Array<{ kind: string; stepId: string; bytes: number }> = [];
-  const ctx = {
-    target: 'web', runId: 'r1', stepId: 's1', env: {},
-    secret: () => { throw new Error('这条测试不该取密钥'); },
-    clock: { now: () => 0, mono: () => 0, sleep: async () => {}, random: () => 0.5, mode: 'frozen' as const },
-    emit: () => {},
-    saveArtifact: async (kind: string, data: Uint8Array | string, stepId: string) => {
-      saved.push({ kind, stepId, bytes: typeof data === 'string' ? data.length : data.byteLength });
-      return 'a'.repeat(64);
-    },
-    capabilities: () => undefined,
-    ...over,
-  } as unknown as ExecContext;
-  return { ctx, saved };
-}
+import { browserBin, browserTest, fixtureUrl, stubCtx as ctxWith } from './browser.js';
 
 const spec = (s: Partial<LocatorSpec> & { primary: LocatorSpec['primary'] }): LocatorSpec =>
   ({ intent: '测试夹具', fallbacks: [], confidenceGate: 0.85, maxCostUsdPerResolve: 0.02, replayable: true, ...s }) as LocatorSpec;

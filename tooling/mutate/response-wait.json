@@ -1,0 +1,98 @@
+{
+  "_comment": [
+    "wait{response} / expectResponse 的变异集（tests: packages/engine/test/responses.test.ts）。",
+    "",
+    "**这族测试要守的东西只有一件**：接线缺失不能被伪装成产品行为。",
+    "改动前 `wait{response}` 读的是一个**没有任何生产者**的 `__responses` 变量，",
+    "于是恒为假；而恒为假被『求值报错也继续等』那条**本身正确**的纪律收成一次超时，",
+    "最终给出与『被测页面确实没发那个请求』逐字节相同的结论（fail + env-unavailable + ",
+    "摘要「等待超时：等待接口 X」）。实测在真引擎上跑过。",
+    "",
+    "所以最值钱的是第 3、4 条（窗口起点与没接观测口），它们各自模拟一种",
+    "**看起来完全合理**的错误结论：",
+    " - 起点退回会话开头 => 第二条 wait 拿到 pass，而『确实有个 /api/query 回来了』听着没毛病；",
+    " - 没接观测口仍走超时 => 人去翻 Network 面板，没人去查平台。",
+    "",
+    "第 1、2 条是成对的（恒 fail / 恒 pass 两种反掉的实现各被一条拦住）。",
+    "第 5 条守的是两个 response 分支共用一次拉取（各拉各的会互相吃掉条目）。",
+    "第 6 条守子串口径（有人『顺手改成正则』会让 IR 里写着 a.c 的 pattern 匹配 abc）。",
+    "第 7 条守 URL 不进报告：redactForDisk 的值形态规则**判不出查询串里的密钥**",
+    "（只认 JWT/AKIA/sk-/Bearer 形状），所以 ?token=xxx 会原样穿过脱敏 —— 唯一的稳做法",
+    "是根本不产 URL，这条变异就是把它产出来。",
+    "**没有给\"URL 进报告\"那条写变异**（写过，删了）。原因是具体的：那种破坏要**两处**一起改（给 ResponseWindow 加一个返回 URL 的访问器 + 在 keyContext 里用它），而 harness 一条 case 只有一个锚点 —— 只改第二处的话编译不过，判读是**「没跑成」而不是结论**，而把「没跑成」记进这张表就是本仓反复警告的那种假账。守它的是那条测试本身（responses.test.ts 的「命中的响应**不给 URL**」）：**任何人**从任何路径把带 token 的 URL 弄进 keyContext/摘要/事件，它都会红 —— 测试不需要先知道破坏长什么样。写不出变异不等于没守。",
+    "",
+    "最后一条（游标按条数推进）是**本轮改动的直接产物**：我第一版就是那么写的，",
+    "17 条测试全绿 —— 因为它默认了\"切片连续\"这个 adapter 并不给的性质，",
+    "只有 adapter 淘汰过旧条目（切片有空洞）时两种写法才分道。",
+    "所以配套地：夹具 fakeStream 现在带绝对下标并有 evict()，",
+    "而 adapter 侧的淘汰本身在 adapter-web/test/response-buffer.test.ts 里判",
+    "（淘汰只在第 5001 条响应时发生，真浏览器测试到不了那个数 —— 实测把淘汰方向反掉，",
+    "六条真浏览器测试全绿，所以那两条不变量必须在纯逻辑层判）。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "response 条件恒假（回到本轮之前：读一个没人写的变量）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      await d.window.poll(d.network);\n      return d.window.any(c.urlPattern, c.status);",
+      "replace": "      await d.window.poll(d.network);\n      return false; // 变异：拿到了数据也不判",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "response 条件恒真（点了按钮就算接口回来了，纯假绿）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      await d.window.poll(d.network);\n      return d.window.any(c.urlPattern, c.status);",
+      "replace": "      await d.window.poll(d.network);\n      return true; // 变异：不看窗口内容",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "每次开窗都从会话开头算（上一步消费过的响应又算命中 -> 假绿）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    new ResponseWindow(responseLedger.snapshot(), (cursorAfter) => responseLedger.observe(cursorAfter));",
+      "replace": "    new ResponseWindow(0, (cursorAfter) => responseLedger.observe(cursorAfter));",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "账位不推进（下一次开窗起点是旧值 -> 同一批响应被反复算命中）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    new ResponseWindow(responseLedger.snapshot(), (cursorAfter) => responseLedger.observe(cursorAfter));",
+      "replace": "    new ResponseWindow(responseLedger.snapshot(), () => { /* 变异：不记账 */ });",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "没接观测口时不抛，静默当条件不成立（接线缺失伪装成产品行为）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (!d.network) throw new NoNetworkObserver();",
+      "replace": "      if (!d.network) return false; // 变异：与\"接口没回来\"同结论",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "子串匹配改成正则（IR 里写着 a.c 的 pattern 会匹配 abc）",
+      "file": "packages/engine/src/responses.ts",
+      "anchor": "  return url.includes(pattern);",
+      "replace": "  return new RegExp(pattern).test(url);",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "窗口只留最新一条响应（业务接口后面还有埋点/心跳 -> 等不到前者）",
+      "file": "packages/engine/src/responses.ts",
+      "anchor": "    this.seen.push(...items);\n    for (const it of items) if (it.idx > this.cursor) this.cursor = it.idx;",
+      "replace": "    this.seen.push(...items.slice(-1)); // 变异：只留最新一条\n    for (const it of items) if (it.idx > this.cursor) this.cursor = it.idx;",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "status: [] 改成\"什么都不匹配\"（空配置的另一种读法，测试钉死了这一种）",
+      "file": "packages/engine/src/responses.ts",
+      "anchor": "  return statuses === undefined || statuses.length === 0 || statuses.includes(r.status);",
+      "replace": "  return statuses === undefined || statuses.includes(r.status);",
+      "testFile": "packages/engine/test/responses.test.ts"
+    },
+    {
+      "label": "游标按\"本批条数\"推进而不是按最大绝对下标（adapter 淘汰过旧条目后会把已消费的响应再算一次命中）",
+      "file": "packages/engine/src/responses.ts",
+      "anchor": "    for (const it of items) if (it.idx > this.cursor) this.cursor = it.idx;",
+      "replace": "    this.cursor += items.length; // 变异：切片连续时与取最大下标等价，有空洞时游标会落后",
+      "testFile": "packages/engine/test/responses.test.ts"
+    }
+  ]
+}

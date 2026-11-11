@@ -17,8 +17,11 @@
  *  3. **导航使句柄失效**。`Page.frameNavigated` 一到就清缓存：拿旧 nodeId 去点，
  *     Chrome 可能把 id 复用成另一个节点，那是"点了另一个元素然后报绿"。
  */
+import type { ObservedResponse } from '@atest/engine';
+
 import type { BrowserHandle, CdpEvent } from './cdp.js';
 import { launchBrowser } from './cdp.js';
+import { ResponseBuffer } from './response-buffer.js';
 
 export interface SessionOptions {
   bin?: string;
@@ -39,6 +42,14 @@ export interface Session {
   readonly viewport: { width: number; height: number; deviceScaleFactor: number };
   readonly dialogs: Array<{ type: string; message: string; accepted: boolean }>;
   readonly pageErrors: Array<{ kind: string; text: string }>;
+  /**
+   * 页面内请求的响应流（供引擎的 `wait{response}` / `expectResponse` 判"那个接口回来了没"）。
+   *
+   * **绝对下标语义**：`responsesSince(s)` 返回下标 > s 的条目，下标从 1 起单调追加，
+   * 永不因清理而回退。引擎侧靠它开窗（起点 = 上一步消费到的位置），
+   * 所以这里**绝不能**把下标重新从 0 排 —— 那会让引擎把旧响应当新的（假绿）。
+   */
+  responsesSince(s: number): Promise<ObservedResponse[]>;
   send<T>(method: string, params?: Record<string, unknown>): Promise<T>;
   /** 失败转异常的那一个（send 刻意不抛，阶梯要"这一级失败试下一级"） */
   call<T>(method: string, params?: Record<string, unknown>): Promise<T>;
@@ -172,6 +183,21 @@ export async function createSession(opts: SessionOptions = {}): Promise<Session>
 
   let rootId: number | undefined;
   const navigateHandlers = new Set<() => void>();
+  /*
+   * 页面内请求的响应流（引擎的 wait{response} / expectResponse 靠它）。
+   *
+   * 缓冲逻辑（绝对下标 + 淘汰丢旧）在 response-buffer.ts，**那里有测试**：
+   * 淘汰只在第 5001 条响应时发生，真浏览器测试到不了那个数，
+   * 所以那两条不变量在浏览器层面是**抓不到**的（我做变异检查时确认过：
+   * 把"丢最旧"改成"丢最新"、把下标改成跟着数组长度走，六条真浏览器测试全绿）。
+   * 留在这里的只有**只有真浏览器能判**的那一条：`status <= 0` 不收。
+   *
+   * 收**全部**响应类型（Document/XHR/Fetch/Script/Image…），不按类型筛：
+   * 与 Playwright 的 waitForResponse 同口径（它也不筛），而 pattern 是子串匹配，
+   * 写 `/api/query` 的人本来就不会命中图片。按类型筛会引入
+   * "我明明在 DevTools 里看到这个请求回来了，为什么等不到"这种新失真。
+   */
+  const responses = new ResponseBuffer();
   const offEvent = browser.onEvent((e: CdpEvent) => {
     if (e.sessionId !== sessionId) return;
     if (e.method === 'Page.javascriptDialogOpening') {
@@ -192,6 +218,21 @@ export async function createSession(opts: SessionOptions = {}): Promise<Session>
       pageErrors.push({ kind: 'exception', text: String(d?.exception?.description ?? d?.text ?? '') });
     }
     if (e.method === 'Page.frameNavigated') { rootId = undefined; navigateHandlers.forEach((f) => f()); }
+    if (e.method === 'Network.responseReceived') {
+      /*
+       * 只收**已经有确定状态码**的那一条。CDP 在这一步之前会先发
+       * `Network.requestWillBeSent`（那时还没有响应），而 -1 不是任何接口给的答案：
+       * 收进来会让 `status: [200]` 这类筛选永远对不上，
+       * 而 `wait{response}`（不筛状态）会**提前**判"接口回来了" —— 那时响应头都没到。
+       */
+      const p = e.params as { response?: { url?: string; status?: number } } | undefined;
+      const url = p?.response?.url;
+      const status = p?.response?.status;
+      // status 缺失/为 0 一律不收：0 是 CDP 给"尚未收到响应头/被阻断"的占位值，
+      // 把它当"接口回来了"是 fail-open 方向（等待满足 = 绿），最危险的那个方向。
+      if (typeof url !== 'string' || typeof status !== 'number' || status <= 0) return;
+      responses.push(url, status);
+    }
   });
 
   await send('Page.enable'); await send('Runtime.enable');
@@ -312,6 +353,7 @@ export async function createSession(opts: SessionOptions = {}): Promise<Session>
       evalValue<T>(await send<EvalOut<T>>('Runtime.evaluate', { expression, returnByValue: true })),
     url: async () => evalValue<string>(await send<EvalOut<string>>('Runtime.evaluate', { expression: 'location.href', returnByValue: true })) ?? '',
     screenshot, waitLoaded,
+    responsesSince: async (s) => responses.since(s),
     onNavigate: (fn) => { navigateHandlers.add(fn); },
     close: async () => {
       offEvent();

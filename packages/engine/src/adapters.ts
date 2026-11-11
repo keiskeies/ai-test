@@ -263,6 +263,73 @@ export interface ArtifactStore {
   load(id: string): Promise<{ kind: string; bytes: Uint8Array; sha256: string } | undefined>;
 }
 
+/**
+ * 一次页面内请求的**观测记录**。
+ *
+ * 为什么形状这么瘦（只有 url 与 status）：
+ *  - **不带响应体**：那要落证据、要走脱敏闸，属另一条路（响应体断言归 http 步骤与
+ *    assert 步骤，docs/06 §4）。把 body 塞进这里，就会有人拿它当"接口的答案"用，
+ *    而它压根没经过脱敏 —— 而这一族数据是要进 trace 的。
+ *  - **不带时间戳**。我一开始加了 `at`，随即撤掉：谁来盖这个数是个真问题 ——
+ *    adapter 报 `Date.now()` 在冻结时钟下与引擎的 `clock.now()` 不同源
+ *    （两边各记一份迟早对不上，同一个缺陷类），而引擎在**拉取那一刻**盖的数
+ *    又不等于观测时刻（一批内的多条会拿到同一个时间，反而更假）。
+ *    "谁先谁后"这件事由**数组下标**（游标）答，它天然全序且与任何时钟无关。
+ *    一个没人读的字段就是本仓那个缺陷类的标准形状，所以不留。
+ */
+export interface ObservedResponse {
+  /**
+   * adapter 侧的**绝对下标**（从 1 起、只增不减）。
+   *
+   * 为什么要把这个数交给引擎而不是让引擎"按条数推进游标"（我第一版就是按条数）：
+   * 按条数推进**默认了返回的切片是连续的**，而 adapter 有内存上限、会淘汰旧条目。
+   * 淘汰之后引擎的账会比真实的流慢，慢出来的那段会被**再报一次**
+   * —— 也就是"上一步消费过的响应又被算作本步的新响应"，正是这个模块存在的理由
+   * 要防的那个假绿，只是换了个触发条件（跑够 5000 条响应才现形，比直接写错更难查）。
+   * 带上下标之后，游标 = **看过的最大下标**，与"这次给了几条"无关，淘汰与否都成立。
+   *
+   * 这不是"第二个数源"（那条理由撤掉了 `responseCount()`）：它是**每条自带的属性**，
+   * 游标由它派生，而不是另外问一次"一共几条"。
+   */
+  idx: number;
+  url: string;
+  status: number;
+}
+
+/**
+ * 页面内请求的**观测**端口（docs/06 §3 的 `expectResponse` / `wait{response}`）。
+ *
+ * **为什么必须有这一层，而不是引擎自己记账**：引擎不许碰网络（lint-layers 硬约束），
+ * 而页面里 XHR/fetch 发出的请求**只有浏览器看得见**。以前 `wait{response}` 读的是一个
+ * 叫 `__responses` 的变量，而**全仓没有任何地方往里写**（grep 只命中读它的那一行），
+ * 于是这个"Web 侧最有价值的等待"永远超时。
+ *
+ * **为什么是 pull 而不是 push**：`since` 让 adapter 只保留一个递增数组、
+ * 引擎按游标取新条目。push（adapter 持回调）会把"谁在听"变成 adapter 的责任，
+ * 而等待循环之外没人听 —— 回调泄漏与"回调指向上一轮的等待"都是这类接口的常客。
+ * pull 的另一条好处：**同一轮里两次 wait 各拿自己的游标，互不消费**
+ * （push + 队列的话，第二个 wait 会看不见被第一个 wait 吃掉的那条）。
+ *
+ * 缺省（没这个端口）时 `wait{response}` **明确报错**，不再静默超时。
+ */
+export interface NetworkObserver {
+  /**
+   * 返回下标**严格大于** `since` 的所有响应，按观测顺序升序。首次传 0。
+   *
+   * **切片可以有空洞**：adapter 有内存上限，淘汰旧条目后中间会缺号。
+   * 调用方靠每条自带的 `idx` 定位，不靠条数，所以空洞无害。
+   * （反过来说，实现方**不能**为了"看起来连续"而把下标重排 ——
+   *  那会让引擎把旧响应当成新的，是假绿。宁可留空洞。）
+   *
+   * **只有一个方法，刻意不加 `responseCount()`**：那样就有两个数要同源
+   * （"总数"与"从某处起的切片"各算一遍迟早对不上，而错的方式是漏几条或重复几条 ——
+   *  与 §4.3 那一族同形）。
+   *
+   * 实现方只需保证"下标单调追加、不回退"，不必持久化。
+   */
+  responsesSince(since: number): Promise<ObservedResponse[]>;
+}
+
 /** 注册表。引擎只认这个，不认 Playwright/Appium。 */
 export interface AdapterRegistry {
   /** 证据存储。缺省时**任何 saveArtifact 调用都会失败**（而不是返回一个假 id）：
@@ -271,6 +338,8 @@ export interface AdapterRegistry {
   http?: HttpExec;
   ui?: UiExec;
   device?: DeviceExec;
+  /** 页面内请求观测（Web 端）。没有它，`wait{response}` 与 `expectResponse` 都报"环境缺失" */
+  network?: NetworkObserver;
   db?: { query(datasource: string, sql: string, vars: Record<string, unknown>, ctx: ExecContext): Promise<unknown[]> };
   llm?: { judge(req: unknown, ctx: ExecContext): Promise<{ passed: boolean; evidence?: unknown; costUsd: number }> };
   /**

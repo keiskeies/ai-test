@@ -63,7 +63,7 @@ Run ──▶ Browser（或 connectOverCDP 到共享 browser 池）
 |---|---|
 | 元素可见/可交互 | `uiPredicate{state: visible\|attached\|enabled}` |
 | 网络空闲 | ⚠ **提供但 lint 警告** —— `waitForLoadState('networkidle')` 在有轮询/长连接的页面上永远不空闲，是 flake 制造机。推荐 `document.readyState` + 特定接口完成 |
-| 某个 API 完成 | **`waitForResponse(urlPattern)` 显式建模**，这是 Web 侧最有价值的等待："点了查询，等那个接口回来"。IR 里 `navigate`/`act` 可声明 `expectResponse`，引擎自动挂监听 |
+| 某个 API 完成 | ✅ **已实现**。`wait{condition: response, urlPattern, status?}` 与 `navigate`/`act` 上的 `expectResponse` 走**同一个判据**（`engine/src/responses.ts`），观测口是 `adapters.network`（Web 端由 CDP 的 `Network.responseReceived` 供）。**匹配口径 = URL 子串 + 可选状态白名单**，两点与直觉不同且都写在代码注释里：① **不是正则**（pattern 是人写在 IR 里的，`new RegExp` 等于开一个 ReDoS 入口；而 URL 是页面产出的不可信数据）；② **窗口从"上一步开始"算而不是从会话开头算**（否则第 3 步发过的接口会让第 9 步的等待立刻通过 —— 而这条等待承诺的正是"我刚做的那个动作真的触发了这个接口"）。命中项**只给条数与状态码，不给 URL**：URL 会进 trace 与报告，而 `?token=` 这种查询串**脱敏规则判不出来** |
 | 动画结束 | CSS transition/animation 完成检测 + `requestAnimationFrame` 双帧稳定判定（安卓侧对应 `uiIdle`） |
 | 虚拟滚动里的目标 | `scrollIntoView` + 分页扫描上限（有界，`maxScrolls`），找不到才失败 |
 | SPA 路由变化 | 监听 URL 变化 + 关键容器重渲染，不用固定 sleep |
@@ -82,7 +82,7 @@ Run ──▶ Browser（或 connectOverCDP 到共享 browser 池）
 | 文本/数量/可见性 | `getByText`/`getByRole` + count | 结构化，首选 |
 | URL/标题/参数 | 直接读 | |
 | 局部截图（元素级） | 存证 + 可选像素比对 | ⚠ **不做全页像素比对当断言** —— 字体渲染/动画/时间戳/广告位导致误报成灾。要做就用 **applitools/percy 式"人审基线 + 忽略区"治理流程**，那是独立产品线，明确不承诺 |
-| 接口响应断言 | `expectResponse` + 复用 API 端 matcher（`docs/05` §3） | **跨端复用点**，这是统一引擎的价值体现 |
+| 接口响应断言 | **只做到"那个接口回来了 + 状态码在白名单里"**（`expectResponse`）。**响应体断言没有**：`ObservedResponse` 刻意只有 `{idx,url,status}`，没有 body。理由是 body 要落证据、要过脱敏闸，而这一族数据是要进 trace 的 | ⚠ 本行原先写的是"复用 API 端 matcher（跨端复用点）"—— 那是**设计意图不是现状**，照它用例会以为能断响应字段。要断 body 就走独立的 `http` 步骤 |
 | console error / 未捕获异常 | 默认收集，**可选**当断言 | 默认不开（第三方脚本的报错会淹没报告），但要在报告里可见 |
 | `assertLlm` | `docs/02` §4 的降权规则 | 视觉模型倾向过度报告"存在" → 否定断言必须走结构化路径 |
 
