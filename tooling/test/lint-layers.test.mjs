@@ -141,6 +141,46 @@ describe('规则表本身', () => {
       assert.equal(v.length, 1, `node:${mod} 竟然没被拦 —— 清单漏了它`);
     }
   });
+  /*
+   * server 与 web 这两条规则是随前端那一轮**新增**的。新增规则有个特有的失效方式：
+   * 规则写了、包也登记了，但 forbidPackages 里的名字拼错一个字母（'adapter-htt'），
+   * 于是那条规则**一条都拦不住**，而 `npm run lint` 照绿 ——
+   * 因为 lint 只报违例，不报"这条规则从没命中过"。所以下面三条各钉一格。
+   */
+  test('web 跑在浏览器里：node 内置模块一个都不许碰，测试目录也只豁免这一条', () => {
+    const rule = LAYER_RULES.find((r) => r.pkg === 'packages/web');
+    assert.ok(rule, 'packages/web 没有规则');
+    assert.equal(rule.forbidNodeBuiltins, true, 'web 竟然允许 node 内置模块（那它在浏览器里会炸）');
+    const src = (t, pkg = 'packages/web/src/a.ts') => [{ pkg, text: t }];
+    assert.equal(checkSources(src(`import { join } from 'node:path';`), [rule]).length, 1);
+    // 测试目录豁免 node（node:test 是内置的），但**不**豁免依赖方向
+    assert.deepEqual(checkSources(src(`import t from 'node:test';`, 'packages/web/test/a.test.ts'), [rule]), []);
+    assert.equal(checkSources(src(`import { startServer } from '@atest/server';`, 'packages/web/test/a.test.ts'), [rule]).length, 1,
+      '前端测试里 import 服务端 = 依赖方向反了，豁免不该管这一条');
+  });
+  test('web 不得依赖 server/cli/store（否则"浏览器里跑真引擎"那条当场失效）', () => {
+    const rule = LAYER_RULES.find((r) => r.pkg === 'packages/web');
+    for (const dep of ['server', 'cli', 'store', 'adapter-http', 'adapter-web']) {
+      const v = checkSources([{ pkg: 'packages/web/src/a.ts', text: `import { x } from '@atest/${dep}';` }], [rule]);
+      assert.equal(v.length, 1, `web 依赖 @atest/${dep} 必须被拦 —— 名字拼错的话这里会红`);
+    }
+    // 而 ir + engine 是它**该**依赖的（那正是"浏览器里是真引擎"的机制）
+    for (const ok of ['ir', 'engine']) {
+      assert.deepEqual(checkSources([{ pkg: 'packages/web/src/a.ts', text: `import { x } from '@atest/${ok}';` }], [rule]), [],
+        `web 依赖 @atest/${ok} 是设计允许的，不该被拦`);
+    }
+  });
+  test('server 是翻译层：放行 node，但不得认识 UI/前端，也不得自己装 adapter', () => {
+    const rule = LAYER_RULES.find((r) => r.pkg === 'packages/server');
+    const src = (t) => [{ pkg: 'packages/server/src/a.ts', text: t }];
+    assert.deepEqual(checkSources(src(`import { createServer } from 'node:http';`), [rule]), [], '服务端必然 listen，node:http 要放行');
+    for (const dep of ['web', 'adapter-http', 'adapter-web']) {
+      assert.equal(checkSources(src(`import { x } from '@atest/${dep}';`), [rule]).length, 1,
+        `服务端依赖 @atest/${dep} 必须被拦（装配 adapter 是 CLI 那条 run 路径的事）`);
+    }
+    // cli 是它**该**调的那一层（翻译到命令形态）
+    assert.deepEqual(checkSources(src(`import { main } from '@atest/cli';`), [rule]), []);
+  });
   test('未知包不受影响（规则按包精确匹配，不能误伤）', () =>
     assert.deepEqual(checkSources([{ pkg: 'packages/adapter-http/src/a.ts', text: `import fs from 'node:fs';` }]), []));
 });

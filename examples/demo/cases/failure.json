@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1",
+  "id": "scn.demo.failure",
+  "name": "演示：一条会失败的用例（看归因与红色态）",
+  "env": { "environmentRef": "demo" },
+  "targets": ["api"],
+  "body": [
+    {
+      "id": "order",
+      "name": "造一个订单响应",
+      "kind": "set",
+      "assign": { "resp": { "status": 201, "body": { "id": "ORD-7", "amount": 12800, "currency": "CNY" } } }
+    },
+    {
+      "id": "assert-status",
+      "name": "下单返回 201",
+      "kind": "assert",
+      "against": "$.step.order.resp",
+      "status": 201
+    },
+    {
+      "id": "assert-amount",
+      "name": "金额是 12800（这条故意写坏：断了一个不可能的币种）",
+      "kind": "assert",
+      "against": "$.step.order.resp.body.currency",
+      "jsonPath": { "$": { "exact": "USD" } },
+      "note": "故意留红：界面上要能看到红色态与归因长什么样"
+    }
+  ]
+}

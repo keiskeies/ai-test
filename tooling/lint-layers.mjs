@@ -105,6 +105,25 @@ const LAYER_RULES = [
     reason: 'CLI 必然碰**磁盘与进程**（读 IR 文件、写证据包、按退出码向 CI 汇报），所以放行 node 内置模块；副作用集中在这一层正是引擎能保持纯净的前提。它也是唯一被允许同时装配 engine+adapter-http+store 的层。不得认识服务端/UI：那会让"能不开服务端就在本地跑"这条失效（docs/01 §1、docs/04 M6）',
     exempt: '/test/',
   },
+  {
+    pkg: 'packages/server',
+    forbidNodeBuiltins: false,
+    forbidPackages: ['web', 'adapter-http', 'adapter-web'],
+    reason: '服务端是"HTTP 形态 ↔ 命令形态"的**翻译层**，不做判定：判定全在 cli/engine 那侧且已被测试钉过，这里再算一遍就是第二份真相（"CLI 绿而平台红"）。'
+      + '放行 node 内置模块的依据是两类副作用：**网络**（listen 端口、收发请求）与**磁盘**（只读地列证据目录、发静态文件）。'
+      + '不得依赖 adapter-*：装配 adapter 是 CLI 那条 run 路径的事，'
+      + '服务端只调 main()，自己装一套 adapter 就会出现"平台跑的与 CLI 跑的不是同一套装配"（docs/01 §8.2）',
+    exempt: '/test/',
+  },
+  {
+    pkg: 'packages/web',
+    forbidNodeBuiltins: true,
+    forbidPackages: ['server', 'cli', 'store', 'llm', 'adapter-http', 'adapter-web'],
+    reason: '前端跑在浏览器里，node 内置模块一个都不许碰（碰一个就在浏览器里炸）。'
+      + '它只许依赖 ir + engine —— 而这正是"浏览器里跑的是真引擎、不是第二套校验"能成立的机制（docs/01 §8.2）：'
+      + '依赖方向一旦反着长（前端去 import server/cli），静态校验就会开始需要从服务端要数据，那条约束当场失效',
+    exempt: '/test/',
+  },
 ];
 
 const IMPORT_RE = [

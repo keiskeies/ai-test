@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1",
+  "id": "scn.demo.login",
+  "name": "演示：登录拿到用户信息",
+  "frozen": true,
+  "env": { "environmentRef": "demo" },
+  "targets": ["api"],
+  "inputs": [
+    { "name": "userId", "type": "string", "default": { "gen": { "kind": "uuid" } } }
+  ],
+  "body": [
+    {
+      "id": "login",
+      "name": "登录（离线桩：不真发请求）",
+      "kind": "set",
+      "assign": {
+        "resp": { "status": 200, "body": { "id": { "path": "$userId" }, "name": "演示账号", "plan": "team" } }
+      }
+    },
+    {
+      "id": "assert-ok",
+      "name": "登录返回 200",
+      "kind": "assert",
+      "against": "$.step.login.resp",
+      "status": 200
+    },
+    {
+      "id": "assert-plan",
+      "name": "套餐是 team",
+      "kind": "assert",
+      "against": "$.step.login.resp.body.plan",
+      "jsonPath": { "$": { "exact": "team" } }
+    }
+  ]
+}

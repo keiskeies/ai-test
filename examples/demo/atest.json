@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "1",
+  "irDir": "cases",
+  "envDir": "env",
+  "specDir": "specs",
+  "evidenceDir": "evidence",
+  "defaultEnv": "demo"
+}

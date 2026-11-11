@@ -11,17 +11,18 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli",
-    "clean": "tsc -b --clean packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli",
+    "build": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server",
+    "clean": "tsc -b --clean packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server",
     "lint:layers": "node tooling/lint-layers.mjs",
     "lint:fields": "node tooling/unread-fields.mjs",
     "lint:refs": "node tooling/ref-lint.mjs",
-    "lint": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli && node tooling/lint-layers.mjs && node tooling/unread-fields.mjs && node tooling/ref-lint.mjs",
+    "lint": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server && node tooling/lint-layers.mjs && node tooling/unread-fields.mjs && node tooling/ref-lint.mjs",
     "test": "node --disable-warning=ExperimentalWarning --import tsx --test \"packages/*/test/**/*.test.ts\" \"tooling/test/**/*.test.mjs\"",
-    "typecheck:test": "tsc -p packages/ir/tsconfig.test.json && tsc -p packages/engine/tsconfig.test.json && tsc -p packages/adapter-http/tsconfig.test.json && tsc -p packages/adapter-web/tsconfig.test.json && tsc -p packages/store/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json",
+    "typecheck:test": "tsc -p packages/ir/tsconfig.test.json && tsc -p packages/engine/tsconfig.test.json && tsc -p packages/adapter-http/tsconfig.test.json && tsc -p packages/adapter-web/tsconfig.test.json && tsc -p packages/store/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json && tsc -p packages/web/tsconfig.test.json && tsc -p packages/server/tsconfig.test.json",
     "mutate": "node tooling/mutate.mjs",
     "cli": "node packages/cli/bin/atest.mjs",
-    "pretest": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli"
+    "serve": "node packages/server/bin/serve.mjs",
+    "pretest": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server"
   },
   "dependencies": {
     "zod": "4.6.7"

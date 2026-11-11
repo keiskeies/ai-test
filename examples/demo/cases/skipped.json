@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1",
+  "id": "scn.demo.skipped",
+  "name": "演示：条件跳过与日志（看 skipped 态）",
+  "env": { "environmentRef": "demo" },
+  "targets": ["api"],
+  "body": [
+    { "id": "flags", "name": "给一个功能开关", "kind": "set", "assign": { "runIos": "off" } },
+    {
+      "id": "ios-case",
+      "name": "iOS 专属步骤（开关关着，应被跳过）",
+      "kind": "assert",
+      "against": "$runIos",
+      "expr": "$runIos == 'off'",
+      "when": "$runIos == 'on'"
+    },
+    { "id": "say", "name": "记一行日志", "kind": "log", "level": "info", "message": "这一条总是跑" },
+    {
+      "id": "final",
+      "name": "收尾断言：开关确实是 off",
+      "kind": "assert",
+      "against": "$runIos",
+      "jsonPath": { "$": { "exact": "off" } }
+    }
+  ]
+}
