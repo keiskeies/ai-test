@@ -1,0 +1,60 @@
+{
+  "_about": "本轮证据目录布局那处改动的变异集：写侧散装落盘（writeEvidenceMembers）、读侧从包里取（readRunMember）、服务端运行记录列表（listRuns）三处判据各一条，外加两条读侧守卫与一条等价对照。",
+  "_口径": "每条只改一个判据，不删功能。缺陷本体是'三个消费者说同一套布局、只有写侧不这么写'，所以变异要照着**消费侧以为在的东西**去破坏：少写一名、少回落一次、少筛一层。expect=equivalent 那条改的是文档成员在 zip 里的**排列顺序**，行为等价 —— 它红了说明测试在钉实现细节（成员顺序）而不是钉行为。注意它会动到包的整体字节，而本仓有'同内容产同字节'的判据在别处守着，那条不在本变异集范围内。",
+  "cases": [
+    {
+      "label": "W1 写侧筛子放掉一个文档成员：manifest.json 又只在包里（原始缺陷）",
+      "_why": "原始失效本体。散装落盘这条语句保留不动，只让筛子多拒一名 —— 这才是真实漏法（写盘代码写了、名单少一名），而删掉整个 writeEvidenceMembers 会 BUILD_BROKEN 或改太多、量不到这一格。",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "    if (!docs.has(e.name)) continue;",
+      "replace": "    if (!docs.has(e.name) || e.name === EVIDENCE_FILES.manifest) continue;",
+      "testFile": "packages/cli/test/e2e.test.ts",
+      "expect": "caught"
+    },
+    {
+      "label": "W2 写侧不再筛成员：artifacts/ 也散装再写一份",
+      "_why": "另一半判据（'只写文档成员'）。它不是省磁盘的小事：散装那份不在 zip 里、不在'下载给别人'这个动作里，却在备份与磁盘清理的视野里 —— 多一份未脱敏副本。所以'少筛一层'必须有人红。",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "    if (!docs.has(e.name)) continue;",
+      "replace": "    if (false) continue;",
+      "testFile": "packages/store/test/evidence.test.ts",
+      "expect": "caught"
+    },
+    {
+      "label": "R1 读侧不再回落进包：只认磁盘上那份",
+      "_why": "改前的真实行为就是这样（readIfFile）。'报告里 artifacts/<sha> 那个链接永远点不开'与'老布局的历史 run 列不出来'两条症状都出在这一格，所以这一条测的是**读侧**这一半，与 W1 是两处不同的代码。",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "  let names: string[];\n  try { names = await readdir(runDir); } catch { return undefined; }",
+      "replace": "  return undefined;\n  // eslint-disable-next-line no-unreachable\n  let names: string[];\n  try { names = await readdir(runDir); } catch { return undefined; }",
+      "testFile": "packages/server/test/evidence-http.test.ts",
+      "expect": "caught"
+    },
+    {
+      "label": "R2 成员白名单不再拒 artifacts 下的非哈希名",
+      "_why": "这一支是读侧唯一的形状判据。放宽它 = '报告里链什么名，磁盘/包里就有什么名'，而 runId 段之外再没有别的东西挡着 —— 于是这一条测的是守卫生效而不是函数能读文件。",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "  return name.startsWith(prefix) && ARTIFACT_MEMBER.test(name.slice(prefix.length));",
+      "replace": "  return name.startsWith(prefix);",
+      "testFile": "packages/server/test/evidence-http.test.ts",
+      "expect": "caught"
+    },
+    {
+      "label": "R3 包坏了不再换下一个：整次读取判死",
+      "_why": "'同一个 run 目录里可能有第二个包'与'包被清理任务截断'都是实测过的形状。这里把 continue 换成 return，测的是坏包会不会把还能读的那个包一起拖死。",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "    } catch { continue; }   // 这个包读不出/坏了：换下一个，而不是把整次读取判死",
+      "replace": "    } catch { return undefined; }",
+      "testFile": "packages/store/test/evidence.test.ts",
+      "expect": "caught"
+    },
+    {
+      "label": "C1 等价对照：文档成员在包内的排列顺序换一下",
+      "_why": "对照组。改的是 entries 数组里 manifest/summary 的**先后**，成员集合、字节、白名单全不动，所以它**不该**红 —— 它红了说明测试在钉实现细节（成员顺序）而不是钉行为。",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "    { name: EVIDENCE_FILES.manifest, data: enc.encode(manifestJson(manifest)), mtimeMs: report.startedAt },\n    { name: EVIDENCE_FILES.summary, data: enc.encode(summary), mtimeMs: report.startedAt },",
+      "replace": "    { name: EVIDENCE_FILES.summary, data: enc.encode(summary), mtimeMs: report.startedAt },\n    { name: EVIDENCE_FILES.manifest, data: enc.encode(manifestJson(manifest)), mtimeMs: report.startedAt },",
+      "testFile": "packages/store/test/evidence.test.ts",
+      "expect": "equivalent"
+    }
+  ]
+}

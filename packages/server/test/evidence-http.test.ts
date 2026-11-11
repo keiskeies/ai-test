@@ -24,7 +24,7 @@
  * 那一套生产代码铺盘，与 `atest run` 走的是同一条写路径。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -143,6 +143,47 @@ test('artifacts/<sha> 只在包里，也点得开（散装刻意不写）', asyn
     const res = await get(`/evidence/${RUN_ID}/artifacts/${f.artifactId}`);
     assert.equal(res.status, 200, '只在包里的成员必须由包里读出来，否则报告里那个证据链接是死的');
     assert.match(res.body.toString('utf8'), /hello from the mock/, '取出的必须是那份响应体本身');
+  } finally { await srv.close(); }
+});
+
+test('老布局的历史 run（目录里只有 zip）照样列得出、链接照样点得开', async () => {
+  /*
+   * 上面几条测的是"新写侧产出的目录"。但**盘上已经躺着老布局的 run** ——
+   * 本轮之前写侧只落 trace/junit/report/zip，manifest 与 summary 只在包里。
+   * 那些 run 该照样出现在运行记录里，而不是"看起来没跑过"；这正是
+   * `readRunMember` 那一支"再进包里"要买的能力，而它到目前为止只有
+   * store 层的一条单测在钉（直接调函数）。这里补的是**穿过 HTTP** 的那一半：
+   * 服务端真的走了那条回落，而不是碰巧散装那份在。
+   *
+   * 做法是把散装那几份删掉、只留 zip（并用 readdir 断言"确实只剩 zip"，
+   * 否则夹具没铺对形状、这条会因为散装还在而假绿）。
+   * 报告正文从 **HTTP 响应**里取再抠 href —— 不用 readRunMember 取，
+   * 那样就成了"用被测函数验证被测函数"。
+   */
+  const f = await oneRun();
+  const loose = (await readdir(f.runDir)).filter((n) => !n.endsWith('.zip'));
+  assert.ok(loose.length > 0, '夹具：新布局先要写出散装文档成员，才谈得上退回老布局');
+  for (const n of loose) await rm(join(f.runDir, n), { force: true });
+  assert.deepEqual(await readdir(f.runDir), (await readdir(f.runDir)).filter((n) => n.endsWith('.zip')),
+    '夹具：这一格要的形状是"目录里只有 zip"');
+
+  const { srv, get } = await serve({ dir: f.dir });
+  try {
+    const res = await get('/api/runs');
+    const items = (JSON.parse(res.body.toString('utf8')) as { items: Array<{ dir: string; manifest?: { runId?: string } }> }).items;
+    assert.equal(items.length, 1, `老布局的 run 也要占一行，实际 ${JSON.stringify(items.map((i) => i.dir))}`);
+    assert.equal(items[0]?.manifest?.runId, RUN_ID, 'manifest 必须由包内取出，而不是留一个空壳');
+
+    const html = await get(`/evidence/${RUN_ID}/report.html`);
+    assert.equal(html.status, 200, '报告只在包里时也要发得出来');
+    const hrefs = [...html.body.toString('utf8').matchAll(/href="\.\/([^"]+)"/g)].map((m) => m[1]!);
+    assert.ok(hrefs.length >= 3, `夹具：报告里该有相对链接，实际 ${hrefs.join(', ') || '无'}`);
+    const broken: string[] = [];
+    for (const h of new Set(hrefs)) {
+      const r = await get(`/evidence/${RUN_ID}/${h}`);
+      if (r.status !== 200) broken.push(`${h} -> ${r.status}`);
+    }
+    assert.deepEqual(broken, [], `老布局里这些链接点不开：${broken.join('、')}`);
   } finally { await srv.close(); }
 });
 
