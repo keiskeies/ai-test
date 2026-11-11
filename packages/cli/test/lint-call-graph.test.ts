@@ -157,6 +157,36 @@ test('两种缺口同时在场时**一种一句**，且 message 说了的原因�
   assert.match(fix, /irDir/);
 });
 
+test('同一个坏 ref 被 call 两次时，**端到端**也要数对（原因表按 ref 取，不是取最后一次失败）', async () => {
+  /*
+   * 上面那条单测**抓不到这里** —— 它自己传 `gapReasonOf`，而被改的那一行在
+   * `lintCtxFor` 里（`gapReasonOf: (ref) => gapLog.get(ref)`）。
+   * 单测怎么改都看不见自己绕过去的那一行，所以这一档必须有端到端的一条
+   * （docs/08 §3 测试侧镜像：被测的那一行没被执行到的"覆盖"不算覆盖）。
+   *
+   * ## 为什么必须是"重复的坏 ref"，别的形状都不行
+   * 遍历是顺序的，而每个缺口紧跟在自己的 `resolveRef` 之后产出，
+   * 所以"取最后一次失败"在**不重复**的 ref 序列上逐字等于"按 ref 取" ——
+   * `(ghost, bad)`、`(bad, ghost)` 两种顺序都是。（本轮第一版就是栽在这里：
+   * 注释里写着"顺序敏感是陷阱"，夹具却摆了两种不重复的 ref，
+   * 于是 `pop()` 那个坏实现**测试全绿**，变异集 M7 存活。）
+   * 唯一分得开两者的形状：某个 ref 第二次被问到时**命中解析器的缓存**、
+   * 不再写日志，此时"最后一次失败"停在**上一个** ref 的原因上。
+   * 所以第三个 call 必须是第一次那个 `scn.bad@1`，而中间要夹一个**不同原因**的 ref。
+   */
+  const dir = await project({ 'scn.a': { calls: ['scn.bad@1', 'scn.ghost@1', 'scn.bad@1'] } });
+  await writeFile(join(dir, 'ir', 'scn.bad.json'), '{ "body": [', 'utf8'); // 文件在而读不出
+  const r = await cli(['lint', 'scn.a'], dir);
+  const line = r.out.split('\n').find((l) => l.includes('CALL_GRAPH_INCOMPLETE')) ?? '';
+  assert.match(line, /2 处[^；]*读不出/, `同一个坏 ref 的两个缺口该同因、合计数 2：\n${line}`);
+  assert.match(line, /1 处[^；]*找不到/, `那个不存在的 ref 只该有 1 处：\n${line}`);
+  // 修法里的计数跟着 message 走（同一张分桶表），所以这里也要数对
+  const fix = r.out.split('\n').find((l) => l.includes('修法')) ?? '';
+  assert.match(fix, /不合法的那 2 处/, `修法的计数要跟着原因走：\n${fix}`);
+  assert.match(fix, /文件不存在的那 1 处/, `修法的计数要跟着原因走：\n${fix}`);
+  assert.equal(r.code, EXIT.OK);
+});
+
 test('@version 不参与解析，所以 A@1→B@1→A@2 也算环（与运行时的判据同一个口径）', async () => {
   /*
    * `interpreter.ts` 里那段运行时环检测的注释写着"判据按场景 id 而不是 ref：
@@ -297,11 +327,24 @@ test('makeCallResolver 自己：不传 gapLog 时行为与改动前**逐字相�
    * 并带上是哪一步）。所以这里要有正反两面：传了要记对，没传什么都不动。
    * 少了后一面，"为了记原因顺手改返回值形状"这种坏法没人挡 ——
    * 那个返回值是**引擎端口**（`Scenario | undefined`），改它等于改引擎契约。
+   *
+   * **两种坏法都要摆**，不是一种：`{ "body": [` 是**JSON 语法**错（报错只有一行），
+   * 而 schema 不合法那份的报错是**多行**的（首行「…共 N 处问题：」+ 每条一行）。
+   * 这个区别不是排版好看：下面那条"detail 只许一行"的断言，
+   * **只在多行那种夹具上有可能变红**。本轮第一版这里只摆了 JSON 语法那一种，
+   * 于是"detail 只取首行"那条实现被改成"整段搬进来"之后**测试全绿**
+   * （变异集 call-graph-gaps.json 的 M6 存活）—— 因为两种写法在那份夹具上逐字相同。
+   * **一条断言必须在被测实现变坏时变红，否则它不是断言**（docs/08 §3 测试侧镜像）。
    */
   const dir = await project({ 'scn.a': { calls: [] } });
   // 只摆那一个坏文件：文件名就是 `scn.bad.json`，resolveScenarioPath 按文件名第一跳就命中它，
   // 所以"这个文件不存在"这条解释在这份夹具里是**可证的假**
-  await writeFile(join(dir, 'ir', 'scn.bad.json'), '{ "body": [', 'utf8'); // 文件在而 JSON 坏
+  await writeFile(join(dir, 'ir', 'scn.bad.json'), '{ "body": [', 'utf8'); // 文件在而 JSON 语法坏
+  await writeFile(join(dir, 'ir', 'scn.multi.json'), JSON.stringify({
+    // JSON 合法而 IR 不合法，且**两处**坏 => loadScenarioFile 的报错是多行清单
+    schemaVersion: '1', id: 'scn.multi', name: '两处不合法', env: { environmentRef: 'unit' },
+    body: [{ id: 's', kind: 'nopeOne' }, { id: 't', kind: 'nopeTwo' }],
+  }), 'utf8');
   const cfg = await findConfig(dir);
 
   const logged = new Map<string, ScenarioGraphGapCause>();
@@ -312,22 +355,29 @@ test('makeCallResolver 自己：不传 gapLog 时行为与改动前**逐字相�
   assert.equal(logged.has('scn.a@1'), false, '解析成功不该记缺口');
   assert.equal(logged.get('scn.bad@1')?.reason, 'invalid-ir');
   const badDetail = logged.get('scn.bad@1')?.detail;
-  // 首行结尾那个冒号是"下面还有清单"的记号，而清单被我们丢了 —— 留着它，
-  // 这句话就以一个等下文的记号结尾而后面什么都没有
   assert.ok(typeof badDetail === 'string' && badDetail.length > 0, 'IR 读不出必须带一句 detail');
-  assert.ok(!/[:：]\s*$/.test(badDetail), `detail 不许以冒号结尾：${badDetail}`);
   assert.match(badDetail, /JSON|场景 IR/, 'detail 要说得出是读不出在哪个环节（JSON 语法 / schema）');
-  /*
-   * **只许一行**。这条钉的是"detail 只取首行"那个决定本身。
-   * 少了它，"顺手把整段 zod 清单搬进 detail"是**测试全绿**的改动 ——
-   * 而那句话会经 lint 输出进 CI 日志。校验失败最常见的对象是登录请求，
-   * 清单里逐字写着失败字段的路径与值形态，那等于把实际值往磁盘上写
-   * （同一族约束：ajv 那处刻意不输出 `er.data`、`HARDCODED_SECRET` 只打印长度）。
-   * 完整清单作者要看时看得到：`atest lint <那个文件>` 会打全 12 条。
-   */
-  assert.ok(!badDetail.includes('\n'), `detail 只许一行（多行 = 整段校验清单进 CI 日志）：${JSON.stringify(badDetail)}`);
   assert.equal(logged.get('scn.nope@1')?.reason, 'not-found');
   assert.equal(logged.get('scn.nope@1')?.detail, undefined, '"找不到"没有 detail 可给（没读到任何文件）');
+
+  /*
+   * 多行那一份才是"只取首行"这条决定的**用武之地**。
+   * 三个断言各钉一层，缺一层就有一种坏法过关：
+   *  · 不许有换行 —— 整段清单搬进来（M6 的坏法）
+   *  · 不许以冒号结尾 —— 那行原文是「…共 N 处问题：」，冒号后面正是被丢掉的下文，
+   *    留着它，这句话就以一个"下面还有内容"的记号结尾而后面什么都没有
+   *  · 不许出现清单的条目符号 `·` —— 只换行不搬条目也算泄漏（比如改成 join(' '))
+   *  · **总数要留下** —— "共 2 处问题"是这句话唯一的量词，砍了就退化成"读不出"三个字
+   */
+  const multi = await r1('scn.multi@1');
+  assert.equal(multi, undefined);
+  const multiDetail = logged.get('scn.multi@1')?.detail ?? '';
+  assert.ok(!multiDetail.includes('\n'), `多行报错的 detail 只许一行（多行 = 整段校验清单进 CI 日志）：${JSON.stringify(multiDetail)}`);
+  assert.ok(!/[:：]\s*$/.test(multiDetail), `detail 不许以冒号结尾：${multiDetail}`);
+  assert.ok(!multiDetail.includes('·'), `不许把逐条清单搬进来：${multiDetail}`);
+  assert.match(multiDetail, /共 2 处/, `总数要留着（否则"读不出"没有量词）：${multiDetail}`);
+  // 单行那种也不该被"顺手 join 一下"改坏
+  assert.ok(!badDetail.includes('\n'), `JSON 语法那种本来就一行：${JSON.stringify(badDetail)}`);
 
   const silent = makeCallResolver({ cfg, cwd: dir });
   assert.equal(await silent('scn.bad@1'), undefined, '不传 gapLog 时返回值一模一样');
