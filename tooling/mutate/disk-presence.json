@@ -1,0 +1,117 @@
+{
+ "_comment": [
+  "落盘序列化的\"有没有\"判据（redactForDisk 的第四道）+ --version-id 那条接线。",
+  "",
+  "这一份管的是**序列化边界**：脱敏那一趟不许改变\"这个字段有没有值\"。",
+  "改动前 undefined / function / symbol 一起走 String(v)，于是 trace.jsonl 里躺着",
+  "\"status\":\"undefined\"、\"durMs\":\"undefined\"，而不传 --version-id 时",
+  "manifest.scenario.versionId 是字符串 \"undefined\"（evidence.ts 里那句",
+  "\"写一个 undefined 字段与不写，在 JSON 里等价\"对裸 stringify 成立、对经过这一趟的不成立）。",
+  "第二处后果是量出来才想到的：被测响应体里真有一个值是字符串 \"undefined\" 的字段",
+  "（JS 后端把 String(undefined) 塞进字段是常见病灶），与\"这个字段压根没有\"在磁盘上同形。",
+  "",
+  "**为什么这里的判据不能写成\"输出等于我抄的那份形状\"**：那种写法只排除一种错法",
+  "（写死 notEqual(x,'undefined') 时，实现改成写 \"null\" 或整个删键都照样过）。",
+  "测试侧的主判据是\"与裸 JSON.stringify 逐一对齐\"，所以这里的变异也有意分成两类：",
+  "一类改了 JSON 形状（R1/R3/R4/R5），一类不改 JSON 形状但会让记号漏到插值里（R2）——",
+  "R2 是\"只看 JSON 形状的一组断言看不住的东西\"，它红了才说明那两条插值断言在干活。",
+  "",
+  "R7 是**顺序**判据：没值必须在 SECRET_KEY_RE 之前处置，否则一个没填的 token",
+  "会在包里显示成 «secret:未暴露» —— 凭空造出一条密钥痕迹，人去查\"这 token 哪来的\"。",
+  "顺序这种东西测试最容易只钉住结果、钉不住次序，所以这里用\"结果确实变红\"来钉。",
+  "",
+  "最后两条（V1/V2）与脱敏无关，是 --version-id 的**接线**：",
+  "实测把 commands.ts 里那句 provenance 赋值换成 { versionId: undefined }，",
+  "packages/cli/test **173/173 全绿** —— 那个开关从 d90e9e1（M6）起从没被验过有没有接通。",
+  "store 层钉住了 provenance.versionId -> manifest，没一条钉住命令行那一段；",
+  "缝在中间、两头各绿一半，就是本仓反复记的\"字段有、没人接\"。"
+ ],
+ "cases": [
+  {
+   "label": "R1 老行为复活：JSON 带不走的三类又走 String(v)（磁盘上出现字符串 undefined）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "  if (typeof v === 'function' || typeof v === 'symbol' || typeof v === 'undefined') return UNSET;",
+   "replace": "  if (typeof v === 'function' || typeof v === 'symbol' || typeof v === 'undefined') return String(v);",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "R2 内部记号漏到公开签名外面（JSON 形状看不出来，插值处抛 TypeError）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "  return r === UNSET ? undefined : r;",
+   "replace": "  return r;",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "数组里没值的洞不再折成 null（**注意：JSON 层面看不出来** —— stringify 对数组里的 symbol 也记 null，与正确行为同形。它红是红在\"内部记号漏进了函数返回值\"，被 deepEqual 抓到。写这条是为了钉住\"数组那一支确实在做转换\"，而不是钉长度）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "      return r === UNSET ? null : r;",
+   "replace": "      return r as never;",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "对象分支不再跳过没值的键（同样**JSON 层面同形** —— stringify 会自己丢掉 symbol 键。抓到的还是\"记号漏进返回值\"）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "      if (r === UNSET) continue; // 裸 JSON.stringify 也不会写这个键，两边同语义",
+   "replace": "      if (false) continue;",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "R5 显式 null 被当成没值（\"明确的空\"与\"没填\"这两种事实在磁盘上合并）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "  if (typeof v === 'number' || typeof v === 'boolean' || v === null) return v;",
+   "replace": "  if (typeof v === 'number' || typeof v === 'boolean') return v;\n  if (v === null) return UNSET;",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "R6 密钥字段不再带长度（另一族老判据，别被这次改动顺手弄坏）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "        out[k] = typeof val === 'string' ? `«字段 ${k} 已脱敏(${val.length} 字符)»` : SECRET_PLACEHOLDER;",
+   "replace": "        out[k] = SECRET_PLACEHOLDER;",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "R7 顺序倒回改动前：先判密钥字段、再处置没值（没填的 token 凭空显示成 «secret:未暴露»，等于造出一条密钥痕迹）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "      const r = redactNode(val, depth + 1, limits);\n      if (r === UNSET) continue; // 裸 JSON.stringify 也不会写这个键，两边同语义\n      if (SECRET_KEY_RE.test(k)) {\n        // 长度留着：排查时\"这个字段是空的还是有值\"是关键信息，而长度不泄露内容\n        out[k] = typeof val === 'string' ? `«字段 ${k} 已脱敏(${val.length} 字符)»` : SECRET_PLACEHOLDER;\n        continue;\n      }\n      out[k] = r;",
+   "replace": "      if (SECRET_KEY_RE.test(k)) {\n        out[k] = typeof val === 'string' ? `«字段 ${k} 已脱敏(${val.length} 字符)»` : SECRET_PLACEHOLDER;\n        continue;\n      }\n      const r = redactNode(val, depth + 1, limits);\n      if (r === UNSET) continue;\n      out[k] = r;",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "R8 bigint 换一种写法（String(v) 与 v.toString() 等价：都是\"存在的值换个形式\"）",
+   "file": "packages/engine/src/redact.ts",
+   "anchor": "  if (typeof v === 'bigint') return v.toString();",
+   "replace": "  if (typeof v === 'bigint') return String(v);",
+   "expect": "equivalent",
+   "testFile": "packages/engine/test/redact.test.ts"
+  },
+  {
+   "label": "V1 CLI 不再把 --version-id 交给证据包（**本轮实测过：加那条测试之前，整包 CLI 测试全绿** —— 这条就是补那个洞。要复现就先注释掉 e2e 里 --version-id 那条再跑一次）",
+   "file": "packages/cli/src/commands.ts",
+   "anchor": "    provenance: { versionId: str(a, 'version-id') },",
+   "replace": "    provenance: { versionId: undefined },",
+   "testFile": "packages/cli/test/e2e.test.ts"
+  },
+  {
+   "label": "V2 没传版本时补一个默认值（把\"调用方没说\"伪装成\"平台说这是第 0 版\"）",
+   "file": "packages/cli/src/commands.ts",
+   "anchor": "    provenance: { versionId: str(a, 'version-id') },",
+   "replace": "    provenance: { versionId: str(a, 'version-id') ?? 'v0' },",
+   "testFile": "packages/cli/test/e2e.test.ts"
+  },
+  {
+   "label": "V3 存储层用 falsy 判断决定写不写 versionId（空串被静默说成\"调用方没传\"）",
+   "file": "packages/store/src/evidence.ts",
+   "anchor": "      ...(o.provenance?.versionId !== undefined ? { versionId: o.provenance.versionId } : {}),",
+   "replace": "      ...(o.provenance?.versionId ? { versionId: o.provenance.versionId! } : {}),",
+   "testFile": "packages/store/test/evidence.test.ts"
+  },
+  {
+   "label": "V4 存储层退回\"无条件写这个键\"（**预期等价**：redact 本轮修好之后，undefined 键在 stringify 时自己就掉了，走磁盘这条路看不出差别。列出来是为了记录\"这一层的守卫是第二道保险，不是唯一那道\"——它只在内存对象 pkg.manifest 上可观测）",
+   "file": "packages/store/src/evidence.ts",
+   "anchor": "      ...(o.provenance?.versionId !== undefined ? { versionId: o.provenance.versionId } : {}),",
+   "replace": "      versionId: o.provenance?.versionId,",
+   "expect": "equivalent",
+   "testFile": "packages/store/test/evidence.test.ts"
+  }
+ ]
+}

@@ -163,7 +163,21 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
     scenario: {
       id: scenario.id,
       name: scenario.name,
-      versionId: o.provenance?.versionId,
+      /**
+       * **没给就不写这个键**，而不是写一个 `undefined` 进去。
+       * 与下面 envFingerprint 那条同一个立场，而这里多一层理由：
+       * 改动前 `redactForDisk` 会把 undefined 变成字符串 `"undefined"`，
+       * 于是"调用方没说版本"在磁盘上长得像"有个版本叫 undefined"。
+       * redact 那一头本轮修了，但**这里也照自己的规矩写** —— 两件事各挡一半：
+       * redact 修的是"所有走它的产物"（trace / keyContext / JUnit context 都受益），
+       * 这里守的是"这一栏的语义不许依赖上游实现正确"。
+       *
+       * 判据是 `!== undefined` 而不是 `!versionId`：空串是**合法的有值**
+       * （与 store 那边 `bytes` 取不到时宁可不写也不写 0 同一条立场 —— 0 和空串都是合法值），
+       * 用 falsy 判断会把"版本就叫空串"悄悄说成"没说版本"。
+       * 判据在 `packages/cli/test/e2e.test.ts` 的 --version-id 那条（不传时断的是**键不存在**）。
+       */
+      ...(o.provenance?.versionId !== undefined ? { versionId: o.provenance.versionId } : {}),
       // frozen 原样带出。true/false 之差决定了"这份证据能不能当 CI 门禁依据"，
       // 所以它必须在包里，而不是只在调用方的内存里
       frozen: scenario.frozen,
@@ -188,8 +202,18 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
       note: '结构化数据（trace/manifest/JUnit）按字段名 + 值形态双规则脱敏；artifacts/ 下的原始体只替换值形态命中的密钥段（JWT/AKIA/sk-/私钥/Bearer），字段名规则不适用于无结构的原始体。keepRawKinds 白名单里的 kind 完全不改。',
     },
     versions: { engine: o.engineVersion ?? '0.0.0', ir: o.irVersion ?? '0.0.0' },
-    // 只在调用方给了的时候写。写一个 undefined 字段与不写，在 JSON 里等价，
-    // 但**写一个空对象不等价于不写** —— 那会被读成"没有环境差异"
+    /*
+     * 环境指纹。**只在调用方给了的时候写**。
+     *
+     * ⚠ 这句话从前写的是"写一个 undefined 字段与不写，在 JSON 里等价" ——
+     * 那句**对裸 `JSON.stringify` 成立、对本文件产出的 manifest 不成立**：
+     * manifest 出去前要过 `redactForDisk`（在 `manifestJson` 里），而改动前那一趟把
+     * `undefined` 变成字符串 `"undefined"`，于是"没记"在磁盘上变成了"记了一个值"。
+     * 本轮在 `redact.ts` 那一头修掉了（判据：脱敏这趟不许改变"有没有"，
+     * 见 `packages/engine/test/redact.test.ts`），**但这里的写法照旧保留** ——
+     * 不靠上游的语义正确来保住"缺与记了"的区分，是这个区分能活着的前提。
+     * 空对象更是另一回事：那会被读成"这次运行没有环境差异"，与"没记环境"是两个结论。
+     */
     ...(o.envFingerprint ? { envFingerprint: o.envFingerprint } : {}),
     /*
      * 子场景（call 链）。这一栏的存在理由是"包是给连不上数据库的人看的"：

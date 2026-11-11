@@ -220,6 +220,31 @@ test('manifest 记录 frozen 与 provenance —— CI 要靠它拒绝执行（M7
   assert.ok(Array.isArray(m.artifacts) && m.artifacts.length >= 1);
 });
 
+test('versionId 缺着就整栏不写；空串是"有值"要留着', async () => {
+  /*
+   * 这一对断言钉的是**同一个判据的两端**：`!== undefined`，不是 `!versionId`。
+   * 用 falsy 判断的话，空串会被静默说成"调用方没说版本" —— 而空串是**合法的有值**
+   * （与 `bytes` 取不到时宁可不写也不写 0 同一条立场：0 和空串都是合法值）。
+   * "缺"与"空"在排查时指向相反的下一步（查平台没传 vs 查调用方为什么传了空），
+   * 合并成一种就是把两种故障压成一条日志。
+   *
+   * ⚠ 只写注释不写测试是不够的：立场一旦只活在注释里，下一个人把它改成 `!versionId`
+   *    不会有任何东西变红（本轮我在 evidence.ts 里就是这么写的，写完整才回来补这条）。
+   */
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+
+  const absent = JSON.parse(unzipMembers((await buildEvidencePackage({ scenario, report, store })).bytes)
+    .get(EVIDENCE_FILES.manifest)!.toString('utf8'));
+  assert.ok(!('versionId' in absent.scenario),
+    `没给版本时这一栏该整栏消失，实际 ${JSON.stringify(absent.scenario.versionId)}`);
+
+  const empty = JSON.parse(unzipMembers((await buildEvidencePackage({ scenario, report, store, provenance: { versionId: '' } })).bytes)
+    .get(EVIDENCE_FILES.manifest)!.toString('utf8'));
+  assert.ok('versionId' in empty.scenario, '空串是合法的有值，键要在');
+  assert.equal(empty.scenario.versionId, '', '而且值不许被改写');
+});
+
 test('irSha 无条件产出：provenance 整个缺失时也有（M7 溯源的最小必要件）', async () => {
   const store = await freshStore();
   const { scenario, report } = await failingRun(store); // scen() 不带 provenance

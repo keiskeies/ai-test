@@ -481,6 +481,24 @@ test('call 子场景：CLI 真能解析到磁盘上的另一个文件（这个�
     const manifest = JSON.parse(new TextDecoder().decode(entries.find((e) => e.name === 'manifest.json')!.data));
     assert.deepEqual(manifest.artifacts.map((a: { stepId: string }) => a.stepId), ['sub.login/cg'],
       '归属要带上子场景 id：步骤 id 只在自己的场景里唯一');
+    /*
+     * 子场景的**结构化**结果也要在真 CLI 的产物里。
+     *
+     * 为什么在 CLI 这一层再钉一遍，而 store 层 call-evidence.test.ts 已经测过：
+     * 那边测的是 buildEvidencePackage(那份 report)，中间隔着 assemble() 的接线与
+     * CLI 手里的 report —— 本仓这一族缺陷（"上半截很完整、下半截没人接"）
+     * 恰好就住在那条缝上：call 的解析器以前就是这么"引擎全有、CLI 一个都跑不了"，
+     * 而 store 层的测试当时全绿（见上面那条测试的块头注释）。
+     * 判据取机器消费者真正要读的那三样：谁、成没成、几个 pass/fail。
+     * 少任何一样，读 manifest.json 的一方就还得回去 grep JUnit 的正文文本。
+     */
+    const kids = manifest.children;
+    assert.ok(Array.isArray(kids), 'children 必须落进 CLI 产的 manifest.json（缺这一栏就等于没结构化）');
+    assert.equal(kids.length, 1, `一个 call 一条。实际 ${kids.length}`);
+    assert.equal(kids[0].scenario.id, 'sub.login');
+    assert.equal(kids[0].status, 'pass');
+    assert.equal(kids[0].tally.pass, 1, '子场景的 tally 只数它自己那一步');
+    assert.equal(kids[0].calledById, 'scn.e2e', '要能回答"谁叫起了它"（扁平列表靠这根链重建调用树）');
   } finally { await f.close(); }
 });
 
@@ -508,6 +526,55 @@ test('已知缺口：scenarioRef 的 @version 今天不参与解析（版本表�
     assert.equal(code, EXIT.OK, `带 @99 也解析到了那个文件（这就是缺口本身）。${log}`);
     assert.ok(f.requests() >= 1, '前提：子场景真的跑了');
     assert.doesNotMatch(log, /解析不到|不存在/, `@99 今天是**被忽略**而不是被拒。${log}`);
+  } finally { await f.close(); }
+});
+
+test('--version-id 真的进到证据包清单里；不传时那一栏是"没有"而不是"空"', async () => {
+  /*
+   * 这条测试的**起因是一次实测**：把 commands.ts 里 `provenance: { versionId: str(a, 'version-id') }`
+   * 整句换成 `{ versionId: undefined }`，重建后 `packages/cli/test` **173/173 全绿**。
+   * 也就是说这个开关从 2026-11-09（d90e9e1，M6 那一份）起**从没被验过有没有接通** ——
+   * store 层有一条测试钉住 `provenance.versionId -> manifest`（evidence.test.ts 的
+   * 「manifest 记录 frozen 与 provenance」），但没有一条钉住**命令行那一段**。
+   * 缝在中间，两头各绿一半：本仓记过好几次的"字段有、没人接"就是这一族。
+   *
+   * 两侧都要钉，理由不同：
+   *  - 传了要落到盘上 —— 否则 CI 传了版本号而证据里没有，事后无法回答"这次跑的是第几版"；
+   *  - 不传时那一栏**得是缺着**，不能是 `"v0"`/`""`/`0` —— 编一个默认值会把"调用方没说"
+   *    伪装成"平台说这是第 0 版"，而 P1 的版本表要拿它当主键用（与 store 侧
+   *    `bytes` 取不到时宁可不写也不写 0 同一条立场：0 和空串都是**合法值**）。
+   */
+  const f = await fixture();
+  try {
+    const manifestOf = async (evDir: string) => {
+      const runDir = await onlyRunDir(join(f.dir, evDir));
+      const zip = (await readdir(runDir)).find((x) => x.endsWith('.zip'));
+      assert.ok(zip, `${runDir} 下没有 zip`);
+      const entries = readZipEntries(new Uint8Array(await readFile(join(runDir, zip!))));
+      return JSON.parse(new TextDecoder().decode(entries.find((e) => e.name === 'manifest.json')!.data));
+    };
+
+    const casePath = await writeCase(f.dir, [
+      { id: 'c', kind: 'openapiCall', docRef: 'shop', operationId: 'createOrder', body: { sku: 'A' } },
+      { id: 'a', kind: 'assert', against: '$.step.c.resp', status: 201 },
+    ]);
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--doc', `shop=${f.specPath}`, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', join(f.dir, 'vidEv'), '--clock', 'deterministic',
+                             '--version-id', 'v12'], io);
+    const log = io.stdout.join('\n') + io.stderr.join('\n');
+    assert.equal(code, EXIT.OK, `带 --version-id 不该改变结论。${log}`);
+    const m = await manifestOf('vidEv');
+    assert.equal(m.scenario.versionId, 'v12',
+      '开关被接受、但值没到磁盘上 = CI 以为记了版本而其实没有（这条测试就是为它写的）');
+
+    const io2 = ioCapture();
+    const code2 = await main(['run', casePath, '--doc', `shop=${f.specPath}`, '--env-var', `baseUrl=${f.addr()}`,
+                              '--evidence-dir', join(f.dir, 'vidEv2'), '--clock', 'deterministic'], io2);
+    assert.equal(code2, EXIT.OK, io2.stderr.join('\n'));
+    const m2 = await manifestOf('vidEv2');
+    assert.ok(!('versionId' in m2.scenario),
+      `没传版本时这一栏该整栏缺着，实际 ${JSON.stringify(m2.scenario.versionId)}（typeof=${typeof m2.scenario.versionId}）`);
   } finally { await f.close(); }
 });
 
