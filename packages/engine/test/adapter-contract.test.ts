@@ -69,50 +69,63 @@ test('capture 步骤的 adapter 也拿得到 stepId（它自己产证据，没�
 
 test('算不出端时 ctx.target 是 any，不是编一个 android（这条钉的是"新取值是有决定的"）', async () => {
   /*
-   * 形状：纯 Web 场景里一步 `wait{uiPredicate}`。IR 里 `wait: 'any'`
-   * —— 等待条件不带世界信息（同一件事在 §3.6 里是"wait.ts 那三处 `??` 刻意没改"
-   * 那条待办），所以引擎**确实不知道**这一步属于哪一端。
+   * **这一条改过形状，而改的理由要留在这儿。** 它原先的形状是"纯 Web 场景里一步
+   * 不带 world 的 `wait{uiPredicate}`"，钉的是 `?? 'android'` 那个兜底。
+   * 等待条件补上 `world` 字段之后**这条真的红了** —— 那不是回归，是这条注释里
+   * 预先写下的那一句：「如果哪天决定给等待条件补上世界字段，这条会红，
+   * 那时该改的是这里」。红得对，因为那个形状现在**有**答案了：
+   * 只有浏览器在场 ⇒ 这一问就是 web，再报 `'any'` 是把手里确定的事实说成不确定。
    *
-   * **改前它报 'android'**（`?? 'android'` 兜底），改后报 `'any'`。
-   * 这条测试存在的理由不是"any 这个值多对"，而是：**联合里多了一个成员而没有任何
-   * 测试产出它，那这个成员就是不可证伪的** —— 下一个人看到 'any' 会分不清
-   * 那是"设计如此"还是"某处漏填了"。所以这里把它钉成决定，并且把另一条路写明白：
-   * **如果哪天决定给等待条件补上世界字段**（schema 层的事，§3.6 记着"未决"），
-   * 这条测试会红，那时该改的是这里 —— 而不是让 'any' 悄悄变成一个没人认领的值。
+   * 但这条测试本身**不能被删**：它钉的是"联合里那个 `'any'` 成员有真实生产者"，
+   * 而那条理由与用哪个形状无关（没有生产者的联合成员是不可证伪的 ——
+   * 下一个人分不清那是设计还是漏填）。所以换一个 `'any'` **仍然是诚实答案**的形状：
+   * `world: "mobile"` 而**没有租约**。mobile 对应 android/ios/harmony 三个真实端，
+   * 唯一知道是哪个的是租约；没租约时这里报 `'any'` 正是"算不出就说算不出"，
+   * 报任何一个真实端都是编。
+   *
+   * 与 `wait-world.test.ts` 里「world: "mobile" 时 ctx 原样透传租约平台」那条
+   * **各管一半、别合并**：那条有租约、断"真实端透传过去"；这条没租约、
+   * 断"没有真实端时不许编"。合成一条的话，"编一个 android"这种坏法
+   * 会让两条都红，看不出是哪一半失守（同本文件 assertLlm 那条不并进来的理由）。
    */
   const seen: string[] = [];
-  const ui = {
+  const device = {
     // perform 在这个端口上是 `void | PerformResult`（动作不回报定位结果），
     // 这里不返回任何东西 —— 这条测试要看的是 resolve 收到哪个端。
     async perform() {},
     async resolve(_l: unknown, ctx: ExecContext) { seen.push(ctx.target); return { resolvedBy: 'css' as const, rung: 1, confidence: 1, nonReplayable: false, handle: 'h' }; },
-    async snapshot() { return { kind: 'aria', data: '', sha: 'x' }; },
+    async snapshot() { return { kind: 'hierarchy', data: '<h/>', sha: 'x' }; },
     async assertUi() { return { passed: true, actual: '', expected: '' }; },
+    // 有 lease 口但没有 device 步 ⇒ 一次都不会被调 ⇒ 槽位上没有租约。
+    // 这两个都得有：少了 lease，"没有租约"就变成"这个 adapter 不能租设备"，
+    // 测的就不是同一件事了。
+    async lease() { throw new Error('这条夹具不该真去租设备'); },
+    async release() {},
   };
   const r = await run(scen([
-    { ...b('nav1'), kind: 'navigate', url: 'http://x/' } as StepDraft,
     {
       ...b('w1'), kind: 'wait', timeoutMs: 1_000, pollMs: 50,
-      condition: { type: 'uiPredicate', state: 'visible', target: { intent: '在', primary: { by: 'css', value: '#a' }, fallbacks: [], confidenceGate: 0.5, replayable: true } },
+      condition: { type: 'uiPredicate', state: 'visible', world: 'mobile', target: { intent: '在', primary: { by: 'css', value: '#a' }, fallbacks: [], confidenceGate: 0.5, replayable: true } },
     } as StepDraft,
-  ] as StepDraft[]), { adapters: { ui } });
+  ] as StepDraft[]), { adapters: { device } as never });
   assert.equal(r.results.find((x) => x.stepId === 'w1')?.status, 'pass', '这一步本身要跑通，否则"传了什么端"是另一个问题');
   assert.ok(seen.length >= 1, '等待条件必须真调到 resolve，否则这条又是空测试');
   assert.deepEqual([...new Set(seen)], ['any'],
-    `没有租约、IR 又说这一步不属于任何端时，该报 any 而不是编一个真实端：${JSON.stringify(seen)}`);
+    `没有租约、mobile 那一档又答不出具体是哪个平台时，该报 any 而不是编一个真实端：${JSON.stringify(seen)}`);
 });
 
 test('assertLlm 送给模型的 ctx 同样是 any（第二种形状，单独一条以便各自归因）', async () => {
   /*
    * `evalLlmAssert` 是把 `deps.ctx` **原样递给 llm adapter** 的，所以这一步的端
    * 会跟着 prompt 一起出去。探针扫过 IR 里所有 `STEP_TARGET === 'any'` 且会碰
-   * adapter 的 kind，产出 any 的就是这两支（wait 与 assertLlm）；
+   * adapter 的 kind，产出 any 的是 assertLlm 与"等待条件答不出具体平台"那一档
+   *（`world: "mobile"` 而没租约 —— 见上面那条的注释）；
    * `assert` / `assertPerf` 两个分支只读变量、压根不碰 deps.ctx。
    *
-   * **为什么不并进上面那条**：上面那条守的是"哪天给等待条件补上世界字段"这个
-   * 可能的 schema 改动，而那条改动**不该连带弄红 assertLlm 这一半** ——
-   * 两条测试共享一句断言时，一半变红会掩盖另一半仍然成立（与 wiring-web.test.ts
-   * 里 setup/teardown 分两句同一条理由）。
+   * **为什么不并进上面那条**：上面那条跟着等待条件的世界字段走（那条改动落地那天
+   * 它确实红了，而这一半**没有**跟着红 —— 这正是当初把它们分开的全部理由，
+   * 现在它有了实证而不只是一句预判）。两条共享一句断言时，一半变红会掩盖
+   * 另一半仍然成立（与 wiring-web.test.ts 里 setup/teardown 分两句同一条理由）。
    *
    * `evidenceFrom` 必须指向**真跑过的步骤**：指 `$.step.不存在` 时这一步会在
    * 变量解析处就 error，judge 一次都不被调用 —— 那又是一条空测试的形状。

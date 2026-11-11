@@ -254,7 +254,7 @@ describe('等待：条件而非时长（docs/02 §3）', () => {
     const cases: Array<[string, Record<string, unknown>, string[]]> = [
       ['dbRow', { type: 'dbRow', sql: 'SELECT 1', datasource: 'main', expect: 'row' }, ['db']],
       ['uiPredicate', { type: 'uiPredicate', state: 'visible', target: loc() }, ['ui', 'device']],
-      ['template', { type: 'template', expect: 'hit', minConfidence: 0.8, target: loc() }, ['device', 'ui']],
+      ['template', { type: 'template', expect: 'hit', minConfidence: 0.8, target: loc() }, ['ui', 'device']],
       ['uiIdle', { type: 'uiIdle', quietMs: 10 }, ['ui', 'device']],
     ];
     for (const [type, condition, slots] of cases) {
@@ -269,10 +269,22 @@ describe('等待：条件而非时长（docs/02 §3）', () => {
       /*
        * 槽位清单**逐个条件各自断言**，而且断的是数组本身（顺序也断）：
        * 这是给看板分组用的那一份，摘要里的中文不是判据（文案本仓改过很多次）。
-       * 顺序 = 代码里 `??` 的顺序，所以 template 那一条是 ['device','ui'] 而另两条相反 ——
-       * 这不是抄错，两处的意图本来就不同（模板匹配优先在设备端做）。
-       * 断顺序的代价是"以后有人刻意调整优先级时这条会红"，**那是好事**：
-       * 那一天的改动需要有人在测试里改一个数组，也就是需要有人想过这件事。
+       *
+       * **这一组数组本轮改过一次向**，而改它之前先要说清原来那句话说了什么：
+       * 原注释写的是"顺序 = 代码里 `??` 的顺序，template 那一条是 ['device','ui']
+       * 而另两条相反 —— 两处的意图本来就不同（模板匹配优先在设备端做）"。
+       * 那句"意图"从来**没有实现**，而且实现不了：`template` 走的是 `resolve()`
+       * 而不是某个像素专用口，所以那一档"优先设备"换来的不是"在设备上跑模板匹配"，
+       * 是"**去问另一个世界的界面树**"。两个槽位都在场时它真的会这么做
+       * （**改前实测**：`.scratch/probe-which.mts`；永久形态是
+       *  `wait-world.test.ts` 里「template 不再"优先设备"」那条），而这正是本轮修掉的东西。
+       *
+       * 原注释还预测了今天：「那一天的改动需要有人在测试里改一个数组，
+       * 也就是需要有人想过这件事」。现在就是那一天 —— 三个数组现在同序，
+       * 而"同序"不是随手对齐：它是"三处走同一个判据 `resolveWaitWorld`"的**结果**，
+       * 那个判据由 `wait-world.test.ts` 那 15 条盯着。
+       * 断顺序这件事本身**保留**：将来真要给某个条件加一档优先，
+       * 仍然需要有人在测试里改一个数组。
        */
       assert.deepEqual(w.keyContext?.missingAdapters, slots, `${type}: 缺的槽位清单`);
       assert.equal(w.keyContext?.waitCondition, type, `${type}: 条件类型要单独可得，别只嵌在文案里`);

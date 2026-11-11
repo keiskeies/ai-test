@@ -83,6 +83,30 @@ export class EnvMissing extends NotWiredError {
   }
 }
 
+/**
+ * 界面类等待条件**说不清该问哪一世界**：作者没写 `world`，而浏览器与设备两条探针
+ * 都在场。定义在这个文件而不是 `wait.ts` 有一个硬理由：下面那张表要用 `instanceof`
+ * 认它，而**这张表所在的文件不能反过来 import `wait.ts`**（`wait.ts` 已经 import 这里，
+ * 反向 import 就是循环）。同一族先例：`NotWiredError` / `EnvMissing` 也住在这里，
+ * 尽管它们唯一的消费者是 adapter 那一侧。
+ *
+ * 归 `case-stale`（见下面那条登记的理由）而不是 `env-unavailable`：
+ * 两个 adapter 都在场，**接线好好的**，缺的是用例作者那一句没写。
+ * 判成"环境不可用"会让人去配一个已经配好的东西。
+ */
+export class AmbiguousWaitWorld extends Error {
+  /** 哪一件条件选不出来（`uiPredicate` / `template` / `uiIdle`）。给测试与 keyContext 用，不让它只活在文案里。 */
+  readonly conditionType: string;
+  constructor(conditionType: string) {
+    super(`等待条件 ${conditionType} 没写 world，而 ui 与 device 两个 adapter 都在场 —— `
+      + '不知道该问浏览器还是手机，**不猜**（猜一个就是把"哪个 adapter 先装配"写进用例结论，'
+      + '而两个世界查的是不同的树：另一世界的"没找到"会被当成这一世界的结论）。'
+      + '修法：这个条件加上 `world: "web"` 或 `world: "mobile"`。');
+    this.name = 'AmbiguousWaitWorld';
+    this.conditionType = conditionType;
+  }
+}
+
 /** 判据表的一项。`base` 用 `instanceof` 匹配，所以子类天然被父类那一条覆盖。 */
 export interface ErrorCauseRule {
   readonly base: abstract new (...args: never[]) => unknown;
@@ -122,6 +146,15 @@ export const ERROR_CAUSE_RULES: readonly ErrorCauseRule[] = Object.freeze([
     base: LocatorBudgetError,
     cause: 'case-stale',
     why: '这一步用了比 IR 声明的 maxCostUsdPerResolve 更贵的定位法，是用例/定位器选型问题。报 product-bug 会让人去查一个不存在的功能 bug。',
+  },
+  {
+    base: AmbiguousWaitWorld,
+    cause: 'case-stale',
+    why: '等待条件没写 world 而两条探针都在场。错在 IR 少写一个字段：重试、换机器、重启浏览器都不会让它变得可判，'
+      + '下一步动作是改用例（补上 world），不是去接线（两个 adapter 都在场）。'
+      + '判成 env-unavailable 会让人去配一个已经配好的东西。'
+      + '**登记在这一行还有一层作用**：`waitUntil` 那句 `causeOfError(e) === "case-stale"` 靠它把这个错**外抛**，'
+      + '否则会被"求值报错就再等一轮"吞成一次普通超时（那是本仓反复记的那族"平台侧的事被说成产品侧的事"）。',
   },
   {
     base: NotWiredError,

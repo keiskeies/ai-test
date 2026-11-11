@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "界面类等待条件**问的是哪一世界的界面**（uiPredicate / template / uiIdle 上的 `world`）。",
+    "tests: engine/test/wait-world.test.ts + ir/test/wait-world.test.ts。",
+    "",
+    "## 这一集修的那个坏法不报红、不报崩，它只是**答错问题**",
+    "改前三处选 adapter 的代码各写各的：`uiPredicate`/`uiIdle` 是 `ui ?? device`，",
+    "`template` 反过来是 `device ?? ui`。两个槽位都在场时（混合场景：开着浏览器又租着设备），",
+    "同一棵 `allOf` 树里两支条件落在**两个不同的世界**上（改前实测 `.scratch/probe-which.mts`，",
+    "永久形态是 wait-world.test.ts 里「template 不再\"优先设备\"」那条）。",
+    "症状是一条**看起来完全正常**的结论：作者问\"页面上那个按钮出现没有\"，",
+    "而答案来自手机屏幕上的\"没找到\"。假绿假红都可能，取决于哪一边碰巧是空的。",
+    "",
+    "## 与 wait-not-wired.json 的分工，以及一条**结构性**的区别",
+    "那份守的是『跑不起来时报错框选错』，四处判定点各一条变异（W2–W5），",
+    "因为那时\"选哪个 adapter\"这句话**抄了四遍**。本轮把三处收敛成一个 `resolveWaitWorld`，",
+    "于是这份**不需要**三处各来一条：判据只有一份，变异打在它上面一次就盖住三种条件。",
+    "这不是省条目 —— 「同一个坏法要变异三次」这件事本身就是那个坏抄了三遍的证据；",
+    "判据合成一份之后，那个必要性跟着消失。留下的三个条件各自的覆盖由**测试**负责",
+    "（wait-world.test.ts 里每个条件各一组正反），因为\"这支条件有没有接上判据\"仍是三件事。",
+    "",
+    "## 这一族最值钱的坏法是**说不清时不报错**",
+    "W1 是那一条，而它坏掉时**其余全绿**：`resolveWaitWorld` 照样选得出一个、",
+    "摘要照样带世界、单槽位场景一切正常 —— 只有\"两个都在场而 IR 没说\"那一格",
+    "从『报错』悄悄变成『按 `slots.ui ?? slots.device` 猜一个』。",
+    "那就是把**装配顺序**写进用例结论，而装配顺序是\"哪个 adapter 先建起来\"这种事。",
+    "",
+    "## W3 与 W4 是一对，别当成重复",
+    "W3 = 声明了 world 而那一档没接时，让**另一档顶包**（给出一条来自另一世界的结论）。",
+    "W4 = 同样的处境下**报错**，但说成『一个 adapter 都没有』（那句在本场景里是假话：",
+    "ui 明明在场）。两种坏法的 status/cause 都一样，**只有那句话不同**，",
+    "而那两句话指向的下一步动作相反：W4 会让人去配一个已经配好的东西。",
+    "本仓给这一族起过名字：报错里的每一句都要能被当场核对。",
+    "",
+    "## W5 / W6 打在**载体**上，不是判据上",
+    "W5 = 选中的世界不记进摘要（判据全对、结论全对，只是没人说得出它问的是谁 ——",
+    "docs/08 §3 那一格：有字段、有判据、没有面向人的载体）。",
+    "W6 = 记成单个值而不是数组，于是混合场景里第二个世界**覆盖**第一个，",
+    "摘要说\"问的是 mobile\"而它两个都问过：报告说的比发生过的少。",
+    "",
+    "## W9 / W10 打在**转述给 adapter 的那一份 ctx** 上",
+    "W9 = 世界只用来选探针、不进 ctx；W10 = mobile 那一档也改写 ctx、于是编出一个真实端。",
+    "两条打在**同一个函数的两个方向**上（少说 / 多说），与 W5/W6 那一对同理：判据是一份，载体是两个。",
+    "## W7 是一条**跨文件**的，而且它坏掉时最像\"什么都没坏\"",
+    "把 `AmbiguousWaitWorld` 从 `ERROR_CAUSE_RULES` 里摘掉：归因落到兜底 `untriaged`，",
+    "而 `waitUntil` 那句 `causeOfError(e) === 'case-stale'` 随即不再外抛 ——",
+    "于是这个错被『求值报错就再等一轮』吞成一次**普通超时** + fail + product-bug。",
+    "那是本轮整集要防的那件事的**自我复现**：我为了修\"问错世界\"新加了一个错，",
+    "而这个新错会被同一段\"把平台侧的事说成产品侧的事\"的老机制吞掉。",
+    "登记与外抛隔着两个文件，所以这条锚点在 errors.ts 而红的测试在 engine 那边 ——",
+    "跨文件耦合只能靠变异集盯着（同一形状见 locator-budget.json）。",
+    "",
+    "## B 族：`.optional()` 与 `.default()` 那一字之差",
+    "B1 = `world` 改成有默认值 ⇒ zod 把默认值物化进 `canonicalScenario` 的输出，",
+    "**每一个已冻结场景的 irSha 都变**，历史证据指向一个查不到的哈希。",
+    "那不是修复是一次磁盘格式迁移，而它坏掉的那天**没有任何测试会红** ——",
+    "症状出现在很久以后有人比对两次历史运行的时候。同一条约束已经为 `dbRow.vars`",
+    "立过一次（B6/B7 in wait-not-wired.json），那是第二次；这是第三次，所以它有自己的一条。",
+    "B2 = 反过来，把\"非法值当场拒\"松成 `.catch('web')` ⇒ 拼错的 world 静默当成浏览器，混合场景里拿错世界的结论 —— 与本轮修掉的错归因同一家，只是入口在 schema。（B2 的第一版\"把字段整个删掉\"是 BUILD_BROKEN：引擎在读 `c.world`，schema 一摘它就不编译。编译器抓到不等于测试抓到，详见该条 _note。）",
+    "场景**当场不合法**。这条刻意 **不** expect=equivalent：它是可观测的（IR 收不收这个键）。",
+    "",
+    "## 没有 expect=equivalent 的条目",
+    "这一批每条都改可观测行为。唯一接近等价的是\"三处选择器合并成一个函数\"那次重构本身",
+    "—— 而它等价**恰恰是本轮的目的**（三份迟早只更新一份），所以它不该以变异条目的形式存在，",
+    "它应该以\"只有一个函数可以打\"的形式存在。"
+  ],
+  "cases": [
+    {
+      "label": "W1 说不清时不报错（退回 `ui ?? device` 猜一个 = 把装配顺序写进用例结论）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "  if (both) throw new AmbiguousWaitWorld(conditionType);",
+      "replace": "  void both; // 变异 W1：不报错，落到下面那句 slots.ui ?? slots.device 猜一个",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W2 声明的 world 被忽略（永远走\"看谁在场\"那一条路）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "  if (declared !== undefined) {",
+      "replace": "  if (false as boolean && declared !== undefined) { // 变异 W2：作者说的话不算数",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W3 声明了 mobile 而只接了 ui 时，让 ui 顶包（一条来自另一世界的结论）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "    const hit = declared === 'web' ? slots.ui : slots.device;",
+      "replace": "    const hit = (declared === 'web' ? slots.ui : slots.device) ?? slots.ui ?? slots.device; // 变异 W3：另一档顶包",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W4 同样的处境改成复用 NoConditionAdapter（于是那句「一个都没有」成了假话）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (slots.ui !== undefined || slots.device !== undefined) {\n        throw new MissingWaitWorldAdapter(conditionType, declared, wanted, other);\n      }",
+      "replace": "      // 变异 W4：少一个类、少一句话 —— status/cause 一字不变，只有报错内容变成假的",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W5 选中的世界不记进摘要（判据全对，只是没人说得出它问的是谁）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "    note(declared);",
+      "replace": "    void note; // 变异 W5：选了而不说",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W6 世界记成单个值（混合场景里第二个覆盖第一个 = 报告说的比发生过的少）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "    note: (w) => { if (!seen.includes(w)) seen.push(w); },",
+      "replace": "    note: (w) => { seen.length = 0; seen.push(w); }, // 变异 W6：只留最后一个",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W7 归因不登记（跨文件：落到兜底 untriaged，随即被「再等一轮」吞成普通超时）",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: AmbiguousWaitWorld,",
+      "replace": "    // 变异 W7：删掉这一条登记（整条规则从表里移除要靠 mutate 的 split 做不到，这里只断掉这一行）\n    // 为让 replace 唯一且类型合法，把 base 换成一个永不匹配的类：\n    base: class NeverThrown extends Error {},",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "W8 没问过界面时也往摘要尾巴上挂那句话（给所有等待加噪音，并抹平\"这条其实没问界面\"）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "  return asked.length === 0 ? describe : `${describe}（问的是 ${asked.join(' + ')}）`;",
+      "replace": "  return `${describe}（问的是 ${asked.join(' + ') || '未知'}）`; // 变异 W8：无条件挂",
+      "testFile": "packages/engine/test/wait-world.test.ts"
+    },
+    {
+      "label": "B1 world 从 .optional() 改成 .default('web')（物化进 canonical => 作废全部历史 irSha）",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "const worldField = z.object({ world: WaitWorldSchema.optional() });",
+      "replace": "const worldField = z.object({ world: WaitWorldSchema.default('web') }); // 变异 B1：一次磁盘格式迁移伪装成加字段",
+      "testFile": "packages/ir/test/wait-world.test.ts"
+    },
+    {
+      "label": "B2 world 写错值不再被拒（.catch 悄悄回落到 web = 凭空捏造的归因）",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "export const WaitWorldSchema = z.enum(WAIT_WORLD);",
+      "replace": "export const WaitWorldSchema = z.enum(WAIT_WORLD).catch('web'); // 变异 B2：非法值不报错，静默当成 web",
+      "testFile": "packages/ir/test/wait-world.test.ts",
+      "_note": "**这一条的第一版是 BUILD_BROKEN，而 BUILD_BROKEN 的教训本仓已经记过两次**（I1 的 `if(false && …)` 把类型收窄成 never、L2 的改判别式让 `.sql` 字段在类型上不存在）。第一版写的是\"把 world 从 schema 里摘掉\"——那当然编译不过：`wait.ts` 里三支条件都在读 `c.world`，schema 一摘，`c.world` 在类型上就不存在了。**编译器抓到 ≠ 测试抓到**，跑出来的\"没跑成\"不是\"抓到了\"。\n      换成一个**类型完全合法**的坏法：`.catch('web')`。输出类型仍是 `WaitWorld | undefined`（`.optional()` 在外面），引擎一字不改照样编译，而行为坏得恰到好处：`world: \"browser\"` 这种拼错不再当场被 schema 拒，而是**静默当成 web** —— 混合场景里它就去问浏览器，拿一个错误世界的结论。这正是本轮整集在防的那件事（错归因），只是入口从引擎挪到了 schema。抓它的是 ir 那边「world 写错值要当场被 schema 拒」那三条（每个条件一条）。"
+    },
+    {
+      "label": "W9 选中的世界不进 ctx（探针选对了，转述给 adapter 的仍是 any/ios）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "  return w === 'web' ? { ...ctx, target: 'web' } : ctx;",
+      "replace": "  return ctx; // 变异 W9：世界只影响选探针，不影响转述",
+      "testFile": "packages/engine/test/wait-world.test.ts",
+      "_note": "**这是本轮修完\"选错探针\"之后紧接着的那一格**，也是本仓缺陷类 (d)「IR 有字段、引擎有判据、面向人的那个载体没有」的 **adapter-facing 版本**：`ExecContext.target` 由解释器按 `targetOf(step)` 算，而 `STEP_TARGET.wait` 是 `'any'`，所以条件里明明写着 `world: \"web\"`，adapter 收到的 ctx 仍然说 `'any'`（纯 Web）或**租约上那个平台**（混合场景里一句\"问浏览器\"的探针转述出去是 `'ios'`）。\n      它与 W5（选了不说）看着同一族而**不是重复**：W5 的载体是**给人看的摘要**，这一条的载体是**给 adapter 看的 ctx**。两者的消费者不同、下一步动作也不同 —— 摘要错了人能看到，ctx 错了只有等 capability 路由那一天才炸（docs/09 §1.1 约束 3）。**同一个事实有几个载体，就该有几条变异**，这与\"同一个判据抄三遍所以变异三条\"是相反方向的判断。"
+    },
+    {
+      "label": "W10 mobile 那一档也改写 ctx（从 world 编一个真实端出来）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "  return w === 'web' ? { ...ctx, target: 'web' } : ctx;",
+      "replace": "  return { ...ctx, target: w === 'web' ? 'web' : 'android' }; // 变异 W10：mobile 侧编一个平台",
+      "testFile": "packages/engine/test/wait-world.test.ts",
+      "_note": "这一条与 W9 是**同一个函数两个方向**的坏法，缺一条就只挡住一半。W9 是\"该说的不说\"，W10 是\"不该编的编了\"：`mobile` 在 `ExecTarget` 里没有对应值 （它对应 android/ios/harmony 三个），**唯一知道是哪个的是租约**。从 IR 那一侧填 `android` 就是把一个真实端凭空造出来 —— 那正是本仓为 assertPage P3 记过的同一个形状（`?? 'android'`），只不过这次是**新代码自己**写出第二个 P3。\n      抓住它的是「world: \"mobile\" 时 ctx 原样透传租约平台（ios）」那条，而它必须跑在**有租约**的场景里才有意义：没租约时透传的是 `'any'`，编出来的 `android` 与透传的 `any` 会被同一句断言分开，但那时候测的是\"不许编\"而不是\"要透传\"。所以那个夹具带一个真 ios 租约。"
+    }
+  ]
+}

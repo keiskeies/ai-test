@@ -324,13 +324,31 @@ describe('活护栏：@atest/engine 导出的每一个错误类都在那张表�
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.ts') || f === 'index.ts' || f === 'env.d.ts') continue;
       const src = readFileSync(join(dir, f), 'utf8');
-      for (const m of src.matchAll(/^export class (\w+)[^\n{]*extends (\w+)/gm)) {
+      /*
+       * `abstract` 那个修饰符**曾经不在正则里**，而它不是排版问题。
+       * 本轮给 `NoConditionAdapter` / `MissingWaitWorldAdapter` 抽了一个共同祖先
+       * `WaitAdapterGap`（abstract），于是这条走链的护栏从那一格起**断链**：
+       * `reachesBase('NoConditionAdapter')` 走到 `WaitAdapterGap` 就拿不到父类、
+       * 返回 false —— 它红了，而红得**正是它该红的方式**：
+       * 那条链自己说了"我走不通时这条测试就退化成比类名"。
+       * 换句话说**护栏当场演示了自己为什么存在**。
+       * 修的是正则而不是把祖先改成非 abstract：将来任何抽象中间层都会踩同一个洞，
+       * 而那个洞的症状是"子类漏登记照样绿"。
+       */
+      for (const m of src.matchAll(/^export (?:abstract )?class (\w+)[^\n{]*extends (\w+)/gm)) {
         if (m[1] && m[2]) declared.set(m[1], m[2]);
       }
     }
     // 护栏的护栏：扫不到东西 / 扫不到那个已知的盲区类，下面那条就是恒通过
     assert.ok(declared.size >= 10, `只扫到 ${declared.size} 个导出类声明：正则该改了`);
-    assert.equal(declared.get('NoConditionAdapter'), 'NotWiredError', '父类链扫描失效了（NoConditionAdapter 的父类不是从源码里读出来的）');
+    /*
+     * 期望值是 `WaitAdapterGap` 而不是 `NotWiredError` —— 那是本轮抽祖先之后的真值。
+     * 这一格仍然是一个**已知具体值**的哨兵（它的职责是"父类是从源码读出来的吗"），
+     * 换成两个都接受就等于没断。
+     */
+    assert.equal(declared.get('NoConditionAdapter'), 'WaitAdapterGap', '父类链扫描失效了（NoConditionAdapter 的父类不是从源码里读出来的）');
+    // 抽象祖先自己也要在图上，否则所有子类从它那一跳起全部断链
+    assert.equal(declared.get('WaitAdapterGap'), 'NotWiredError', '抽象祖先没进图（正则漏了 abstract？）');
 
     const bases = new Set(ERROR_CAUSE_RULES.map((r) => r.base.name));
     const reachesBase = (name: string): boolean => {

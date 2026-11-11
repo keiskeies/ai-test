@@ -10,6 +10,48 @@ import { z } from 'zod';
 import { ExprSchema, RefSchema, ValueSchema, deriveExprFields } from './values.js';
 import { LocatorSpecSchema } from './locator.js';
 
+/**
+ * 界面类等待条件**问的是哪一世界的界面**。
+ *
+ * 取值刻意与 `STEP_TARGET` 那一侧的"世界"同一档（`web` / `mobile`），
+ * 而**不是** `ExecTarget` 那一套六值：`android` / `ios` / `harmony` 的细分
+ * 是**运行时**从租约读的（`platformOf`），作者写不出来也不该写 ——
+ * 同一份 IR 要在三种平台上跑，写死 `android` 等于把用例钉死在一台设备上。
+ *
+ * ## 为什么这个字段本来就该有（docs/15 §3.6 那条"未决"的落地）
+ * 三件事凑在一起，使"该问哪一个界面"在改动前**没有任何地方能回答**：
+ *  1. `STEP_TARGET.wait` 是 `'any'` —— 等待步骤不带世界信息；
+ *  2. 条件对象里当时也没有任何世界字段；
+ *  3. 引擎里那三处选 adapter 的代码各写各的（`uiPredicate`/`uiIdle` 是
+ *     `ui ?? device`，`template` 反过来是 `device ?? ui`）。
+ *     **改前实测**：两个槽位都在场时，同一棵 `allOf` 树里两个界面条件会落在
+ *     **两个不同的世界**上（`.scratch/probe-which.mts`，改前的行为；
+ *     永久形态是 `engine/test/wait-world.test.ts` 里那条"两档都在场"的对照）。
+ * 第 3 条不是"风格不统一"而是**结论错误**：混合场景（同时开着浏览器与租着设备）里，
+ * 作者想等"页面上那个按钮出现"，`template` 那一支却去查了手机屏幕，
+ * 查不到就判"没出现" —— 一个**来自另一世界的否定证据**被当成了本世界的结论，
+ * 而报告上看不出它问的是谁。
+ * 所以答案必须在 IR 里：引擎既猜不出（同一份 IR 两种端都可能），
+ * 也不该由 adapter 在场顺序决定（那是装配细节，不是用例作者的意思）。
+ */
+export const WAIT_WORLD = ['web', 'mobile'] as const;
+export const WaitWorldSchema = z.enum(WAIT_WORLD);
+export type WaitWorld = z.infer<typeof WaitWorldSchema>;
+
+/**
+ * 世界字段本身。**`.optional()` 而不是 `.default(...)`，这一字之差是量出来的**
+ *（与 `dbRow.vars` 同一条理由，那份教训已经记在上面的注释里）：
+ * `canonicalScenario` 会把 zod 补出来的默认值**物化**进规范串，
+ * 一旦有默认值，**每一个已冻结场景的 `irSha` 都会变** —— 那是磁盘格式迁移，
+ * 不是加字段。`.optional()` + `stable()` 丢 `undefined` ⇒ 不写这个字段时
+ * 规范串**逐字节不变**（`ir/test/wait-world.test.ts` 里逐字对比钉住了这一点，
+ * 因为这条一旦漂，症状是"历史版本的指纹全废"而没有任何一条测试会先红）。
+ *
+ * **没有默认值 = 混合场景里不写就是不知道的**，那时引擎报 `case-stale`
+ * 而不是替作者挑一个（挑一个就是把装配顺序写进结论）。
+ */
+const worldField = z.object({ world: WaitWorldSchema.optional() });
+
 /** 单个条件 */
 export const WaitConditionSchema = z.discriminatedUnion('type', [
   /** 某步骤的 HTTP 状态命中 */
@@ -62,6 +104,7 @@ export const WaitConditionSchema = z.discriminatedUnion('type', [
       type: z.literal('uiPredicate'),
       target: LocatorSpecSchema,
       state: z.enum(['visible', 'attached', 'enabled', 'gone']).default('visible'),
+      ...worldField.shape,
     })
     .strict(),
   /** 模板命中/未命中（像素世界的等价物，docs/10 §4） */
@@ -71,10 +114,17 @@ export const WaitConditionSchema = z.discriminatedUnion('type', [
       target: LocatorSpecSchema,
       expect: z.enum(['hit', 'miss']).default('hit'),
       minConfidence: z.number().min(0).max(1).default(0.8),
+      ...worldField.shape,
     })
     .strict(),
   /** Detox 式「app 空闲」门控。安卓端动画未结束就 dump 是 flake 主因之一 */
-  z.object({ type: z.literal('uiIdle'), quietMs: z.int().min(0).max(5000).default(400) }).strict(),
+  z
+    .object({
+      type: z.literal('uiIdle'),
+      quietMs: z.int().min(0).max(5000).default(400),
+      ...worldField.shape,
+    })
+    .strict(),
   /** 等某个接口回来（docs/06 §3：Web 侧最有价值的等待） */
   z
     .object({

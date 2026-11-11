@@ -41,11 +41,12 @@
   ],
   "cases": [
     {
-      "label": "W1 不再往外抛 NoConditionAdapter（让它重新被『求值报错也继续等』吞掉）",
+      "label": "W1 不再往外抛\"没接线\"这一族（让它重新被『求值报错也继续等』吞掉）",
       "file": "packages/engine/src/wait.ts",
-      "anchor": "      if (e instanceof NoConditionAdapter) throw e;",
+      "anchor": "      if (e instanceof NotWiredError) throw e;",
       "replace": "      // 删掉这一行：让它落到下面那句『当成还没满足』",
-      "testFile": "packages/engine/test/lang.test.ts"
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "锚点本轮从 `if (e instanceof NoConditionAdapter) throw e;` 改成基类那一句：那四行 instanceof 合并成了 `instanceof NotWiredError`（理由写在 wait.ts 那段注释里：本轮新加的 MissingWaitWorldAdapter 让\"第五个错名\"这件事落地，而当年不合并的理由\"基类要跨文件放\"早就失效了）。**这条变异测的还是同一件事** —— 这一族被吞回去就退回本轮修掉的假超时 —— 只是它现在一次盖住整族五个错名，而不是其中一个。"
     },
     {
       "label": "W2 dbRow 缺 db 时写回裸 Error（缺陷原样的第一处）",
@@ -55,25 +56,25 @@
       "testFile": "packages/engine/test/lang.test.ts"
     },
     {
-      "label": "W3 uiPredicate 缺 ui/device 时写回裸 Error（第二处，选择器是 ui ?? device）",
+      "label": "W3 uiPredicate 缺 adapter 时写回裸 Error（第二处判定点）",
       "file": "packages/engine/src/wait.ts",
-      "anchor": "      if (!a || !('resolve' in a)) throw new NoConditionAdapter('uiPredicate', ['ui', 'device']);",
-      "replace": "      if (!a || !('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');",
+      "anchor": "      if (!('resolve' in a)) throw new NoConditionAdapter('uiPredicate', ['ui', 'device']);",
+      "replace": "      if (!('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');",
       "testFile": "packages/engine/test/lang.test.ts"
     },
     {
-      "label": "W4 template 缺 device/ui 时写回裸 Error（第三处。选择器与 W3 相反：device ?? ui）",
+      "label": "W4 template 缺 adapter 时写回裸 Error（第三处判定点）",
       "file": "packages/engine/src/wait.ts",
-      "anchor": "      if (!a || !('resolve' in a)) throw new NoConditionAdapter('template', ['device', 'ui']);",
-      "replace": "      if (!a || !('resolve' in a)) throw new Error('template 条件需要 device/ui adapter');",
+      "anchor": "      if (!('resolve' in a)) throw new NoConditionAdapter('template', ['ui', 'device']);",
+      "replace": "      if (!('resolve' in a)) throw new Error('template 条件需要 device/ui adapter');",
       "testFile": "packages/engine/test/lang.test.ts",
-      "_note": "这一处是四处里唯一 `??` 顺序反过来的（device 在前）。它今天测不出额外东西，但这一行是抄出来的证据 —— 留这条是为了下次有人『统一一下顺序』时能发现两处的意图本来就不一样。"
+      "_note": "**这条的 _note 本轮被证伪过一次，留下来**：它原先写的是\"这一处是四处里唯一 `??` 顺序反过来的（device 在前）…留这条是为了下次有人『统一一下顺序』时能发现两处的意图本来就不一样\"。后来真有人统一了顺序，而那次查下去的结论是：**那个意图从来不存在**。`template` 走的是 `resolve()`，不是像素专用口，所以\"优先设备\"换来的不是\"在设备上跑模板匹配\"，是\"去问另一个世界的界面树\" —— 两个槽位都在场时它真的会这么干（改前实测 `.scratch/probe-which.mts`）。所以这条现在的价值换了：**它盯的是这一处仍然要抛具名错**，而顺序那半边已经由 `wait-world.json` 那组接管。\n      一次\"这条变异的存在理由错了\"的记录，比一条没人再读的注释值钱 —— 注释会说对的东西，_note 会说我们**怎么错的**。"
     },
     {
       "label": "W5 uiIdle 缺 ui/device 时写回裸 Error（第四处，判的是 snapshot 口不是 resolve 口）",
       "file": "packages/engine/src/wait.ts",
-      "anchor": "      if (!a || !('snapshot' in a)) throw new NoConditionAdapter('uiIdle', ['ui', 'device']);",
-      "replace": "      if (!a || !('snapshot' in a)) throw new Error('uiIdle 条件需要 ui/device adapter');",
+      "anchor": "      if (!('snapshot' in a)) throw new NoConditionAdapter('uiIdle', ['ui', 'device']);",
+      "replace": "      if (!('snapshot' in a)) throw new Error('uiIdle 条件需要 ui/device adapter');",
       "testFile": "packages/engine/test/lang.test.ts"
     },
     {
@@ -86,10 +87,10 @@
     {
       "label": "W7 槽位清单不进 keyContext（错照样抛、摘要照样对，只是结构化那一份没了）",
       "file": "packages/engine/src/interpreter.ts",
-      "anchor": "          ...(e instanceof NoConditionAdapter\n            ? { missingAdapters: e.triedAdapters, waitCondition: e.conditionType }\n            : {}),",
+      "anchor": "          ...(e instanceof WaitAdapterGap\n            ? {\n                missingAdapters: e.triedAdapters,\n                waitCondition: e.conditionType,\n                ...(e.world ? { waitWorld: e.world } : {}),\n              }\n            : {}),",
       "replace": "          // 删掉：摘要里已经有 adapters.xxx 了",
       "testFile": "packages/engine/test/lang.test.ts",
-      "_note": "W2–W5 坏掉时摘要也退化成'求值报错'那一框，所以它们抓的是**错名选错**；这一条抓的是**只有文案、没有结构化那一份**。分开的理由是消费方不同：摘要给人读，missingAdapters 给看板/jq 分组。只测前一组的话，有人会把这两个字段当成'文案里已经有了，冗余'删掉 —— 而按中文摘要正则分组正是本仓最脆的那种依赖。"
+      "_note": "W2–W5 坏掉时摘要也退化成'求值报错'那一框，所以它们抓的是**错名选错**；这一条抓的是**只有文案、没有结构化那一份**。分开的理由是消费方不同：摘要给人读，missingAdapters 给看板/jq 分组。只测前一组的话，有人会把这两个字段当成'文案里已经有了，冗余'删掉 —— 而按中文摘要正则分组正是本仓最脆的那种依赖。\n      锚点本轮从 `NoConditionAdapter` 换成抽象基类 `WaitAdapterGap`：本轮新增的 MissingWaitWorldAdapter 带着同样那三个字段，看板要按同一口径分组，而\"新加一个错时记得回来这里加一句 `||`\"正是这一族反复否决的那种自觉。"
     },
     {
       "label": "I1 解释器不看 evalError（回到『不满足就是超时』那一支）",

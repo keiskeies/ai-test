@@ -14,11 +14,11 @@ import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parall
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
-import { causeOfError, EnvMissing } from './errors.js';
+import { causeOfError, EnvMissing, AmbiguousWaitWorld } from './errors.js';
 import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ExecTarget, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
 import { resolveValue as resolveValueShared, strMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, truncatedByCap, hitCeiling, type ValueScope } from './resolve.js';
-import { waitUntil, NoConditionAdapter } from './wait.js';
+import { waitUntil, WaitAdapterGap } from './wait.js';
 import { ResponseLedger, ResponseWindow } from './responses.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
@@ -655,9 +655,28 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
            * 把"这一场里有几步是压根没接线"列出来，而按摘要正则匹配中文
            * 是本仓最脆的那种依赖（文案本仓改过很多次，见 mutate 集 I3 那条等价记录）。
            * 没有敏感值：槽位名与条件类型都是 IR 里的字面词，不是被测系统的数据。
+           *
+           * 判据是那个**抽象基类** `WaitAdapterGap` 而不是 `NoConditionAdapter`：
+           * 本轮加的 `MissingWaitWorldAdapter`（声明了 world 而那一档没接）带着
+           * 同样那三个字段，看板要按同一口径分组。写成两个 `||` 的话，
+           * "下一个同类错记得回来加一句"又是一次自觉 —— 而 `extends` 写不出来才编译不过。
            */
-          ...(e instanceof NoConditionAdapter
-            ? { missingAdapters: e.triedAdapters, waitCondition: e.conditionType }
+          ...(e instanceof WaitAdapterGap
+            ? {
+                missingAdapters: e.triedAdapters,
+                waitCondition: e.conditionType,
+                ...(e.world ? { waitWorld: e.world } : {}),
+              }
+            : {}),
+          /*
+           * "说不清该问哪一世界"也要结构化可得。它**没有** missingAdapters
+           *（两个 adapter 都在场，缺的不是接线），所以不能并进上面那一支 ——
+           * 并进去的话看板会把"IR 少写一个字段"数进"平台没接线"那一栏，
+           * 而这两件事的下一步动作完全相反（改用例 vs 接 adapter）。
+           * 归因也不同：这一条是 case-stale，上面那两条是 env-unavailable。
+           */
+          ...(e instanceof AmbiguousWaitWorld
+            ? { waitCondition: e.conditionType, waitWorldAmbiguous: true }
             : {}),
         },
       });
