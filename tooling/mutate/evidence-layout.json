@@ -9,7 +9,9 @@
       "anchor": "    if (!docs.has(e.name)) continue;",
       "replace": "    if (!docs.has(e.name) || e.name === EVIDENCE_FILES.manifest) continue;",
       "testFile": "packages/cli/test/e2e.test.ts",
-      "expect": "caught"
+      "expect": "caught",
+      "_measured": "抓到（`packages/cli/test/e2e.test.ts` 的「一次失败的 run 产出可被系统 unzip 验开的包」）—— 断的是 run 目录里五个文档成员一个不少，而名单是**写死的字面量**，所以筛子少放一名它就红。同一变异下 `packages/server/test/evidence-http.test.ts` **照绿**，那是有意的：读侧会回落到包里（纵深防御）。写侧的载体只能是这里。",
+      "_抓到": "caught"
     },
     {
       "label": "W2 写侧不再筛成员：artifacts/ 也散装再写一份",
@@ -18,7 +20,9 @@
       "anchor": "    if (!docs.has(e.name)) continue;",
       "replace": "    if (false) continue;",
       "testFile": "packages/store/test/evidence.test.ts",
-      "expect": "caught"
+      "expect": "caught",
+      "_measured": "抓到（`packages/store/test/evidence.test.ts` 的「writeEvidenceMembers：五个文档成员全都落盘，artifacts/ 一个都不落」）—— 后半句才是这一条的载体：它断的是 `artifacts` 目录**不出现**在 run 目录里",
+      "_抓到": "caught"
     },
     {
       "label": "R1 读侧不再回落进包：只认磁盘上那份",
@@ -27,7 +31,9 @@
       "anchor": "  for (const z of names.filter((n) => n.startsWith('evidence.') && n.endsWith('.zip')).sort()) {",
       "replace": "  for (const z of names.filter((n) => n.startsWith('evidence.NOPE.') && n.endsWith('.zip')).sort()) {",
       "testFile": "packages/server/test/evidence-http.test.ts",
-      "expect": "caught"
+      "expect": "caught",
+      "_measured": "抓到（`packages/server/test/evidence-http.test.ts` 的「report.html 里每一个相对链接，浏览器都真点得开」）——上一版这条报 BUILD_BROKEN（在循环前塞 `return undefined`，tsc 不过），那一格**没有结论**；改成改遍历过滤器后仍然编译，才量到真判据。同一条变异下「artifacts/<sha> 只在包里，也点得开」与「老布局的历史 run」两条同样红 —— 三条各钉一支，不是冗余。",
+      "_抓到": "caught"
     },
     {
       "label": "R2 成员白名单不再拒 artifacts 下的非哈希名",
@@ -36,7 +42,9 @@
       "anchor": "  return name.startsWith(prefix) && ARTIFACT_MEMBER.test(name.slice(prefix.length));",
       "replace": "  return name.startsWith(prefix);",
       "testFile": "packages/store/test/evidence.test.ts",
-      "expect": "caught"
+      "expect": "caught",
+      "_measured": "抓到（`packages/store/test/evidence.test.ts` 的「readRunMember：白名单外的名字一个都不给」）——上一版把 testFile 指到 http 那份，于是报了 survived，而**那是 spec 的错不是代码的漏**：服务端 resolveEvidence 自己就先拒了非 64hex 的名，轮不到 readRunMember 说话，http 那份测试**结构上看不见**这一格。",
+      "_抓到": "caught"
     },
     {
       "label": "R3 包坏了不再换下一个：整次读取判死",
@@ -45,7 +53,9 @@
       "anchor": "    } catch { continue; }   // 这个包读不出/坏了：换下一个，而不是把整次读取判死",
       "replace": "    } catch { return undefined; }",
       "testFile": "packages/store/test/evidence.test.ts",
-      "expect": "caught"
+      "expect": "caught",
+      "_measured": "抓到（`packages/store/test/evidence.test.ts` 的「坏包排在前面时，后面那个好包仍然要读得出」）——这一条量了两次才对：第一次缺\"坏+好并排\"的形状（`continue` 与 `return` 等价），第二次补了形状却仍 survived，因为 `readZipEntries(垃圾字节)` **不抛**（签名对不上就当零成员返回），夹具压根进不了 catch。换成 CRC 改坏的真包 + `corruptCrc()` 自己 assert.throws 才真被测到。**这条是本变异集里唯一\"测试真缺\"的那一格**，另两格是 spec 自己的问题。",
+      "_抓到": "caught"
     },
     {
       "label": "C1 等价对照：文档成员在包内的排列顺序换一下",
@@ -54,7 +64,10 @@
       "anchor": "    { name: EVIDENCE_FILES.manifest, data: enc.encode(manifestJson(manifest)), mtimeMs: report.startedAt },\n    { name: EVIDENCE_FILES.summary, data: enc.encode(summary), mtimeMs: report.startedAt },",
       "replace": "    { name: EVIDENCE_FILES.summary, data: enc.encode(summary), mtimeMs: report.startedAt },\n    { name: EVIDENCE_FILES.manifest, data: enc.encode(manifestJson(manifest)), mtimeMs: report.startedAt },",
       "testFile": "packages/store/test/evidence.test.ts",
-      "expect": "equivalent"
+      "expect": "equivalent",
+      "_measured": "未抓到，符合预期（等价 1/1）。改的是文档成员在包内的**排列顺序**：成员集合、每个成员的字节、白名单全不动。\"同内容产同字节\"那条判据也照样绿 —— 它比的是**同一份代码跑两遍**，而不是两个不同顺序，所以它不钉顺序。反过来读：它绿说明确实没有测试在钉 zip 成员顺序这种实现细节。",
+      "_抓到": "equivalent"
     }
-  ]
+  ],
+  "_本轮实测": "抓到 5 / 未抓到 0 / 等价 1/1 / 没跑成 0（共 6）。三轮才到这一步：第一轮 BUILD_BROKEN 1 + survived 2，第二轮 survived 1，第三轮全清。每轮的修法见各条 `_measured`。"
 }
