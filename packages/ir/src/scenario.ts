@@ -114,22 +114,29 @@ export type Scenario = z.infer<typeof ScenarioSchema>;
  * 写死返回一个 `TargetKind` 会让"某个 kind 需要两个端"变成改签名而不是加一个元素
  * （而改签名的那一轮会波及所有调用点，正是没人愿意改、于是随手 if 一下的形状）。
  *
- * ⚠ mobile 那一支的 `s.target` **只有 `device` 的那个是平台**（本轮实测，不是推断）：
- * `tap`/`input`/`key` 的 `target` 是 **LocatorSpec**（点哪个元素，是个对象，永远不等于 `'ios'`），
- * `app`/`swipe`/`watcher`/`logcat`/`manualHandoff` 压根没有这个字段，
- * 于是它们无条件落进 `android`；而 `assertUi.target` 是**字符串引用**（指向哪一步的输出），
- * 所以 `assertUi{target:'ios'}`（"那个叫 ios 的元素"）会被读成"这条场景要 iOS 设备"。
- * 一漏一多，后果与为什么本轮不改判据，
- * 由 `ir/test/target-sources.test.ts` 第 2 条与最后那条测试完整记着（改它 = 改所有
- * 已冻结场景的 irSha，那是一次迁移而不是一个修复）。
- * **别把这一支读成"按平台细分"** —— 它是"只有 device 认平台，其余默认 android，
- * 而撞名字的被误读"。
+ * ⚠ mobile 那一支**只有 `device` 报平台**（本轮改的；改前的行为与实测读数见
+ * `ir/test/target-sources.test.ts` 里「mobile 那一支只读 device.target」那条）。
+ * 改前的写法是"读任何叫 `target` 的字段，读不出平台就落 android"，而 mobile 那一档里
+ * 叫 `target` 的字段有**三种互不相干的含义**（本轮逐个量过，不是推的）：
+ *  - `device.target` 是**平台枚举** —— 唯一真正的平台来源；
+ *  - `tap`/`input`/`key`/`swipe` 的是 **LocatorSpec**（点哪个元素，是个对象，
+ *    永远不等于 `'ios'`）→ 无条件落 android，于是纯 iOS 场景凭空多出一个 android；
+ *  - `assertUi.target` 是**字符串引用**（指向哪一步的输出，schema 是 `z.string()`）
+ *    → `assertUi{target:'ios'}`（"那个叫 ios 的元素"）被读成"这条场景要 iOS 设备"。
+ *
+ * 所以"其余 mobile 步骤报什么"这一格的正确答案是**什么都不报**：它们确实要设备，
+ * 但**说不出要哪一端**，而替它们猜一个 android 是把"我不知道"写成"我知道"。
+ * **"这一步要不要设备"是另一个问题**，由 `deriveNeedsDevice` 答（它读 `STEP_TARGET`
+ * 的档位、不读平台），两者刻意分开 —— 合成一个的时候，就是这个函数同时答错两件事的时候。
  */
 export function targetsOfStep(s: Step): TargetKind[] {
   const t = STEP_TARGET[s.kind];
   if (t === 'api') return ['api'];
   if (t === 'web') return ['web'];
   if (t === 'mobile') {
+    // 只有 device 那一步真的带平台。其余 mobile 步骤返回空：**不是漏**，
+    // 是"这件事不由这一步说"。要"要不要设备"去问 deriveNeedsDevice。
+    if (s.kind !== 'device') return [];
     const kind = (s as { target?: unknown }).target;
     return [kind === 'ios' ? 'ios' : kind === 'harmony' ? 'harmony' : 'android'];
   }
@@ -148,16 +155,27 @@ export function targetsOfStep(s: Step): TargetKind[] {
 /**
  * 从步骤推导目标端集合（IR 里 targets 是冗余字段，推导函数是它的唯一权威来源）。
  *
- * ⚠ 移动端那一侧的集合**含一个多余项**：一份 iOS 场景（`device{target:'ios'}` +
- * `tap` + `assertUi`）推出来是 `["ios","android"]`，因为 `tap`/`assertUi` 没有平台可分
- * （而 `assertUi{target:'ios'}` 反过来会**凭空**造出一个 ios —— 那里的 `target` 是变量引用）。
- * 今天不咬人的原因要说准：`needsWeb` 只看 `includes('web')`；`lint.ts` 的 `needsDevice`
- * 是 `.some([android,ios,harmony])`，多一个也算同一个人（它**刻意不读**本函数写进 IR 的那个
- * 冗余字段，而是现算三层）；`dryrun.ts` 的 `estimate.needsDevice` **确实读那个冗余字段**，
- * 但同样只 `.some(...)`，而它回显的 `estimate.targets` 今天就会列出不存在的端 ——
- * 只是 `dryRun()` 还没有生产调用方。**"没人读"和"读的人还不存在"不是一回事**，后者才是现状。
- * 而它的输出进了 `canonicalScenario`，所以**不能顺手改**。全部细节与"改了会红的那条测试"在
- * `ir/test/target-sources.test.ts` 最后一条。**别把这里当"场景用到哪些端"的精确答案读**，
+ * ## 它只回答"哪一端"，不回答"要不要设备"
+ *
+ * 只有 `device` 那一步会往这里贡献 android/ios/harmony（理由见 `targetsOfStep`）。
+ * 所以一份「setup 里 `device{target:'ios'}` + body 里 `tap`」的场景推出来是
+ * `["ios"]` —— 改前是 `["ios","android"]`（多的那个来自 `tap` 替它猜的那一端），
+ * 而 `assertUi{target:'ios'}` 那种"一个元素名让全场景声称要 iOS 设备"也不再可能。
+ *
+ * ⚠ **由此得到的一个重要推论**：`deriveTargets(...).some(是移动端)` **不再**
+ * 等价于"这个场景需要设备" —— 一份只有裸 `tap`（作者漏写了 `device` 那一步）的场景
+ * 现在推出来是**空集**，而它是本文件 `LEASE_REQUIRED` 意义上的"需要设备"。
+ * 需要后者请用 `deriveNeedsDevice`。这不是理论顾虑：本轮第一版就是顺手把
+ * `lint.ts` 那道 `needsDevice` 前置过滤留在这里、只改这一支，结果
+ * `RESOURCE_LEASE_MISSING` 对"裸 tap"整个**不响了**（`.scratch/probe-lint-naked-tap.mts`，
+ * 永久落点 `engine/test/lease-scope.test.ts`「前置过滤不许来自端集合」那条）——
+ * 把一条报 error 的静态闸修成静默，比那个多余的 android 严重得多。
+ *
+ * 仍然要说一句：它的输出进了 `canonicalScenario`，所以**这一版的输出本身就是一份
+ * 磁盘契约**（改前的历史证据里那些 mobile 步多的 android 属于旧版算法，不回填 ——
+ * 理由见 `store/src/ir-hash.ts` 的"算法只有两个自由度"那段与本文件 `canonicalScenario`
+ * 规则 3：不补默认值、不做事后规范化）。
+ *
  * 需要"因为哪一步"的时候用 `targetSources`：它说得出是谁，但**共用同一格判据**，
  * 所以判据本身错时它会忠实复述那个错（这是刻意的 —— 分叉的话报错点名的步骤里
  * 没有一个需要那个端，而两个函数各自看都自洽）。
@@ -166,6 +184,35 @@ export function deriveTargets(steps: Step[]): TargetKind[] {
   const set = new Set<TargetKind>();
   walk(steps, (s) => { for (const t of targetsOfStep(s)) set.add(t); });
   return [...set];
+}
+
+/**
+ * 这个场景**要不要设备**（不问哪一端）。
+ *
+ * ## 为什么它不能由 `deriveTargets` 推出来
+ *
+ * 判据是 `STEP_TARGET[kind] === 'mobile'`，也就是**档位**，不是平台。这件事本来可以由
+ * `deriveTargets(...).some(是移动端)` 代替，而那一版本轮实测过、坏了：`deriveTargets`
+ * 的移动端那一格里今天只有 `device` 会发言（平台只有它说得出），所以"作者漏写 device 步"
+ * 这种**最需要报警**的形状会让那个派生判据变成 false，于是整条租约静态闸静默跳过。
+ * **一个只能让守卫变哑的派生判据，不是优化，是守卫的漏洞**（docs/08 §3：
+ * 守卫自己漏报比没有守卫更坏，它让人以为数过了）。
+ *
+ * 反过来也不许用它代替 `deriveTargets`："要设备"里不含"要哪一端"，
+ * 按端申请设备的那一侧读它会拿不到平台。两问两答，各一张判据，这才是分开的理由。
+ *
+ * 与 `LEASE_REQUIRED` 的关系要说准（两者**不是一张表**，本轮逐个 kind 对过）：
+ * 本函数按 `STEP_TARGET` 的档位算，覆盖 mobile 那一档的**全部 10 个 kind**；
+ * `LEASE_REQUIRED` 只有 8 个，不含 `device` 自己（它不是"要用别人的租约"，它是租约的来源）
+ * 与 `watcher`（它没有独立租约语义，跑在别的步骤挣来的那台上）。所以：
+ *  - 本函数答"这台机器要被用"，`LEASE_REQUIRED` 答"这一步手上得有租约"；
+ *  - 拿前者当后者的前置过滤是**安全的方向**（前者是后者的超集，漏报不可能由它引入），
+ *    反过来用不行；`walkLease` 里真正报错的那一格读的一直是后者。
+ */
+export function deriveNeedsDevice(steps: Step[]): boolean {
+  let needs = false;
+  walk(steps, (s) => { if (STEP_TARGET[s.kind] === 'mobile') needs = true; });
+  return needs;
 }
 
 /**

@@ -2,7 +2,8 @@
  * Dry-run（编辑器常驻面板 + Agent 的第三道闸）。
  * 不求值网络、不碰设备：只检查「结构上能不能跑起来」。
  */
-import type { Scenario } from '@atest/ir';
+import { deriveNeedsDevice, type Scenario } from '@atest/ir';
+
 import { lintScenario, toReport, type LintIssue, type LintReport, type LintContext } from './lint.js';
 import { VarSpace } from './vars.js';
 
@@ -102,7 +103,34 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
   };
   count([...scenario.setup, ...scenario.body, ...scenario.teardown]);
 
-  const needsDevice = scenario.targets.some((t) => ['android', 'ios', 'harmony'].includes(t));
+  /*
+   * `needsDevice` 从前读的是 `scenario.targets.some(是移动端)`，两个方向都坏，本轮都修：
+   *  1. **它读的是那个冗余字段**，而那个字段只从 `body` 推（`ir/index.ts` 的
+   *     `withDerivedTargets`）。所以「setup 里 `device` + body 里 `tap`」这种**最常见**的
+   *     移动端写法推出来是空集 → 面板上写"不要设备"，而它要两台。
+   *     `lint.ts` 那条同类判据早就改成现算三层了，这一处是漏掉的那个消费者
+   *     （docs/08 §3：「每个消费者都各自正确，而它们对同一件事的假设互不相容」）。
+   *  2. **判据本身来自端集合**，而本轮 `targetsOfStep` 改对之后，端集合里只剩 `device`
+   *     会发言 —— 一份漏写 `device` 步的裸 `tap` 场景会答"不要设备"，
+   *     而它其实跑不起来。改用 `deriveNeedsDevice`（读档位不读平台），理由与
+   *     `lint.ts` 那道过滤同一份，写在 `ir/src/scenario.ts` 那个函数头上。
+   *
+   * 同一格里的 `targets` 仍回显 `scenario.targets`，但**那个字段本轮在根上修好了**：
+   * `withDerivedTargets` 从前只走 `body`（同一句"只知道自己那一段"的病，根因只有一行），
+   * 现在走三层。所以这里不必自己再推一遍 —— 而自己推一遍还有第二个坏处：
+   * **作者显式写了 `targets` 的场景会被推导覆盖**，屏幕上那一栏于是与 IR 文件不一致，
+   * 而显式写下的值是**声明能力**（"这条还要一台 iOS 机做对照"），比推导强。
+   *
+   * `needsDevice` 与 `targets` 现在同源不同问：前者问步骤（"有没有移动端步骤要机器"），
+   * 后者读声明（"这条场景说自己要哪些端"）。两者可以合法地不同 ——
+   * 例如显式写了 `targets:['ios']` 而一个移动步骤都还没写，那正是"先声明、待补步骤"的形态。
+   *
+   * 改前那份纯 iOS 场景这里会多列一个 android（替 mobile 步骤猜出来的那一端），
+   * 前端 `app.ts` 直接把它画成「端 ios / android」，于是那条从没要过安卓机的用例
+   * 看起来要在两台机器上跑。
+   */
+  const three = [...scenario.setup, ...scenario.body, ...scenario.teardown];
+  const needsDevice = deriveNeedsDevice(three);
   return {
     ...toReport(issues), missingInputs, exprSummaries,
     estimate: { steps, minMs: steps * 50, needsDevice, targets: scenario.targets },

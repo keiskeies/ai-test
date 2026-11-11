@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveTargets, eachValuePosition, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveNeedsDevice, eachValuePosition, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { redactSecretText } from './redact.js';
@@ -905,12 +905,35 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
    */
   {
     // 顺序按**运行顺序**拼：setup → body → teardown。
-    // 判据用 deriveTargets(三层) 而不是 scenario.targets —— 后者是从 body 推的
-    // （`ir/index.ts` 里 `targets: deriveTargets(draft.body)`），
-    // 于是"body 里没有移动端步骤、只有 setup 里有"这种场景那个 .some() 根本不成立，
-    // 上面的遍历修好了也仍然漏（手工验过：只改遍历时，只有这种场景会红）。
+    // 判据**自己现算三层**，不读 `scenario.targets` 那个冗余字段。
+    // 两件事凑在一起才让它必须自己算：
+    //  1. 那个字段在本轮之前**只从 body 推**（`ir/index.ts` 的 `withDerivedTargets`），
+    //     于是"移动端步骤只在 setup 里"这种场景它压根不知道自己知道。
+    //     本轮把根修好了（改走三层），但这条闸**不回读它** —— 见下面那段：
+    //     读它还有一个更坏的坏处，与被派生集合压制无关。
+    //  2. 更根本的是**判据不该由被它守护的那个派生值算出来**（下一段）。
     const three = [...scenario.setup, ...scenario.body, ...scenario.teardown];
-    const needsDevice = deriveTargets(three).some((t) => ['android', 'ios', 'harmony'].includes(t));
+    /*
+     * 这道前置过滤**不许由端集合派生**（本轮之前它是
+     * `deriveTargets(three).some(是移动端)`）。理由不是风格：`walkLease` 里真正报错的
+     * 那一格读的是 `LEASE_REQUIRED`（见上面那个函数），也就是"这一步手上得有租约"，
+     * 而"这一步属于 mobile 档"是**另一张表的另一件事**。用一个当另一个的前置条件，
+     * 就等于允许"端集合说不需要"来压制一条本来要报的 error。
+     *
+     * 本轮把 `targetsOfStep` 的 mobile 那一支改对（只有 `device` 报平台）之后，
+     * 那个派生判据立刻把一个真缺陷放过去了：一份只有裸 `tap`（作者漏写 `device` 步）
+     * 的场景 `deriveTargets` 是**空集**，于是整条 `RESOURCE_LEASE_MISSING` 不响 ——
+     * 改前它会报 `error@t`。实测（`.scratch/probe-lint-naked-tap.mts`），永久落点是
+     * `lease-scope.test.ts` 里那两条：「反向：全场无租约、tap 在 body → 仍然要报」
+     * （那个形状正是被这个派生判据放过的第一个）与「前置过滤不许比报错那一格窄」
+     * （后者是本轮新加的结构性守卫，逐 kind 比两张表，不靠样本）。
+     * **少报一条 error 级静态闸，比它本来要修的那个多余端严重得多**（docs/08 §3）。
+     *
+     * `deriveNeedsDevice` 走 `STEP_TARGET` 的档位，是 `LEASE_REQUIRED` 的**超集**
+     * （10 个 kind 对 8 个，多的两个是 `device` 自己与 `watcher`），
+     * 所以"它说不要"必然蕴含"walkLease 也没有可报的步" —— 超集方向才允许当过滤。
+     */
+    const needsDevice = deriveNeedsDevice(three);
     if (needsDevice) {
       // 三层是**一次连续运行**，游标必须一路传下去：setup 里申请的设备在 body 里还在手上
       // （这正是 §3.3 那张探针表里 A 那一格修的东西）。逐层各自起 false 会把它重新变成误报。

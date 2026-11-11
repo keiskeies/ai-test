@@ -39,10 +39,35 @@ import { humanize } from './humanize.js';
 export type StepDraft = Record<string, unknown>;
 export type ScenarioDraft = Record<string, unknown>;
 
-/** 书写形态里缺 targets 时按步骤推导；写了就以写的为准（显式优先，可标注额外能力） */
+/**
+ * 书写形态里缺 targets 时按步骤推导；写了就以写的为准（显式优先，可标注额外能力）。
+ *
+ * ## 为什么推的是三层而不是只有 body（本轮改的，改前只走 `draft.body`）
+ *
+ * 那个字段是**给人和别的层读的**，而不是一句备忘：
+ *  - `server` 的场景列表把 `scenario.targets` 直接回给前端，`web/src/app.ts` 画成
+ *    「端 ios / android」那一栏；
+ *  - `dryrun` 的 `estimate.targets` 从前回显同一个字段。
+ * 而**三层是会一起执行的**（`device` 写在 setup、`tap` 写在 body 是 docs/15 §3.3
+ * 里推荐的写法，`engine/src/lint.ts` 的租约规则也因此早就自己走三层）。
+ * 于是"setup 里申请 iOS 机 + body 里点屏幕"这份场景的字段是 `[]`，
+ * 屏幕上那一栏就写着**空** —— 一个字段只知道自己那一段，而所有读它的人以为知道全部，
+ * 是 docs/08 §3 那一族（各消费者各自正确、而对同一件事的假设互不相容）。
+ *
+ * ⚠ 这里取的是**书写形态**的三个数组，所以 setup/teardown 可能是 undefined
+ * （`.default([])` 要等 schema 跑完才有），逐个 `?? []`。
+ * 不要因为"parse 之后它们一定是数组"就省掉 —— 本函数跑在 parse **之前**，
+ * 那正是它能给没写 targets 的草稿补值的原因。
+ *
+ * 显式写了 targets 的场景**一个字节都不改**（`draft.targets !== undefined` 直接返回）。
+ * 这不是兼容姿态而是语义：写下来的值是作者在**声明能力**（"这条还要一台 iOS 机做对照"），
+ * 比推导出来的强，推导不该覆盖它。
+ */
 export function withDerivedTargets(draft: ScenarioDraft): ScenarioDraft {
   if (draft.targets !== undefined) return draft;
-  return { ...draft, targets: deriveTargets((draft.body as Step[] | undefined) ?? []) };
+  const layers = [draft.setup, draft.body, draft.teardown];
+  const steps = layers.flatMap((a) => (Array.isArray(a) ? (a as Step[]) : []));
+  return { ...draft, targets: deriveTargets(steps) };
 }
 
 export class IrValidationError extends Error {

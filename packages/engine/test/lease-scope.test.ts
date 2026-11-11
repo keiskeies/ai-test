@@ -9,6 +9,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { lintScenario, toReport } from '../src/index.js';
+import { LEASE_REQUIRED, STEP_KINDS, STEP_TARGET } from '@atest/ir';
 import { b, scen, tapStep, type StepDraft } from './helpers.js';
 
 const dev = (id: string): StepDraft => ({ ...b(id), kind: 'device', target: 'android' } as StepDraft);
@@ -54,6 +55,93 @@ describe('RESOURCE_LEASE_MISSING 的遍历范围（docs/15 §3.3 探针 A/A′/B
   test('反向：全场无租约、tap 在 body → 仍然要报（别把闸修成永不响）', () => {
     const c = codes([tapStep('t'), assertion()]);
     assert.ok(c.includes('RESOURCE_LEASE_MISSING'));
+  });
+});
+
+/*
+ * ── 前置过滤那一格：它只能**比报错那一格宽**，不能更窄 ────────────────────────
+ *
+ * `RESOURCE_LEASE_MISSING` 是两段拼起来的：一道场景级的 `needsDevice` 前置过滤，
+ * 与一段真正报错的 `walkLease`（它读 `LEASE_REQUIRED`）。本轮踩的坑就在这里 ——
+ * 把 `targetsOfStep` 的 mobile 那一支改对（只有 `device` 报平台）之后，
+ * 那句前置判据 `deriveTargets(三层).some(是移动端)` 立刻把一个真缺陷放过去了：
+ *
+ * | 场景 | deriveTargets | 旧前置判据 | 结果 |
+ * |---|---|---|---|
+ * | 只有裸 `tap`（作者漏写 device 步） | `[]` | false | **整条闸跳过，一句不报** |
+ *
+ * 而它改前报 `error@t`。实测见 `.scratch/probe-lint-naked-tap.mts`（永久落点就是下面这几条）。
+ * **少报一条 error 级静态闸，比它本来要修的那个多余端严重得多**：漏报的那份 IR 会进 CI、
+ * 会在运行时报一个归因成"环境不可用"的 error，而 lint 那句「✓ 通过」正是让人不去查它的东西。
+ *
+ * 所以下面这三条不是把上面那几条重做一遍：上面测的是**各形状的判定**，
+ * 这几条测的是**过滤与报错之间的关系** —— 那种关系坏了，上面每条都可以照样全绿
+ * （它们都恰好落在"过滤成立"的形状里）。
+ */
+describe('前置过滤不许比报错那一格窄（needsDevice 必须是 LEASE_REQUIRED 的超集）', () => {
+  /*
+   * 判据来自 `STEP_TARGET` / `LEASE_REQUIRED` 两张**表**，逐个 kind 扫，不挑样本。
+   * 挑样本就是赌"我挑的那些形状恰好会红"，而这一族的坏法恰恰是
+   * "新增一个移动端 kind 而它谁都不认识" —— 那种形状只可能由全量扫暴露。
+   */
+  test('逐个 kind：裸的移动端步骤（全场没有任何 device 步）必须照报', () => {
+    /*
+     * 夹具用**手写形状**而不是查表生成：`LEASE_REQUIRED` 里那 8 个 kind 各自的必填字段
+     * 差别很大（`app` 要 package、`logcat` 要 filter、`manualHandoff` 要 reason…），
+     * 在这里重抄八份必填字段就是"夹具比被测代码更知道 schema"那种假象。
+     * 所以走 `STEP_TARGET` 现算"哪些 kind 属于 mobile 档"，再让**每个 kind 用自己的最小样本**：
+     * 那些样本在 `ir/test/target-sources.test.ts` 里已经有一份（过不了 schema 的会被
+     * 那条测试当场抓住），这里通过 `defineScenario` 复用它，不另写一套。
+     */
+    const MINIMAL: Record<string, StepDraft> = {
+      app: { ...b('m'), kind: 'app', action: 'launch', package: 'com.x' },
+      tap: tapStep('m'),
+      input: { ...b('m'), kind: 'input', value: 'a' },
+      swipe: { ...b('m'), kind: 'swipe', from: [1, 1], to: [2, 2] },
+      key: { ...b('m'), kind: 'key', key: 'enter' },
+      logcat: { ...b('m'), kind: 'logcat', filter: 'x' },
+      assertUi: { ...b('m'), kind: 'assertUi', assertKind: 'visible', target: 'x' },
+      manualHandoff: { ...b('m'), kind: 'manualHandoff', reason: '插上线' },
+    };
+    assert.deepEqual(Object.keys(MINIMAL).sort(), [...LEASE_REQUIRED].sort(),
+      `这张夹具表与 LEASE_REQUIRED 对不上了：夹具多/少了 kind。`
+      + ' 少了 => 那个 kind 从没被这条扫过（漏报扫不出来）；多了 => 它在夹具里而运行时不要求租约');
+    for (const [kind, step] of Object.entries(MINIMAL)) {
+      const c = codes([step, assertion()]);
+      assert.ok(c.includes('RESOURCE_LEASE_MISSING'),
+        `${kind} 裸着写（全场没 device）而 lint 不报：前置过滤比报错那一格窄，`
+        + '这类形状整条闸会被跳过 = 静态闸静默失效（本轮踩过的就是这个形状，只不过当时是 tap）');
+    }
+  });
+
+  test('结构性那一半：needsDevice 为假的场景里，不可能有 LEASE_REQUIRED 意义上的裸步', () => {
+    /*
+     * 上面那条扫的是八个具体 kind，这一条把判据写成**集合关系**，
+     * 因此"新增一个移动端 kind 而忘了登记进 LEASE_REQUIRED"这种形状也会红：
+     * 那种 kind 会落在 STEP_TARGET 的 mobile 档（needsDevice 为真 → 前置过滤放行），
+     * 而 walkLease 不认它 → 永远不报，于是运行时要租约、静态闸不查（两个方向又打脸）。
+     *
+     * 判据直接比两张表，不跑场景 —— 跑场景只能证明"我试过的形状对"，
+     * 比表能证明"关系成立"。这是本仓那套"扫源码/扫表而不是挑样本"的同一口径。
+     */
+    const mobileKinds = STEP_KINDS.filter((k) => STEP_TARGET[k] === 'mobile');
+    for (const k of LEASE_REQUIRED) {
+      assert.ok(mobileKinds.includes(k),
+        `${k} 在 LEASE_REQUIRED 里而不在 STEP_TARGET 的 mobile 档 => needsDevice 会答"不要设备"`
+        + '而 walkLease 却要报它：前置过滤比报错窄，这条闸对它静默');
+    }
+  });
+
+  test('对照：纯 API / 纯 Web 场景**不该**被这条闸烦（过滤不是无用）', () => {
+    /*
+     * 没有这条，"把前置过滤整个删掉"这种改动能让上面两条全绿（更宽的过滤当然不漏报），
+     * 而代价是每条 API 用例都要被这段遍历走一遍 —— 那是**性能与噪声**方向的回归。
+     * 一条守卫只测"不许漏"而不测"不许过"，最后会被改成一个恒真的巨无霸。
+     */
+    const c = codes([{ ...b('h'), kind: 'http', request: { method: 'GET', url: 'http://x/y' } }, assertion()]);
+    assert.ok(!c.includes('RESOURCE_LEASE_MISSING'), '纯 http 场景不该出现租约告警');
+    const w = codes([{ ...b('n'), kind: 'navigate', url: 'https://x/' }, assertion()]);
+    assert.ok(!w.includes('RESOURCE_LEASE_MISSING'), '纯 web 场景不该出现租约告警');
   });
 });
 
