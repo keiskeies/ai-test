@@ -10,7 +10,7 @@
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
 import type { Step, Scenario, Lease, ForEachStep, WhileStep, Retry, FlakyAttempt } from '@atest/ir';
-import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parallelHazards, walk, hintOnTimeout, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parallelHazards, walk, hintOnTimeout, scenarioIdOfRef, scenarioVersionOfRef, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
@@ -1242,6 +1242,44 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          * 而真相是"平台没接线"——两者下一步动作完全不同。
          */
         if (!adapters.callScenario) return { status: 'error', summary: '子场景解析器未注入（adapters.callScenario 缺失），无法执行 call 步骤', cause: 'env-unavailable' };
+        /*
+         * **`@version` 今天不参与解析** —— 平台还没有版本表（docs/14 §5 那一行），
+         * 所以 `sub.login@9` 与 `sub.login@1` 落到同一份 IR。
+         *
+         * 这一条**只出声、不改行为**，而且是刻意分成两件事的：
+         * 真正按版本解析要连版本表（store 层，P1）一起做，那不是本轮能收的；
+         * 但"**静默忽略**"这一半今天就能收，而且它本来就该单独收 ——
+         * `docs/14` 那行登记的原话是「静默忽略比报错坏」，而作者写 `@9` 时
+         * 心里明确想着"我要那个版本"。让它一路全绿，等于让用例结论建立在一个
+         * 没人实现的语义上。
+         *
+         * **为什么用提醒（`lint.reported`）而不是 error**：这条今天**没有一种正确的拒绝方式**。
+         * 报 error 会让所有已经写了 `@N` 的场景跑不了 —— 而它们跑的这份 IR 恰恰就是
+         * 版本表落地之前唯一存在的那份；拒了反而把人推向"干脆别写 @N"，
+         * 那正好把唯一还留着的需求信号也抹掉。所以是"照跑 + 说清楚"，
+         * 与 `ROW_LEASE_NOT_IMPLEMENTED` 完全同一处置（字段保留、每次都说出来）。
+         *
+         * **只发一次（按 ref 去重）**：同一个子场景被 call 十次不该吼十遍。
+         * 但**这件事已经在载体那一侧做了**，这里不再自己记一张 Set ——
+         * `collectAdvisories` 按 `(code, detail)` 合并且带 `count`，而本条的 detail
+         * 里带的就是 ref，同一个 ref 天然合成一条。
+         * **我第一版在这里自己记了 `versionlessRefs`，那是错的而不只是多余**：
+         * 同一个 ref 被**两个不同步骤** call 时，Set 会压掉第二次那条 emit，
+         * 于是提醒里的 `stepIds` 只剩第一个步骤 —— 而真相是两处都在跑这份没版本语义的 IR。
+         * 交给聚合去合，两处坐标都留得住，"吼了几遍"由 count 说。
+         */
+        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);
+        if (wantedVersion !== undefined) {
+          emit({
+            kind: 'lint.reported', stepId: s.id,
+            data: {
+              code: 'CALL_VERSION_IGNORED',
+              detail: `call 引用了版本 ${s.scenarioRef}，而 @version 目前不参与解析：`
+                + `实际跑的是按 id（${scenarioIdOfRef(s.scenarioRef)}）找到的那一份 IR，`
+                + '@9 与 @1 落到同一个文件（版本表未落地，P1 补）',
+            },
+          });
+        }
         const child = await adapters.callScenario(s.scenarioRef);
         // 解析不到不是"跳过"。skip 会让这一步从通过率分母里消失，
         // 于是"引用了一个不存在的版本"的场景可以一路全绿 —— 它压根没测任何东西。

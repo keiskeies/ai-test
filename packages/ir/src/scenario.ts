@@ -236,6 +236,29 @@ export function scenarioIdOfRef(ref: string): string {
   return ref.split('@')[0]!;
 }
 
+/**
+ * `scenarioRef`（`id@version`）里的 **version** 部分；没写就是 `undefined`。
+ *
+ * 与 {@link scenarioIdOfRef} 住在同一个文件、同一个理由：**ref 的切分不许有第二份**。
+ * 这里返回的是"**作者有没有提出版本这个要求**"，而**不是**"用的是哪个版本"——
+ * 后者今天没有答案（没有版本表）。
+ *
+ * 为什么单独成一个函数而不是让调用方 `ref.includes('@')`：
+ * 那个写法会把 `id@`（写了 @ 而没写版本）也算成"提出了要求"，而后面什么都没有。
+ * 判据集中在一处，将来要放宽或收紧只有一个地方要改。
+ *
+ * **刻意不限制成"纯数字"**：`sub.login@v3` 同样是提出了一个版本要求，
+ * 把它排除在外就等于**又给那一种写法留下静默** —— 而这一条存在的全部理由
+ * 就是终结静默。宁可把 `@draft` 这种非数字版本也一并吼一声（那句话本身
+ * 没断言版本长什么样，只说"这一句没生效"），也不要漏掉任何一种写法。
+ */
+export function scenarioVersionOfRef(ref: string): string | undefined {
+  const at = ref.indexOf('@');
+  if (at < 0) return undefined;
+  const v = ref.slice(at + 1);
+  return v.length > 0 ? v : undefined;
+}
+
 /** 一条 `call` 步骤：在**哪一步**、call 的**哪个 ref** */
 export interface CallSite {
   at: string;

@@ -325,3 +325,56 @@ test('父子两层用**同名** call 步骤：根因要钻到最里层，不能�
   assert.match(xml, /根因在子场景步骤：sub\.leaf\/la=fail/,
     `必须钻到最里层那一步。停在 sub.mid/k1 就是拿错了作用域。实际：\n${xml}`);
 });
+
+test('refs 里没写 @版本 时，**不许**出现 CALL_VERSION_IGNORED（这条管的是误报）', async () => {
+  /*
+   * `advisories.test.ts` 那张表只证明"写了 @9 会吼"，**它证不出"没写就不吼"** ——
+   * 一个无条件 emit 的实现能让那张表全绿。那是本仓反复记的那一族的又一格：
+   * 提醒一旦在合法写法上响，人学会的是跳过提醒，而不是修用例
+   *（`SLEEP_USED` 与 `hintOnTimeout` 那两处都为这件事写过"只在必要时说"）。
+   *
+   * 这条同时管住另一种坏法：把判据写成 `ref.includes('@')` 之外再放宽到
+   * "只要 ref 里有版本号字样"，那会让 `scn.v1login`（id 里带 v1）也中枪。
+   */
+  const child = defineScenario({
+    schemaVersion: '1', id: 'scn.plain', name: '子', env: { environmentRef: 'unit' },
+    body: [{ ...b('n'), kind: 'noop' }],
+  } as unknown as ScenarioDraft);
+  const report = await run(
+    scen([{ ...b('c1'), kind: 'call', scenarioRef: 'scn.plain' } as StepDraft]),
+    { adapters: { callScenario: async () => child } as never },
+  );
+  // 夹具自检：call 真跑到了，否则"没有这条提醒"只是因为压根没跑到那一步
+  assert.ok((report.childRuns ?? []).length >= 1, '夹具前提：子场景没跑起来，那"没报提醒"是空测试');
+  const fired = report.events.filter(
+    (e) => e.kind === 'lint.reported' && (e.data as { code?: string })?.code === 'CALL_VERSION_IGNORED');
+  assert.deepEqual(fired, [], `没写 @版本 就不该说版本被忽略：${JSON.stringify(fired)}`);
+});
+
+test('两个不同步骤 call 同一个带版本的 ref 时，提醒里**两个步骤都在**', async () => {
+  /*
+   * 这条是**我自己犯过的那个错的回归测试**：第一版为了"一次 run 只吼一声"
+   * 在解释器里记了一张按 ref 去重的 Set，于是第二个 call 步骤的那条 emit
+   * 被压掉，提醒里的 stepIds 只剩第一个步骤 —— 报告说的比发生过的少，
+   * 而那正是本仓最贵的那一族。
+   *
+   * 正确做法是不在 emit 侧去重，交给 `collectAdvisories` 按 (code, detail) 合并：
+   * 它合并的是**展示**，`stepIds` 与 `count` 都留着。
+   */
+  const child = defineScenario({
+    schemaVersion: '1', id: 'scn.twice', name: '子', env: { environmentRef: 'unit' },
+    body: [{ ...b('n'), kind: 'noop' }],
+  } as unknown as ScenarioDraft);
+  const report = await run(
+    scen([
+      { ...b('ca'), kind: 'call', scenarioRef: 'scn.twice@2' } as StepDraft,
+      { ...b('cb'), kind: 'call', scenarioRef: 'scn.twice@2' } as StepDraft,
+    ]),
+    { adapters: { callScenario: async () => child } as never },
+  );
+  const fired = report.events.filter(
+    (e) => e.kind === 'lint.reported' && (e.data as { code?: string })?.code === 'CALL_VERSION_IGNORED');
+  assert.equal(fired.length, 2, `两处 call 各发一条（合并是展示侧的事）。实际 ${fired.length} 条`);
+  assert.deepEqual([...new Set(fired.map((e) => e.stepId))].sort(), ['ca', 'cb'],
+    '两个发起步骤都要在，否则"谁在跑这份没版本语义的 IR"只说了一半');
+});

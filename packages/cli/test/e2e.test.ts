@@ -502,13 +502,22 @@ test('call 子场景：CLI 真能解析到磁盘上的另一个文件（这个�
   } finally { await f.close(); }
 });
 
-test('已知缺口：scenarioRef 的 @version 今天不参与解析（版本表落地时要删这条）', async () => {
-  // 这条断言的是**当前的**行为，不是期望的行为。它存在的意义是把这个缺口
-  // 放在测试套件里而不是只放在注释里：`sub.login@9` 与 `sub.login@1` 现在
-  // 落到同一个文件，而作者写 `@9` 时心里想的是"我要那个版本"。
-  // 平台还没有版本表（证据包里的 versionId 也还是 undefined），
-  // 所以文件系统里"一个 id 一个文件"就是当前唯一的版本形态。
-  // **版本表落地的那天，这条会变红 —— 那是它该有的结局，删掉它并改成按版本解析。**
+test('已知缺口：scenarioRef 的 @version 今天不参与解析，但**不再静默**', async () => {
+  /*
+   * 这条断言的是**当前的**行为，不是期望的行为。它存在的意义是把这个缺口
+   * 放在测试套件里而不是只放在注释里：`sub.login@9` 与 `sub.login@1` 现在
+   * 落到同一个文件，而作者写 `@9` 时心里想的是"我要那个版本"。
+   * 平台还没有版本表（证据包里的 versionId 也还是 undefined），
+   * 所以文件系统里"一个 id 一个文件"就是当前唯一的版本形态。
+   * **版本表落地的那天，这条会变红 —— 那是它该有的结局，删掉它并改成按版本解析。**
+   *
+   * 本轮把两半**分开**处理，所以这条也分成两句断言：
+   *  - **解析这一半没动**（要连版本表，属 P1 store）；
+   *  - **静默这一半修掉了**：解释器发 `CALL_VERSION_IGNORED`，
+   *    经 `advisories.ts` 那个载体进 HTML / junit / summary.txt 三个出口。
+   * 分成两件事是因为它们的阻塞点不同 —— 我原先把两半当成一件事，
+   * 于是"静默忽略"这一半跟着版本表一起排到了 P1，而它今天就能修。
+   */
   const f = await fixture();
   try {
     await writeFile(join(f.dir, 'child.json'), JSON.stringify({
@@ -523,9 +532,17 @@ test('已知缺口：scenarioRef 的 @version 今天不参与解析（版本表�
     const code = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
                              '--evidence-dir', join(f.dir, 'verEv'), '--clock', 'deterministic'], io);
     const log = io.stdout.join('\n') + io.stderr.join('\n');
+    // ── 第一半：解析行为**没变**（缺口还在）
     assert.equal(code, EXIT.OK, `带 @99 也解析到了那个文件（这就是缺口本身）。${log}`);
     assert.ok(f.requests() >= 1, '前提：子场景真的跑了');
     assert.doesNotMatch(log, /解析不到|不存在/, `@99 今天是**被忽略**而不是被拒。${log}`);
+    /* ── 第二半：缺口从此**说得出**。断 CLI 出口而不是引擎事件 ——
+     * 事件在 trace.jsonl 里"有"过很多次，而本仓实测过那不等于人看得见
+     *（advisories.ts 那个文件整篇就是为这件事写的）。*/
+    assert.match(log, /CALL_VERSION_IGNORED|@version 目前不参与解析/,
+      `写了 @99 而平台按 id 跑了另一份 IR，这句话必须到 CLI 眼前。${log}`);
+    // 那句话要带上"实际按谁找的"，否则人只知道版本没生效、不知道跑了哪份
+    assert.match(log, /sub\.login/, `提醒里要点出实际用的 id。${log}`);
   } finally { await f.close(); }
 });
 

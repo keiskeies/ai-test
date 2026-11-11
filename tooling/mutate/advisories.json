@@ -16,7 +16,15 @@
     "",
     "为什么测试文件统一指 advisories.test.ts：三个出口（HTML 带 / JUnit property /",
     "summary.txt 段）都在那一个文件里逐个 code 验过，html.test.ts 只覆盖页面那一支。",
-    "同包不重建由驱动自己判（mustBuild），这里不写 build。"
+    "同包不重建由驱动自己判（mustBuild），这里不写 build。",
+    "",
+    "## V1/V2/V3 打的是生产者，其余各条打的是载体",
+    "其余各条测的是「事件发了而到不了人眼前」（那是这个文件存在的理由）；",
+    "V1-V3 测的是「CALL_VERSION_IGNORED 这一条该不该发、发几次」。",
+    "**V2 是这一组里最值钱的**：它坏掉时那张「每个 code 都在三个出口上」的表全绿 ——",
+    "只验「说了」的测试集，对一个逢人就说的实现免疫。所以**每条提醒都配一条反着写的测试**",
+    "（「没写这个字段时，不许出现这句话」），与 wait-not-wired.json 的 I3、",
+    "wait-world.json 的 W8 是同一条纪律。"
   ],
   "cases": [
     {
@@ -124,6 +132,30 @@
       "anchor": "  for (const e of rep.events) a.emit({ kind: e.kind, stepId: e.stepId, status: e.status, durMs: e.durMs, data: e.data, path: e.path });",
       "replace": "  // 变异 N1：子场景事件不上行中继（载体的另一头断了）",
       "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "V1 @version 提醒整条不发光（缺口重新变回静默）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined) {",
+      "replace": "        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (false as boolean && wantedVersion !== undefined) { // 变异 V1：照旧静默",
+      "testFile": "packages/engine/test/advisories.test.ts",
+      "_note": "这一条与这张表里其余各条打在相反的方向上：其余各条打的是载体（事件发了而到不了人眼前），V1 打的是生产者（压根不发）。分开的理由与 advisories.ts 这个文件的存在理由同源 —— 「发一条事件」与「人看得见」是两件事，于是「没发」与「发了没人看」也是两种坏法，各自有不同的修法、不同的红法。抓它的是 CASES 表里 CALL_VERSION_IGNORED 那一条（夹具自检就断「这条事件真的发了」）。"
+    },
+    {
+      "label": "V2 @version 提醒无条件发光（没写版本的 call 也被说成版本被忽略）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined) {",
+      "replace": "        const wantedVersion = scenarioVersionOfRef(s.scenarioRef); void wantedVersion; // 变异 V2：不看作者写没写，每次 call 都吼\n        if (true as boolean) {",
+      "testFile": "packages/engine/test/call.test.ts",
+      "_note": "与 V1 同一段代码的另一个方向，缺一条就只挡住一半：V1 = 该说的不说，V2 = 不该说的乱说。V2 是这一族里更难防的那一条，因为它让「每条提醒都能到三个出口」那张表全绿 —— 那张表只证明「写了 @9 会吼」，从不检查「没写就不吼」。所以抓它的不是那张表，是 call.test.ts 里刻意反着写的那条「refs 里没写 @版本 时，不许出现 CALL_VERSION_IGNORED」。一个只验「说了」的测试集，对一个逢人就说的实现是免疫的。乱说的代价也不止是噪音：一条会在合法写法上响的提醒，收到的反应是「把 @ 删掉」或者「把提示关掉」，于是连真正的缺口信号一起没 —— 与 hintOnTimeout 只在超时时说、SLEEP_USED 只对真 sleep 响，是同一条纪律。"
+    },
+    {
+      "label": "V3 emit 侧按 ref 自己记一张 Set（两个步骤 call 同一个 ref 时，第二个的坐标被压掉）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined) {",
+      "replace": "let __vDedup: Set<string> = new Set();\n        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined && !__vDedup.has(s.scenarioRef)) { __vDedup.add(s.scenarioRef); // 变异 V3：emit 侧自己去重",
+      "testFile": "packages/engine/test/call.test.ts",
+      "_note": "这条打的 bug 是本轮真写过的一版实现：我当时想「同一个子场景被 call 十次不该吼十遍」，于是在解释器里记了一张按 ref 的 Set。方向对、层次错 —— 合并是展示侧的事（collectAdvisories 按 (code, detail) 合并并带 count），放到 emit 侧之后，第二个 call 步骤的那条 emit 压根没发出去，提醒里的 stepIds 只剩第一个步骤：报告说的比发生过的少，而那一步确确实实也在跑这份没有版本语义的 IR。抓住它的是「两个不同步骤 call 同一个带版本的 ref 时，提醒里两个步骤都在」那条。通用的一条：已经有聚合载体的地方，生产者不要自己去重 —— 生产者一压，聚合就看不见那些坐标了（同族：日志 / trace / metrics 的客户端侧采样都会吃掉归属）。"
     }
   ]
 }

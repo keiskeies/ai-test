@@ -13,7 +13,7 @@ import {
   EVIDENCE_FILES, lintScenario, runScenario, toHtmlReport, toJUnitXml, toReport, toTraceJsonl, summaryText,
   type AdapterRegistry, type RunReport, type ScenarioGraph, type ScenarioGraphGapCause, EVIDENCE_MEMBERS
 } from '@atest/engine';
-import { callSites, defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
+import { callSites, defineScenario, scenarioIdOfRef, type Scenario, type ScenarioDraft } from '@atest/ir';
 import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidencePackage } from '@atest/store';
 
 import { formatErrors, type ParsedArgs } from './args.js';
@@ -98,15 +98,26 @@ export function makeCallResolver(o: {
   return (ref: string) => {
     const hit = cache.get(ref);
     if (hit) return hit;
-    const id = ref.split('@')[0]!;
+    // 切分只走 scenarioIdOfRef。这行从前是手写的 `ref.split('@')[0]!` ——
+    // 而 `scenarioIdOfRef` 的注释里明写着"别让用户各写一遍"，它自己却被抄了一份，
+    // 还是在这个文件里（同一族"判据有唯一支点而被抄两处"，本轮由 ref-split.test.ts
+    // 那条扫源码的测试抓出来）。抄的那份今天行为相同，改天版本语义落地时
+    // 只改 IR 那一处，这里就会安静地继续按 id 找 —— 而没有任何东西会红。
+    const id = scenarioIdOfRef(ref);
     /*
-     * **`@version` 今天被忽略**，只按 id 找文件 —— `sub.login@2` 与 `sub.login@1`
+     * **`@version` 今天不参与解析**，只按 id 找文件 —— `sub.login@2` 与 `sub.login@1`
      * 落到同一个文件。这是**已知缺口**而不是设计：平台还没有版本表（证据包里的
      * `versionId` 同样还是 `undefined`，见 docs/14 §5），本地文件系统里
      * "一个 id 一个文件"就是当前唯一的版本形态。
      *
      * 之所以**不**在这里报错或忽略整个 ref：作者写 `@2` 说明他心里有"版本"这个概念，
      * 今天静默忽略它比告诉他"版本还不参与解析"坏得多 —— 他会以为 CI 跑的是第 2 版。
+     * **而"告诉他"这一半本轮已经接上了**：不在这里报，而是由解释器发
+     * `CALL_VERSION_IGNORED` 那条运行期提醒（`interpreter.ts` 的 call 分支），
+     * 于是它同时进 `report.html` / `junit.xml` / `summary.txt` 三个出口。
+     * 为什么不在这里报：这里只有 ref 字符串，不知道**是哪一步**的 call 在要它，
+     * 而装配期抛错会让整场跑不了 —— 那条提醒的取舍（照跑 + 说清楚）在解释器那边写着。
+     *
      * 版本表落地时要一起改的还有 call 的解析与证据里的 versionId，别只改这一处。
      */
     const p = (async () => {

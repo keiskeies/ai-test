@@ -8,7 +8,7 @@
  * report.html  提到 = false      junit.xml 提到 = false      summary.txt / CLI 提到 = false
  * ```
  *
- * 十一条 emit 点全都在响，而**唯一的落点是 trace.jsonl 里的一行 JSON**。
+ * 这些 emit 点全都在响，而**唯一的落点是 trace.jsonl 里的一行 JSON**。
  * `docs/14` §5 里登记着"发这条事件是为了不让行租约静默地看起来已启用"——
  * 那句话本轮实测**是假的**，所以那个文件的原文也一起改了。
  *
@@ -16,7 +16,7 @@
  *
  * 只验"页面上有个 div"会放过最坏的情形：**十条里有三条因为形状不对而没渲染**
  * （没有 stepId 的、detail 是对象的、一次 run 里发很多次的）。
- * 所以先把十一条 code 逐个跑到三个出口上，再单独测那三种形状。
+ * 所以先把这些 code 逐个跑到三个出口上，再单独测那三种形状。
  *
  * ## 三种出口都要测到，少一个就等于那个出口没人守
  *
@@ -69,13 +69,13 @@ function outlets(report: RunReport): Record<OutletName, string> {
   };
 }
 
-/* ── 十一条运行期提醒逐个跑到三个出口上 ─────────────────────────────────── */
+/* ── 运行期提醒逐个跑到三个出口上（**表长即条数**，别在注释里另记一份）─────── */
 
 /**
  * 每个 code 配一个**能真的发出它**的夹具。
  *
  * 这些夹具本身就是本文件的一半价值：它们同时是"这条 emit 点在什么条件下会响"
- * 的可执行说明。写这个表之前，十一条里有五条**在全仓没有任何测试能让它响**
+ * 的可执行说明。写这个表之前，这张表里的 code 有约一半**在全仓没有任何测试能让它响**
  * （`ROW_LEASE_NOT_IMPLEMENTED` / `VALIDATE_REQUEST_UNAVAILABLE` /
  *  `REQUEST_SCHEMA_MISMATCH` / `LLM_ADAPTER_MISSING` / `LOOP_TRUNCATED`），
  * 也就是说那五条连"确实会发出去"都没人验过 —— 只有这个表里的夹具跑通，
@@ -133,9 +133,30 @@ const CASES: Array<{ code: string; make: () => Promise<RunReport> }> = [
   { code: 'LOOP_TRUNCATED', make: () => run(scen([{ ...b('fe'), kind: 'forEach', items: '$.xs', as: 'x', maxIterations: 2, steps: [{ ...b('n1'), kind: 'noop' }] } as StepDraft]), { inputs: { xs: [1, 2, 3, 4, 5] } }) },
   { code: 'LOOP_CEILING_HIT', make: () => run(scen([{ ...b('wh'), kind: 'while', condition: '1 == 1', maxIterations: 2, steps: [{ ...b('n1'), kind: 'noop' }] } as StepDraft])) },
   { code: 'LOOP_BODY_NEVER_RUN', make: () => run(scen([{ ...b('fe'), kind: 'forEach', items: '$.xs', as: 'x', steps: [{ ...b('n1'), kind: 'noop' }] } as StepDraft]), { inputs: { xs: [] } }) },
+  {
+    /*
+     * `@version` 今天不参与解析（没有版本表），而**静默忽略比报错坏** ——
+     * 作者写 `@3` 时心里明确想着"我要那个版本"，一路全绿等于让用例结论
+     * 建立在一段没人实现的语义上。所以照跑 + 说清楚。
+     *
+     * 夹具里那个子场景**必须真能被解析到**：解析不到的话 call 在
+     * `if (!child)` 那一步就 error 返回，这条 emit 压根发不出去
+     *（与 LLM_ADAPTER_MISSING 那条同一个夹具陷阱）。
+     */
+    code: 'CALL_VERSION_IGNORED',
+    make: async () => {
+      const sub = defineScenario({
+        schemaVersion: '1', id: 'scn.vsub', name: '子', env: { environmentRef: 'unit' },
+        body: [{ ...b('n'), kind: 'noop' }],
+      } as unknown as ScenarioDraft);
+      return run(scen([{ ...b('c1'), kind: 'call', scenarioRef: 'scn.vsub@3' } as StepDraft]), {
+        adapters: { callScenario: async (ref: string) => (ref.startsWith('scn.vsub') ? sub : undefined) } as never,
+      });
+    },
+  },
 ];
 
-describe('十一条运行期提醒：每条都要出现在三个出口上', () => {
+describe('运行期提醒：每条都要出现在三个出口上', () => {
   for (const c of CASES) {
     test(c.code, async () => {
       const report = await c.make();
@@ -424,7 +445,7 @@ print(json.dumps({'kids': kids, 'props': props,
  *
  * 为什么要手工拼而不是跑真引擎：这一组要验的是**出口在给定事件下怎么说**，
  * 而"25 类不同的提醒"在真实引擎里需要 25 个不同的触发条件 —— 那既写不出来，
- * 也不是这里要问的问题（十一条 emit 点各自能不能响，上面那张 CASES 表已经逐个验过）。
+ * 也不是这里要问的问题（各条 emit 点能不能响，上面那张 CASES 表已经逐个验过）。
  * 反过来，凡是要问"**这条事件真的会发吗**"的判据，一律用真引擎（CASES），
  * 不用这个 helper —— 手工拼的事件流只能证明"发出来之后到不到人眼前"。
  */
