@@ -9,7 +9,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lintScenario, toReport, LINT_DOCS, isNearMiss, type LintCode, type LintContext } from '../src/index.js';
+import { lintScenario, toReport, LINT_DOCS, isNearMiss, graphGapSummary, type LintCode, type LintContext, type ScenarioGraph, type ScenarioGraphGap } from '../src/index.js';
 import * as irSchema from '@atest/ir';
 import { ZodType } from 'zod';
 import { CONTAINER_KINDS } from '@atest/ir';
@@ -225,11 +225,176 @@ describe('依赖关系', () => {
     assert.ok(codes([{ ...b('c'), kind: 'call', scenarioRef: 'scn.test', args: {} }]).includes('SELF_REFERENCING_CALL')));
   test('DEPENDENCY_CYCLE：跨场景成环', () => {
     const body: StepDraft[] = [{ ...b('c'), kind: 'call', scenarioRef: 'other', args: {} }];
-    assert.ok(lintScenario(scen(body as never), { scenarioGraph: { 'scn.test': ['other'], other: ['scn.test'] } }).some((i) => i.code === 'DEPENDENCY_CYCLE'));
+    assert.ok(lintScenario(scen(body as never), { scenarioGraph: { edges: { 'scn.test': ['other'], other: ['scn.test'] } } }).some((i) => i.code === 'DEPENDENCY_CYCLE'));
   });
   test('…无环时不报', () => {
     const body: StepDraft[] = [{ ...b('c'), kind: 'call', scenarioRef: 'other', args: {} }];
-    assert.ok(!lintScenario(scen(body as never), { scenarioGraph: { 'scn.test': ['other'], other: [] } }).some((i) => i.code === 'DEPENDENCY_CYCLE'));
+    assert.ok(!lintScenario(scen(body as never), { scenarioGraph: { edges: { 'scn.test': ['other'], other: [] } } }).some((i) => i.code === 'DEPENDENCY_CYCLE'));
+  });
+
+  /*
+   * 下面四条是本轮把这张图从 `Record<string, string[]>` 换成 `ScenarioGraph` 时加的，
+   * 每条对应一次**实测**（不是推演）。前两条尤其要紧：它们防的不是"漏报环"，
+   * 而是"**图给了、规则跑了、而它其实什么都没看见**"——那种失效比没接更坏，
+   * 因为接的人会以为它在工作。
+   */
+  test('图按 **ref** 键（带 @version）时仍然成环：键的归一化在这一侧做', () => {
+    /*
+     * 本轮实测过的静默失效：`visit` 从 `scenario.id`（`scn.test`）起跳，
+     * 而调用方给的是 `'scn.test@1'` 这种带版本的键时，**第一跳就查不到出边** ——
+     * 于是环真在、图也给全了，规则一声不响。
+     * 修法有两个方向（要求调用方必须切干净 / 这一侧自己归一化），选后者：
+     * "调用方会不会切分"这件事没法在编译期保证，而这一侧一行代码就能保证。
+     */
+    const body: StepDraft[] = [{ ...b('c'), kind: 'call', scenarioRef: 'other@1', args: {} }];
+    const g: ScenarioGraph = { edges: { 'scn.test@1': ['other@1'], 'other@1': ['scn.test@1'] } };
+    const hit = lintScenario(scen(body as never), { scenarioGraph: g }).find((i) => i.code === 'DEPENDENCY_CYCLE');
+    assert.ok(hit, '带 @version 的键必须被归一化后照样查出环');
+    // 归一化不许漏进**给人看的那句话**：链条写 id，不写 ref
+    assert.ok(!hit!.message.includes('@'), `成环链条不该带着没切分的 ref：${hit!.message}`);
+  });
+
+  test('自环只报 SELF_REFERENCING_CALL 一条，不双报', () => {
+    /*
+     * 改前实测：`scn.test` call `scn.test` 时 DEPENDENCY_CYCLE 与
+     * SELF_REFERENCING_CALL **一起响**。同一条 IR 上的一个坏被报成两条，
+     * 读的人会以为是两处要改（而修法是同一个）。
+     * 留 SELF_REFERENCING 那条因为它更具体：带 stepId、说得出"无限递归"。
+     */
+    const got = codes([{ ...b('c'), kind: 'call', scenarioRef: 'scn.test@1', args: {} }], {
+      scenarioGraph: { edges: { 'scn.test': ['scn.test'] } },
+    });
+    assert.equal(got.filter((c) => c === 'SELF_REFERENCING_CALL').length, 1);
+    assert.ok(!got.includes('DEPENDENCY_CYCLE'), `自环不该再报第二条：${got.join(',')}`);
+  });
+
+  test('同一个环经两条路径撞上只报一条；**两个不同的环必须报两条**', () => {
+    /*
+     * 两个方向都要钉，因为它们坏的方向相反：
+     *  - **不判重**：同一个环从两条路径各报一遍，读的人以为有两个问题；
+     *  - **判得太狠**：两个真实的环合成一条，那就是**少报**（本仓那一族的正面形态）。
+     *
+     * 第一个 fixture：{a,b} 这一个环，可以走 m→a→b→a，也可以走 m→c→a→b→a。
+     * 去重的键取"环上那些 id 排序后的串"，所以两条路径算出同一个键。
+     * 第二个 fixture：{a,b} 与 {a,c} 是两个**节点集不同**的环，键必然不同 → 两条。
+     */
+    const one: ScenarioGraph = { edges: { 'scn.test': ['m'], m: ['a', 'c'], a: ['b'], b: ['a'], c: ['a'] } };
+    const body: StepDraft[] = [{ ...b('c'), kind: 'call', scenarioRef: 'm', args: {} }];
+    const gotOne = lintScenario(scen(body as never), { scenarioGraph: one }).filter((i) => i.code === 'DEPENDENCY_CYCLE');
+    assert.equal(gotOne.length, 1, `同一个环报了 ${gotOne.length} 条：${gotOne.map((i) => i.message).join(' | ')}`);
+
+    const two: ScenarioGraph = { edges: { 'scn.test': ['a'], a: ['b', 'c'], b: ['a'], c: ['a'] } };
+    const gotTwo = lintScenario(scen(body as never), { scenarioGraph: two }).filter((i) => i.code === 'DEPENDENCY_CYCLE');
+    assert.equal(gotTwo.length, 2, `两个不同的环只报了 ${gotTwo.length} 条（判重判过头 = 少报）：${gotTwo.map((i) => i.message).join(' | ')}`);
+  });
+
+  test('图不完整时报 CALL_GRAPH_INCOMPLETE，而不是安静地"没环"', () => {
+    /*
+     * 这一条是整张 `ScenarioGraph` 形状改造的**存在理由**。
+     * 裸 Record 的接口下"没看全"与"确认无环"是同一个输出，于是报告上的
+     * 「✓ 通过」会被读成"环检测跑过了"。这里钉的是**缺口的可见性**，
+     * 所以断言分三面：报了、是 warning（不许拦执行）、话说清了缺从哪儿开始。
+     */
+    const body: StepDraft[] = [{ ...b('c'), kind: 'call', scenarioRef: 'ghost@1', args: {} }];
+    const withGap = lintScenario(scen(body as never), { scenarioGraph: { edges: { 'scn.test': ['ghost'] }, gaps: [{ from: 'scn.test', ref: 'ghost@1' }] } });
+    const gap = withGap.find((i) => i.code === 'CALL_GRAPH_INCOMPLETE');
+    assert.ok(gap, '解析不到 ref 时必须说出来');
+    assert.equal(gap!.level, 'warning', '是 warning 不是 error：解析不到有正当原因（部分 checkout / 子场景在别的仓），定成 error 会让人去关规则');
+    assert.match(gap!.message, /判不出/, '要说清"这里往后的环判不出"，而不是只说"图不全"');
+    // **正向对照**：完整的图不许有这条（否则上面那两句是恒真的）
+    const clean = lintScenario(scen(body as never), { scenarioGraph: { edges: { 'scn.test': ['other'], other: [] } } });
+    assert.ok(!clean.some((i) => i.code === 'CALL_GRAPH_INCOMPLETE'), '图完整时不该报缺口');
+    // 触上限是另一种缺口，也要说出来
+    const trunc = lintScenario(scen(body as never), { scenarioGraph: { edges: { 'scn.test': ['a'] }, truncated: 3 } });
+    assert.match(trunc.find((i) => i.code === 'CALL_GRAPH_INCOMPLETE')!.message, /节点上限/);
+    // `gaps: []`（键**在**而长度为 0）不算不完整。这条钉的是 `graphComplete` 里那句
+    // `!(g.gaps?.length ?? 0)`：写成 `!g.gaps` 的话，空数组是 truthy，
+    // 每一次完整的 lint 都会带上一条"图不完整" —— 而那条 warning 一旦常开，
+    // 下一次真不完整时就没人看了（本项目对"恒常出现的告警"记过多次账）
+    const emptyGaps = lintScenario(scen(body as never), { scenarioGraph: { edges: { 'scn.test': [] }, gaps: [] } });
+    assert.ok(!emptyGaps.some((i) => i.code === 'CALL_GRAPH_INCOMPLETE'), 'gaps 是空数组时不该报（键在不在不等于完不完整）');
+  });
+
+  test('缺口按**原因**分说：文件不存在 ≠ 文件在而 IR 读不出（两种修法不同）', () => {
+    /*
+     * 本轮量到的真实错归因：子场景文件在而里面那份 IR 不合法时，话说成
+     * 「1 个 call 目标**解析不到**」，于是人去查那个 ref 存不存在、拼没拼错 ——
+     * 而真相是文件一直在，要修的是文件里的内容。**这一格还比"缺文件"更要紧：
+     * 环可能正藏在那个读不出来的文件里。**
+     *
+     * 判据交给 `graphGapSummary`（独立实现），所以这里是一行断言而不是"跑一次真命令"。
+     * 两侧都要断：只断"读不出那种说了读不出"，实现退化成"永远说读不出"也能过关。
+     */
+    const missing = graphGapSummary([{ from: 'scn.a', ref: 'x@1', reason: 'not-found' }]);
+    const invalid = graphGapSummary([{ from: 'scn.a', ref: 'x@1', reason: 'invalid-ir', detail: 'body.0.kind 不是合法值' }]);
+    assert.match(missing.lines[0]!, /找不到/);
+    assert.ok(!missing.lines[0]!.includes('读不出'), '文件不存在时不许提"IR 读不出"（那是另一种修法）');
+    assert.match(invalid.lines[0]!, /读不出/);
+    assert.match(invalid.lines[0]!, /body\.0\.kind/, 'detail 要带上，否则"读不出"还是没有下文');
+    assert.ok(!invalid.lines[0]!.includes('找不到'), '文件在时不许说"找不到" —— 那句话会让人去查 ref 拼没拼错');
+    // 修法也必须分岔：给"文件在"的人一句"把子场景放进 irDir"，他会去改 ref
+    assert.match(invalid.fixes.join(''), /内容/, '修 IR 的理由要说清修的是**内容**');
+    assert.ok(!invalid.fixes.join('').includes('irDir'), '不许给"文件在"的人一个搬文件的动作');
+    assert.match(missing.fixes.join(''), /irDir/);
+  });
+
+  test('生产方没记原因时，**不许**说成"文件找不到"（那是凭空捏造的归因）', () => {
+    /*
+     * `reason` 在类型上是可选的（引擎里手拼的夹具图分辨不出原因）。
+     * 我第一版写的是 `gaps.filter(g => g.reason !== 'invalid-ir')` → 归到"找不到文件"，
+     * 于是"没记原因"被说成了"文件不存在"。那种句子的害处与"说错"同级：
+     * 人会照做（去查 ref），而真相可能压根不是这件事。
+     * 现在认不出来就照实说认不出来，而且**不给修法**。
+     */
+    const unknown = graphGapSummary([{ from: 'scn.a', ref: 'x@1' }]);
+    assert.match(unknown.lines[0]!, /没记下原因/);
+    assert.ok(!unknown.lines[0]!.includes('找不到'), '不许把"没记原因"并入"文件不存在"');
+    assert.ok(!unknown.lines[0]!.includes('读不出'), '也不许并入另一种');
+    assert.deepEqual(unknown.fixes, [], '认不出原因时不给修法（不承诺一个不知道能不能做的动作）');
+    // 未知键同理：reason 的值来自类型，但外部生产方给的字符串不可信
+    const weird = graphGapSummary([{ from: 'scn.a', ref: 'x@1', reason: 'whatever' as 'not-found' }]);
+    assert.match(weird.lines[0]!, /没记下原因/, '认不出的 reason 落到兜底那一格，不许悄悄复用别的原因的措辞');
+  });
+
+  test('多种原因同时在场：**每种一句，且 message 里说了的原因 fix 里必须有**', () => {
+    /*
+     * 后半句是这条测试的重点，也是我把措辞与修法放进**同一张表**的原因。
+     * 第一版分两处算"本次有哪些原因"（message 用分桶、fix 用 `gaps.filter(…)`），
+     * 那时"message 里出现了 invalid-ir 而 fix 里没提"只需要有人改一处就能诞生 ——
+     * 半截建议比没建议更坏：人以为已经看完修法了。
+     * 所以这里不是逐条点死文案，而是断**两个集合恒等**这个不变式。
+     */
+    const gaps = [
+      { from: 'scn.a', ref: 'bad1@1', reason: 'invalid-ir' as const, detail: '不是合法 JSON' },
+      { from: 'scn.a', ref: 'bad2@1', reason: 'invalid-ir' as const },
+      { from: 'scn.a', ref: 'ghost@1', reason: 'not-found' as const },
+      { from: 'scn.a', ref: 'mystery@1' },
+    ];
+    const { lines, fixes } = graphGapSummary(gaps, 4);
+    assert.equal(lines.length, 4, `三种原因 + 触上限 = 四句：\n${lines.join('\n')}`);
+    assert.match(lines.join(''), /2 处/);
+    assert.match(lines.join(''), /例如 bad1@1/, '多于一个时要点样本（一个时不写"例如"）');
+    assert.match(lines.join(''), /节点上限/);
+    // 不变式：**message 里出现的每一类有修法的缺口，fix 里都得有一句**
+    const fixText = fixes.join('；');
+    assert.match(fixText, /文件在而 IR 不合法的那 2 处/);
+    assert.match(fixText, /文件不存在的那 1 处/);
+    assert.match(fixText, /达到节点上限的那 4 处/);
+    assert.equal(fixes.length, 3, `没记原因那一类不该有修法，所以是 3 句：\n${fixText}`);
+    // 多的那类排在前面（读的人只会认真读第一句）
+    assert.match(lines[0]!, /^2 处/, `最多的原因该排第一：\n${lines.join('\n')}`);
+  });
+
+  test('detail 里混进密钥形态时**不许原样进日志**（那句话源自别人写的文件）', () => {
+    /*
+     * `detail` 是 CLI 解析器从磁盘上那份文件的报错里取的，而 `JSON.parse`
+     * 会带上出错位置附近的**原文**。这句话要进 lint 输出与 CI 日志，那是要落盘的文字，
+     * 所以我不能假设它永远无害 —— 与散文那三个出口（`esc`/`xmlSafe`/`plainSafe`）同一条约束。
+     */
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    const { lines } = graphGapSummary([{ from: 'scn.a', ref: 'bad@1', reason: 'invalid-ir', detail: `不是合法 JSON，附近有 "${jwt}"` }]);
+    assert.ok(!lines[0]!.includes(jwt), `JWT 不许出现在结论里：${lines[0]}`);
+    assert.match(lines[0]!, /JWT:已脱敏/, '要留痕（说明确实脱过一次），不能悄悄删掉');
   });
 });
 

@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "`call` 调用图的**完整性归因**这条链：makeCallResolver 记原因 → buildScenarioGraph 拼缺口 → graphGapSummary 说话 → lint 那条规则决定说不说。tests: engine/test/lint.test.ts + cli/test/lint-call-graph.test.ts。",
+    "",
+    "这一批改的不是'有没有环'，而是**报告说得出'我没能看到哪一段'、以及那一段为什么看不见**。",
+    "这类改动最危险的坏法是**测试全绿而话说不清**：文案与判据都还在，只是那句话把人送去查错的方向。",
+    "本轮整轮的起因就是这样一个坏法 —— 子场景文件在而里面那份 IR 读不出时，",
+    "话说成「1 个 call 目标**解析不到**」，于是人去查那个 ref 拼没拼错，而真相是文件一直在。",
+    "所以每条变异都在问一句：**报告说的话，还配得上它知道的那些事实吗？**",
+    "",
+    "M1/M2/M3 打在'完整性'这一个概念的三个不同部位，不是凑数：",
+    " M1 = 完整性判据恒真（退化成裸 Record 时代那个'没看全'与'确认无环'同一个输出）；",
+    " M2 = 规则体不走那个判据、自己重写一遍（生产方与判据分叉，只认触上限那种缺口）；",
+    " M3 = 分了原因但把'没记原因'并入'文件不存在'（凭空捏造的归因，比不说更坏）。",
+    "M4/M5 钉的是**结论与修法同源**这个不变式：我第一版把'本次有哪些原因'算了两遍",
+    "（message 分桶、fix 用 gaps.filter），那时'消息里出现了某种原因而修法没提'",
+    "只需要有人改一处就能诞生。M4 抽掉 fixes 那一半、M5 抽掉触上限那一桶，各打一侧。",
+    "",
+    "M6 是唯一一条打在**磁盘边界**上的：detail 只取首行。它坏掉时其余断言仍然全绿 ——",
+    "除非有人断言'detail 只许一行'（那条断言就写在 cli 那个文件里）。它防的是",
+    "整段校验清单进 CI 日志：校验失败最常见的对象是登录请求，那等于把实际值写进磁盘。",
+    "",
+    "M7 打在**原因表按 ref 键**这一点上（改成'记住最后一次失败'）。这条最隐蔽：",
+    "解析器按 ref 缓存，同一个坏 ref 只触发一次登记，所以'最后一次'在最简单的夹具里恰好是对的；",
+    "要两种原因同时在场才露馅 —— 所以抓它的是那条端到端的'两种缺口同时在场'，",
+    "而不是单元那条（单元那条自己传 gapReasonOf，改 lintCtxFor 里那一行影响不到它）。",
+    "",
+    "M8 打在脱敏上，而且 replace 是**类型合法**的写法（String 包一层）。",
+    "写成会让 typecheck 崩的样子，抓到它的是编译器而不是测试 —— 那种'被抓到'没有信息量。",
+    "",
+    "没有 expect=equivalent 的条目：这批每条都是可观测行为（那句话有没有出现、内容对不对）。",
+    "唯一接近等价的是 rows.sort 那一行（并列计数时的先后），而那正好说明它**不该**进变异集：",
+    "断言并列时的顺序等于把'实现恰好按插入序'写成契约，那种测试会在无害重构时红。"
+  ],
+  "cases": [
+    {
+      "label": "完整性判据恒真（图缺边也算完整 → CALL_GRAPH_INCOMPLETE 永远不报，静默的\"没环\"回来了）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  !(g.gaps?.length ?? 0) && !(g.truncated ?? 0);",
+      "replace": "  (void g, true); // 变异 M1：graphComplete 恒真，缺口不再可见",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "规则体不走 graphComplete、自己重写一遍\"完整\"（只认触上限，有 gaps 时安静通过）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (!graphComplete(ctx.scenarioGraph)) {",
+      "replace": "    if ((ctx.scenarioGraph.truncated ?? 0) > 0) { // 变异 M2：判据的第二份实现，且漏掉 gaps 那一半",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "认不出的原因并入\"文件不存在\"（人会照着去查 ref 拼没拼错）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    const hit = buckets.get(g.reason ?? '');",
+      "replace": "    const hit = buckets.get(g.reason === 'invalid-ir' ? 'invalid-ir' : 'not-found'); // 变异 M3：非 invalid 一律算找不到",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "修法那一半不产出（结论说了缺哪种、fix 一个字没提 = 半截建议）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    fixes: rows.flatMap(({ n, cause }) => (cause.fix ? [`${cause.label}的那 ${n} 处：${cause.fix}`] : [])),",
+      "replace": "    fixes: [], // 变异 M4：结论与修法不再是同一批桶的产物",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "触上限不进桶表（\"到了上限所以没看完\"这件事整个消失）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  if (truncated) rows.push({ n: truncated, cause: GAP_TRUNCATED });",
+      "replace": "  void truncated; // 变异 M5：静默截断",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "detail 不再只取首行（整段校验清单进 lint 输出与 CI 日志）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "            const first = (e as Error).message.split('\\n').find((l) => l.trim())?.trim() ?? String(e);",
+      "replace": "            const first = (e as Error).message; // 变异 M6：整段错误原文进 detail（校验清单逐条写着失败字段的值）",
+      "testFile": "packages/cli/test/lint-call-graph.test.ts"
+    },
+    {
+      "label": "缺口原因改成\"记住最后一次失败\"（两个缺口挂上同一个原因 = 捏造归因）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "    gapReasonOf: (ref) => gapLog.get(ref),",
+      "replace": "    gapReasonOf: () => [...gapLog.values()].pop(), // 变异 M7：按\"最后一次\"给原因，不按 ref 查",
+      "testFile": "packages/cli/test/lint-call-graph.test.ts"
+    },
+    {
+      "label": "缺口那句不过值形态脱敏（源自别人文件的 detail 原样进日志）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      redactSecretText(sample",
+      "replace": "      String(sample",
+      "testFile": "packages/engine/test/lint.test.ts"
+    }
+  ]
+}

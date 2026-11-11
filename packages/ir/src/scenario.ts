@@ -219,6 +219,48 @@ export function targetSources(steps: Step[], target: TargetKind): TargetSource[]
   return out;
 }
 
+/**
+ * `scenarioRef`（`id@version`）里的 **id** 部分。
+ *
+ * 为什么要占一个导出函数而不让调用方各写一遍 `ref.split('@')[0]`：
+ * 这个切分是"**环按 id 判还是按 ref 判**"那条判据的唯一支点 ——
+ * `interpreter.ts` 里那段环检测的注释写着「判据按场景 id 而不是 ref：
+ * `A@1 → B@1 → A@2` 也是环」，而**这句话在两个地方要成立**（运行时的 callStack、
+ * 静态闸的调用图）。两处各写一遍 split，其中一处忘了切分时的表现是
+ * "`A@1 → B@1 → A@2` 这种环静态看不出来、运行时才发现" —— 而那正是这条规则存在的理由被绕过去。
+ *
+ * ⚠ `@version` 今天**不参与解析**（`cli/commands.ts` 的 makeCallResolver 只按 id 找文件，
+ * 那里记着原因：平台还没有版本表）。所以"切出 id"目前也就是"实际用哪份 IR"。
+ */
+export function scenarioIdOfRef(ref: string): string {
+  return ref.split('@')[0]!;
+}
+
+/** 一条 `call` 步骤：在**哪一步**、call 的**哪个 ref** */
+export interface CallSite {
+  at: string;
+  ref: string;
+  /** `scenarioIdOfRef(ref)` —— 图要按它键（理由见那个函数） */
+  id: string;
+}
+
+/**
+ * 这个场景**直接** call 了哪些子场景（含 setup/teardown 与所有容器里的 call）。
+ *
+ * 只走一层、不递归进子场景 —— 调用图是"每个节点记自己的出边"，
+ * 递归由消费方（`cli/commands.ts` 的 buildScenarioGraph）沿边走。
+ * 这里若替消费方做闭包，就把"环"这个概念抄进了 IR，而环检测恰恰是它要防的东西。
+ */
+export function callSites(scenario: Scenario): CallSite[] {
+  const out: CallSite[] = [];
+  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
+    if (s.kind !== 'call') return;
+    const ref = s.scenarioRef;
+    out.push({ at: s.id, ref, id: scenarioIdOfRef(ref) });
+  });
+  return out;
+}
+
 export const ScenarioVersionMetaSchema = z
   .object({
     ver: z.int().min(1),

@@ -11,9 +11,9 @@ import { dirname, join } from 'node:path';
 
 import {
   EVIDENCE_FILES, lintScenario, runScenario, toHtmlReport, toJUnitXml, toReport, toTraceJsonl, summaryText,
-  type AdapterRegistry, type RunReport, EVIDENCE_MEMBERS
+  type AdapterRegistry, type RunReport, type ScenarioGraph, type ScenarioGraphGapCause, EVIDENCE_MEMBERS
 } from '@atest/engine';
-import { defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
+import { callSites, defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
 import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidencePackage } from '@atest/store';
 
 import { formatErrors, type ParsedArgs } from './args.js';
@@ -64,7 +64,36 @@ export function makeCallResolver(o: {
    * 往往和它放在一起，而项目配置指向的是另一个仓库根 —— 只搜配置根会找不到。
    */
   scenarioDir?: string;
-}): AdapterRegistry['callScenario'] {
+  /**
+   * 解析失败的**原因**按 ref 记在这里（可选；不传就什么都不记，`run` 那条路径正是这样）。
+   *
+   * ## 为什么要区分原因，而不是"反正都失败了"
+   *
+   * `lint` 要把它写进 `CALL_GRAPH_INCOMPLETE`，而"文件不存在"与"文件里的 IR 不合法"
+   * 是两种修法。本轮实测过混成一件事的代价：子 IR 不合法时话说成"1 个 call 目标**解析不到**"，
+   * 于是人去查那个 ref 存不存在、拼没拼错 —— 而真相是文件一直在，里面那份 IR 读不出。
+   *
+   * ## 为什么是**一张按 ref 键的表**而不是一个"最后一次失败"的回调
+   *
+   * 两个原因，第二个是硬的：
+   *  1. 回调只能传"刚刚失败的那一个"，而缺口由**遍历侧**组装（只有它知道是谁发起的）。
+   *     于是遍历要能问"这个 ref 为什么失败"，那就得有一张表。
+   *  2. 解析器**按 ref 缓存**：同一个坏 ref 被 call 两次，第二次命中缓存、压根不再解析，
+   *     所以 onGap 只响一次。用"最后一次"当原因的话，第二个缺口会挂上别的 ref 的原因 ——
+   *     那是**凭空捏造的归因**，比没有原因更坏。表天然没这个问题（键就是 ref）。
+   *
+   * ⚠ 表是**只增不改**的：不做失效、不做删除，因为一次 lint/run 期间磁盘上的 IR 视为不变
+   *   （与缓存同一个前提）。缓存会跟着进程一起没，表也一样 —— 别把它当跨调用的缓存用。
+   */
+  gapLog?: Map<string, ScenarioGraphGapCause>;
+/*
+ * 返回类型不是 `AdapterRegistry['callScenario']` 而是它的 NonNullable：
+ * 那个端口是**可选属性**，类型里带着 undefined，而这个工厂永远不会返回 undefined。
+ * 挂着可选类型的话，每个"我确实拿到了一个解析器"的调用点都得自己再收窄一次
+ * （本轮加 buildScenarioGraph 时就是这样，编译报错报在调用点上，读起来像
+ *  是那个新函数写错了 —— 真相是这个函数的返回值说得比实际宽）。
+ */
+}): NonNullable<AdapterRegistry['callScenario']> {
   const cache = new Map<string, Promise<Scenario | undefined>>();
   return (ref: string) => {
     const hit = cache.get(ref);
@@ -90,16 +119,166 @@ export function makeCallResolver(o: {
         // 第一条退到 cwd，通常就够；有配置时这条覆盖"场景放在项目外"的情况）
         ...(o.scenarioDir && o.scenarioDir !== o.cwd ? [{ cfg: o.cfg, cwd: o.scenarioDir }] : []),
       ];
+      /*
+       * **"文件找不到"与"文件在而那份 IR 读不出"必须分开报**，混成一件事的后果本轮实测过：
+       * 子场景 IR 不合法时，缺口话说成"1 个 call 目标**解析不到**（例如 X）"，
+       * 于是人去查 X 存不存在、拼没拼错 —— 而真相是那个文件里的 IR 本身不合法。
+       * 这一格还比"缺文件"更要紧：**环可能正藏在那个读不出来的文件里**。
+       *
+       * 原因只进 `gapLog`、不进返回值：端口的返回类型是 `Scenario | undefined`
+       * （引擎据此报 env-unavailable），改它等于改引擎契约。
+       *
+       * ⚠ **detail 只取首行**是有意的：这句话会进 CI 日志，而校验失败最常见的对象是
+       * 登录请求 —— 整段 zod 清单搬进 lint 的输出，就等于把实际值往磁盘上写
+       * （同一族约束：ajv 那处刻意不输出 `er.data`、`HARDCODED_SECRET` 只打印长度）。
+       * 首行是"共 N 处问题 / 不是合法 JSON"这一类**不含值**的概括句；
+       * 真正带值的那些行（`body.3.target → …`）留在作者直接 `atest lint <那个文件>` 时看。
+       * 即便如此，输出侧还有一道 `redactSecretText`（engine 的 `graphGapSummary`）——
+       * 纵深防御：这一格的内容来自**外部文件**，我不能假设它永远只有一行无害文字。
+       */
+      let invalid: string | undefined;
       for (const a of attempts) {
         try {
           const path = await resolveScenarioPath(a.cfg, id, a.cwd);
-          return (await loadScenarioFile(path)).scenario;
-        } catch { /* 换下一个。找不到最终由引擎报"解析不到 + ref"，那里知道是哪一步 */ }
+          try {
+            return (await loadScenarioFile(path)).scenario;
+          } catch (e) {
+            /*
+             * 取首行**并去掉结尾的冒号**：那行往往写着「…共 N 处问题：」，
+             * 冒号后面是要被我们丢掉的清单。留着它，这句话就以一个"接下来还有内容"
+             * 的记号结尾而后面什么都没有 —— 读的人会等那个不来的下文。
+             */
+            const first = (e as Error).message.split('\n').find((l) => l.trim())?.trim() ?? String(e);
+            invalid = first.replace(/[:：]\s*$/, '');
+            // 这一份读不出，换下一个候选根：别处可能还有一份同 id 的能读
+          }
+        } catch { /* 这个根下没找到，换下一个 */ }
       }
+      /*
+       * 只记 `reason`/`detail`，**不记 `from`** —— 解析器不知道是谁发起的这条 call
+       * （它只被问"这个 ref 有没有 IR"），编一个 `from` 会被打印成归因。
+       * `detail` 只取首行：这句话会进 CI 日志，而校验失败最常见的对象是登录请求，
+       * 整段清单搬进来就等于把实际值往磁盘上写（同一族约束见 ajv 那处刻意不输出 data）。
+       */
+      o.gapLog?.set(ref, invalid ? { reason: 'invalid-ir', detail: invalid } : { reason: 'not-found' });
       return undefined;
     })();
     cache.set(ref, p);
     return p;
+  };
+}
+
+/**
+ * `buildScenarioGraph` 的默认节点上限。
+ *
+ * 为什么要有上限而不是"走到走不动为止"：**环**。`A↔B` 时，"解析过就不再解析"
+ * 这一条确实让它停得住，但那道护栏一旦哪天被改松（改成按 ref 去重、或加一层
+ * `@version` 感知），无上限的遍历就变成**永远不返回的 lint**。一条静态检查
+ * 卡死的后果比漏报一个环更糟：人会去掉这条检查，然后连"它以前能查出来"这件事都忘了。
+ * 200 个节点是一棵真实调用树很难达到的规模（用例复用得再深也到不了），
+ * 触到上限时**报"图不完整"而不是静默**（`CALL_GRAPH_INCOMPLETE`）。
+ */
+export const DEFAULT_MAX_CALL_NODES = 200;
+
+/**
+ * 沿 `call` 走**可达闭包**，产出 `DEPENDENCY_CYCLE` 要的调用图。
+ *
+ * ## 为什么不扫全仓（这条推翻了 docs/14 §5 原先登记的"填它要先把整棵调用图从文件系统扫出来"）
+ *
+ * 环检测要的不是"全仓所有的边"，而是**从入口场景能走到的那些边**。
+ * 一条不在可达范围内的环，无论多环，都跟这条用例无关；而可达的那些边
+ * 用 `makeCallResolver` **本来就有的能力**一跳一跳问得到 —— 不需要 readdir、
+ * 不需要新端口、不需要 engine 反过来依赖文件系统（那违反 `lint-layers`）。
+ *
+ * ## 完整性是返回值的**一部分**，不是旁证
+ *
+ * 解析不到的 ref 进 `gaps`、触上限进 `truncated`。这两个字段不是诊断信息：
+ * 报告写「✓ 通过」而图缺了一条边时，"没有环"是个**超出证据的结论**。
+ * 所以调用方拿到图之后要判 `graphComplete()`，而不是"有没有 DEPENDENCY_CYCLE"。
+ *
+ * ## 边记的是 IR 写的话，不是"我查到的"
+ *
+ * 解析失败的 ref，它的边**照样记录**（IR 上确实写着 call 它），缺口另外记一条。
+ * 那样 `edges` 始终是"作者写了什么"的忠实投影 —— 而"我能不能看懂它"在 gaps 里。
+ * 混在一起（解析失败就不记边）会让图悄悄变小，而悄悄变小的图正是这条函数要防的东西。
+ */
+export async function buildScenarioGraph(
+  scenario: Scenario,
+  /** 就是 makeCallResolver 的返回值。用 NonNullable 包一层是因为
+   *  `AdapterRegistry['callScenario']` 取自**可选属性**，类型里带着 undefined ——
+   *  而这里没有"没注入解析器"这一档：没图就别调本函数。 */
+  resolveRef: NonNullable<AdapterRegistry['callScenario']>,
+  opts: {
+    maxNodes?: number;
+    /**
+     * 某个 ref **为什么**解析不出来 —— 由 `makeCallResolver` 的 `onGap` 边解析边记下来，
+     * 这里按 ref 取。
+     *
+     * 为什么不让解析器自己把缺口塞进图：`reason` 来自"文件找不到"还是"IR 读不出"，
+     * 只有解析器知道；而**它是谁发起的**只有这里的遍历知道。两边各持一半事实，
+     * 所以缺口由这里组装、原因从那里取。
+     *
+     * ⚠ 这一格**只能按 ref 查，不能"记住最后一次 onGap"**：解析器按 ref 缓存，
+     * 同一个坏 ref 被 call 两次时 onGap 只响一次（第二次命中缓存，压根没重新解析）。
+     * 用"最后一次"的话，第二个缺口会挂上别的 ref 的原因 —— 那是**凭空捏造的归因**，
+     * 比没有原因更坏（本轮就是被一句错归因送去做无用功的，见 docs/14 §6 第 18 条）。
+     */
+    gapReasonOf?: (ref: string) => ScenarioGraphGapCause | undefined;
+  } = {},
+): Promise<ScenarioGraph> {
+  const maxNodes = opts.maxNodes ?? DEFAULT_MAX_CALL_NODES;
+  const edges = new Map<string, string[]>();
+  const link = (from: string, sites: ReturnType<typeof callSites>): void => {
+    const list = edges.get(from) ?? [];
+    for (const c of sites) if (!list.includes(c.id)) list.push(c.id);
+    edges.set(from, list);
+  };
+  const gaps: NonNullable<ScenarioGraph['gaps']> = [];
+  // 入口自己占一个额度：否则 maxNodes=1 时下面那句判据永远不触发，
+  // 而"节点上限"这个概念在测试里就永远没有可达的那条分支。
+  const expanded = new Set<string>([scenario.id]);
+  const queue: Scenario[] = [scenario];
+  let truncated = 0;
+  link(scenario.id, callSites(scenario));
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const c of callSites(cur)) {
+      // 已展开过的、以及**环上的祖先**都从这里跳过：边已经记下了（上面那轮 link），
+      // 不重复展开正是让 A↔B 停得住的那一条
+      if (expanded.has(c.id)) continue;
+      if (expanded.size >= maxNodes) { truncated++; continue; }
+      const child = await resolveRef(c.ref);
+      // 解析不到 = "从这里往下的环判不出"。不当成环（它可能只是没 checkout），
+      // 也不能当"没有环"—— 所以进 gaps，由 lint 侧的 CALL_GRAPH_INCOMPLETE 说话
+      if (!child) {
+        const why = opts.gapReasonOf?.(c.ref);
+        gaps.push({
+          from: cur.id,
+          ref: c.ref,
+          ...(why?.reason ? { reason: why.reason } : {}),
+          ...(why?.detail ? { detail: why.detail } : {}),
+        });
+        continue;
+      }
+      expanded.add(c.id);
+      link(child.id, callSites(child));
+      /*
+       * **ref 里的 id 与解析到的那份 IR 的内部 id 不一致时，两个键都要挂上出边。**
+       * 这不是假想：`resolveScenarioPath` 先按**文件名**试 `<id>.json`，
+       * 而 paths.ts 里写着"文件名与 id 不一致是常态：改名后 id 常留旧的"。
+       * 只按内部 id 挂的话，图里会有一条指向 `scn.b` 的边而 `scn.b` 那一格是空的 ——
+       * 遍历到那里当叶子收工，于是"经由那条边才看得见"的环全部漏报，
+       * 而**图看起来是完整的**（gaps 里没有它，因为解析成功了）。
+       * 那正是本函数开头声称要防的形状，所以在这里补掉。
+       */
+      if (child.id !== c.id) link(c.id, callSites(child));
+      queue.push(child);
+    }
+  }
+  return {
+    edges: Object.fromEntries(edges),
+    ...(gaps.length ? { gaps } : {}),
+    ...(truncated ? { truncated } : {}),
   };
 }
 
@@ -234,12 +413,33 @@ async function runOne(o: {
   const { scenario } = await loadScenarioFile(path);
 
   if (flag(a, 'strict')) {
-    const rep = toReport(lintScenario(scenario));
+    /*
+     * 这条分支以前调的是 `lintScenario(scenario)`，**第二个参数压根不传**。
+     * 本轮接上调用图之后这件事才变得可观察：`DEPENDENCY_CYCLE` 是 error 级、
+     * 要图才响，而 `--strict` 恰恰是 CI 会用的那一档（`atest lint` 是本地手跑）。
+     * 传了图之后它响在这里的意思是"**一个请求都不发**就拒绝执行" —— 静态闸的全部价值。
+     * 不传的话，环要等到运行时那条 callStack 才发现，那时装配都做完了。
+     *
+     * 说准一点，免得这段话被读成"--strict 以前所有 ctx 规则都是静默的"：
+     * 本轮实测过 `STEP_BUDGET_EXCEEDED`，它读 `ctx.maxCostUsd ?? 2`，
+     * 不传 ctx 时**照样响**（用默认上限 2）。所以"不传 ctx"≠"ctx 规则全不跑"，
+     * 而是"读了 ctx 里那几个**没有默认值**的字段（图、快照能力）的规则不跑"。
+     *
+     * 也**不**把 run 的 `--max-cost` 喂给这里的 ctx：同一个开关名在两条命令里
+     * 是两个意思（run 那边是"本次运行的成本硬停"，lint 那边 help 写着是
+     * "步骤成本预算，喂给 STEP_BUDGET_EXCEEDED"）。把它们接起来看着像顺手修，
+     * 实际是把两个语义并成一个 —— 那是产品决策，不是这一轮的活。
+     */
+    const ctx = await lintCtxFor(scenario, o.cfg, io.cwd, dirname(path), {});
+    const rep = toReport(lintScenario(scenario, ctx));
     if (!rep.ok) {
       io.err(`--strict：lint 有 ${rep.errors.length} 个错误，拒绝执行：`);
       for (const e of rep.errors.slice(0, 10)) io.err(`  [${e.code}] ${e.stepId ?? ''} ${e.message}`);
       return { code: EXIT.INVALID, summary: `${scenario.id}: lint 拒绝` };
     }
+    // 警告也要打。`--strict` 只按 error 拦执行，但"图不完整"这类话不说出来，
+    // 读日志的人会以为这次静态闸看的是全的（CALL_GRAPH_INCOMPLETE 存在的全部理由）
+    for (const w of rep.warnings) io.err(`  （--strict 警告，不拦执行）[${w.code}] ${w.stepId ?? ''} ${w.message}`);
   }
 
   // 执行**前**的闸。frozen/provenance 不满足时连一个请求都不发：
@@ -447,17 +647,53 @@ function parseInputs(list: string[]): Record<string, unknown> {
 
 // ── atest lint ────────────────────────────────────────────────────────────
 
+/** lintScenario 的第二个参数。**取类型而不是手抄一份字段**：手抄的那份会过期（本仓的老账） */
+type LintCtx = Parameters<typeof lintScenario>[1];
+
+
+/**
+ * 给**某一个**场景造 lint 的 ctx（含调用图）。
+ *
+ * 为什么是"逐场景"造而不是循环外造一次共用：图是**从入口场景往外走**出来的，
+ * `atest lint a b` 里 a 与 b 的可达集通常不同。共用的话要么把两个入口都塞进
+ * 同一个闭包（多解析一批压根不参与这条判定的场景，白做 IO），
+ * 要么就得让"图的覆盖范围"变成一个与入口无关的说法 —— 而它不是。
+ */
+async function lintCtxFor(
+  scenario: Scenario,
+  cfg: ProjectConfig | undefined,
+  cwd: string,
+  /** 入口场景所在目录（`--scenario /somewhere/x.json` 时子场景常放在它旁边） */
+  scenarioDir: string,
+  opts: { maxCost?: number },
+): Promise<LintCtx> {
+  const ctx: LintCtx = {};
+  if (opts.maxCost !== undefined) ctx.maxCostUsd = opts.maxCost;
+  /*
+   * 与 run 用**同一个** resolver：如果 lint 自己另写一套 ref→文件的逻辑，
+   * 就会出现"lint 说没有环而 run 报解析不到"或反过来 —— 两个判据两份实现的老账。
+   *
+   * `gapLog` 是原因的唯一去处：resolver 只认 ref，遍历只认"谁发起"，
+   * 缺口由这一处把两边拼起来（为什么非要一张表而不是一个回调，写在 `gapLog` 那一格）。
+   */
+  const gapLog = new Map<string, ScenarioGraphGapCause>();
+  ctx.scenarioGraph = await buildScenarioGraph(scenario, makeCallResolver({ cfg, cwd, scenarioDir, gapLog }), {
+    gapReasonOf: (ref) => gapLog.get(ref),
+  });
+  return ctx;
+}
+
 export async function cmdLint(a: ParsedArgs, io: Io): Promise<CommandResult> {
   if (!a.positionals.length) throw new CliError('lint 需要目标：atest lint <场景 id 或文件路径>[…]', EXIT.USAGE);
   const cfg = await findConfig(io.cwd);
   const registry = await DocRegistry.load(a.multi.doc ?? []);
-  const ctx: Parameters<typeof lintScenario>[1] = {};
-  if (str(a, 'max-cost')) ctx.maxCostUsd = Number(a.flags['max-cost']);
+  const maxCost = str(a, 'max-cost') ? Number(a.flags['max-cost']) : undefined;
 
   let bad = false;
   for (const f of a.positionals) {
     const path = await resolveScenarioPath(cfg, f, io.cwd);
     const { scenario } = await loadScenarioFile(path);
+    const ctx = await lintCtxFor(scenario, cfg, io.cwd, dirname(path), { ...(maxCost === undefined ? {} : { maxCost }) });
     const issues = lintScenario(scenario, ctx);
     const rep = toReport(issues);
     // 逐条打印：code + 位置 + 一句"为什么这是问题"。

@@ -8,9 +8,10 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, isExprConditionField, isExprField, iterConditions, parallelHazards, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
+import { redactSecretText } from './redact.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern, GEN_KINDS, isValueForm } from '@atest/ir';
 
 export type LintLevel = 'error' | 'warning';
@@ -34,13 +35,179 @@ export type LintCode =
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
   | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE'
-  | 'REQUEST_PART_NOT_IMPLEMENTED';
+  | 'REQUEST_PART_NOT_IMPLEMENTED' | 'CALL_GRAPH_INCOMPLETE';
+
+/**
+ * `call` 调用图，给 `DEPENDENCY_CYCLE` 用。
+ *
+ * ## 为什么不是裸的 `Record<string, string[]>`
+ *
+ * 因为它**没法表达"我没看全"**。裸 Record 加一句"缺省时跳过环检测"的形状下，
+ * 调用方只有一种方式说话："给了图" 或 "没给图"。而真实的第三种情形最常见 ——
+ * **图给了，但里面缺边**（子场景解析不到、或走到节点上限没继续展开）。
+ * 那种情形下报告写着「✓ 通过」，读的人以为"环检测跑过了、没环"，
+ * 实际是"环检测压根没看到那一条"。这是本仓那一族的又一格：
+ * **一个结论缺了"我是怎么得出来的"这一半，看起来就和完整的结论一样**。
+ *
+ * 所以完整性**不是**一个可以漏填的说明字段，而是这张图**类型上必须携带**的信息：
+ * 生产方只能靠 `gaps` / `truncated` 表达不完整，而"完不完整"由下面那个
+ * `graphComplete()` 现算 —— 不在类型里存一个 `complete: boolean`，
+ * 因为那会有第二份事实（`gaps: [{…}]` 配 `complete: true` 是自相矛盾的，
+ * 而自相矛盾的两个字段迟早出现）。
+ */
+export interface ScenarioGraph {
+  /** 场景 id → 它直接 call 的场景 id。**键与值都不许带 `@version`**（`scenarioIdOfRef`） */
+  edges: Record<string, string[]>;
+  /**
+   * 没能展开的 ref。每一条都意味着"从这里往下的环判不出"。
+   *
+   * `reason` 不是装饰，是**修法**的分岔：`not-found` 是"这个 ref 指向的东西不在"，
+   * `invalid-ir` 是"文件在而里面那份 IR 读不出"（往往还带一句是哪一处读不出）。
+   * 混成一句"解析不到"的话，本轮实测过人拿着后者去查文件名拼没拼错。
+   */
+  gaps?: Array<{ from: string; ref: string; reason?: 'not-found' | 'invalid-ir'; detail?: string }>;
+  /** 触到节点上限而未继续展开的 ref 数 */
+  truncated?: number;
+}
+
+/**
+ * 这张图是否覆盖了入口场景能触达的全部 ref。
+ *
+ * 判据**只在这一处**：lint 侧那条"图不完整"的规则、以及任何将来要决定
+ * "这份结论能不能当门禁依据"的人，都问这同一个函数。抄第二遍的代价是
+ * 两处对"完整"的定义漂移，而漂移的表现是"lint 说完整、另一个消费者说不完整"。
+ */
+export const graphComplete = (g: ScenarioGraph): boolean =>
+  !(g.gaps?.length ?? 0) && !(g.truncated ?? 0);
+
+/** `ScenarioGraph.gaps` 的一条 */
+export type ScenarioGraphGap = NonNullable<ScenarioGraph['gaps']>[number];
+
+/**
+ * 一条缺口里**只关于原因**的那一半（`Pick` 而不是重抄字段：多一个字段就跟着多一个）。
+ *
+ * 生产方需要单独递这一半：解析器知道某个 ref 为什么解析不出来，
+ * 但**不知道是谁发起的 call**（那是遍历侧才有的事实），所以它没法产出完整的 gap。
+ * 给它一个"必须填 from"的类型，它就会去编一个 —— 而编出来的 `from` 会被打印成归因。
+ */
+export type ScenarioGraphGapCause = Pick<ScenarioGraphGap, 'reason' | 'detail'>;
+
+/**
+ * 一种缺口原因的**措辞**与**修法**，成对放在一起。
+ *
+ * 写成一张表而不是两处各写一遍（措辞在模板里、修法在 if 链里），是因为
+ * "本次有哪些原因"这个集合**只该被算一次**：我第一版就是把它算了两遍
+ * （message 用分桶、fix 用 `gaps.filter(g => g.reason === …)`），
+ * 于是"message 里出现了 invalid-ir 而 fix 里没提"这种半截建议
+ * 只需要有人改一处不改另一处就能诞生 —— 而那正是本仓记账最多的那一族。
+ * 现在两者从同一次分桶里长出来，结构上无法只对一半。
+ *
+ * `label` 是**给修法那一句用的短名**，与 `text` 分开是有意的：
+ * `text` 是接在「N 处 call」后面的**谓语**，要能独立读通；`label` 嵌在
+ * 「……的那 N 处：」中间，长的措辞会让那句变成绕口令
+ * （第一版直接复用整句，量出来是「那个找不到被 call 的那个文件的：把子场景放进 irDir…」
+ *  —— 一个句子里两个"那个"，读的人已经放弃了）。
+ *
+ * ⚠ `text` 起头不能是名词：「1 处 call **目标文件在**而…」会被读成
+ * "call 目标文件"这个名词再加一个"在"，读到后半句才回头（本轮实测到的）。
+ * 所以三条谓语都以"的"或动词起头，数量词的宾语始终是"处 call"。
+ */
+const GAP_CAUSE: Record<string, { text: string; label: string; fix?: string }> = {
+  'not-found': {
+    text: '的文件找不到',
+    label: '文件不存在',
+    fix: '把子场景放进 irDir，或改掉 ref（`atest run` 运行时同样解析不到，会报 env-unavailable）',
+  },
+  'invalid-ir': {
+    text: '的文件在、而那份 IR 读不出',
+    label: '文件在而 IR 不合法',
+    fix: '要修的是文件的**内容**（别去改 ref，文件本来就在）：`atest lint <那个文件>` 会指出具体哪一处不合法',
+  },
+  // `reason` 在类型上可选：不是每个生产方都能分辨原因（引擎里手工拼的夹具图就分辨不了）。
+  // **把"没记原因"并入"找不到文件"是在说谎** —— 那句话会让人去查 ref 拼没拼错。
+  // 所以认不出来时照实说认不出来，并且**不给修法**（不承诺一个不知道能不能做的动作）。
+  '': { text: '没被展开（生产方没记下原因）', label: '没记下原因' },
+};
+const GAP_CAUSE_UNKNOWN = GAP_CAUSE['']!;
+/** 触到节点上限那一类缺口。与 gaps 同进同出，理由见 `graphGapSummary` 里那句注释 */
+const GAP_TRUNCATED = { text: '达到节点上限，没继续展开', label: '达到节点上限', fix: '把调用树拆浅一点（公共步骤抽成第三个场景让双方 call 它）' };
+
+/** `graphGapSummary` 的产物：一桶一句话，以及**与这些桶同源**的修法 */
+export interface GraphGapSummary {
+  /** 每种原因一句（同类合并计数，每类点一个样本），多的那类在前 */
+  lines: string[];
+  /** 只覆盖 `lines` 里真的出现过的那些原因；没修法的原因不硬编一句 */
+  fixes: string[];
+}
+
+/**
+ * 调用图的缺口 → 结论那一句 + 修法那一句。
+ *
+ * ## 为什么这是一处独立导出的判据，而不是 lint 规则里的字符串拼接
+ *
+ * 这一族缺陷的正面对面是："schema 有字段、执行侧没人读"。本轮我先犯的正是它的镜像：
+ * `reason`/`detail` 加在了类型上，而措辞长在规则体内部 —— 于是"`invalid-ir` 这个值
+ * 到底有没有被用上"只能靠**跑一次真命令**来验（要临时项目、真文件系统、一个恰好不合法的
+ * 子 IR）。措辞成为独立函数之后，那件事是一行断言；规则体里剩下的只是"要不要说话"，
+ * 那是另一条规则该管的事。**判据尽量交给独立实现**（docs/08 §3）。
+ *
+ * ## 为什么必须分桶
+ *
+ * 三种缺口的修法本来就不同：少文件是"去看那个 ref 对不对"，IR 读不出是"去修那个文件"
+ * （本轮实测过人拿着后者去查文件名拼没拼错），触上限是"把调用树拆浅"。
+ * 合成一句"有 N 处没展开"等于三句都没说。
+ *
+ * ## 为什么每桶只点一个样本、以及为什么仍然报总数
+ *
+ * 一个没 checkout 的目录就能造出几十个缺口，全列出来这一条会挤成一堵墙，
+ * 而人真正要修的是第一个。总数照报 —— "几个"决定了这件事值不值得管。
+ *
+ * ## `detail` 过一遍值形态脱敏
+ *
+ * 跑在**拼完整段之后**而不是每个片段上（与 `report.ts` 的 `plainSafe` 同一个做法：
+ * 将来新加一行天然带着这道处理）。生产方（CLI 的解析器）已经只取首行了，这里再过一遍
+ * 是纵深防御而不是重复：`detail` 源自**磁盘上别人写的文件**，而 `JSON.parse` 的报错
+ * 会带上出错位置附近的原文 —— 我不能假设那种内容永远无害。这句话要进 lint 输出与
+ * CI 日志，那是要落盘的文字（同一族约束见 docs/02 §6 与散文那三个出口）。
+ */
+export function graphGapSummary(
+  gaps: readonly ScenarioGraphGap[],
+  truncated = 0,
+): GraphGapSummary {
+  const buckets = new Map<string, { n: number; sample: ScenarioGraphGap }>();
+  for (const g of gaps) {
+    const hit = buckets.get(g.reason ?? '');
+    if (hit) hit.n++;
+    else buckets.set(g.reason ?? '', { n: 1, sample: g });
+  }
+  /*
+   * 触上限**并进同一张桶表**而不是在末尾各拼一句：两类缺口都要出现在 lines，
+   * 也都要（或都不要）出现在 fixes。分两处写就要在两个地方各判一次 `truncated`，
+   * 而"结论里说了触上限、修法里没提"正是这张表存在的理由要防的那种半截话。
+   * （触上限那一条没有 `sample`，所以 lines 那一侧要能容纳"没有样本"的行。）
+   */
+  type Row = { n: number; cause: { text: string; label: string; fix?: string }; sample?: ScenarioGraphGap };
+  const rows: Row[] = [...buckets.entries()]
+    .map(([reason, v]) => ({ ...v, cause: GAP_CAUSE[reason] ?? GAP_CAUSE_UNKNOWN }))
+    // 多的那类排前面：读的人只会认真读第一句
+    .sort((a, b) => b.n - a.n);
+  if (truncated) rows.push({ n: truncated, cause: GAP_TRUNCATED });
+  return {
+    lines: rows.map(({ n, cause, sample }) =>
+      redactSecretText(sample
+        ? `${n} 处 call ${cause.text}（${n > 1 ? '例如 ' : ''}${sample.ref}，由 ${sample.from} 发起${sample.detail ? `；${sample.detail}` : ''}）`
+        : `${n} 处 call ${cause.text}`),
+    ),
+    // 遍历同一批 rows，所以"说了的原因"与"给了修法的原因"不可能是两个集合
+    fixes: rows.flatMap(({ n, cause }) => (cause.fix ? [`${cause.label}的那 ${n} 处：${cause.fix}`] : [])),
+  };
+}
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
   snapshotKinds?: Record<string, 'aria' | 'hierarchy' | 'pixels' | 'none'>;
-  /** 已知的 call 目标（用于环检测）。缺省时跳过环检测 */
-  scenarioGraph?: Record<string, string[]>;
+  /** 已知的 call 调用图（用于环检测）。缺省时跳过环检测 */
+  scenarioGraph?: ScenarioGraph;
   /** 步骤 id → 该步骤目标界面的快照种类（更细粒度） */
   stepSnapshotKind?: Record<string, string>;
   maxCostUsd?: number;
@@ -197,6 +364,9 @@ export const LINT_DOCS: Record<LintCode, string> = {
   RESERVED_KEY_REWRITE: 'docs/02 §5、docs/14 §5',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
+  // 不是"某条 IR 坏了"，是"这条检查没看完"。归到 docs/02 §2 那张表旁边，
+  // 因为它存在的理由就是让 DEPENDENCY_CYCLE 的"没报"读起来不像"确认没有"
+  CALL_GRAPH_INCOMPLETE: 'docs/02 §2、docs/14 §6',
   LITERAL_OVERFIT: 'docs/02 §4、docs/00 §6.3',
   HARDCODED_SECRET: 'docs/02 §5、docs/03 §5',
   RESOURCE_LEASE_MISSING: 'docs/07 §2',
@@ -1060,19 +1230,85 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     push({ code: 'STEP_BUDGET_EXCEEDED', level: 'warning', message: `maxCostUsd=${scenario.config.maxCostUsd} 超过项目上限 ${cap}`, fix: '拆分场景，或把视觉兜底改成本地模型（docs/03 §1）' });
   }
 
-  // call 环检测
+  /*
+   * **call 环检测**。`ctx.scenarioGraph` 是"每个场景 id → 它 call 的场景 id"，
+   * 由调用方给（`cli/commands.ts` 的 `buildScenarioGraph`：沿 resolver 走**可达闭包**，
+   * 不扫全仓 —— 理由写在那儿）。
+   *
+   * 三条判据都不是显然的，每条都有它防的事：
+   *
+   *  1. **键与边一律先过 `scenarioIdOfRef`**。本轮实测过一个静默失效：图按
+   *     **ref** 键（`'scn.a@1'`）而遍历从 `scenario.id`（`'scn.a'`）起跳时，
+   *     第一跳就查不到出边，于是**图给了、环真在、规则一声不响**。
+   *     那种失效比"没接"更坏：接了的人以为它在工作。所以这里不要求调用方切分干净
+   *     —— 归一化在这一侧做，调用方给 `@` 带不带版本都同一个答案。
+   *  2. **按 id 而不是 ref**：`A@1 → B@1 → A@2` 也是环（`interpreter.ts` 那段
+   *     运行时环检测说的就是它），而运行时的判据比静态闸严没用 —— 静态闸的意义是
+   *     "一个请求都不发就知道这条 IR 坏了"，它比运行时松一寸，CI 就多做一次真调用。
+   *  3. **自环不双报**（`scn.x` call `scn.x` 时只留 SELF_REFERENCING_CALL）。
+   *     实测改前那种形状会同时报两条：同一条 IR 的两个坏其实是一个坏，
+   *     报两条会让人以为是两处要改（而修法是同一个）。SELF_REFERENCING 那条更具体
+   *     （它带 stepId 与"无限递归"这句话），所以留它。
+   */
   if (ctx.scenarioGraph) {
+    /*
+     * **先说"这张图不全"，再谈有没有环。**
+     *
+     * 缺一条边和"确认没有环"在裸 Record 的形状下是同一个输出（都没有 DEPENDENCY_CYCLE），
+     * 于是报告上的「✓ 通过」会被读成"环检测跑过了"。这一条把那个缺口变成看得见的东西。
+     * 定成 **warning 而不是 error**：解析不到某个 ref 有很多正当原因（部分 checkout、
+     * 子场景在另一个仓、权限），把它变成 error 会让人去删掉那条 call 或者关掉规则 ——
+     * 而规则一旦被关，真环也没人管了。warning 的语义正好是"这条结论的可信度有限"。
+     *
+     * **不点名是哪个环**（我们不知道），只点名**从哪儿开始看不见的**。
+     *
+     * 判"完不完整"走 `graphComplete()` 而不是在这里重写一遍 `gaps.length || truncated`：
+     * 这条规则与"这份 lint 结论能不能当门禁依据"问的是同一个问题，
+     * 两处各写一遍迟早只改一处（本仓为这类漂移记过多次账）。
+     */
+    if (!graphComplete(ctx.scenarioGraph)) {
+      /*
+       * 结论与修法**同源于一次分桶**（`graphGapSummary`，那里写着为什么不许分两遍算）。
+       * 这里只负责"要不要说话"与"说什么级别"。
+       */
+      const { lines, fixes } = graphGapSummary(ctx.scenarioGraph.gaps ?? [], ctx.scenarioGraph.truncated ?? 0);
+      push({
+        code: 'CALL_GRAPH_INCOMPLETE', level: 'warning',
+        message: `调用图不完整：${lines.join('；')} —— 从这里往下的 call 环**判不出**，所以"没有环"这个结论只覆盖已展开的那部分`,
+        // 兜底那句**不许是空的**：修不了也要说清"这个结论的可信度有限"，
+        // 否则 fix 一格空着，读的人以为没什么要做的
+        fix: `${fixes.length ? `${fixes.join('；')}` : '确认那些 ref 真的能被解析（`atest run` 运行时同样解析不到，会报 env-unavailable）'}（docs/02 §2）`,
+      });
+    }
+    const edges = new Map<string, string[]>();
+    for (const [k, vs] of Object.entries(ctx.scenarioGraph.edges)) {
+      const id = scenarioIdOfRef(k);
+      edges.set(id, [...(edges.get(id) ?? []), ...vs.map(scenarioIdOfRef)]);
+    }
+    const seenCycles = new Set<string>();
     const stack = new Set<string>([scenario.id]);
     const visit = (id: string, chain: string[]): void => {
-      for (const next of ctx.scenarioGraph?.[id] ?? []) {
-        if (stack.has(next)) { push({ code: 'DEPENDENCY_CYCLE', level: 'error', message: `call 依赖成环：${[...chain, next].join(' → ')}`, fix: '把公共步骤抽成第三个场景让双方 call 它' }); continue; }
+      for (const next of edges.get(id) ?? []) {
+        // 自环由 SELF_REFERENCING_CALL 报（带 stepId，话说得更准），这里不重复
+        if (next === scenario.id && chain.length === 1) continue;
+        if (stack.has(next)) {
+          // 同一个环只在**第一次撞上它**时报：dfs 换个入口会再次撞上同一个环，
+          // 而"成环"是一条事实，报三遍读起来像三个问题（seenCycles 的键是环上各 id 排序后拼出的串，
+          // 于是无论从哪个入口绕进来都只报一次）
+          const key = [...chain.slice(chain.indexOf(next) + 1), next].sort().join('>');
+          if (seenCycles.has(key)) continue;
+          seenCycles.add(key);
+          push({ code: 'DEPENDENCY_CYCLE', level: 'error', message: `call 依赖成环：${[...chain, next].join(' → ')}`, fix: '把公共步骤抽成第三个场景让双方 call 它' });
+          continue;
+        }
         stack.add(next); visit(next, [...chain, next]); stack.delete(next);
       }
     };
     visit(scenario.id, [scenario.id]);
   }
   for (const s of allSteps) {
-    if (s.kind === 'call' && s.scenarioRef.split('@')[0] === scenario.id) {
+    // 切分只走 scenarioIdOfRef：判据不许有第二份，理由在那个函数的注释里
+    if (s.kind === 'call' && scenarioIdOfRef(s.scenarioRef) === scenario.id) {
       push({ code: 'SELF_REFERENCING_CALL', level: 'error', stepId: s.id, message: '场景 call 自身（无限递归）', fix: '抽公共步骤到独立场景' });
     }
   }
