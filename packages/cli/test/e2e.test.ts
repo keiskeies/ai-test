@@ -142,6 +142,22 @@ test('一次失败的 run 产出可被系统 unzip 验开的包，退出码是 T
     // 在 `packages/store/test/evidence.test.ts` 里钉。这一格只钉磁盘形状。
     assert.ok(!files.includes('artifacts'), `artifacts 不该散装落在 run 目录：${files.join(', ')}`);
 
+    /*
+     * 屏幕上那句「产物：」要**与磁盘一一对应**。
+     *
+     * 这一格从前没有：那行是 `html / junit / trace / zip` 四个名字手抄的，
+     * 而散装落盘变成五个文档成员之后它就悄悄过期了 —— 磁盘上六样、屏幕上四样，
+     * 而**没有任何断言看过那一行**（它只是给人看的）。这是同一个缺陷类的载体侧形状：
+     * 判据（哪些文件是产物）只有一份，抄进文案的那份一定会漂。
+     * 所以这里**双向**断：报出来的路径都得真存在（少写=指向不存在的东西），
+     * 磁盘上的散装文件都得被报出来（漏报=人不知道它在那儿，也就不知道去 gitignore 它）。
+     */
+    const printed = io.stdout.join('\n').split('\n').map((l) => l.trim())
+      .filter((l) => l.startsWith(runDir + '/'));
+    const onDisk = files.map((f) => join(runDir, f)).sort();
+    assert.deepEqual([...printed].sort(), onDisk,
+      `「产物：」那一行与磁盘不对应。报出：${printed.map((p) => basename(p)).join(', ') || '无'}｜磁盘：${files.join(', ')}`);
+
     const zipPath = join(runDir, zip!);
     const report = execFileSync('unzip', ['-t', zipPath], { encoding: 'utf8' });
     assert.match(report, /No errors detected/, report);

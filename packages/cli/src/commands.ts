@@ -583,12 +583,23 @@ async function runOne(o: {
    * 理由写在 store 的 `writeEvidenceMembers` 上，那句判据不在这里重述。
    */
   const outDir = join(o.evidenceDir, safeRunId(report.runId));
-  await writeEvidenceMembers(outDir, pkg.entries);
+  const members = await writeEvidenceMembers(outDir, pkg.entries);
   // 第四个参数：被砍断的 run 的文件名要写 aborted，不能写 pass（见 writeEvidencePackage）。
   // 只传"有没有中断"这个事实，**状态词由 store 侧定**，否则同一个词两处各拼一遍。
   const written = await writeEvidencePackage(outDir, report.runId, report.status, pkg.bytes, Boolean(report.aborted));
   io.out('');
-  io.out(`产物：\n  ${join(outDir, EVIDENCE_FILES.html)}\n  ${join(outDir, EVIDENCE_FILES.junit)}\n  ${join(outDir, EVIDENCE_FILES.trace)}\n  ${written.path}`);
+  /*
+   * 产物清单**取写侧实际写出的那份**，不在这里再手列一遍文件名。
+   *
+   * 这一行原先是 `html / junit / trace / zip` 四个名字手抄的，而散装落盘改成
+   * 五个文档成员之后它就悄悄过期了 —— 屏幕上说"产物是这四样"，磁盘上躺着六样，
+   * 而**没有任何测试测这一行**（它只是给人看的，不在任何断言里）。
+   * 这与本轮修掉的是同一族：判据只有一份，抄的那份会漂。
+   * `report.html` 排到最前是**这一行唯一自己决定的事**，因为它是人点开的那一个。
+   */
+  const entry = EVIDENCE_FILES.html;
+  const listed = [entry, ...members.filter((n) => n !== entry)];
+  io.out(`产物：\n${listed.map((n) => `  ${join(outDir, n)}`).join('\n')}\n  ${written.path}`);
   io.out(`  证据包 sha256=${written.sha256}`);
   if (pkg.missing.length) io.err(`注意：有 ${pkg.missing.length} 个证据在磁盘上已经取不到了（被清理或写盘失败），包里少它们：${pkg.missing.join('、')}`);
   if (flag(a, 'print-junit')) io.out(toJUnitXml(report, { suiteName: scenario.id }));
