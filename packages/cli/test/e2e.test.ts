@@ -595,3 +595,65 @@ test('evidence 缺参数时的成员清单里真的有 report.html（提示别�
   // 顺手验 list 真能把 report.html 数列出来（提示说了，得真做得到）
   assert.match(text, /list/, '要同时给出 list 这条路，人拿不准时可以先列');
 });
+
+test('被砍断的 run：退出码 10，且**三个产物**都不说自己是 pass', async () => {
+  /*
+   * 这条是 `interruption.test.ts` + `gate.test.ts` 之上的**接线**测试，
+   * 而那两层各自都不够：
+   *  - 引擎侧只证明 `report.aborted` 有值；
+   *  - 门禁侧读的是**合成 fixture**里的 aborted（自己造的），撤掉引擎那半它全绿；
+   *  - 两边都不知道 CLI 有没有把这个码**当作本次命令的退出码返回**。
+   *
+   * 怎么在不真等、不起子进程的前提下造出中断：
+   * `--clock deterministic` 让 `sleep` 只推进虚拟时间，`config.timeoutMs` 定小，
+   * 于是 `checkAbort` 在下一步开头抛 timeout。**这是 atest 今天唯一接线的中断来源**
+   * —— `runOptions.signal` 在 CLI 里压根没人赋值（Ctrl-C 那条路还没接，见 docs/15 §3.7）。
+   */
+  const f = await fixture();
+  try {
+    const casePath = join(f.dir, 'cut.json');
+    await writeFile(casePath, JSON.stringify({
+      schemaVersion: '1', id: 'scn.cut', name: 'cut', env: { environmentRef: 'unit' },
+      config: { timeoutMs: 1_000 },
+      body: [
+        { id: 'seed', kind: 'set', assign: { n: 1 } },
+        { id: 'a1', kind: 'assert', against: '$n', expr: '$n == 1' },
+        // 这一步让虚拟时间越过 timeoutMs
+        { id: 'slow', kind: 'sleep', ms: 5_000 },
+        { id: 'a2', kind: 'assert', against: '$n', expr: '$n == 1' },
+      ],
+    }), 'utf8');
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', join(f.dir, 'cutEv'), '--clock', 'deterministic', '--run-id', 'cut1'], io);
+    assert.equal(code, EXIT.ABORTED, `被砍断的 run 不能是绿的。实际 ${code}：${io.stderr.join(' | ')}`);
+
+    const runDir = await onlyRunDir(join(f.dir, 'cutEv'));
+    const zipName = (await readdir(runDir)).find((n) => n.startsWith('evidence.') && n.endsWith('.zip'));
+    assert.ok(zipName, `${runDir} 下没有 evidence*.zip`);
+    // ① **文件名**。改动前实测是 `evidence.cut1.pass.zip` —— 一个被砍断的 run
+    // 在文件管理器里、在"拖进聊天窗口发给同事"这个动作上写着 pass。
+    assert.match(zipName!, /^evidence\.cut1\.aborted\.zip$/, `文件名要说出被中断，实际 ${zipName}`);
+
+    const entries = readZipEntries(new Uint8Array(await readFile(join(runDir, zipName!))));
+    const text = (n: string) => new TextDecoder().decode(entries.find((e) => e.name === n)!.data);
+
+    // ② **summary.txt 的首行**。那是下载给别人看的东西，只有文字、没有字段
+    const summary = text('summary.txt');
+    assert.match(summary.split('\n')[0]!, /被中断/, `summary.txt 首行要说出被中断：${summary.split('\n')[0]}`);
+
+    // ③ **manifest.json**。机器读的是 manifest.status，而它按设计仍是 pass
+    //（那是已完成步骤的结论），所以要靠 aborted 这一栏
+    const manifest = JSON.parse(text('manifest.json'));
+    assert.equal(manifest.status, 'pass', 'status 保持已完成步骤的结论（这是设计，不是遗漏）');
+    assert.equal(manifest.aborted?.kind, 'timeout', `清单里要能查到为什么：${JSON.stringify(manifest.aborted)}`);
+
+    // 夹具自检：**a2 确实一步没跑**。少了这句，上面三条可能测的是别的东西。
+    // 计数是 3 不是 2：`checkAbort` 在**步骤开头**判，所以 sleep 自己已经记过 pass，
+    // 被砍掉的是它后面那条断言 —— 这也是这个缺陷的样子：
+    // 报告里三条干净结论，只有"后面少了一条"这件事看不见。
+    assert.equal((manifest.tally as { pass: number }).pass, 3, `夹具要让 seed/a1/slow 跑过、a2 没跑到：${JSON.stringify(manifest.tally)}`);
+    const junit = text('junit.xml');
+    assert.ok(!junit.includes('name="a2"'), 'a2 没执行，JUnit 里就不该有它的 testcase');
+  } finally { await f.close(); }
+});

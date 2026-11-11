@@ -10,6 +10,7 @@
  * 这也是 gate.ts 与 exit.ts 不 import node 内置模块的原因。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import type { RunReport } from '@atest/engine';
@@ -29,13 +30,17 @@ function scen(over: Partial<Scenario> = {}): Scenario {
   } as Scenario;
 }
 
-function rep(rows: Array<{ stepId: string; status: StepResult['status']; kind?: StepResult['kind']; cause?: string }>): RunReport {
+function rep(
+  rows: Array<{ stepId: string; status: StepResult['status']; kind?: StepResult['kind']; cause?: string }>,
+  /** 引擎放在报告头部的"被中断"事实（RunReport.aborted）。不给就是没中断 */
+  extra: Pick<RunReport, 'aborted'> = {},
+): RunReport {
   const tally = { pass: 0, fail: 0, error: 0, healed: 0, skipped: 0, triaged: 0 };
   for (const r of rows) tally[r.status as keyof typeof tally]++;
   return {
     runId: 'run_g', status: 'fail', startedAt: 1, durMs: 10,
     results: rows.map((r) => ({ kind: 'assert', durMs: 1, healed: r.status === 'healed', ...r })) as unknown as RunReport['results'],
-    events: [], outputs: {}, costUsd: 0, tally, summary: 'x',
+    events: [], outputs: {}, costUsd: 0, tally, summary: 'x', ...extra,
   };
 }
 
@@ -272,4 +277,75 @@ test('执行前已拒绝时，gateAfterRun 原样返回拒绝而不是看结果'
   const after = gateAfterRun({ scenario, report: rep([{ stepId: 'a', status: 'pass' }]), ci: true, allowUnfrozen: false });
   assert.equal(after.refused, true);
   assert.equal(after.code, EXIT.INVALID, '全绿的结果不能把"不该跑的运行"变成通过');
+});
+
+// ── 被中断的 run ──────────────────────────────────────────────────────────
+
+/*
+ * `EXIT.ABORTED = 10` 以前**没有生产者**：表里定义着、CI_HINT 里印着、
+ * WORSE_ORDER 里排着序，而没有任何一条路径返回它。
+ * 后果是取消/超时/熔断的 run 一律报 0 加一句"全部通过"（实测），
+ * 也就是流水线读到绿、而用例压根没跑完。
+ */
+
+const cancelled = { kind: 'cancelled' as const, reason: '外部取消' };
+
+test('被中断且已完成步骤全绿 => 退出码 10（改动前是 0 + 一句"1 条断言全部通过"）', () => {
+  const d = gateAfterRun({
+    scenario: scen(), report: rep([{ stepId: 'a', status: 'pass' }], { aborted: cancelled }),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.code, EXIT.ABORTED, `被砍断的 run 不能是绿的。实际 ${d.code}：${d.reasons.join(' / ')}`);
+  assert.match(d.reasons.join('\n'), /被中断/);
+  assert.ok(!/全部通过/.test(d.reasons.join('\n')), '一句"全部通过"是不完整的报告最坏的措辞');
+});
+
+test('被中断且断言一步没跑 => 10 而不是 3（报"你没用例"会把人支去改用例）', () => {
+  // 这是**位置**测试：中断的判定必须排在"没有任何结论"那道闸之前。
+  // 排在之后的话，症状是中断的 run 报 3 + 一句"没有一条断言"，
+  // 人去查 IR（IR 是对的），而该做的是把这次 run 跑完。
+  const d = gateAfterRun({
+    scenario: scen(), report: rep([{ stepId: 'seed', status: 'pass', kind: 'set' }], { aborted: cancelled }),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.code, EXIT.ABORTED, `实际 ${d.code}：${d.reasons.join(' / ')}`);
+  assert.ok(!/没有.*断言/.test(d.reasons.join('\n')), `不该把人支去改用例：${d.reasons.join(' / ')}`);
+});
+
+test('中断不抢具体结论：已经有 error => 仍是 5，已有 fail => 仍是 1', () => {
+  // "5 重试一次"对超时/取消也是对的，而 10 会让人以为只是有人按了 Ctrl-C。
+  // 更重要的是**不改动任何已经是红的码**：这次改动只把今天误报 0 的那一批变成 10。
+  const e = gateAfterRun({ scenario: scen(), report: rep([{ stepId: 'a', status: 'error' }], { aborted: cancelled }), ci: true, allowUnfrozen: false });
+  assert.equal(e.code, EXIT.RUNTIME, e.reasons.join(' / '));
+  const f = gateAfterRun({ scenario: scen(), report: rep([{ stepId: 'a', status: 'fail' }], { aborted: cancelled }), ci: true, allowUnfrozen: false });
+  assert.equal(f.code, EXIT.TEST_FAILED, f.reasons.join(' / '));
+});
+
+test('执行前就被拒绝的运行不看中断（refused 优先于一切结果）', () => {
+  const d = gateAfterRun({
+    scenario: scen({ frozen: false }), report: rep([{ stepId: 'a', status: 'pass' }], { aborted: cancelled }),
+    ci: true, allowUnfrozen: false,
+  });
+  assert.equal(d.refused, true);
+  assert.equal(d.code, EXIT.INVALID, '一个不该跑的运行，不因"跑完/被中断"改变结论');
+});
+
+test('EXIT 表里每个码都在源码的**非注释位置**出现过（钉"契约有名额、没人兑现"这一类）', () => {
+  /*
+   * 这条不是风格测试。`ABORTED` 从写下那天起就没人返回它，而**任何按表写的
+   * 分支测试都不会发现**：测试的是"10 表示被中断"这件事本身，
+   * 而生产它的那条路径压根不存在。
+   *
+   * 判据故意保守：它只证明"源码里有一处非注释位置提到这个码"，
+   * **不证明真有一条路径返回它** —— 后者由各码的行为测试负责
+   * （本文件与 e2e.test.ts 里那些 assert.equal(code, …)）。
+   * 它能抓到的是"加了个码然后忘了接线"，而那正是这次的实际事故。
+   */
+  const src = ['gate.ts', 'commands.ts', 'main.ts'].map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8'));
+  const codeLines = src.flatMap((t) => t.split('\n'))
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l));
+  for (const key of Object.keys(EXIT)) {
+    const hit = codeLines.some((l) => l.includes(`EXIT.${key}`));
+    assert.ok(hit, `退出码 EXIT.${key}（${EXIT[key as keyof typeof EXIT]}）在 gate/commands/main 的非注释代码里从不出现 —— 它可能又是一个没有生产者的码`);
+  }
 });

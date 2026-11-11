@@ -313,17 +313,12 @@
     {
       "id": "packages/ir/src/steps.ts#DeviceStepSchema.allowManualHandoff",
       "milestone": "P3+",
-      "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
+      "reason": "人工介入锁没实现：`manualHandoff` 步骤有 case，但这个开关既不改变它也不改变租约状态。原写的理由「web/adb adapter 未开工」是**两句不同的话混成一句** —— adapter-web 早就开工了，缺的是 device(adb) 那一侧与这个字段本身的语义，别拿前者当后者的理由"
     },
     {
       "id": "packages/ir/src/steps.ts#DeviceStepSchema.inheritToChildren",
       "milestone": "P3+",
-      "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
-    },
-    {
-      "id": "packages/ir/src/steps.ts#DeviceStepSchema.leaseMs",
-      "milestone": "P3+",
-      "reason": "Device 步骤属于设备端（web/adb adapter 未开工）"
+      "reason": "**继承在同一层作用域内是无条件发生的**（租约槽里的 `lease` 一旦被 device 步写入，就对后续所有设备步可见；本轮之前那个变量叫 `stepCtx.lease`），所以这个「允许显式关闭继承」的字段没有任何读者 —— 写 false 与不写一样。docs/15 §3.1 第一行。它比一般的「没人读」更误导：字段名暗示「可以关」，于是人会写 false 并以为关掉了"
     },
     {
       "id": "packages/ir/src/steps.ts#HttpRequestSchema.fixtureRef",

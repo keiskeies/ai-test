@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "一次被砍断的 run 的**四份产物**都必须自己说出这件事。tests: engine/test/{html,junit}.test.ts + store/test/evidence.test.ts。",
+    "",
+    "**这一族守的是同一个假绿的四个消费者**。interruption.json 那一份管的是",
+    "「引擎产出 report.aborted」+「门禁读它给退出码」；这一份管的是**产物侧**：",
+    "summary.txt 首行、manifest.aborted、evidence 包的文件名、HTML 横幅与徽章、junit 的 properties。",
+    "为什么单独一份而不是往 interruption.json 里续：判据不在同一层。",
+    "门禁那侧撤掉判定，产物这四份**照样全对**（它们读的是 report.aborted，不是退出码）；",
+    "反过来产物侧随便撤一条，gate.test.ts 与 interruption.test.ts **一条都不红**。",
+    "两半各守一侧，只测一侧会留一半（interruption.json 的 I5 记过同一个形状）。",
+    "",
+    "**为什么产物侧值得五份冗余**：这几处的读者**各不相同**，而且互相看不见 ——",
+    "  · summary.txt / HTML 是给**人**看的（人只扫头部一眼）；",
+    "  · manifest.aborted 与 junit 的 properties 是给**机器**看的（入库、看板、流水线插件）；",
+    "  · 文件名是给**下载了就走**的人看的（他看不见另外四份）。",
+    "少任何一个，就有那么一类读者拿到的是「全绿」。这正是 docs/08「少验了什么要有一行可指」的产物侧版本。",
+    "",
+    "**刻意不动的东西**（A6/A7 之外的对称条目，写在这里而不是做成变异）：",
+    "`status`、JUnit 计数、HTML 那个状态胶囊，被中断时**都保持原样** —— 它们说的是",
+    "「已完成步骤的结论」，那是真的 pass。改成 error 等于伪装成「某一步坏了」。",
+    "钉住这件事的是各测试文件里那句对照断言（`status 保持 pass` / `计数不动` / `st-pass` 仍在），",
+    "而**不能**做成变异：变异只能证明「改坏会红」，这里要钉的是「不许往那个方向改」。",
+    "",
+    "**A8 与 A1-A7 的分工**：A1-A7 测的是**产物层自己**读不读 report.aborted；",
+    "A8 测的是 CLI **有没有把这件事告诉 store**。两者独立：",
+    "writeEvidencePackage 的 interrupted 参数是显式传入的（不是自己从 report 里取），",
+    "所以「store 侧实现对但 CLI 传 false」完全可达，而本机实测它会造出 evidence.xxx.pass.zip。",
+    "这也说明为什么 A1-A7 用真 report 走 store/engine 的入口、而不是只测纯函数。",
+    "",
+    "**build 的归属**：spec 里写 build:false，但 A1 是「改 engine 的 src、跑 store 的测试」，",
+    "跨包 -> 由 mustBuild() **强制重建**（口头声明 build:false 曾在同一天产出过一次假结论）。",
+    "A2-A7 是同包（测试直接 import ../src），省掉重建是安全的。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "A1 summary.txt 首行不再写「被中断」（status 仍是 pass，而那份文件只有文字可读）",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "    `运行 ${report.runId} — ${report.status}${report.aborted ? `（**被中断**：${report.aborted.reason}）` : ''}`,",
+      "replace": "    `运行 ${report.runId} — ${report.status}`,",
+      "testFile": "packages/store/test/evidence.test.ts"
+    },
+    {
+      "label": "A2 manifest 里不再有 aborted 栏（机器读的是 manifest.status，那里就是一条 pass 记录）",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "    ...(report.aborted ? { aborted: report.aborted } : {}),",
+      "replace": "",
+      "testFile": "packages/store/test/evidence.test.ts"
+    },
+    {
+      "label": "A3 证据包文件名不再换成 aborted（下载别人只看得到 evidence.r9.pass.zip）",
+      "file": "packages/store/src/evidence.ts",
+      "anchor": "${interrupted ? 'aborted' : status}",
+      "replace": "${status}",
+      "testFile": "packages/store/test/evidence.test.ts"
+    },
+    {
+      "label": "A4 HTML 横幅不看 aborted（一次「已完成步骤全过、第 3 步被砍」的 run 是一道绿条）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  const bannerKind = bad.length ? '' : (attn.length || report.aborted) ? 'warn' : 'ok';",
+      "replace": "  const bannerKind = bad.length ? '' : attn.length ? 'warn' : 'ok';",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "A5 横幅只染色、不挂文字徽章（色弱 / 黑白打印 / 截图转发时这条信息整个消失）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "${report.aborted ? `<span class=\"badge\"><b>被中断</b>（${esc(report.aborted.reason)}）：后面的步骤没执行</span>` : ''}",
+      "replace": "",
+      "testFile": "packages/engine/test/html.test.ts"
+    },
+    {
+      "label": "A6 junit 不再输出 properties（Jenkins/GitLab 读到 tests=3 failures=0 errors=0 = 全绿）",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "  if (report.aborted) {",
+      "replace": "  if (false) {",
+      "testFile": "packages/engine/test/junit.test.ts"
+    },
+    {
+      "label": "A7 properties 里 kind 与 reason 写反（有这一栏，但机器按 kind 分流时分错：取消被当成超时）",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "xmlAttr(report.aborted.kind)",
+      "replace": "xmlAttr(report.aborted.reason)",
+      "testFile": "packages/engine/test/junit.test.ts"
+    },
+    {
+      "label": "A8 CLI 侧永远传 interrupted=false（产物层实现对、装配层不告诉它 => 包名回到 pass）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "pkg.bytes, Boolean(report.aborted));",
+      "replace": "pkg.bytes, false);",
+      "testFile": "packages/cli/test/signal.test.ts"
+    }
+  ]
+}

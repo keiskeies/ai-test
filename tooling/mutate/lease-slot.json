@@ -1,0 +1,115 @@
+{
+  "_comment": [
+    "parallel 分支的**租约槽**（tests: packages/engine/test/lease-lifecycle.test.ts 最后四条）。",
+    "",
+    "缺陷（本轮实测）：`runStep` / `dispatch` / `runChildren` 都是 `runScenario` 作用域里的闭包，",
+    "读的租约是那个作用域上的变量 —— 所以 `parallel` 的分支虽然调用点写成",
+    "`runStep(c, path, branch, branchWindow)`（没有租约相关形参），实际**共用同一个槽**。",
+    "后果两条，都实测过（.scratch/probe-parallel-race.mts / probe-parallel-b.mts）：",
+    " 1. 两支各带一个 device 时，两个 device 步都看到\"手上已有租约\"，于是各自去还**同一个** id，",
+    "    而自己新拿的那台谁都不还：`lease 2 次 / release 1 次`，收尾手上攥着一台真机，",
+    "    **而报告是 p:pass、整场 pass**。一份全绿报告漏一台真机，在设备农场里是持续累积的泄漏。",
+    " 2. 一支 device + 一支裸 tap 时，裸 tap 那支**有没有租约取决于谁先跑到** —— 同一份",
+    "    冻结场景两种结论，直接违反 docs/02 §9 的确定性（与 useIdentity 在 parallel 里被拒同因）。",
+    "",
+    "修法：每支分支一个槽（`newLeaseSlot(slot.lease)`，借来的 owns=false），\n    （初值这半边第一轮写的是 runSlot.lease，嵌套时会少继承一层，见下面 T8。）",
+    "分支自己申请的在分支结束时还；借来的由申请它的那一层还。",
+    "",
+    "**每条变异都对应一个\"看起来也能修好\"的错法**，这是本文件存在的理由：",
+    " - T1 忘了给分支开槽（= 缺陷原样）；",
+    " - T2 分支收尾时不看 owns，于是把父正在用的那台还了；",
+    " - T3 分支结束时压根不还自己那台（漏还换了个位置发生，与 T2 是不同的漏法）；",
+    " - T4 device 步不记\"这台是我拿的\"（于是自己拿的也没人还）；",
+    " - T5 第二个 device 步不还前一台 —— **上一轮**那个\"裸赋值\"缺陷的回归位（判据挪进 slot 之后",
+    "   老锚点对不上了，跟着搬过来，顺手验一次它抓的还是同一件事）；",
+    " - T6 `newLeaseSlot(from)` 把借来的那台记成自己的（T2 的错以另一处写法重现）；",
+    " - T7 归还失败时把租约塞回槽里 —— **刻意等价**，见该条 _note。",
+    "",
+    "**为什么 T2 与 T6 都要留**：它们都破坏\"借来的不还\"，但破坏点不同 ——",
+    "T2 改判据（不看 owns），T6 改写入（把 owns 一开始就记成 true）。",
+    "只测一个的话，另一个是可以悄悄写回去的。",
+    "",
+    "**跨包所以 build 由 harness 强制**（`mustBuild` 那套），本文件写 build:false 只是声明",
+    "\"我不需要额外的构建步骤\"，不是\"可以不构建\"。",
+    "",
+    "**T8 是这一族缺陷第二次出现时加的**（第一轮修完之后才实测到的另一半年份）：",
+    "第一轮把分支槽写成 `newLeaseSlot(runSlot.lease)`，顶层形状下对，嵌套一层 parallel",
+    "就**跳过中间那一层**（`dispatch` 层层传 `slot`，唯独 parallel 这一支从闭包读 runSlot）。",
+    "T1 与 T8 是**同一个 bug 的两种大小**：T1 = 一个分支槽都没有（顶层就能看见），",
+    "T8 = 槽有、继承链错一层（只有嵌套能看见）。T8 的红是本轮实测出来的，不是推出来的：",
+    "调用序 `lease L1..L4 / release L3,L4,L1,L2` 归还全对，**只有内层那两个裸 tap 恒 error** ——",
+    "所以只有嵌套形状的测试能抓它（`.scratch/probe-nested-b.mts`）。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "T1 分支不新开槽，直接用上层那个对象（缺陷原样：两支共用一个槽）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "              const branchSlot = newLeaseSlot(slot.lease);",
+      "replace": "              const branchSlot = runSlot;",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts",
+      "_note": "锚点本轮从 `newLeaseSlot(runSlot.lease)` 变成 `newLeaseSlot(slot.lease)`（少传一层的修复，见 T8），所以这条跟着搬。**搬的时候顺手确认它抓的还是同一件事**：T1 与 T9 在顶层形状下等价（都让两支共用一个对象），实测都死于\"parallel 两支各自 device\"那条 + 嵌套那条。"
+    },
+    {
+      "label": "T2 借来的那台也算\"本分支的\"，于是分支收尾时把父的设备还了",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "              if (branchSlot.lease && branchSlot.owns) {",
+      "replace": "              if (branchSlot.lease) {",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts"
+    },
+    {
+      "label": "T3 分支结束时根本不还自己那台（漏还换了个位置发生）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "              if (branchSlot.lease && branchSlot.owns) {\n                const held = branchSlot.lease;",
+      "replace": "              if (false) {\n                const held = branchSlot.lease;",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts"
+    },
+    {
+      "label": "T4 device 步不记录\"这台是我拿的\"（于是自己拿的也没人还）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        slot.owns = true;",
+      "replace": "        slot.owns = false;",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts"
+    },
+    {
+      "label": "T5 第二个 device 步不还前一台（第一轮那个\"裸赋值\"缺陷的回归位）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (slot.lease && slot.owns) {",
+      "replace": "        if (false) {",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts",
+      "_note": "这条守的是**上一轮**的修法（第二个 device 步先还前一个），测试是 lease-lifecycle 第 8 条。放在这个文件里是因为判据挪进了 slot：`stepCtx.lease` 换成 `slot.lease` 之后，老锚点对不上了，得跟着搬 —— 搬的时候顺手验一次它抓的还是同一件事。"
+    },
+    {
+      "label": "T6 借来的那台也算自己的（newLeaseSlot(from) 把 from 记成 owns:true）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "const newLeaseSlot = (from?: Lease): LeaseSlot => ({ lease: from, owns: false });",
+      "replace": "const newLeaseSlot = (from?: Lease): LeaseSlot => ({ lease: from, owns: from !== undefined });",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts"
+    },
+    {
+      "label": "T7 分支归还失败时把租约塞回槽里（**刻意等价**：那个槽随分支一起消失）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "                } catch (e) {\n                  emit({ kind: 'log.emitted', stepId: s.id, data: { level: 'warn', message: `分支 ${c.id} 结束时没能归还它自己申请的",
+      "replace": "                } catch (e) {\n                  branchSlot.lease = held;\n                  branchSlot.owns = true;\n                  emit({ kind: 'log.emitted', stepId: s.id, data: { level: 'warn', message: `分支 ${c.id} 结束时没能归还它自己申请的",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts",
+      "expect": "equivalent",
+      "_note": "实测 survived，而且它本来就该 survived：`branchSlot` 是 worker 循环体里 const 出来的，这一支跑完再没人读它 —— 塞回去是死写入；顶层那次归还也够不着它（顶层还的是 runSlot.lease，与分支槽是两个对象）。留这一条记两件事：① branchSlot 的生命周期确实只有一支分支，这正是\"分支自己申请的自己还\"能成立的前提，写成变异比写成注释难被无声改掉；② \"survived\" 有两种意思（\"这段代码改不动\"与\"这条变异没设计好\"），必须用 expect:equivalent 事前分开，否则下一个人会来\"修\"这条变异。"
+    },
+    {
+      "label": "T8 分支槽的祖先是**整场**而不是当前这一层（本轮实测的缺陷：嵌套 parallel 少传一层）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "              const branchSlot = newLeaseSlot(slot.lease);",
+      "replace": "              const branchSlot = newLeaseSlot(runSlot.lease);",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts",
+      "_note": "第一轮修完\"分支共用一个槽\"之后写的就是这个形状：顶层对（slot === runSlot），嵌套一层 parallel 就跳过中间那一层 —— `dispatch` 层层把 `slot` 传下去，唯独这一支从闭包读 `runSlot`。实测（.scratch/probe-nested-parallel.mts / probe-nested-b.mts）：内层那个裸 tap 恒报「缺少 device 租约」，而**同一形状 lint 判它该通过** —— 静态闸与运行事实又不一致，本仓最贵的那一族，在这轮\"修完了\"之后原地出现第二次。症状**只有**继承缺失：归还一条都没坏（release L3,L4,L1,L2、inflight=0），所以抓它必须用嵌套形状 + 断言继承，看 id 集合是瞎的。"
+    },
+    {
+      "label": "T9 把\"继承\"写成\"共用同一个槽对象\"（不新开对象，各支互相还对方那台）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "              const branchSlot = newLeaseSlot(slot.lease);",
+      "replace": "              const branchSlot = slot;",
+      "testFile": "packages/engine/test/lease-lifecycle.test.ts",
+      "_note": "反方向的错法：槽是共享的而不是各开一个、初值抄一份。实测调用序 `lease L1, lease L2, release L2, …` —— device 步还的是**别人此刻放在共用槽里**的那台（lease 2 次只 release 1 次那一族的老症状换了个写法）。与 T1 在顶层等价，但注释里记的是不同的判断：T1 是\"忘了开槽\"，T9 是\"开了槽但传的是引用\"，后者在 review 里更像\"已经修过了\"。"
+    }
+  ]
+}

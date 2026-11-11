@@ -173,6 +173,112 @@ const raceText = (h: ParallelHazard): { message: string; fix: string } =>
 /** 表达式语法错误的修法。两处（condition / when）共用，避免文案漂移 */
 const EXPR_SYNTAX_FIX = '支持：字面量、$.路径、算术、比较、and/or/not、in，以及 count/sum/avg/min/max/len/contains/matches 等函数';
 
+/** 租约游标走到某一步时"手上有没有租约"这件事的**作用域**判据（见 walkLease） */
+type LeaseCursor = { has: boolean };
+
+/**
+ * 按**运行时的作用域**走一遍租约，报出所有"这一刻手上没有租约"的设备步骤。
+ *
+ * ## 为什么不能用 `walk()` + 一个扁平游标
+ *
+ * `walk` 是深度优先的扁平遍历，配上"先前见过 device 就算有租约"的游标，
+ * 对**分支语义**会给出与运行事实相反的判定（三处，实测见 `docs/15` §3.3）：
+ *  - `parallel`：两支并发，分支内部申请的租约**不跨分支**（每支一个槽，见
+ *    `interpreter.ts` 的 `LeaseSlot`），而扁平游标会认为"A 支的 device 喂到了 B 支"；
+ *  - `if` / `switch`：`then` 与 `else` 只会走一边、`cases[i]` 与 `default` 只会走一边，
+ *    而扁平游标会认为"上一个分支里的 device 喂到了下一个分支"。
+ *
+ * ## 三条规则各自的形状
+ *
+ *  | 容器 | 子步骤之间 | 传给子步骤的游标 | 容器之后的游标 |
+ *  | --- | --- | --- | --- |
+ *  | `sequence` / `forEach` / `while` / `repeat` | 顺序，前一步的效果可见 | 逐段传递 | 最后一段的结果 |
+ *  | `if` | `then` 与 `else` **互斥** | 两段各拿**进入前**那份 | 取"两段都没有"那种（保守） |
+ *  | `switch` | `cases[i]` 与 `default` **互斥** | 同上 | 同上 |
+ *  | `parallel` | 分支之间**并发**，互不可见 | 每支各拿进入前那份 | 同上 |
+ *
+ * "容器之后取最保守的一种"是必须的：`if { then: [device] } else { … }` 走 else 那一边时，
+ * 出了 if 之后**确实没有租约**，所以后面不能有裸设备步。反过来如果取"有"，
+ * 就会放行一份"一半路径没租约"的 IR —— 那正是本仓那一族"看起来有防护，实际漏一个"。
+ * 宁可多问一句（作者可以把租约提到容器之前，那本来就是更清楚的写法）。
+ *
+ * ## 一处**故意**的宽松（不是遗漏）
+ *
+ * `parallel` 里"分支借来的那台"（分支槽的初值 `slot.lease`）在运行时是**进入容器时手上那台**，
+ * 而这里传的就是同一个游标，两边一致。唯一的差别在**并发可见性**：
+ * 运行时的分支槽是在 `worker()` 里 `newLeaseSlot(slot.lease)` 现取的，
+ * 所以"一支先 device、另一支后跑"时后者**能**看到前者那台（实测过这个不确定性）。
+ * 这里**不**跟着那个不确定性走 —— 于是这一形状会被判 error 而运行时可能跑通。
+ * 这是**假阳性方向**的错，而它比反向错好：假阳性让人加一步 `device`（多加一次申请，
+ * 结果不变），假阴性则让一份 lint 全绿的 IR 在 CI 里偶发红。
+ * **而且那个"可能跑通"本身不该被依赖**：它由调度顺序决定，同一份冻结场景两种结论，
+ * 违反 docs/02 §9 的确定性要求。判它 error 是在把一个 flaky 的写法挡在门外，不是误伤。
+ *
+ * @param has 进入这一步时手上有没有租约
+ * @param report 每发现一个"没租约的设备步"调一次；`inBranch` 是"它处在某个互斥/并发分支里"
+ */
+function walkLease(s: Step, has: boolean, report: (bad: { id: string; kind: string; inBranch: boolean }) => void, inBranch = false): LeaseCursor {
+  let cur: LeaseCursor = { has };
+  // 叶子：判"这一刻有没有"，device 把自己变成"有"
+  if (LEASE_REQUIRED.includes(s.kind) && !cur.has) report({ id: s.id, kind: s.kind, inBranch });
+  if (s.kind === 'device') cur = { has: true };
+  if (!CONTAINER_KINDS.includes(s.kind)) return cur;
+
+  const children = (key: string): Step[] => {
+    const v = (s as unknown as Record<string, unknown>)[key];
+    return Array.isArray(v) ? (v as Step[]) : [];
+  };
+  /*
+   * 把子步骤切成"**互不可见的段**"。注意 `parallel` 的一段是 `steps` 里的**一个元素**
+   * （一支分支），不是整个 `steps` 数组 —— 我第一版把它当成一个数组，于是两支被当成
+   * 一段顺序执行，"A 支的 device 喂给 B 支"这个误判**原地留着没修掉**（实测 P4 形状
+   * 照样放行）。判据写错最难发现的地方就在这：它对大部分形状是对的，
+   * 只有跨分支那一种坏，而那恰好是这条规则存在的理由。
+   */
+  const groups: Step[][] =
+    s.kind === 'switch'
+      // switch 的子步骤分两处：cases[i].steps（每个 case 一个数组）与 default
+      ? [...((s as unknown as { cases?: { steps?: Step[] }[] }).cases ?? []).map((cs) => cs.steps ?? []), children('default')]
+      : s.kind === 'if'
+        ? [children('then'), children('else')]
+        : s.kind === 'parallel'
+          ? children('steps').map((one) => [one])
+          : [children('steps')];
+
+  /*
+   * `if` / `switch` / `parallel` 的这几段**互斥或并发**：段与段之间互相看不见，
+   * 所以每段都从"进入容器前"那份游标起算，段内才是顺序传递。
+   * 顺序容器（sequence / forEach / while / repeat）只有一段，于是自然退化成"整段顺序走"。
+   */
+  const exclusive = s.kind === 'if' || s.kind === 'switch' || s.kind === 'parallel';
+  const entry = cur.has;
+  const outs: boolean[] = [];
+  for (const g of groups) {
+    let c: LeaseCursor = { has: entry };
+    for (const child of g) c = walkLease(child, c.has, report, exclusive ? true : inBranch);
+    outs.push(c.has);
+  }
+
+  if (!exclusive) {
+    cur = { has: outs[0] ?? cur.has };
+    return cur;
+  }
+  /*
+   * 容器之后"有没有"：
+   *  - `parallel`：**只认进入前那台**。分支是在自己的槽里拿的（见 interpreter 的 `LeaseSlot`），
+   *    并且分支结束时已经自己还掉了，所以容器之后手上还是原来那台（可能就是没有）。
+   *  - `if` / `switch`：**每一段都有**才算有。只有一条路径拿得到时，后面那个裸设备步
+   *    就是"看条件运气的 error" —— 与 parallel 那两支看调度运气是同一种坏。
+   *    这条会多问一句（把 device 提到容器之前即可，那本来也是更清楚的写法），
+   *    属于**假阳性方向**的错，比反向（放行一份偶发红的 IR）便宜得多。
+   *    `groups` 在这里不可能为空（schema 上 then/cases/steps 都是 min(1)），
+   *    但 `outs.every` 对空数组恒真，所以空的情况要单独挡住 —— 宁缺毋滥的方向反过来
+   *    就是"没有子步骤可查时不该声称有租约"。
+   */
+  cur = { has: s.kind === 'parallel' ? entry : groups.length > 0 && outs.every(Boolean) };
+  return cur;
+}
+
 export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIssue[] {
   const issues: LintIssue[] = [];
   // doc 缺省时从 LINT_DOCS 兜上，保证「每条报错都有出处」是无条件的性质，
@@ -295,22 +401,50 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
    * 把未决的产品问题夹在一个缺陷修复里一起做，做完就没人再来分开判了。
    */
   {
-    let leaseAcquiredAt = -1;
-    let idx = 0;
     // 顺序按**运行顺序**拼：setup → body → teardown。
     // 判据用 deriveTargets(三层) 而不是 scenario.targets —— 后者是从 body 推的
     // （`ir/index.ts` 里 `targets: deriveTargets(draft.body)`），
     // 于是"body 里没有移动端步骤、只有 setup 里有"这种场景那个 .some() 根本不成立，
     // 上面的遍历修好了也仍然漏（手工验过：只改遍历时，只有这种场景会红）。
-    const needsDevice = deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown])
-      .some((t) => ['android', 'ios', 'harmony'].includes(t));
-    walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
-      idx++;
-      if (s.kind === 'device') leaseAcquiredAt = idx;
-      if (LEASE_REQUIRED.includes(s.kind) && leaseAcquiredAt < 0 && needsDevice) {
-        push({ code: 'RESOURCE_LEASE_MISSING', level: 'error', stepId: s.id, message: `设备步骤 ${s.kind} 之前没有 device 租约`, fix: '在场景开头加 { kind:"device", require:{…} } 申请租约' });
+    const three = [...scenario.setup, ...scenario.body, ...scenario.teardown];
+    const needsDevice = deriveTargets(three).some((t) => ['android', 'ios', 'harmony'].includes(t));
+    if (needsDevice) {
+      // 三层是**一次连续运行**，游标必须一路传下去：setup 里申请的设备在 body 里还在手上
+      // （这正是 §3.3 那张探针表里 A 那一格修的东西）。逐层各自起 false 会把它重新变成误报。
+      let carry: LeaseCursor = { has: false };
+      /*
+       * **`parallel` 的分支之间不传租约** —— 这条改动是运行时那个租约槽修法的**另一半**，
+       * 单独改任何一半都会造出一条新的"静态闸与运行事实不一致"（本仓最贵的那一族）。
+       *
+       * 原先的判据是一个**扁平游标** `leaseAcquiredAt`：整条 walk 上只要先前见过一个
+       * `device`，后面所有位置的裸设备步都算有租约。顺序无关的容器（parallel）配上
+       * 顺序相关的游标，就会给出与运行事实矛盾的判定，实测（`.scratch/probe-parallel-lint.mts`）：
+       *
+       * | 分支声明顺序 | 旧 lint | 运行时（本轮修法后） |
+       * | --- | --- | --- |
+       * | `[device,tap]` 在前、裸 `tap` 在后 | **放行** | 裸 tap 那支 error「缺少 device 租约」 |
+       * | 裸 `tap` 在前、`[device,tap]` 在后 | error@裸tap | 同上（error） |
+       *
+       * 也就是说旧判据**让同一件事取决于分支的书写顺序**，而其中一种顺序是假的：
+       * 一份 lint 全绿的 IR 跑起来必红。运行时现在是确定且对的（每支一个槽，
+       * 见 `interpreter.ts` 的 LeaseSlot），所以**这边要跟上**，而不是把那边拉回来。
+       *
+       * 判据因此改成**作用域感知**：分支继承进来的是"进入容器时手上那台"，
+       * 分支内部申请的只对自己那一段可见。这条与解释器的差别见下面 walkLease 的注释。
+       */
+      for (const st of three) {
+        carry = walkLease(st, carry.has, (bad) =>
+          push({
+            code: 'RESOURCE_LEASE_MISSING', level: 'error', stepId: bad.id,
+            message: bad.inBranch
+              ? `设备步骤 ${bad.kind} 在容器分支里，而进入这个容器时没有租约（**兄弟分支 / 另一条 case 里的 device 不算**，分支之间不共享设备）`
+              : `设备步骤 ${bad.kind} 之前没有 device 租约`,
+            fix: bad.inBranch
+              ? '给这一支自己加一步 { kind:"device", require:{…} }；或把租约提到容器之前（那样各分支共享同一台）'
+              : '在场景开头加 { kind:"device", require:{…} } 申请租约',
+          }));
       }
-    });
+    }
   }
 
   // ── 逐步骤规则 ──────────────────────────────────────────────────

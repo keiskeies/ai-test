@@ -1,0 +1,107 @@
+{
+  "_comment": [
+    "被中断的 run 必须自己说出「我没跑完」。tests: packages/engine/test/interruption.test.ts + packages/cli/test/gate.test.ts。",
+    "",
+    "**这一族守的是本轮实测到的一个假绿**：三步骤的 run 在第 2 步取消，实际输出是",
+    "`results = seed:pass,a1:pass,s:pass` / `status = \"pass\"` / 门禁退出码 **0** / 理由一句",
+    "`1 条断言全部通过`。三个中断来源（外部取消、运行超时、成本熔断）全都抛 RunAborted，",
+    "被 run 的 catch 收成一条事件之后**照常汇总**，于是「第 2 步就被砍」与「10 步全过」",
+    "在 status / summary / JUnit 计数 / 退出码上完全同形。",
+    "而 `EXIT.ABORTED = 10` 从写下那天起**没有生产者** —— exit.ts 定义着、CI_HINT 里印着、",
+    "WORSE_ORDER 里排着序，没有任何一条路径返回它。这是 docs/14 §4.3 那个缺陷类的",
+    "**docs/14 §4.3 子类 (c)「读了、也判了，但没有生产者」换到对外 API 这层上的复现**",
+    "（以前是 IR 字段 + adapter 不报数，这里是码表有名额 + 执行侧没人返回。同一子类、不同表面，不另立编号）。",
+    "",
+    "**I1-I4 是判据侧，I5-I8 是数据侧**，两侧各四条不是凑数：门禁读的是 `report.aborted`",
+    "（合成 fixture 就能测），引擎产的是同一个字段（只有真 run 才测得到）。",
+    "本轮的先例（lease-scope 的 S1/S2）说明**只测一侧会留一半**：",
+    "I5 撤掉赋值时 gate.test.ts 全绿（它自己造 aborted），I1 撤掉判定时 interruption.test.ts 全绿（它不判退出码）。",
+    "",
+    "**I3 是有主见的判据**，不是「随便挑个码」：CI_HINT 教流水线「5 → 标 error 重试一次」，",
+    "而「有人按了 Ctrl-C」重跑一遍是纯浪费；成本熔断更甚 —— 那笔钱再花一遍，正是 maxCostUsd 要防的事。",
+    "所以中断必须有自己的码，不能借 5 用。",
+    "",
+    "**I4 是位置测试**：把判定挪到「没有任何结论」那道闸之后（写成 `&& conclusive.length`，",
+    "在与挪位置同一批输入上同果），中断的 run 会拿到 3 + 一句「你的用例里没有断言」，",
+    "人去查一份本来就写对了的 IR。这是本轮自己踩过的顺序坑（gate.ts 里那段「放前面会报错因」讲的是同一件事），",
+    "所以钉成变异而不只是测试。",
+    "",
+    "**刻意没有的 case**：`if (report.aborted)` 改成 `if (report.aborted && report.status !== 'pass')`。",
+    "它看起来像「更谨慎」，实际**恰好把这次要修的假绿原样留下**（被砍的 run 的 status 就是 pass），",
+    "而 I1/I2 都抓不到它 —— 抓到它的是 interruption.test.ts 第 1 条那句 `status 保持 pass` 的断言。",
+    "**两侧判据互相不知道对方的存在**，这正是「只测一侧会留一半」的另一面，所以记在这里而不是补一条变异：",
+    "要钉住它得让 gate.test.ts 也拿真 run 的报告，那是 e2e 的活（见最后一则）。",
+    "",
+    "**CLI 端到端没测**：`atest run` 至今**没有接 signal**（全仓没人给 runOptions.signal 赋值），",
+    "所以「Ctrl-C → 退出码 10」这条链路只到「引擎产出 + 门禁判定」为止，中间那一跳还没接线。",
+    "已记进 docs/15 §3.7 的待办；不要因为没被测就以为它坏了 —— 它压根还没接。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "I1 门禁整个不看 report.aborted（回到「契约有名额、没人兑现」：10 又变成没人返回的码）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (report.aborted) {",
+      "replace": "  if (false) {",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "I2 判到中断却给 EXIT.OK（假绿只换了措辞：理由说「被中断」而退出码仍是 0）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "    return { code: EXIT.ABORTED,",
+      "replace": "    return { code: EXIT.OK,",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "I3 中断判成 EXIT.RUNTIME（5 让 CI 按 CI_HINT 重试一次；有人取消的 run 被重跑一遍）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "    return { code: EXIT.ABORTED,",
+      "replace": "    return { code: EXIT.RUNTIME,",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "I4 只在已有结论时才认中断（等于把判定挪到「没有任何结论」那道闸之后 => 报 3 把人支去改用例）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (report.aborted) {",
+      "replace": "  if (report.aborted && conclusive.length) {",
+      "testFile": "packages/cli/test/gate.test.ts"
+    },
+    {
+      "label": "I5 run 的 catch 不再记录中断（报告头部只剩 status=pass，门禁压根收不到这件事）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    if (aborted) interruption = { kind: (e as RunAborted).kind, reason: (e as RunAborted).message };\n",
+      "replace": "",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "I6 报告里恒有 aborted 键（没中断时是 undefined）=> 「记了没中断」与「压根没记」不可区分",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    ...(interruption ? { aborted: interruption } : {}),",
+      "replace": "    aborted: interruption,",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "I7 summary 文字里不写「被中断」（status 仍是 pass，而人读的那份 summary.txt 只有文字）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    summary: `${interruption ? `被中断（${interruption.reason}）· ` : ''}${status} ·",
+      "replace": "    summary: `${status} ·",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "I8 子场景被砍时 call 步骤不再报错（父报告里一份中间断掉的子场景是条干净绿灯）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (rep.aborted) {",
+      "replace": "        if (false) {",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "E1 call 分支的中断优先级 ??= 改 =（今天无可观测形状，见 _comment）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          interruption ??= { kind: rep.aborted.kind, reason: `子场景 ${s.id} ${rep.aborted.reason}` };",
+      "replace": "          interruption = { kind: rep.aborted.kind, reason: `子场景 ${s.id} ${rep.aborted.reason}` };",
+      "testFile": "packages/engine/test/interruption.test.ts",
+      "expect": "equivalent",
+      "_note": "刻意等价（预期不被抓）。要让它可观测，得构造「两个 call 各自都被砍、且成因不同」的场景；而外层中断只在**整个 run 被打断**时才写，那时它按定义覆盖子场景那一份。先有真需求再决定钉哪一边，别为了消灭一个 survived 去造夹具。"
+    }
+  ]
+}

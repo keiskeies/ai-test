@@ -285,6 +285,41 @@ function gateAfterRunCore(i: GateInput): GateDecision {
     reasons.push(`${healed.length} 步靠自愈通过，**等人审**（改了定位器/等待策略的用例必须被看见，否则自愈会慢慢把用例改成"永远通过"）。`);
     return { code: EXIT.TEST_FAILED, reasons, refused: false, suppressedFails: suppressed, attention };
   }
+  /*
+   * **被中断的 run 不能报"全部通过"**（`EXIT.ABORTED = 10`）。
+   *
+   * 这个码以前**没有生产者**：`exit.ts` 里定义着、`CI_HINT` 里印着"10 被中断"、
+   * `WORSE_ORDER` 里给它排了序，而全仓没有任何一条路径返回它。
+   * 症状实测过（三场景的 run，第 2 步之后取消）：
+   * 退出码 **0**、理由一句 `1 条断言全部通过`、`report.status` 是 `pass`。
+   * CI 于是读到"绿"，而真实情况是"用例压根没跑完" —— 假绿里最贵的那一种，
+   * 因为它连"哪里坏了"都不提示。
+   *
+   * **只读 `report.aborted`，不去 `childRuns` 里找中断**。不是漏：子场景被砍时
+   * call 那一步自己会报 error（interpreter 的 call 分支），所以下面那个 error 分支
+   * 一定先命中，父侧的 `aborted` 在这里永远轮不到 —— 写出来就是一行没有可达路径的
+   * 判据（docs/14 §4.3 的第三个子类：读了但读不到）。子场景那条路给的是 5 +
+   * 一个具体步骤坐标，比 10 更有用（重试一次对"子场景超时"也是对的）。
+   *
+   * **位置：error/fail/healed 之后、"没有任何结论"那道闸之前**，两边都有理由：
+   *  - 不抢在 error/fail 之前：那些是**具体**结论（哪一步、什么成因），
+   *    而"被中断"只说"这份报告不完整"。让人先看到具体的那一条；
+   *    并且不改动任何**已经是红**的退出码 —— 只把今天误报 0 的那一批改成 10。
+   *  - 必须抢在 `!conclusive.length` 之前：中断的 run 里"断言一步没跑"很常见，
+   *    那时报 3 附一句"你的用例里没有断言"是**报错因**（用例写了断言，是运行被砍了），
+   *    人会去改用例，而该做的是把这次 run 跑完。
+   */
+  if (report.aborted) {
+    reasons.push(
+      `本次运行**被中断**（${report.aborted.reason}）。已完成步骤的结论仍然有效，但这份报告是不完整的：`
+      + '后面的步骤（包括断言与 teardown）没有执行。',
+    );
+    reasons.push(
+      '中断分三种：cancelled（有人取消）/ timeout（撞到 scenario.config.timeoutMs）/ cost（成本熔断）。'
+      + 'timeout 要查是环境慢还是上限定小了；cost 要查哪一步在花钱。',
+    );
+    return { code: EXIT.ABORTED, reasons, refused: false, suppressedFails: suppressed, attention };
+  }
   // **"没有一条能当门禁的结论"这条闸放在所有 error/fail/healed 分支之后**，
   // 而且必须放最后 —— 不是我偏好这个顺序，是放前面会**报错因**：
   // http 步骤连不上（error）会连带断言一步没跑，于是"没有任何断言结论"先返回，

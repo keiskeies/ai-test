@@ -376,6 +376,25 @@ export function toJUnitXml(report: RunReport, opts: JUnitOptions = {}): string {
   const total = report.results.filter((r) => !isContainer(r.kind)).length;
   lines.push(`<testsuites tests="${total}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="${(Math.max(0, report.durMs) / 1000).toFixed(3)}">`);
   lines.push(`  <testsuite name="${xmlAttr(name)}" tests="${total}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="${(Math.max(0, report.durMs) / 1000).toFixed(3)}" timestamp="${new Date(report.startedAt).toISOString()}">`);
+  /*
+   * **被中断要在 properties 里，而不只在 system-out 的散文里**。
+   *
+   * 这是同一个假绿的**第五个消费者**，而且是对机器说话的那一个：
+   * 一次被砍断的 run 的 junit.xml 是 `tests=3 failures=0 errors=0 skipped=0`
+   * —— Jenkins/GitLab 看到的就是"全绿"。而"跑完之后有没有断言结论"这件事
+   * 在 CI 侧的判据是**退出码**，有些流水线（或插件）只看这份 XML，
+   * 于是修好退出码也只堵了一半。
+   *
+   * 位置放在 testcase 之前：JUnit DTD 里 testsuite 的产生式是
+   * `properties?, (testcase|error|failure)*, system-out?, system-err?`，
+   * 顺序错了严格的解析器会拒（拒了的后果是"这份报告压根读不出来"，比撒谎更糟但也没好多少）。
+   * 计数**不动**（不加 skipped）：`sum == tests` 那条自洽性是本文件开头列的三条之一，
+   * 而那些步骤确实执行过并且过了 —— 与 status 不改写的同一条判断。
+   */
+  if (report.aborted) {
+    lines.push(`    <properties><property name="atest.aborted" value="${xmlAttr(report.aborted.kind)}"/>`
+      + `<property name="atest.aborted.reason" value="${xmlAttr(report.aborted.reason)}"/></properties>`);
+  }
   lines.push(...bodies);
   lines.push(`    <system-out>${xmlText(report.summary)}</system-out>`);
   lines.push('  </testsuite>');
@@ -423,6 +442,17 @@ export const EVIDENCE_MEMBERS: string[] = Object.entries(EVIDENCE_FILES)
 export interface EvidenceManifest {
   runId: string;
   status: string;
+  /**
+   * **这份证据出自一次被中断的运行**（原样搬自 `RunReport.aborted`）。
+   *
+   * 为什么要在清单里再来一份：`status` 在被中断时仍然是 `pass`（那是已完成步骤的
+   * 结论，见 RunReport 上那段注释），而**机器读的是 manifest.status**。
+   * 少了这一栏，一个被砍断的 run 在库里就是一条 pass 记录，
+   * 而"这条流水线为什么绿"没人能从包里查出答案 —— 真话在报告内存里，不在产物里。
+   *
+   * 与 `missing` 同一类处置：包是给别人下载的东西，拿到它的人看不到 CI 那几行日志。
+   */
+  aborted?: { kind: string; reason: string };
   startedAt: string;
   durMs: number;
   /** 场景与版本指纹。缺 provenance 时 CI 要拒绝（M7），这里先如实记下来 */
@@ -538,7 +568,16 @@ export function summaryText(report: RunReport, m: EvidenceManifest): string {
   const bad = report.results.filter((r) => r.status === 'fail' || r.status === 'error');
   const attn = report.results.filter((r) => r.status === 'healed' || r.status === 'triaged');
   const lines = [
-    `运行 ${report.runId} — ${report.status}`,
+    /*
+     * **被中断时首行就要说出来**。这一行是 `summary.txt` 的第一行，
+     * 而那个文件是"下载给别人看"的东西 —— 那里没有 status 字段可读，只有文字。
+     *
+     * 只在末尾加一行是不够的（我第一版就是这么想的）：`status: pass` 在**第一行**，
+     * 而人排查时的动作恰恰是"扫一眼头部"。同一个缺陷类在证据侧的形状是
+     * "真话在报告里、不在产物里"（RunReport.aborted 已经带着这件事，
+     * 而 summary.txt 与文件名都把它丢了）。
+     */
+    `运行 ${report.runId} — ${report.status}${report.aborted ? `（**被中断**：${report.aborted.reason}）` : ''}`,
     `场景 ${m.scenario.id} · ${m.scenario.frozen ? '已冻结' : '未冻结（CI 不应执行）'} · ${(report.durMs / 1000).toFixed(1)}s`,
     `计入 ${counted} 步：${t.pass} 通过 / ${t.fail} 失败 / ${t.error} 错误 / ${t.healed} 自愈待审 / ${t.skipped} 跳过 — ${rate}%`,
     // 币种符号统一用 $：字段就叫 costUsd，docs/03 §2 的预算也是按美元定的。

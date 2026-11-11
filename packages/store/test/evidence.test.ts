@@ -550,3 +550,43 @@ test('脱敏：循环引用不会炸（一个 self-ref 就能让整份 trace 变
   o.self = o;
   assert.doesNotThrow(() => JSON.stringify(redactForDisk(o)));
 });
+
+test('被中断的 run：文件名换成 aborted，而 manifest.status **照实留 pass**', async () => {
+  /*
+   * 这一对断言看起来自相矛盾，而**矛盾本身就是这次修复的内容**：
+   *  - status 说"已完成步骤全过"（那是真的，不能改，改了就是伪装成某一步坏了）；
+   *  - 文件名说"这份证据出自一次没跑完的 run"（下载别人看不到别的，只看得到这个名字）。
+   *
+   * 改动前实测是 `evidence.cut1.pass.zip`。那是同一个假绿的第三个消费者
+   * （前两个是 summary.txt 首行与 manifest.status），而 CLI 的 e2e 只测得到
+   * "传了 true 之后叫什么"，**测不到"没传 true 时不许改状态词"** ——
+   * 那是本层的参数语义，所以在本层钉。
+   */
+  const dir = await mkdtemp(join(tmpdir(), 'atest-abort-'));
+  const store = await freshStore();
+  const report: RunReport = { ...stubReport(), aborted: { kind: 'timeout', reason: '运行超时（1000ms）' } };
+  const pkg = await buildEvidencePackage({ scenario: scen([{ ...b('n'), kind: 'noop' }]), report, store });
+
+  const cut = await writeEvidencePackage(dir, 'r9', 'pass', pkg.bytes, true);
+  assert.match(cut.path, /evidence\.r9\.aborted\.zip$/, `被砍断的包不该叫 pass：${cut.path}`);
+  // 对照组：没中断时**不许**动状态词（否则 fail 的包也会被抓成 aborted）
+  const plain = await writeEvidencePackage(dir, 'r8', 'fail', pkg.bytes);
+  assert.match(plain.path, /evidence\.r8\.fail\.zip$/, plain.path);
+
+  const manifest = JSON.parse(new TextDecoder().decode(
+    readZipEntries(pkg.bytes).find((e) => e.name === 'manifest.json')!.data,
+  ));
+  assert.equal(manifest.status, 'pass', 'status 保持已完成步骤的结论（设计，不是遗漏）');
+  assert.equal(manifest.aborted.kind, 'timeout', '机器读的是 manifest，中断必须在这一栏里');
+  // **没中断时这个键要压根不在**（不是 null / 空对象），与 RunReport.aborted 同一纪律
+  const clean = await buildEvidencePackage({ scenario: scen([{ ...b('n'), kind: 'noop' }]), report: stubReport(), store });
+  const cleanManifest = JSON.parse(new TextDecoder().decode(
+    readZipEntries(clean.bytes).find((e) => e.name === 'manifest.json')!.data,
+  ));
+  assert.ok(!('aborted' in cleanManifest), `正常包不该带这一栏：${JSON.stringify(cleanManifest.aborted)}`);
+  // summary.txt 首行也要说出来（那是唯一一份**只有文字**的产物）
+  const summary = new TextDecoder().decode(
+    readZipEntries(pkg.bytes).find((e) => e.name === 'summary.txt')!.data,
+  );
+  assert.match(summary.split('\n')[0]!, /被中断/, summary);
+});

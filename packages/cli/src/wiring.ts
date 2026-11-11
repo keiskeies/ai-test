@@ -447,6 +447,18 @@ export interface AssembleOptions {
    * 以前是个 `adapters.callScenario is not a function` 的 TypeError。
    */
   callScenario?: AdapterRegistry['callScenario'];
+  /**
+   * 取消标志（`signals.ts` 的 `installSignalHandlers()` 给的那个）。
+   *
+   * **以前这个入参不存在**，因为 `runOptions.signal` 在全仓没有生产者 ——
+   * 引擎里那句 `opts.signal?.aborted` 恒为 undefined，`EXIT.ABORTED` 恒不被返回。
+   * 契约（exit.ts 的码表与 CI_HINT）有名额而执行侧没人兑现，是 docs/14 §4.3 子类 (c)
+   * 「读了、也判了，但没有生产者」换到对外 API 这层上的复现（不另立编号）。
+   *
+   * 类型是**结构性的** `{ aborted }` 而不是 AbortSignal，理由写在 signals.ts 的
+   * `AbortFlag` 上（DOM 与 node 的两个 AbortSignal 声明不同 + 引擎只读一个布尔量）。
+   */
+  signal?: { readonly aborted: boolean };
 }
 
 export interface Assembled {
@@ -586,6 +598,14 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
     runId: o.runId,
     maxCostUsd: o.maxCostUsd,
     secretResolver: resolve,
+    /*
+     * **原样传对象，不传 `aborted: o.signal.aborted`**。
+     * 后者在装配那一刻取一次快照，而取消发生在**运行中间** —— 那样这条管道
+     * 永远读不到 true，症状与"压根没接线"一字不差（引擎那边照样恒为 undefined 的等价物）。
+     * 传对象之所以够：引擎在**每一步开头**读 `.aborted`（interpreter.ts 的 checkAbort），
+     * 而我们给的那个对象的 aborted 是 getter，读的那一刻才定值。
+     */
+    ...(o.signal ? { signal: o.signal } : {}),
   };
 
   if (missingSecrets.size) {

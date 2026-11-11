@@ -230,7 +230,16 @@ export interface UiExec {
 }
 
 export interface DeviceExec {
-  lease(req: unknown, ctx: ExecContext): Promise<{ id: string; deviceRef: string; expiresAt: number }>;
+  /**
+   * `leaseMs` 是 IR 上那个 `device.leaseMs`（默认 600000）。**它以前不传**：
+   * 全仓只有 schema 那一行提到这个字段，adapter 压根收不到，所以"写 30000 与不写
+   * 行为一字不差"（docs/15 §3.1 第一行）。
+   *
+   * 第三参数**可选**而不是必填：必填会让所有现存实现（含 `adapter-contract.test.ts`
+   * 里那个假 DeviceExec）变成编译错误，而那是**接口改动**不是缺陷修复。
+   * 不接这个参数的 adapter 只是"自己定租期"，仍然合法。
+   */
+  lease(req: unknown, ctx: ExecContext, leaseMs?: number): Promise<{ id: string; deviceRef: string; expiresAt: number }>;
   renew(lease: { id: string }, ctx: ExecContext): Promise<{ expiresAt: number }>;
   release(lease: { id: string }, ctx: ExecContext): Promise<void>;
   app(action: string, args: Record<string, unknown>, ctx: ExecContext): Promise<unknown>;

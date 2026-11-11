@@ -373,3 +373,31 @@ test('容器步骤不出行、子场景另起一段且明说不计数', async ()
   }, {});
   assert.match(childReport, /不计入上面的用例数/, '子场景那一段必须自证不双算，否则页面用例数与 CI 对不上');
 });
+
+test('被中断的 run：横幅不绿，且页面上有"被中断"的文字（第四个消费者）', async () => {
+  /*
+   * 同一个假绿在这一轮被修了四处：退出码、summary.txt 首行、manifest.status + 文件名、
+   * 然后是**这个页面** —— 而它是人第一个看的。
+   * 改动前 `bannerKind = bad.length ? '' : attn.length ? 'warn' : 'ok'`
+   * 对一次"已完成步骤全过、第 3 步被砍"的 run 给出 `ok`：一道绿条。
+   *
+   * 两条判据各管一半：**颜色**（banner 的 class）与**文字**（徽章）。
+   * 只验颜色等于没验 —— 灰度打印、色盲用户、把截图贴进聊天窗口都丢掉颜色那层，
+   * 这与上面 healed 那条的三重编码是同一条纪律。
+   */
+  const report = await run(scen([{ ...b('a'), kind: 'set', assign: { n: 1 } } as StepDraft]));
+  assert.equal(report.status, 'pass', '夹具要拿一份"已完成步骤全过"的报告，否则测的是别的东西');
+
+  const cut = toHtmlReport({ ...report, aborted: { kind: 'timeout', reason: '运行超时（1000ms）' } }, {});
+  assert.match(cut, /class="banner warn"/, '被中断的横幅不该是绿的');
+  assert.ok(!/class="banner ok"/.test(cut), cut.slice(0, 400));
+  assert.match(cut, /被中断/, '文字也要说出来（颜色会丢）');
+  assert.match(cut, /运行超时/, '成因要写在页面上，别让人再去翻 summary');
+  // **状态胶囊仍然是"通过"**：那是已完成步骤的结论，改成"执行异常"就是伪装成某一步坏了
+  assert.match(cut, /st-pass[^>]*>✓ 通过/, 'report.status 不该被中断改写（见 RunReport.aborted）');
+
+  // 对照组：正常 run 不挂徽章、横幅照旧绿（否则"被中断"这个信号会因为到处都是而失效）
+  const clean = toHtmlReport(report, {});
+  assert.match(clean, /class="banner ok"/, '正常 run 的横幅该是绿的');
+  assert.ok(!/被中断/.test(clean), '没中断时页面上不该出现这个词');
+});

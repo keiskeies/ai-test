@@ -301,7 +301,18 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
   const rate = counted ? Math.round((report.tally.pass / counted) * 100) : 100;
 
   // 顶部横幅：先给结论，再给细节。状态用 class 编码（色）+ 图标 + 中文，三重
-  const bannerKind = bad.length ? '' : attn.length ? 'warn' : 'ok';
+  /*
+   * **被中断时横幅不能是绿的**（`bad.length ? '' : attn.length ? 'warn' : 'ok'` 那一行
+   * 在本轮之前对一次被砍断的 run 给出 `ok`，也就是一道绿条）。
+   * 这是同一个假绿的**第四个消费者**：退出码（已修）、summary.txt 首行、
+   * manifest.status、文件名，然后是这个页面 —— 而这个页面是**人第一个看的**。
+   *
+   * 只把横幅染色不够（色弱、黑白打印、截图发给别人都会丢掉这条信息），
+   * 所以同时挂一个文字徽章。而**不改 `st`（那个状态胶囊）**：
+   * `report.status` 说的是"已完成步骤的结论"，那是真的 pass，改成 error 就是伪装成某一步坏了
+   * —— 与 RunReport.aborted 上那段同一条判断。
+   */
+  const bannerKind = bad.length ? '' : (attn.length || report.aborted) ? 'warn' : 'ok';
   const st = stateOf(report.status);
   const banner = `<div class="banner ${bannerKind}">
     <h1><span class="st st-${st.v.replace('--', '')}">${st.icon} ${esc(st.label)}</span> · ${esc(opts.scenarioName ?? id)}</h1>
@@ -312,6 +323,7 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
       <span class="hint">${esc(fmtMs(report.durMs))}</span>
       <span class="hint">${rate}% 通过率（分母 ${counted}）</span>
       <span class="badge">${opts.frozen ? '已冻结' : '<b>未冻结</b>（CI 不应执行）'}</span>
+      ${report.aborted ? `<span class="badge"><b>被中断</b>（${esc(report.aborted.reason)}）：后面的步骤没执行</span>` : ''}
     </div>
     ${opts.summary ? `<div class="hint">${esc(opts.summary)}</div>` : ''}
   </div>`;

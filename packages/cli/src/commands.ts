@@ -26,6 +26,7 @@ import {
   assemble, buildAuthLayer, CliError, DocRegistry, loadScenarioFile, makeClock, startLocalMock, buildEnv, secretEnvKey,
 } from './wiring.js';
 import { authCheckExit, checkAuth } from './authcheck.js';
+import { installSignalHandlers, type AbortFlag } from './signals.js';
 
 export interface Io {
   out(s: string): void;
@@ -143,17 +144,74 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
   const registry = await DocRegistry.load(a.multi.doc ?? []);
   const evidenceDir = str(a, 'evidence-dir') ?? cfg?.evidenceDir ?? join(io.cwd, DEFAULT_CONFIG.evidenceDir);
 
+  /*
+   * **接信号**（Ctrl-C / CI runner 的 cancel）。这一段以前不存在，于是
+   * `exit.ts` 的 `ABORTED = 10` 与 `CI_HINT` 里那句「10 被中断」是**没有生产者的契约**，
+   * 而 `report.aborted` 只在中断来自超时/熔断时才可能出（外部取消那条路压根走不到引擎）。
+   * 判据与"为什么第一次只置标志、第二次才真死"全在 signals.ts。
+   *
+   * 装在**命令**这一层而不是 runOne 里：多个场景共用一个标志，
+   * 这样在第 1 个场景上按的 Ctrl-C 会跳过第 2、3 个（runOne 里装的话，
+   * 每个场景都会重新"允许被取消"，而人按的那一下只作用于当时那个场景 ——
+   * 那恰好是人在取消一批用例时最不想要的行为）。
+   */
+  const signals = installSignalHandlers({
+    onAbort: ({ sig, sameSignal }) => {
+      // 同步一句、立刻打。信号栈里不能 await，而**什么都不打**的表现是
+      // "按了没反应，还得多等几秒才知道有没有生效" —— 于是人会再按一次。
+      if (sameSignal) {
+        // 第二次同名：signals.ts 马上要把进程打死。这里**只说已经发生的事**，
+        // 不说"正在收尾"那种假进度（进程不会活到收尾）。
+        io.err(`再次收到 ${sig}：立即终止，**放弃**证据包、teardown 与设备归还。`);
+        return;
+      }
+      io.err(`收到 ${sig}：正在收尾（已完成的步骤会照常产出证据包，teardown 与设备归还也要跑完）。`);
+      io.err('  再按一次同样的键**立刻终止**，代价是：没有证据包、没有 teardown、设备租约不归还。');
+    },
+  });
+
   const results: CommandResult[] = [];
   // 显式类型：EXIT.OK 是字面量 0，不标注的话 worst 被推成 0，后面赋别的码就报
   // "number 不能赋给 0" —— 那个报错会让人以为 worseExit 写错了，其实是推断问题
   let worst: number = EXIT.OK;
-  for (const f of files) {
-    const one = await runOne({ file: f, a, io, ci, cfg, clock, env, registry, evidenceDir });
-    results.push(one);
-    // 取"更坏"的那个码。顺序按语义严重程度而不是数值大小：
-    // USAGE/INVALID 比 TEST_FAILED 更要紧（先修配置再谈测试结果），
-    // 但数值上 1 < 3，直接 Math.max 会让 IR 不合法被一次测试失败盖掉
-    worst = worseExit(worst, one.code);
+  /** 被取消挡掉的场景数。**必须进退出码**，否则"取消"在流水线里是绿的（见 exitAfterCancelledBatch） */
+  let skippedByCancel = 0;
+  try {
+    for (const f of files) {
+      if (signals.signal.aborted) {
+        skippedByCancel++;
+        // 明说"没跑"，而不是静默 break：静默的话输出里只有前几个场景的结论，
+        // 而人以为这批跑完了（docs/14 §4.3 那一族"少跑了的东西不留一行"）
+        io.err(`已跳过 ${f}：本次运行已被 ${signals.signal.sig() ?? '信号'}取消，它**一步都没跑**。`);
+        continue;
+      }
+      const one = await runOne({ file: f, a, io, ci, cfg, clock, env, registry, evidenceDir, signal: signals.signal });
+      results.push(one);
+      // 取"更坏"的那个码。顺序按语义严重程度而不是数值大小：
+      // USAGE/INVALID 比 TEST_FAILED 更要紧（先修配置再谈测试结果），
+      // 但数值上 1 < 3，直接 Math.max 会让 IR 不合法被一次测试失败盖掉
+      worst = worseExit(worst, one.code);
+    }
+  } finally {
+    // **必须摘**（三条理由见 InstalledSignals.restore 的注释：处理器累加、
+    // 同进程后续用例会被误中断、进程期间对 Ctrl-C 免疫）。
+    // 放 finally：runOne 抛异常（配置缺失那几条 CliError）时也要摘。
+    signals.restore();
+  }
+  /*
+   * **被取消挡掉的场景必须进退出码**。走现成的 `worseExit` 而不是新写一条比较：
+   * WORSE_ORDER 里 ABORTED 排在 TEST_FAILED/RUNTIME 之后、USAGE/INVALID/ENV 之前，
+   * 正是这里要的语义（"有一步测出产品坏了"之后又被取消 => 说取消这件事；
+   * 而"用法本身就错"仍然是更要紧的那条）。复用同一张表也保证不会出现
+   * 第二份"谁更坏"的答案 —— 那是本仓反复记的漂移。
+   *
+   * 不这么做的形状（本轮之前的 cmdRun）：循环 `break` 出去，worst 里只有
+   * 已完成那几个的码，全绿时就是 **0** —— 一次"取消"在流水线里留下一个绿灯，
+   * 而且是**最安静的那种假绿**：连一个红步骤都没有。
+   */
+  worst = worseExit(worst, skippedByCancel ? EXIT.ABORTED : EXIT.OK);
+  if (skippedByCancel) {
+    io.err(`本次运行被取消：${skippedByCancel} 个场景**一个请求都没发**（它们没进 results，所以也不在证据包与 JUnit 里）。`);
   }
   if (files.length > 1) {
     io.out('');
@@ -168,6 +226,8 @@ async function runOne(o: {
   file: string; a: ParsedArgs; io: Io; ci: boolean;
   cfg: Awaited<ReturnType<typeof findConfig>>; clock: ReturnType<typeof makeClock>;
   env: Record<string, unknown>; registry: DocRegistry; evidenceDir: string;
+  /** 取消标志（cmdRun 装的信号处理器给的那个）。必传：漏掉就等于这条路径没接线 */
+  signal: AbortFlag;
 }): Promise<CommandResult> {
   const { io, a, ci } = o;
   const path = await resolveScenarioPath(o.cfg, o.file, io.cwd);
@@ -225,6 +285,19 @@ async function runOne(o: {
     inputs,
     runId: str(a, 'run-id'),
     maxCostUsd: str(a, 'max-cost') ? Number(a.flags['max-cost']) : undefined,
+    /*
+     * 把取消标志交给装配层。**这一行曾经不存在**，而它是整条管道上最后一段缺口：
+     * `cmdRun` 装了处理器、`assemble` 有 `signal` 入参、`runOptions` 会原样透传、
+     * 引擎的 `checkAbort` 每步都读 —— 中间这一跳没人接，于是每一层单独看都是对的，
+     * 而端到端恒读不到 true（本机实测：证据包文件名 `evidence.sig1.pass.zip`，
+     * 退出码却是 10，因为那个 10 来自"后面的场景被跳过"，不是来自这次中断的 run）。
+     *
+     * 退出码对、产物说"正常通过"，是这个缺陷类里最难发现的一种形状：
+     * 只看退出码会以为接线成功了，只看文件名会以为是 store 的问题。
+     * 所以这一行由 signal.test.ts 第 10 条**端到端**钉住，而不是由任何单元测试钉
+     * —— 单元测试测的是相邻两层，恰好测不到"这两层之间有没有接上"。
+     */
+    signal: o.signal,
   });
   for (const w of assembled.warnings) io.err(w);
 
@@ -287,7 +360,9 @@ async function runOne(o: {
   await writeFile(join(outDir, EVIDENCE_FILES.html), toHtmlReport(report, {
     suiteId: scenario.id, scenarioName: scenario.name, frozen: scenario.frozen, summary: report.summary,
   }), 'utf8');
-  const written = await writeEvidencePackage(outDir, report.runId, report.status, pkg.bytes);
+  // 第四个参数：被砍断的 run 的文件名要写 aborted，不能写 pass（见 writeEvidencePackage）。
+  // 只传"有没有中断"这个事实，**状态词由 store 侧定**，否则同一个词两处各拼一遍。
+  const written = await writeEvidencePackage(outDir, report.runId, report.status, pkg.bytes, Boolean(report.aborted));
   io.out('');
   io.out(`产物：\n  ${join(outDir, EVIDENCE_FILES.html)}\n  ${join(outDir, EVIDENCE_FILES.junit)}\n  ${join(outDir, EVIDENCE_FILES.trace)}\n  ${written.path}`);
   io.out(`  证据包 sha256=${written.sha256}`);

@@ -155,6 +155,9 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
   const manifest: EvidenceManifest = {
     runId: report.runId,
     status: report.status,
+    // 被中断要**原样进清单**。`status` 在这种 run 里仍然是 pass（那是已完成步骤的
+    // 结论），而机器读的是 manifest.status —— 少这一栏，库里就是一条 pass 记录。
+    ...(report.aborted ? { aborted: report.aborted } : {}),
     startedAt: new Date(report.startedAt).toISOString(),
     durMs: report.durMs,
     scenario: {
@@ -233,15 +236,26 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
  *
  * 返回值里带 sha256：CI 会把它打进日志。这样"我下载的那份是不是构建产出的那份"
  * 有据可对，而不是靠"应该没被中间环节动过"。
+ *
+ * **`interrupted` 会把文件名里的状态换成 `aborted`**（本轮加）。
+ * 不做的后果是 `evidence.ab1.pass.zip` —— 一个被砍断的 run 在磁盘上、在
+ * 文件管理器里、在"把它拖进聊天窗口发给同事"这个动作里都写着 pass。
+ * 这是同一个假绿在**第三个消费者**上的形状（前两个是 summary.txt 首行与 manifest.status，
+ * 三处读的都是 `report.status`，而它按设计不该变：见 `RunReport.aborted`）。
+ *
+ * 参数是布尔而不是"让调用方直接传想要的状态串"：那样"这次算不算被中断"这件事
+ * 就有两个判法（调用方判一次、写盘再判一次），而迟早只改其中一处。
+ * 文件名里的 `aborted` 与清单里的 `aborted` 栏说的是同一件事，
+ * 而 `status` 那一栏**照实保留 pass**（见 EvidenceManifest.aborted）。
  */
 export async function writeEvidencePackage(
-  dir: string, runId: string, status: string, bytes: Uint8Array,
+  dir: string, runId: string, status: string, bytes: Uint8Array, interrupted = false,
 ): Promise<{ path: string; sha256: string }> {
   await mkdir(dir, { recursive: true });
   // runId 会进文件名，而它可能来自外部（API 触发时是请求里的字段）：
   // 不清洗就是一个路径穿越写文件
   const safe = runId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'run';
-  const path = join(dir, `evidence.${safe}.${status}.zip`);
+  const path = join(dir, `evidence.${safe}.${interrupted ? 'aborted' : status}.zip`);
   await writeFile(path, bytes);
   return { path, sha256: createHash('sha256').update(bytes).digest('hex') };
 }

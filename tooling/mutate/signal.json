@@ -1,0 +1,166 @@
+{
+  "_comment": [
+    "取消这条管道：信号 → runOptions.signal → teardown 补跑 → 跳过后续场景 → 退出码 10。",
+    "tests: packages/cli/test/signal.test.ts + packages/engine/test/interruption.test.ts。",
+    "",
+    "**这一族守的是 docs/14 §4.3 子类 (c)「读了、也判了，但没有生产者」换到对外 API 这层上的复现**：",
+    "`exit.ts` 的 `ABORTED = 10` 从写下那天起没有生产者，`CI_HINT` 里印着「10 被中断」，",
+    "`WORSE_ORDER` 给它排了序，而 `runOptions.signal` 全仓没有生产者、各包 src 里 `process.on` 零命中。",
+    "本轮把管道接上之后，**管道本身**就要有变异：否则它被改回「只置标志不摘处理器」",
+    "或者「装配那一跳忘了传」，没人会知道 —— 这两种改法的症状与「压根没接线」**一字不差**。",
+    "",
+    "**P2 与 P5 是本轮自己踩出来的两个「半修」**，各有一条专属测试，别的条目抓不到：",
+    " - P2 只把 signal 那一支绕开、不暂停**整道** run 级闸：teardown 第一步照样被",
+    "   run 级超时抛死，而「取消那条」测试**照样是绿的**（只有「超时砍断的 run 里 teardown 也照跑」那条红）；",
+    " - P5 装配层拿到 flag 却忘了交给 assemble：cmdRun 装了处理器、assemble 有入参、",
+    "   runOptions 会透传、引擎每步读 —— **每一层单独看都是对的**，端到端恒读不到 true。",
+    "   实测形状是「退出码 10、证据包叫 evidence.sig1.pass.zip」：**码是对的、产物说正常通过**，",
+    "   只看退出码会以为接线成功，只看文件名会以为是 store 的问题。",
+    "   所以这条只能由**端到端**那条测试钉（「run 中途收到 SIGINT：退出码 10、证据包说 cancelled…」那条），单元测试测的是相邻两层，",
+    "   恰好测不到「这两层之间有没有接上」—— 而这一族缺陷的本名就是「层与层之间没接上」。",
+    "",
+    "**P15 是刻意等价**（预期不被抓）：`restore()` 里 `off` 那道幂等闸。Node 的 `removeListener` 本身幂等，",
+    "所以删掉它没有可观测差别（本机实测：施加 P15 后 signal.test.ts 十一条**全绿**、判定 survived）。列在这里是为了让",
+    "「这一行为什么没被测试钉住」有记录：它防的是**对 Node 行为的依赖**（哪天 removeListener 不再幂等，",
+    "或者处理器被换成了带副作用的实现），不是当前的某个失效。不要为了消灭这个 survived 去造夹具。",
+    "",
+    "**P16 与 P5 是同一条缺陷的两半**（P5 = CLI 装配那一跳没传，P16 = 引擎内部 call 那一跳没传）。",
+    "P16 的实测形状：子里 6 条 sleep，第 3 条后翻 flag => `子场景跑了 s1..s6`，而父报告同时写着",
+    "`aborted = 外部取消` —— **人已经按了 Ctrl-C，深层 call 里剩下的步骤照样跑完**。",
+    "子场景 body 里可能是 POST/下单/删除（docs/02 §5 的不可逆动作纪律），而取消的全部意义就是",
+    "**从此不再产生副作用**；视觉兜底那档还在逐步花钱。",
+    "`runScenarioIn` 的签名里 `secretResolver` / `envRevision` / `callStack` / `responseLedger` 是",
+    "**一个个补过的**（每条都对应一条实测后果，`responseLedger` 那条注释写的就是「可选参数一旦",
+    "忘了传也编译得过」）。**同一个签名漏同一个字段**，说明「哪些东西必须透传」从来没被当成",
+    "一个问题问过。修法因此不只是补一行：`signal` 在类型上是**必填**（值可为 undefined），",
+    "把「忘了接」从一条要靠测试去追的静默分叉变回编译错误 —— 抄的是 `responseLedger` 那一条。",
+    "",
+    "**P8 是本轮唯一的一条「删掉一行而其余测试全绿」**（本机实测：把 skippedByCancel 那条 worseExit",
+    "整条删掉，「run 中途收到 SIGINT」那条**照样是绿的**。测试条数不写在这里 —— 每补一条就漂一次，",
+    "本仓对「注释里的数」的口径是别钉它）。原因：那次取消落在 run **中间**，`report.aborted` 有值，",
+    "10 由**门禁**（gate.ts 读 report.aborted）给，`skippedByCancel` 从未单独决定过退出码。",
+    "补了「取消落在场景之间」那条（跑完的那个场景自己完整、gate 给 0，",
+    "于是那个 10 **只能**来自「有场景被跳过」）之后 P8 才被抓住 ——",
+    "并且**当场复验过**：施加 P8 时只有那条红、其余全绿。",
+    "「一条写着、注释详尽、没有任何测试经过它」的代码，是这一族缺陷最省事的产生方式。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "P1 中断路径不补跑 teardown（环境留下这次造的数据，而报告/trace/证据包里零痕迹）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    await runTeardown('interrupted');",
+      "replace": "",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "P2 清理期只放行「取消」、不暂停 run 级超时（超时砍断的 run 里清理照样被抛死 —— 半个修复）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    if (cleanupPhase) return;",
+      "replace": "    if (cleanupPhase && !opts.signal?.aborted) return;",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "P3 没有「跑过就别再跑」的标记（正常 run 的每条清理做两遍：DELETE 第二次 404 => 长期挂着 TEARDOWN_FAILED）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    teardownStarted = true;",
+      "replace": "",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "P4 异常路径不记 resultBoundary（teardown 的结果被算进整体状态：一次 cleanup 500 掩盖 body 的结论）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    if (resultBoundary < 0) resultBoundary = results.length;",
+      "replace": "",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    },
+    {
+      "label": "P5 装配层拿到 flag 却没交给 assemble（每层单独看都对，端到端恒读不到取消：包名回到 pass）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "    signal: o.signal,",
+      "replace": "",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P6 交给引擎的是**装配那一刻的快照**而不是对象（取消发生在运行中间，那条管道永远读不到 true）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "    ...(o.signal ? { signal: o.signal } : {}),",
+      "replace": "    ...(o.signal ? { signal: { aborted: o.signal.aborted } } : {}),",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P7 已取消之后不跳过后面的场景（人被取消的那一批继续往下发请求，其中有 POST/下单/删除）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "      if (signals.signal.aborted) {",
+      "replace": "      if (false) {",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P8 被跳过的场景不进退出码（一次「取消」在流水线里是绿灯，而且是**最安静的那种假绿**：连一个红步骤都没有）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "  worst = worseExit(worst, skippedByCancel ? EXIT.ABORTED : EXIT.OK);",
+      "replace": "  worst = worseExit(worst, EXIT.OK);",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P9 cmdRun 结束时不摘处理器（常驻进程里每次 run 留一套，且第二次按键会打死**下一条**命令）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "    signals.restore();",
+      "replace": "",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P10 异名信号也算「第二次」（CI runner 的「TERM 然后 INT」是同一句话说了两遍，却被当成「别收拾了」=> 每次 CI 取消都丢掉清理）",
+      "file": "packages/cli/src/signals.ts",
+      "anchor": "    if (!same) return;",
+      "replace": "",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P11 自我终止之前不摘处理器（处理器在场期间进程对该信号免疫：kill 自己只是又叫一次回调，**按多少下都出不去**）",
+      "file": "packages/cli/src/signals.ts",
+      "anchor": "    restore();\n    // 默认实现自带",
+      "replace": "    // 默认实现自带",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P12 restore 里不用 removeListener 而用 removeAllListeners（把宿主/测试框架装的处理器一起清掉：症状从「多一个」变成「别人的功能静默失效」）",
+      "file": "packages/cli/src/signals.ts",
+      "anchor": "    for (const name of HANDLED_SIGNALS) process.removeListener(name, handler);",
+      "replace": "    for (const name of HANDLED_SIGNALS) process.removeAllListeners(name);",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P13 signal.aborted 从 getter 改成快照（症状与「压根没接线」一字不差，所以钉在**它自己那一层**）",
+      "file": "packages/cli/src/signals.ts",
+      "anchor": "    get aborted() { return state.aborted; },",
+      "replace": "    aborted: state.aborted,",
+      "testFile": "packages/cli/test/signal.test.ts"
+    },
+    {
+      "label": "P14 用 on/addListener 这一对别名里的 on（撞上 IR 字段名 CaptureStepSchema.on，被 unread-fields 判成「那个字段有人读」=> 它的豁免被报成过期，照提示删掉就等于**写一行信号代码把别人的闸拆了**）",
+      "file": "packages/cli/src/signals.ts",
+      "anchor": "for (const name of HANDLED_SIGNALS) process.addListener(name, handler);",
+      "replace": "for (const name of HANDLED_SIGNALS) process.on(name, handler);",
+      "testFile": "tooling/test/unread-fields.test.mjs",
+      "expect": "caught",
+      "_note": "跨 tooling 的变异：mustBuild() 认不出包名时**保守地重建**（少建一次多跑几分钟，误判成不用建会产出假结论），所以这条会带一次 npm run build。抓它的是「真实 baseline 与扫描结果对得上」那条 —— 也就是说这条变异测的是**门禁本身**，不是产品行为：这一仓的缺陷类里有整整一类靠这类闸兜底。"
+    },
+    {
+      "label": "P15 restore() 里那道「摘过就别再摘」的幂等闸（预期不被抓：Node 的 removeListener 本身就幂等，所以今天没有可观测差别）",
+      "file": "packages/cli/src/signals.ts",
+      "anchor": "    if (off) return; // 摘两次不抛",
+      "replace": "    // 摘两次不抛",
+      "testFile": "packages/cli/test/signal.test.ts",
+      "expect": "equivalent",
+      "_note": "刻意等价。signal.test.ts 有一条专门测「restore 调两次不抛」，而它抓不到这个变异 —— 因为 removeListener 对没挂上的处理器本来就是 no-op。这一行防的是**对 Node 行为的依赖**（哪天它不再幂等，或这里换成带副作用的收尾），不是当前的某个失效。别为了把这个 survived 改成 caught 去造夹具：那会得到一条只测 Node 的测试。"
+    },
+    {
+      "label": "P16 取消标志不透传进子场景（每层单独看都对，而人按了 Ctrl-C、深层 call 里剩下的 POST 照样发）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "    ...(a.signal ? { signal: a.signal } : {}),",
+      "replace": "",
+      "testFile": "packages/engine/test/interruption.test.ts"
+    }
+  ]
+}

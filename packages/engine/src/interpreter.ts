@@ -134,6 +134,36 @@ export interface RunReport {
   costUsd: number;
   /** 通过率计算所需的分桶（healed 计入分母不计入分子，docs/12/13） */
   tally: { pass: number; fail: number; error: number; healed: number; skipped: number; triaged: number };
+  /**
+   * **这次运行是被中断的**（外部取消 / 运行超时 / 成本熔断），带原因。
+   *
+   * **为什么需要这个字段**（它以前不存在）：中断时 `status` 是 `pass`。
+   * 三个来源都从 `checkAbort`/`addCost` 抛 `RunAborted`，被 run 的 catch 收成
+   * 一条 `error` 事件（`data.aborted === true`）然后**照常走完汇总**，
+   * 于是"跑到第 2 步被人按了 Ctrl-C"与"10 步全过"在 `status`、退出码、
+   * JUnit 计数、summary 文本上是同一个形状：
+   *
+   * ```
+   * results = seed:pass,a1:pass,s:pass   status = pass   EXIT = 0
+   * reasons = ["1 条断言全部通过"]
+   * ```
+   *
+   * 而 `EXIT.ABORTED = 10` 早就写在退出码表里、`CI_HINT` 里也印着"10 被中断"，
+   * 全仓**没有一个生产者**（`grep ABORTED` 只有定义与 WORSE_ORDER 排序）。
+   * 这是 docs/14 §4.3 子类 **(c)「读了、也判了，但没有生产者」**换到**对外 API**
+   * 这一层上的复现：以前是"IR 字段有、引擎判了、adapter 不报数"，这里是"码表有名额、
+   * 门禁判了、执行侧没人返回"。**同一子类、不同表面，所以不另立编号**（理由见 §4.3 表下那段）。
+   *
+   * **为什么不改 `status`**：StepStatus 是六态，被中断的 run 里那几步的结论
+   * 各自仍然成立（它们真的过了）。把整体状态改成 error/skipped 会伪装成
+   * "某一步坏了"，而真实情况是"这份报告是不完整的"。所以这是一个**关于报告**
+   * 的字段，不是关于某一步的状态。
+   *
+   * **可选**（`undefined` = 这份报告没记这件事）与 `childRuns` 同一条理由：
+   * 手写 fixture 与别的引擎实现要给"我不知道"留出位置，
+   * 门禁对"记了且没中断"与"压根没记"的处置不同。
+   */
+  aborted?: { kind: AbortKind; reason: string };
   /** 人类可读摘要，报告与 CI 评论用 */
   summary: string;
 }
@@ -147,7 +177,24 @@ export interface RunReport {
  */
 const NEGATIVE_STRATEGIES = new Set(['requiredMissing', 'typeViolation', 'negativeFuzz', 'boundary']);
 
-class RunAborted extends Error {}
+/**
+ * 被中断（外部取消 / 运行超时 / 成本熔断）。
+ *
+ * `kind` 是给门禁与人看的**分类**，不是给人读的句子（那在 `message` 里）。
+ * 三个来源必须分开：值班人对这三件事的动作毫无重叠 ——
+ *  取消 → 有人主动停的，一般不用管；
+ *  超时 → 用例跑太久，要查是环境慢还是 `timeoutMs` 定小了；
+ *  成本 → 熔断生效，要查是哪一步在花钱（多半是视觉兜底）。
+ * 只有一个 `aborted: true` 布尔的话，这三种在报表里是同一行，
+ * 而 docs/08 那份失败看板要按原因分组 —— 同一种原因被写成一个桶就是没有信息。
+ */
+export type AbortKind = 'cancelled' | 'timeout' | 'cost';
+
+class RunAborted extends Error {
+  constructor(readonly kind: AbortKind, message: string) {
+    super(message);
+  }
+}
 /** 环境缺配置（如没配 baseUrl）。区别于"用例错了"：它该让人去改环境，不是改用例。 */
 class EnvMissing extends Error {}
 
@@ -168,9 +215,47 @@ type EmitIn = {
 
 /** 步骤级执行上下文。租约继承走这里，不用全局状态。 */
 interface StepCtx {
-  lease?: Lease;
   watchers: { rules: { match: Record<string, string | undefined>; action: string; maxTimes: number; hit: number }[] }[];
 }
+
+/**
+ * 一个**租约槽位** = "当前这一层作用域手上那台设备" + "这台是不是我申请的"。
+ *
+ * ## 为什么要有这个类型（它不是把 `stepCtx.lease` 换个名字）
+ *
+ * 租约原本挂在 `runScenario` 的闭包变量上，而 `runStep` / `runChildren` 都是那个作用域里的
+ * **闭包** —— 所以 `parallel` 的分支虽然看起来"各跑各的"（调用点
+ * `runStep(c, path, branch, branchWindow)` 里确实没有 stepCtx 形参），实际**共享同一个租约槽**。
+ * 共享本身是对的（一个场景一台设备，分支不该各占一台），但它让"第二个 device 步先还前一个"
+ * 那条修法在并发下失效：两支各带一个 `device` 时，两个 device 步都看到"手上已有租约"，
+ * 于是**各自去还同一个 id，而自己新拿的那台谁都不还**。实测：`lease 2 次 / release 1 次`，
+ * 收尾手上还攥着一台真机，而报告是 `p:pass`、整场 pass。
+ *
+ * ## 为什么要 `owns` 这个位（不共享的话就不用问这个问题）
+ *
+ * 槽位可以是**上层传下来**的（`parallel` 给分支预置外层那台）。借来的租约**不该由借方释放**：
+ * 否则一支分支跑完就把父场景正在用的设备还回池子，父后面所有设备步骤跑在一台已被别人
+ * 领走的机器上，而报告的证据与结论看起来连贯。所以分支槽位继承租约时 `owns: false`，
+ * 分支里那个 `device` 步新申请的才是 `owns: true`。
+ *
+ * ## 为什么是一个布尔而不是 `Set<Lease>`（我第一版写的就是 Set，理由是假的）
+ *
+ * 我原先写 `own: Set<Lease>`，注释说"同一层申请过多台时布尔会说谎"。**不会**：
+ * 释放判据只问"**当前**这个租约是不是我申请的"，而"当前"永远只有一个对象 ——
+ * 第二个 device 步把旧的还掉、换上新的之后，新的确实是自己申请的，布尔照样为真。
+ * Set 还额外制造了一个坑：续租那一步会把租约**重建**成
+ * `{ ...lease, expiresAt }`（见 runStep 里续租那段），对象身份变了而 id 没变，
+ * 存对象的 Set 在续租之后就查不回当前租约了 —— 得额外写一行 delete/add 去喂它，
+ * 而那一行的存在本身就是"这个数据结构选错了"的信号。**换成布尔之后那行没了。**
+ */
+interface LeaseSlot {
+  lease?: Lease;
+  /** 当前这个租约是本槽位**自己申请**的（true）还是上层借来的（false）。借来的不还 */
+  owns: boolean;
+}
+
+/** 开一个新槽位。`from` 是上层传下来的那台（借来的，所以 `owns: false`） */
+const newLeaseSlot = (from?: Lease): LeaseSlot => ({ lease: from, owns: false });
 
 export async function runScenario(opts: RunOptions): Promise<RunReport> {
   const { scenario, adapters, clock } = opts;
@@ -301,14 +386,42 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     costUsd += n;
     // 单位跟着字段名走（maxCostUsd → 美元）。写了 ¥ 的话，人会把 docs/03 里按美元定的
     // 预算数直接填进来，熔断阈值当场差一个汇率
-    if (costUsd > maxCost) throw new RunAborted(`成本上限超出：$${costUsd.toFixed(4)} > $${maxCost.toFixed(4)}，已中断`);
+    if (costUsd > maxCost) throw new RunAborted('cost', `成本上限超出：$${costUsd.toFixed(4)} > $${maxCost.toFixed(4)}，已中断`);
   };
 
   const stepCtx: StepCtx = { watchers: [] };
+  /**
+   * 这一**层运行**（一个场景 = 一层 `call`）自己的租约槽。setup / body / teardown
+   * 三段都跑在它上面，所以外层 setup 里申请的租约在 body 里可见 —— 那是既有行为。
+   *
+   * 只有 `parallel` 的分支会从**某一层槽位**派生新槽位（见 `case 'parallel'` 那段），
+   * 而那里派生的祖先是"当前这一层的 slot"，不必然是本槽 —— 嵌套 parallel 时两者不同。
+   */
+  const runSlot = newLeaseSlot();
+
+  /**
+   * **清理阶段暂停中断判定**。只在"运行已经被打断、现在是在收尾"时置真，见 finally 里那段。
+   *
+   * 为什么必须暂停而不是直接跑 teardown：`checkAbort` 是**每一步开头**读的，
+   * 而打断的条件在清理期间**仍然成立** ——
+   *  · `signal.aborted` 还是 true（人按的那一下不会自己复位）；
+   *  · `clock.mono() - t0 > timeoutMs` 还是成立（时间只会更远）；
+   *  · 成本已经超了（超了就是超了）。
+   * 所以不暂停的话，teardown 的**第一步**就再抛一次 RunAborted，清理一条也跑不完 ——
+   * 那正是本轮实测到的旧行为（`teardown 跑了吗 = false`）。
+   *
+   * 暂停的范围是**这一道闸**，不是"清理期间不会失败"：
+   *  · `addCost` 的熔断照抛（清理不该把钱再花一遍，那正是预算存在的理由）；
+   *  · 每一步/adapter 自己的超时照用（http client 有自己的 AbortController），
+   *    所以"清理挂死"是有界的，不会因为我们暂停了 run 级超时就没界；
+   *  · CLI 侧第二次同名信号会直接终止进程（signals.ts），人永远有逃生门。
+   */
+  let cleanupPhase = false;
 
   const checkAbort = (): void => {
-    if (opts.signal?.aborted) throw new RunAborted('外部取消');
-    if (clock.mono() - t0 > scenario.config.timeoutMs) throw new RunAborted(`运行超时（${scenario.config.timeoutMs}ms）`);
+    if (cleanupPhase) return;
+    if (opts.signal?.aborted) throw new RunAborted('cancelled', '外部取消');
+    if (clock.mono() - t0 > scenario.config.timeoutMs) throw new RunAborted('timeout', `运行超时（${scenario.config.timeoutMs}ms）`);
   };
 
   /** 守望规则执行（docs/00 §5.5）：在步骤之间弹掉干扰弹窗，容器级生效 */
@@ -356,7 +469,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     new ResponseWindow(responseLedger.snapshot(), (cursorAfter) => responseLedger.observe(cursorAfter));
 
   /** 单个步骤的执行。返回 StepResult，异常一律在此收敛成 error 状态。 */
-  const runStep = async (s: Step, path: string[], vars: VarSpace, window: ResponseWindow): Promise<StepResult> => {
+  const runStep = async (s: Step, path: string[], vars: VarSpace, window: ResponseWindow, slot: LeaseSlot): Promise<StepResult> => {
     checkAbort();
     for (const w of stepCtx.watchers) void w;
     const stepStart = clock.mono();
@@ -371,13 +484,62 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     }
 
     // 租约：需要设备的步骤若上下文无租约 → error（RESOURCE_LEASE_MISSING 应在 lint 阶段就拦住）
-    if (LEASE_REQUIRED.includes(s.kind) && !stepCtx.lease && s.kind !== 'manualHandoff') {
+    if (LEASE_REQUIRED.includes(s.kind) && !slot.lease && s.kind !== 'manualHandoff') {
       if (!adapters.device) return finish(s, path, 'error', stepStart, '设备执行器未注册（device adapter 缺失）', { cause: 'env-unavailable' });
       return finish(s, path, 'error', stepStart, '执行设备步骤前缺少 device 租约', { cause: 'env-unavailable' });
     }
 
+    /*
+     * **到期先续、续不动才报 env-unavailable**（`docs/15` §3.1）。
+     *
+     * 为什么判在这里而不是 `case 'device'` 里：到期发生在**中间某个设备步**，
+     * 而那条步走的是 tap/app/input，压根不经过 device 那个 case。
+     *
+     * `expiresAt` 是 0 / 非法的时候**不判**，理由不是"照顾测试"（虽然现有那几个
+     * 假 DeviceExec 确实返回 0），而是 **0 是"这个 adapter 不报到期时间"的唯一可表达值**：
+     * `DeviceExec.lease()` 的返回里 `expiresAt` 是必填 number，一个不想管租期的
+     * 实现没有别的写法。把它当"1970 年就已过期"会让所有老实报 0 的实现直接不可用，
+     * 那是拿类型缺陷当缺陷修。**要说清这是宽容**：租期纪律今天只对"报了真实到期时间"
+     * 的 adapter 生效，而**仓库里一个这样的 adapter 都还没有**（docs/15 §3.1 整节的
+     * 取证都标着"缺 device adapter"）。所以这条现在能防的是"将来有人写了带租期的
+     * adapter 之后忘了处理过期"，不是"今天正在漏"。
+     */
+    if (slot.lease && adapters.device) {
+      const exp = Date.parse(slot.lease.expiresAt);
+      if (Number.isFinite(exp) && exp > 0 && clock.now() >= exp) {
+        /*
+         * 续租**必须自己吞异常**。这一坨在 dispatch 的 try 之外（它要在进步骤之前拦），
+         * 所以 renew 抛出来会一路撞到 run 的 catch —— 症状是"整份报告变成一条
+         * `__run__: error`"，前面所有步骤的结论虽然还在、但整体状态被一次设备农场
+         * 500 改写成运行异常。本轮写第一版时就是这个形状，是测试把它测出来的：
+         * 期望"这一步 error"，实际拿到 `undefined`（那一步压根没进 results）。
+         */
+        let renewed: { expiresAt: number } | undefined;
+        if (slot.lease.renewable) {
+          try {
+            renewed = await adapters.device.renew({ id: slot.lease.id }, execCtx(slot.lease.target as ExecContext['target'], s.id));
+          } catch (e) {
+            renewed = undefined;
+            emit({ kind: 'lease.lost', stepId: s.id, data: { lease: slot.lease.id, device: slot.lease.deviceRef, reason: errSummary(e) } });
+          }
+        }
+        if (renewed === undefined) {
+          return finish(s, path, 'error', stepStart,
+            `device 租约已过期${slot.lease.renewable ? '且续租失败' : '（该租约 renewable=false）'}：${slot.lease.deviceRef}`,
+            { cause: 'env-unavailable', keyContext: { lease: slot.lease.id, expiresAt: slot.lease.expiresAt, now: clock.now() } });
+        }
+        /*
+         * 续租会**重建**租约对象（`{ ...slot.lease, expiresAt }`），id 不变而身份变了。
+         * 槽位上的 `owns` 与这件事无关，所以这里只动 `lease` —— 也正因如此，
+         * "这租约是不是我申请的"这个判据不能存对象（否则每次续租都要记得换进去）。
+         */
+        slot.lease = { ...slot.lease, expiresAt: new Date(renewed.expiresAt).toISOString() };
+        emit({ kind: 'lease.renewed', stepId: s.id, data: { lease: slot.lease.id, expiresAt: slot.lease.expiresAt } });
+      }
+    }
+
     try {
-      const outcome = await dispatch(s, path, vars, window);
+      const outcome = await dispatch(s, path, vars, window, slot);
       // 守望在步骤之后跑一次，处理「上一步触发的弹窗」
       await runWatchers();
       return finish(s, path, outcome.status, stepStart, outcome.summary, {
@@ -633,7 +795,15 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     artifactIds?: string[];
   }
 
-  const runChildren = async (steps: Step[], path: string[], vars: VarSpace = rootVars): Promise<Outcome> => {
+  /**
+   * @param slot 这一批步骤跑在**哪个租约槽**上。**必填、无默认值**，
+   *   而且这个默认值是本轮**先写上去又删掉**的：写成 `slot: LeaseSlot = runSlot`
+   *   看起来无害（顶层调用少打一个字），但它让"`dispatch` 里新增一处嵌套 `runChildren`
+   *   忘了传 slot"这件事**编译得过而行为静默回落到外层槽** —— 那正是本轮刚修的缺陷的形状
+   *   （分支共用了本该独立的槽位）。留默认值等于把同一个坑原地留着等人再踩一次。
+   *   顶层那三处（setup/body/teardown）显式写 `runSlot`，一眼能看出"这三段共用一层槽"。
+   */
+  const runChildren = async (steps: Step[], path: string[], vars: VarSpace, slot: LeaseSlot): Promise<Outcome> => {
     const rs: StepResult[] = [];
     // 身份在**每个序列**入口快照、出口复位（理由见 currentIdentity 的注释）。
     // finally 是必须的：中途 return（子步骤失败且 onError 不是 continue）
@@ -648,7 +818,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          * 顺序上必须在 withRetry **外面**建，见 newResponseWindow 的注释。
          */
         const window = newResponseWindow();
-        const r = await withRetry(c, path, () => runStep(c, path, vars, window));
+        const r = await withRetry(c, path, () => runStep(c, path, vars, window, slot));
         rs.push(r);
         if (r.status === 'fail' || r.status === 'error') {
           if (c.onError === 'continue') continue;
@@ -663,20 +833,20 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     return { status: healed ? 'healed' : 'pass', summary: `${rs.length} 个子步骤` };
   };
 
-  const dispatch = async (s: Step, path: string[], vars: VarSpace, window: ResponseWindow): Promise<Outcome> => {
+  const dispatch = async (s: Step, path: string[], vars: VarSpace, window: ResponseWindow, slot: LeaseSlot): Promise<Outcome> => {
     switch (s.kind) {
       // ── 控制流 ────────────────────────────────────────────────
-      case 'sequence': return runChildren(s.steps, [...path, s.id], vars);
+      case 'sequence': return runChildren(s.steps, [...path, s.id], vars, slot);
       case 'if': {
         const ok = evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now });
-        return runChildren(ok ? s.then : s.else, [...path, s.id], vars);
+        return runChildren(ok ? s.then : s.else, [...path, s.id], vars, slot);
       }
       case 'switch': {
         const value = compileExpr(s.value).eval({ root: vars.asExprRoot(), vars: vars.visible(), now: clock.now });
         for (const c of s.cases) {
-          if (looseEq(value, resolveValue(c.is, vars))) return runChildren(c.steps, [...path, s.id], vars);
+          if (looseEq(value, resolveValue(c.is, vars))) return runChildren(c.steps, [...path, s.id], vars, slot);
         }
-        return runChildren(s.default, [...path, s.id], vars);
+        return runChildren(s.default, [...path, s.id], vars, slot);
       }
       case 'forEach': {
         const items = iterItems(compileExpr(s.items).eval({ root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }));
@@ -686,7 +856,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         }
         for (let i = 0; i < cap; i++) {
           const depth = vars.pushIteration(s.as, items[i], s.indexAs, i);
-          const o = await runChildren(s.steps, [...path, s.id], vars);
+          const o = await runChildren(s.steps, [...path, s.id], vars, slot);
           vars.popTo(depth); // 按深度回退：子步骤若没配对 pop（失败提前返回），迭代变量也不会漏出去
           if (o.status !== 'pass' && o.status !== 'healed') return o;
         }
@@ -699,7 +869,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           checkAbort();
           if (!evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now })) break;
           const depth = vars.push('while');
-          const o = await runChildren(s.steps, [...path, s.id], vars);
+          const o = await runChildren(s.steps, [...path, s.id], vars, slot);
           vars.popTo(depth);
           if (o.status !== 'pass' && o.status !== 'healed') return o;
           i++;
@@ -710,7 +880,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (i === 0) noteNeverRun(s, path, '条件第一次就为假，一次都没进循环');
         return { status: 'pass', summary: `循环 ${i} 次${i ? '' : '，循环体一条未执行'}` };
       }
-      case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id], vars);
+      case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id], vars, slot);
       case 'parallel': {
         // **分支里不许切身份**。身份是共享的可变量，分支交错执行时
         // "谁先切"决定另一边看到谁 —— 而用 parallel 跑多身份恰恰是权限矩阵的
@@ -802,7 +972,54 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
                * 不会把账推到流前面（见 ResponseLedger 的"为什么是 max"）。
                */
               const branchWindow = newResponseWindow();
-              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id], branch, branchWindow));
+              /*
+               * 分支各开**自己的租约槽**，初值是**这一层**手上那台（可能没有）。
+               *
+               * 这里读的是形参 `slot` 而不是闭包里的 `runSlot`，差别只在**嵌套 parallel**：
+               * `parallel` 里的一支自己申请了租约、里面又套一层 parallel 时，内层的分支
+               * 该继承**外层那一支**的那台，而不是整场运行的 `runSlot`（那里可能根本没有）。
+               * 写成 `runSlot.lease` 时实测（`.scratch/probe-nested-parallel.mts`）：
+               * 内层那个裸 tap 报「缺少 device 租约」，而**同一形状 lint 判它该通过** ——
+               * 静态闸与运行事实又不一致了，这是本仓最贵的那一族缺陷，
+               * 而它在这轮"修完了"之后原地又出现了一次（形状不同：这次是**少传一层**，
+               * 上次是**多共享一层**）。`slot` 是必填形参的意义正在这里：
+               * 编译器能逼每个容器写 `slot`，但**逼不了它写对 `slot`**。
+               *
+               * 这是本轮的缺陷修复，原先没有这一行 —— 分支通过闭包共用同一个租约变量，
+               * 于是两支各带一个 `device` 时，两个 device 步都看到"手上已有租约"，
+               * 各自去还**同一个** id，而自己新拿的那台谁都不还：
+               * 实测 `lease 2 次 / release 1 次`，收尾手上攥着一台真机，报告却是 `p:pass`。
+               *
+               * 借来的那台 `owns: false`，所以分支里的 device 步**不会**把它还掉
+               * （还了就等于把上层正在用的设备扔回池子），而是另拿一台、跑完还自己那台。
+               *
+               * **顺带把一个隐性的不确定性变成确定结论**：一支 `device` + 一支裸 `tap`
+               * 这种形状，今天的结果取决于调度 —— 裸 tap 那支先跑就 error，后跑就 pass
+               * （实测两种都出现过）。分支各自有槽之后它**恒为 error**，
+               * 而 lint 对同一形状本来就报 `RESOURCE_LEASE_MISSING/error@tB`
+               * （探针 `.scratch/probe-parallel-lint.mts`）—— 两边终于同一个口径，
+               * 而且不再 flaky。**"分支之间共享设备"不是一种可承诺的语义**，
+               * 与 parallel 分支之间变量"谁后写谁赢"是同一条判断（见上面 scopes 那段注释）。
+               */
+              const branchSlot = newLeaseSlot(slot.lease);
+              const r = await withRetry(c, [...path, s.id], () => runStep(c, [...path, s.id], branch, branchWindow, branchSlot));
+              /*
+               * 分支自己申请的租约，在**分支结束**时归还 —— 不能等整场跑完，
+               * 因为槽位是分支局部的，出了这一支再没人能引用它，那就是又一种"没人还"。
+               * 借来的那台**不在这条路径上**（owns=false），由申请它的那一层负责。
+               * 归还失败不改变这一支的结论（清理失败不该改写"功能对不对"，
+               * 与 runScenario 收尾那段同一个口径），但要说进日志。
+               */
+              if (branchSlot.lease && branchSlot.owns) {
+                const held = branchSlot.lease;
+                branchSlot.lease = undefined;
+                branchSlot.owns = false;
+                try {
+                  await adapters.device!.release({ id: held.id }, execCtx(held.target as ExecContext['target'], s.id));
+                } catch (e) {
+                  emit({ kind: 'log.emitted', stepId: s.id, data: { level: 'warn', message: `分支 ${c.id} 结束时没能归还它自己申请的 ${held.id} @ ${held.deviceRef}，这台可能被一直占着：${errSummary(e)}` } });
+                }
+              }
               done.push({ status: 'fulfilled', value: r });
             } catch (e) {
               // RunAborted（外部取消/超时）必须能掀翻整个 run，不能被吞成"这支失败了"——
@@ -897,7 +1114,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           inputDefs: child.inputs,
           env: opts.env, secretResolver: opts.secretResolver,
         });
-        const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), ctxBase, execCtx, addCost, stepCtx, depth: 0, secretResolver: opts.secretResolver, envRevision: opts.envRevision, callStack: [...callStack, child.id], responseLedger });
+        const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), addCost, secretResolver: opts.secretResolver, envRevision: opts.envRevision, callStack: [...callStack, child.id], responseLedger, signal: opts.signal });
         /**
          * 把"这次 call 跑的是哪份 IR、跑出什么"记进父报告。
          *
@@ -921,6 +1138,24 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          * 到这里改写就等于拿父的口径去覆盖子的实况。
          */
         childRuns.push(...(rep.childRuns ?? []));
+        /*
+         * **子场景被中断时，call 这一步不能报 pass**。
+         *
+         * 子场景自己有 `config.timeoutMs`，所以"子里被砍、父侧一切正常"是可达的：
+         * `rep.status` 在被打断时仍然是 pass（见 RunReport.aborted 那段），
+         * 于是父侧这一步会 `return {status:'pass'}` —— 一份**中间被砍断**的子场景
+         * 在父报告里是一条干净的通过。这是同一个缺陷在第二层上的复现，
+         * 而它比父侧更难发现（父的 summary 看起来完全正常）。
+         *
+         * 归 env-unavailable 而不是 fail：被砍不是被测产品的结论，
+         * 与"子场景解析不到"同一处置。
+         * 同时把中断**记到父报告上**（`interruption`）：整份报告确实是不完整的，
+         * 门禁该给"被中断"而不是"运行异常"。
+         */
+        if (rep.aborted) {
+          interruption ??= { kind: rep.aborted.kind, reason: `子场景 ${s.id} ${rep.aborted.reason}` };
+          return { status: 'error', summary: `子场景 ${child.name} 被中断：${rep.aborted.reason}`, cause: 'env-unavailable', keyContext: { callStepId: s.id, abortKind: rep.aborted.kind } };
+        }
         if (s.assignTo) vars.set(s.assignTo, rep.outputs);
         if (rep.status === 'fail' || rep.status === 'error') return { status: rep.status, summary: `子场景 ${child.name}: ${rep.summary}`, cause: rep.results.find((r) => r.cause)?.cause };
         return { status: 'pass', summary: `子场景 ${child.name}` };
@@ -933,7 +1168,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           clock,
           evalExpr: (e) => evalBool(e, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }),
           resolveRef: (ref) => vars.resolveRef(ref).value,
-          adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
+          adapters, ctx: execCtx(targetOf(s, slot), s.id),
           // 等待循环里的每次付费定位都往上汇。不传的话编译不过（WaitDeps 里
           // 这是必填字段），因为"忘接成本"的症状是**总账不动、熔断永不触发**，
           // 而那正是这条预算存在的理由。
@@ -1228,7 +1463,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const locator = 'locator' in s ? s.locator : 'target' in s ? s.target : undefined;
         let resolved: ResolveResult = { resolvedBy: 'n/a', rung: 0, confidence: 1, nonReplayable: false, handle: '' };
         if (locator && 'resolve' in uiOrDev) {
-          resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(locator, execCtx(targetOf(s, stepCtx), s.id));
+          resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(locator, execCtx(targetOf(s, slot), s.id));
           emit({ kind: 'locator.resolved', stepId: s.id, data: { ...resolved } });
         }
         /*
@@ -1321,7 +1556,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         }
         const performed = 'perform' in uiOrDev
           ? await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<{ artifactIds?: string[] } | void> })
-            .perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id))
+            .perform(opOf(s), resolved, execCtx(targetOf(s, slot), s.id))
           : undefined;
         /*
          * **动作步骤上的两个"声明了就必须发生"的检查：`expectResponse`（docs/06 §3）
@@ -1373,7 +1608,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             // 默认 10s 与 wait 步骤同一档（不新造一个数）。作者写了 timeoutMs 就用他的。
             timeoutMs: s.timeoutMs ?? 10_000,
             clock, evalExpr: () => { throw new Error('response 条件不该走表达式求值'); },
-            resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
+            resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, slot), s.id),
             addCost, network: adapters.network, window,
             newPage: adapters.newPage, newPageBaseline: newPageBaselineBefore,
           });
@@ -1404,7 +1639,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             predicate: { type: 'newPage' },
             timeoutMs: s.timeoutMs ?? 10_000,
             clock, evalExpr: () => { throw new Error('newPage 条件不该走表达式求值'); },
-            resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
+            resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, slot), s.id),
             addCost, network: adapters.network, window,
             newPage: adapters.newPage, newPageBaseline: newPageBaselineBefore,
           });
@@ -1474,9 +1709,49 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       }
       case 'device': {
         if (!adapters.device) return { status: 'error', summary: 'device adapter 未注册（P4）', cause: 'env-unavailable' };
-        const l = await adapters.device.lease(s.require, execCtx(s.target, s.id));
-        stepCtx.lease = { id: l.id, deviceRef: l.deviceRef, target: s.target, state: 'leased', acquiredAt: new Date(clock.now()).toISOString(), expiresAt: new Date(l.expiresAt).toISOString(), holder: runId, renewable: true };
-        emit({ kind: 'lease.acquired', stepId: s.id, data: { device: l.deviceRef, lease: l.id } });
+        /*
+         * **第二个 device 步先还前一个**（docs/15 §3.1：原来是裸赋值）。
+         *
+         * 为什么"报错"而不是"静默换设备"：换设备会让**前面那些步骤跑在另一台机器上**，
+         * 而报告的证据与结论看起来是连贯的一整条。还掉旧的是唯一能让"两步各要一台设备"
+         * 这件事成立的读法。
+         *
+         * 还旧租约用**旧租约自己的 target**，不是写死 'android'（同 §3.1 那一行）。
+         *
+         * ## `slot.owns` 那道闸是本轮加的（并发下会漏还真机）
+         *
+         * 借来的租约（`parallel` 分支从外层拿到的那一台）**不由这里释放**：
+         * 那是上层正在用的设备，还回池子之后上层剩下的步骤会跑在一台已被别人领走的机器上，
+         * 而报告看起来连贯。所以"手上有一台"**不足以**成为释放的理由，还得是"这台是我拿的"。
+         * 不释放的同时**照旧新拿一台**（下面那两行），于是"外层一台 + 本层另一台"这种
+         * 双设备用例（两台手机对聊）今天是能写的 —— 这一点算这次修法的**副作用收益**，
+         * 而原来那段注释说的"IR 今天表达不了同时持两台"从此不再成立（改口记在 docs/15 §3.1）。
+         * 另拿一台这件事要说进日志：它意味着这次 run 同时占着两台真机，
+         * 静默做和大声做在设备农场里是完全不同的两件事。
+         */
+        if (slot.lease && slot.owns) {
+          const prev = slot.lease;
+          slot.lease = undefined;
+          slot.owns = false;
+          try {
+            await adapters.device.release({ id: prev.id }, execCtx(prev.target as ExecContext['target'], s.id));
+            emit({ kind: 'log.emitted', stepId: s.id, data: { level: 'info', message: `旧租约 ${prev.id} @ ${prev.deviceRef} 已被第二个 device 步替换并归还` } });
+          } catch (e) {
+            // 还不掉不拦新租约：拦了会把"第二个 device 步"变成必然失败，
+            // 而泄漏这件事已经由这句日志说出去了（漏在明处 vs 假在暗处）。
+            // **用 log.emitted 而不是新造一个 lint code**：TraceEventKind 里没有
+            // lease.released，LINT_DOCS 里也没有 LEASE_RELEASE_FAILED —— 在这儿随手
+            // 造一个"看起来有出处的码"，就是本仓反复记的那族"有码没登记"。
+            emit({ kind: 'log.emitted', stepId: s.id, data: { level: 'warn', message: `替换租约时旧租约没还掉（${prev.id} @ ${prev.deviceRef}），这台设备可能一直被占着：${errSummary(e)}` } });
+          }
+        } else if (slot.lease) {
+          emit({ kind: 'log.emitted', stepId: s.id, data: { level: 'info', message: `本层另申请一台设备；上层传下来的租约 ${slot.lease.id} @ ${slot.lease.deviceRef} 保留不动（由申请它的那一层归还）` } });
+        }
+        const l = await adapters.device.lease(s.require, execCtx(s.target, s.id), s.leaseMs);
+        slot.lease = { id: l.id, deviceRef: l.deviceRef, target: s.target, state: 'leased', acquiredAt: new Date(clock.now()).toISOString(), expiresAt: new Date(l.expiresAt).toISOString(), holder: runId, renewable: true };
+        // 这台是本槽位自己拿的 —— 于是"收尾时由谁还"这件事有了唯一答案（见 LeaseSlot.owns）
+        slot.owns = true;
+        emit({ kind: 'lease.acquired', stepId: s.id, data: { device: l.deviceRef, lease: l.id, leaseMs: s.leaseMs } });
         return { status: 'pass', summary: `设备 ${l.deviceRef}` };
       }
       case 'watcher': {
@@ -1515,7 +1790,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // 传的是**分支作用域**那一份（dispatch 的 vars 形参），不是 vars：
         // 断言里 `$xxx` 读的是这一支看得见的变量。写成 vars 的话，
         // "parallel 分支里断言自己那一支刚算出来的值"会读到共享帧那份或干脆读不到。
-        const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id), clock, addCost, emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
+        const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, slot), s.id), clock, addCost, emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
         vars.exportStep(s.id, { assertion: r });
         return r;
       }
@@ -1566,17 +1841,85 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   let setupPhaseFailed = false;
   let bodyRan = false;
   let resultBoundary = -1; // -1 = 还没进 teardown
+  /**
+   * 被中断时记下**分类与原因**，最后放进 `RunReport.aborted`。
+   * 用局部变量而不是只在 catch 里 emit：事件流是**追加式**的，
+   * 任何读报告的人都要先扫一遍 events 才能知道"这次是不是跑完了"，
+   * 而"这次跑完了没"是报告的**头部**事实（门禁、摘要文字、JUnit 计数都读它）。
+   */
+  let interruption: { kind: AbortKind; reason: string } | undefined;
+  /**
+   * teardown **有没有开跑**（不是"有没有跑完"）。唯一用途：让 finally 知道要不要补跑它。
+   *
+   * 判据是"开跑"而不是"跑完"，因为 finally 里再跑一遍 teardown 的代价是**第二次副作用**
+   * （DELETE 两次、释放两次锁、GC 两遍），而"跑完没有"这件事 td.status 已经报出来了。
+   */
+  let teardownStarted = false;
+
+  /**
+   * 跑 teardown。**两条路共用这一个实现**（正常走完 body 之后 / 被中断之后在 finally 里补），
+   * 因为「teardown 默认必跑（含 data GC）」是 IR 侧的契约，而契约有两份实现时
+   * 迟早只改其中一处 —— 本文件为这类漂移记过不止一次账。
+   *
+   * **本轮之前只有第一条路**，实测（body 中途被取消，teardown 里一条清理步骤）：
+   *
+   * ```
+   * status = pass   results = seed:pass, slow:pass   teardown 跑了吗 = false
+   * ```
+   *
+   * 后果不是"少跑几步"这么轻：**环境里留下了这次 run 造的数据，而没有任何一行说它留下了** ——
+   * `TEARDOWN_FAILED` 挂在 try 里所以也不发，于是"清理没做"在报告、trace、证据包里零痕迹。
+   * 与 docs/08「少验了什么要有一行可指」正好相反，而按一次 Ctrl-C 是最常见的取消场景。
+   *
+   * 三条实现约束，都在被测（`interruption.test.ts` 后半那三条）：
+   *  1. **`cleanupPhase = true`**（见 `checkAbort` 上那段）。不置的话 teardown 第一步
+   *     就被 run 级超时/取消再拦一次，这条修复等于没做 —— 我第一版就是这个形状。
+   *     顺带这也让"信号在清理中途才到"不再打断清理（契约是无条件必跑）。
+   *  2. **`teardownStarted` 一置就不重跑**：清理步骤不保证幂等（DELETE 两次会 404，
+   *     那把一次正常清理变成假失败）。
+   *  3. **它自己抛也不能冒出去**：清理失败不该把已产出的结论改写成运行异常
+   *     （与「teardown 失败不进整体状态」同一条判断）。但**不静默** —— 照发
+   *     `TEARDOWN_FAILED`，不新造码的理由见下面租约那段。
+   *     能走到 catch 的只有成本熔断（run 级超时这道闸已暂停，其它异常在 runStep
+   *     里就收成 error 结果了）：熔断**照生效**，因为"清理不该把钱再花一遍"正是预算存在的理由。
+   *     那时也如实记 `aborted`（这次 run 确实没走完），只是不覆盖已有的中断成因。
+   */
+  const runTeardown = async (why: 'normal' | 'interrupted'): Promise<void> => {
+    if (!scenario.teardown.length || teardownStarted) return;
+    teardownStarted = true;
+    cleanupPhase = true;
+    try {
+      const td = await runChildren(scenario.teardown, ['teardown'], rootVars, runSlot);
+      if (td.status === 'fail' || td.status === 'error') {
+        emit({ kind: 'lint.reported', data: { code: 'TEARDOWN_FAILED', detail: `清理未成功，可能留脏数据：${td.summary}` } });
+      }
+    } catch (e) {
+      if (e instanceof RunAborted) interruption ??= { kind: e.kind, reason: e.message };
+      emit({
+        kind: 'lint.reported',
+        data: {
+          code: 'TEARDOWN_FAILED',
+          detail: `${why === 'interrupted' ? '运行被中断，收尾清理也没做完' : '清理中途出错'}，可能留脏数据：${errSummary(e)}`,
+        },
+      });
+    } finally {
+      // 交还给"正常路径"的语义。此处之后已经没有业务步骤，但**不留在 true**：
+      // 一道永久关掉的闸是将来会咬人的地雷（谁在 return 之前加一步带 checkAbort 的收尾逻辑，
+      // 就会拿到一个"永不超时"的 run）。
+      cleanupPhase = false;
+    }
+  };
 
   try {
     emit({ kind: 'run.started', data: { scenario: scenario.id, mode: scenario.mode, frozen: scenario.frozen, env: scenario.env.environmentRef } });
     // setup 失败 = error（前置不成立，不是产品缺陷）
-    const setup = await runChildren(scenario.setup, ['setup']);
+    const setup = await runChildren(scenario.setup, ['setup'], rootVars, runSlot);
     if (setup.status === 'fail' || setup.status === 'error') {
       setupPhaseFailed = true;
       emit({ kind: 'run.finished', status: 'error', data: { phase: 'setup', detail: setup.summary } });
     } else {
       bodyRan = true;
-      const body = await runChildren(scenario.body, ['body']);
+      const body = await runChildren(scenario.body, ['body'], rootVars, runSlot);
       emit({ kind: 'run.finished', status: body.status, data: { detail: body.summary } });
     }
     // teardown 默认必跑（含 data GC）。它的失败**不进整体状态**：
@@ -1584,21 +1927,88 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     // 混在一起会让一次 cleanup 500 掩盖掉 body 的结论，或把绿的场景判成红的。
     // 记 resultBoundary 以便最后算状态时把 teardown 的结果排除在外。
     resultBoundary = results.length;
-    if (scenario.teardown.length) {
-      const td = await runChildren(scenario.teardown, ['teardown']);
-      if (td.status === 'fail' || td.status === 'error') {
-        emit({ kind: 'lint.reported', data: { code: 'TEARDOWN_FAILED', detail: `清理未成功，可能留脏数据：${td.summary}` } });
-      }
-    }
+    await runTeardown('normal');
     for (const o of scenario.outputs) {
       const r = rootVars.resolveRef(o.from);
       if (r.found) rootVars.setOutput(o.name, r.value);
     }
-    if (stepCtx.lease && adapters.device) await adapters.device.release({ id: stepCtx.lease.id }, execCtx('android'));
   } catch (e) {
     const aborted = e instanceof RunAborted;
+    /*
+     * **赋值而不是 ??=**：这里的是**真的把 run 打断**的那一次，
+     * 比中途某个子场景被砍（上面 call 分支里记的）更该出现在报告头部。
+     *
+     * `reason` 用 `message` 而不是 `errSummary(e)`：后者会给所有 Error 加一个
+     * `Error: ` 前缀（对未知异常有意义：能分出 "TypeError: xxx" 这种我们的 bug），
+     * 而 RunAborted 是我们自己抛的三句话，摘要与证据里就会变成
+     * 「被中断（Error: 运行超时（1000ms））」—— 一句给人读的成因开头挂个类名，
+     * 会让人以为是一次真异常。events 里那条仍然用 errSummary（机读侧格式统一）。
+     */
+    if (aborted) interruption = { kind: (e as RunAborted).kind, reason: (e as RunAborted).message };
     emit({ kind: 'error', status: aborted ? 'skipped' : 'error', data: { message: errSummary(e), aborted } });
     if (!aborted) results.push({ stepId: '__run__', kind: 'noop', status: 'error', durMs: clock.mono() - t0, retry: 0, healed: false, nonReplayable: false, costUsd: 0, artifactIds: [], keyContext: {}, assertionSummary: errSummary(e), cause: 'env-unavailable' });
+    /*
+     * **位置在 push 之后**，这一点是有意的：`__run__` 那条 error 必须落在
+     * resultBoundary **之前**，否则整体状态就不再是 error（异常被"洗白"成
+     * 一条不进结论的清理记录）。而 finally 里补跑的 teardown 落在 boundary
+     * **之后**，正好被排除在整体状态之外 —— 与正常路径同一条语义。
+     *
+     * 已设过（正常路径进 try 后半段才抛）就不动，避免把 boundary 往后挪、
+     * 把已经跑完的 teardown 结果重新算进结论。
+     */
+    if (resultBoundary < 0) resultBoundary = results.length;
+  } finally {
+    /*
+     * **中断路径也要跑 teardown**（本轮补；判据与三条实现约束写在 `runTeardown` 上，
+     * 那里也记着本轮实测到的旧行为 `teardown 跑了吗 = false`）。
+     *
+     * 放在 finally 而不是 catch 里，是因为下面还要还租约，而**顺序有实质差别**：
+     * 清理步骤自己要用设备（`adb shell rm`、关 App、清购物车），
+     * 先把租约还掉，就等于把它自己的清理废掉了。所以这一行必须在租约那段之前。
+     *
+     * 正常路径已经跑过（`teardownStarted` 为真），这里靠那个标记直接跳过 ——
+     * 清理步骤不保证幂等，DELETE 两次会 404，那会把一次正常清理报成假失败。
+     */
+    await runTeardown('interrupted');
+    /*
+     * **释放放在 finally**（docs/15 §3.1：原来它在 try 的最后一行，于是
+     * `catch` 那一支 —— 中断、成本熔断、任何抛出的异常 —— 都不还设备）。
+     *
+     * 三个细节都是必须的，少一个就换一个坏法：
+     *  1. **target 用租约自己的**，不是写死 `'android'`。同一份引擎跑 iOS/鸿蒙时
+     *     还租约的 `ctx.target` 会指着另一个平台（`release` 里按 target 选设备的
+     *     实现会还不存在的那台）。
+     *  2. **先取出来再置空**，让"已发起释放"这件事只有一个真相；否则释放本身抛异常时
+     *     `runSlot.lease` 还在，看起来像没试过。
+     *  3. **这里不能让它冒出去**：try 已经产出结论了，一次 cleanup 失败不该把整份报告
+     *     变成运行异常。但也不能静默 —— 用 log.emitted 说出去（**不新造 lint code**：
+     *     `LINT_DOCS` 里没有这个码，`TraceEventKind` 里也没有 `lease.released`；
+     *     造一个"看着有出处的码"就是本仓反复记的那族"有码没登记"）。
+     */
+    /*
+     * 这里读的是 `runSlot`（这一层运行自己的槽），**不需要问 `owns`**：
+     * runSlot 从 `newLeaseSlot()` 起，初值没有租约，所以里面那台必然是本层自己申请的。
+     * `parallel` 的分支槽才有"借来的"这一说（`newLeaseSlot(slot.lease)`，owns=false），
+     * 而分支槽的归还在分支结束时做，走不到这里。
+     * 把这条不变式写在这里而不是加一句 `&& runSlot.owns`：
+     * 加上去就等于承认"runSlot 可能装着借来的租约"，而今天没有那条路径 ——
+     * **为不存在的路径写守卫，会让下一个人以为那条路径存在。**
+     */
+    const lease = runSlot.lease;
+    if (lease && adapters.device) {
+      runSlot.lease = undefined;
+      runSlot.owns = false;
+      try {
+        await adapters.device.release({ id: lease.id }, execCtx(lease.target as ExecContext['target']));
+        // 成功就**留在 undefined**，不写回一个 state:'released' 的租约：
+        // "已经还了"与"手上还有个租约（只是标成还了）"是两件事，
+        // 后者会让任何后来读到 runSlot.lease 的代码再还一次。
+        // 失败也**不写回**：finally 之后没有任何代码读它，写回等于造一个没人读的字段
+        // （同一个文件里刚因为同样的理由删掉一个 orderIdx）。失败由下面那句日志说出去。
+      } catch (e) {
+        emit({ kind: 'log.emitted', data: { level: 'warn', message: `没能归还设备 ${lease.deviceRef}（租约 ${lease.id}），这台可能被一直占着：${errSummary(e)}` } });
+      }
+    }
   }
 
   for (const r of results) if (r.status in tally) tally[r.status as keyof typeof tally]++;
@@ -1621,8 +2031,15 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     // 而门禁对这两件事的处置不同（前者只能保留旧的宽容，后者可以照实判）。
     runId, status, startedAt, durMs: clock.mono() - t0, results, events,
     ...(childRuns.length ? { childRuns } : {}),
+    // 与 childRuns 同样"没有就不写"：`undefined`（没记）与"记了、没中断"要可区分，
+    // 门禁对前者的宽容同上面那条注释。
+    ...(interruption ? { aborted: interruption } : {}),
     outputs: rootVars.outputs, costUsd, tally,
-    summary: `${status} · ${counted} 步计入通过率 · ${rate}% 通过 · ${tally.healed} 自愈待审 · $${costUsd.toFixed(4)}`,
+    // **摘要文字里也要带"被中断"**。理由不是"信息更全"：`summary` 会原样进
+    // 证据包的 summary.txt 与 CI 日志，而那里读的是**文字**不是 status 字段
+    // （status 在被中断时仍然是 pass，见 RunReport.aborted 那段）。
+    // 只在被中断时加这一段，不影响"两次运行字节一致"那条契约测试。
+    summary: `${interruption ? `被中断（${interruption.reason}）· ` : ''}${status} · ${counted} 步计入通过率 · ${rate}% 通过 · ${tally.healed} 自愈待审 · $${costUsd.toFixed(4)}`,
   };
 }
 
@@ -1740,7 +2157,7 @@ function resolveUrl(url: string, env: Record<string, unknown>): string {
   if (!base) throw new EnvMissing(`环境（${JSON.stringify(Object.keys(env))}）里没有 baseUrl，而用例地址是相对路径 "${url}"。IR 不写死域名是刻意的（docs/05 §1）`);
   return base.replace(/\/$/, '') + (url.startsWith('/') ? url : `/${url}`);
 }
-function targetOf(s: Step, ctx: StepCtx): ExecContext['target'] {
+function targetOf(s: Step, ctx: LeaseSlot): ExecContext['target'] {
   if (s.kind === 'device') return s.target;
   if (['navigate', 'act', 'capture'].includes(s.kind)) return 'web';
   if (['http', 'openapiCall', 'db'].includes(s.kind)) return 'api';
@@ -1822,7 +2239,23 @@ function byteLen(s: string): number {
 async function runScenarioIn(a: {
   scenario: Scenario; vars: VarSpace; adapters: AdapterRegistry; clock: Clock;
   emit: (e: EmitIn) => void;
-  ctxBase: unknown; execCtx: (t: ExecContext['target']) => ExecContext; addCost: (n: number) => void; stepCtx: StepCtx; depth: number;
+  /**
+   * 成本往父报告上汇总。**只有这一个"环境类"入参是必要的**：
+   * 原先这里还挂着 `ctxBase`、`execCtx`、`stepCtx`、`depth` 四个，函数体里**一个都没读**
+   * （本轮逐个 grep 实测：`a.ctxBase` / `a.execCtx` / `a.stepCtx` / `a.depth` 各 0 次命中）。
+   *
+   * **其中 `stepCtx` 那一个是本轮缺陷的直接成因**：`call` 那一行的实参老老实实写着
+   * `stepCtx`，于是任何人（包括我）读那一行都会得出"父的 stepCtx 传进子运行了"，
+   * 进而以为父的 device 租约在子里可见 —— 而 `runScenarioIn` 的函数体压根不碰它。
+   * **"看起来传了"比"根本没这个参数"坏得多**：前者需要读完整条链路才能推翻，
+   * 后者一眼就知道要自己做。docs/15 §3.1 里那句"parallel 那一支压根不共享 stepCtx"
+   * 就是这么写错的（同一个推理错误：从调用参数表推行为）。
+   *
+   * 删掉而不是留一句"未使用"的注释：留着就是等下一个人去"接上"它，
+   * 而租约该不该跨 `call` 是一个**没定的产品问题**（选项 A/B 见 docs/15 §3.1 末段），
+   * 不该由一个死参数的引力替它决定。
+   */
+  addCost: (n: number) => void;
   /**
    * 密钥解析器，**必须从父运行带下来**。这里以前硬编码 `secretResolver: undefined`。
    *
@@ -1853,11 +2286,27 @@ async function runScenarioIn(a: {
    * 这里让它必填，"忘了接"回到编译错误，而不是留一条要靠测试去追的静默分叉。
    */
   responseLedger: ResponseLedger;
+  /**
+   * 取消标志。**类型上必填、值可以为 undefined** —— 这个组合是故意的，
+   * 抄的是上面 `responseLedger` 那条的做法：可选参数（`signal?:`）一旦"忘了写也编译得过"，
+   * 漏写的症状不是报错，而是**人按了 Ctrl-C、子场景把剩下的步骤照样跑完**。
+   *
+   * **改动前实测**（子里 6 条 sleep，第 3 条后翻 flag）：
+   * `子场景跑了 = s1,s2,s3,s4,s5,s6`，而父报告同时写着 `aborted = 外部取消`。
+   * 子场景的 body 里可能是 POST/下单/删除（docs/02 §5 的不可逆动作纪律），
+   * 而"取消"这件事的全部意义就是**从此不再产生副作用**。视觉兜底那档还在逐步花钱。
+   *
+   * 顶层那次 run 没有标志（CLI 还没装处理器、或服务端直接调引擎）时传 undefined 是对的，
+   * 所以这里收 `| undefined`；必填的部分只是"**你得在场说一句话**"。
+   */
+  signal: RunOptions['signal'];
 }): Promise<RunReport> {
   const rep = await runScenario({
     scenario: a.scenario, inputs: a.vars.inputs, env: a.vars.env,
     secretResolver: a.secretResolver, envRevision: a.envRevision, callStack: a.callStack,
     responseLedger: a.responseLedger,
+    // **原样传对象**，不传 `a.signal.aborted`（取一次快照的话，取消发生在运行中间就永远读不到）
+    ...(a.signal ? { signal: a.signal } : {}),
     adapters: a.adapters, clock: a.clock,
     /*
      * 子场景**不单独设预算**，但成本照常往上汇总（`addCost`）。

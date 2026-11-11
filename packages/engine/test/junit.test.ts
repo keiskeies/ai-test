@@ -33,6 +33,8 @@ function parseXml(xml: string): {
    *  在这里 Number() 掉就把 "8" 与 "8000" 变成同一个值了 */
   time: string | null;
   cases: Array<{ name: string; bucket: string; attn: string; type: string; text: string }>;
+  /** <properties> 里的键值（属性名 -> 值）。没有 properties 时是空对象 */
+  props: Record<string, string>;
 } {
   const dir = mkdtempSync(join(tmpdir(), 'atest-junit-'));
   const file = join(dir, 'junit.xml');
@@ -50,9 +52,12 @@ for tc in suite.iter('testcase'):
     node = tc.find('failure') if tc.find('failure') is not None else (tc.find('error') if tc.find('error') is not None else tc.find('skipped'))
     cases.append({'name': tc.get('name'), 'bucket': bucket, 'attn': tc.get('attn') or '',
                   'type': (node.get('type') if node is not None else ''), 'text': (node.text or '') if node is not None else ''})
+props = {}
+for p_ in (suite.find('properties') or []):
+    props[p_.get('name')] = p_.get('value')
 out = {'tests': int(suite.get('tests')), 'failures': int(suite.get('failures')),
        'errors': int(suite.get('errors')), 'skipped': int(suite.get('skipped') or 0),
-       'time': suite.get('time'), 'cases': cases}
+       'time': suite.get('time'), 'cases': cases, 'props': props}
 print(json.dumps(out))
 `;
   const stdout = execFileSync('python3', ['-c', script], { encoding: 'utf8' });
@@ -230,4 +235,38 @@ describe('重试之后才通过的步骤在 JUnit 里留痕', () => {
     assert.match(xml, /<error/, '先要真的是 error');
     assert.doesNotMatch(xml, /flaky-recovered/, '同一件事不出现两次');
   });
+});
+
+test('被中断：properties 里给出 aborted，而计数**不动**（第五个消费者，对机器说话那一个）', () => {
+  /*
+   * 一次被砍断的 run 的 junit.xml 在本轮之前是
+   * `tests=3 failures=0 errors=0 skipped=0` —— Jenkins/GitLab 读到"全绿"。
+   * 修好退出码只堵了一半：有些流水线/插件只看这份 XML。
+   *
+   * **计数不动**是判断不是偷懒：那些步骤确实执行过并且过了，
+   * 加 skipped 会同时破掉本文件开头那条 `sum == tests` 自洽判据，
+   * 并把"没跑到"谎报成"跑了但跳过"。与 status 不改写是同一条判断。
+   */
+  const r = rep([{ stepId: 'a', status: 'pass' }, { stepId: 'b', status: 'pass' }],
+    { status: 'pass', aborted: { kind: 'timeout', reason: '运行超时（1000ms）' } });
+  const out = parseXml(toJUnitXml(r));
+  // **XML 仍然合法**（properties 的位置在 testsuite 的 DTD 产生式里排在 testcase 之前，
+  // 放错就是"这份报告压根读不出来"，比撒谎好不了多少）
+  assert.equal(out.tests, 2, '计数不动');
+  assert.equal(out.failures, 0);
+  assert.equal(out.errors, 0);
+  assert.equal(out.props['atest.aborted'], 'timeout', `机器要能在结构里查到：${JSON.stringify(out.props)}`);
+  assert.match(out.props['atest.aborted.reason'] ?? '', /运行超时/);
+  // 对照：正常 run **不带 properties**（而不是带一个空 properties 或空值）
+  const clean = parseXml(toJUnitXml(rep([{ stepId: 'a', status: 'pass' }], { status: 'pass' })));
+  assert.deepEqual(clean.props, {}, `正常报告不该有这一栏：${JSON.stringify(clean.props)}`);
+});
+
+test('中断成因里的特殊字符被转义（属性位置不接受裸文本）', () => {
+  // reason 里含 adapter 报回来的文本，而"消息里不许带敏感值"是纪律不是保证。
+  // 引号漏转义 = 属性被截断 = 后面的内容变成 XML 结构，那是注入不是显示问题。
+  const nasty = '外部取消 "quoted" <tag> & more';
+  const out = parseXml(toJUnitXml(rep([{ stepId: 'a', status: 'pass' }],
+    { status: 'pass', aborted: { kind: 'cancelled', reason: nasty } })));
+  assert.equal(out.props['atest.aborted.reason'], nasty, `原样往返才对得上：${out.props['atest.aborted.reason']}`);
 });
