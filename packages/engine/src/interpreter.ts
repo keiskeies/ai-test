@@ -429,7 +429,9 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     if (!stepCtx.watchers.length || !adapters.device) return;
     /*
      * **端从这一层的槽位读，不写死 `'android'`**（本轮改；探针
-     * `.scratch/probe-watcher.mts`）。原先这两处写死，而守望点的是**真机**：
+     * `.scratch/probe-watcher.mts`；永久落点是 `adapter-contract.test.ts` 里
+     * 「守望按**这一层租约的端**点屏幕」与「守望读**申请那台的那一层**」两条）。
+     * 原先这两处写死，而守望点的是**真机**：
      * ios 场景里一次 run 报出两个端 ——
      *   snapshot@android、perform@android，而紧挨着的那一步 tap 是 perform@ios。
      * 与 §3.1 里 `release` 写死 `'android'` 是同一个根（运行时的端从步骤种类
@@ -1009,7 +1011,9 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
                * 这里读的是形参 `slot` 而不是闭包里的 `runSlot`，差别只在**嵌套 parallel**：
                * `parallel` 里的一支自己申请了租约、里面又套一层 parallel 时，内层的分支
                * 该继承**外层那一支**的那台，而不是整场运行的 `runSlot`（那里可能根本没有）。
-               * 写成 `runSlot.lease` 时实测（`.scratch/probe-nested-parallel.mts`）：
+               * 写成 `runSlot.lease` 时实测（`.scratch/probe-nested-parallel.mts`；
+               * 永久落点 `lease-lifecycle.test.ts`「外层分支自己申请了租约，内层 parallel 的裸 tap
+               * 继承**外层那一支**那台」，静态侧同一形状由 `lease-scope.test.ts` 的 L6 钉住）：
                * 内层那个裸 tap 报「缺少 device 租约」，而**同一形状 lint 判它该通过** ——
                * 静态闸与运行事实又不一致了，这是本仓最贵的那一族缺陷，
                * 而它在这轮"修完了"之后原地又出现了一次（形状不同：这次是**少传一层**，
@@ -1028,7 +1032,9 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
                * 这种形状，今天的结果取决于调度 —— 裸 tap 那支先跑就 error，后跑就 pass
                * （实测两种都出现过）。分支各自有槽之后它**恒为 error**，
                * 而 lint 对同一形状本来就报 `RESOURCE_LEASE_MISSING/error@tB`
-               * （探针 `.scratch/probe-parallel-lint.mts`）—— 两边终于同一个口径，
+               * （探针 `.scratch/probe-parallel-lint.mts`；永久落点运行侧是
+               * `lease-lifecycle.test.ts`「一支 device + 一支裸 tap → **恒为 error**」，
+               * 静态侧是 `lease-scope.test.ts` 的 L1）—— 两边终于同一个口径，
                * 而且不再 flaky。**"分支之间共享设备"不是一种可承诺的语义**，
                * 与 parallel 分支之间变量"谁后写谁赢"是同一条判断（见上面 scopes 那段注释）。
                */
@@ -2289,7 +2295,10 @@ function targetOf(s: Step, ctx: LeaseSlot): ExecTarget {
    * "两处各一份，迟早只更新其中一处"。
    *
    * **哪些行今天走不到（探针实测，`.scratch/probe-targetof.mts` +
-   * `.scratch/probe-targetof-mobile.mts`，两次分别灌 Web 形状与移动/混合形状）：**
+   * `.scratch/probe-targetof-mobile.mts`，两次分别灌 Web 形状与移动/混合形状；
+   * 永久落点是变异集 `tooling/mutate/exec-target.json` 的 M6 ——
+   * 它把 `s.kind === 'device'` 那一行整行删掉，跑出来**没有任何测试变红**，
+   * 这就是"这一行今天走不到"的可重跑形式）：**
    * 实测走到过这个函数的 kind 一共九个（两次的并集）——
    * navigate / act / capture / assertPage（web 档）
    * 与 app / tap / assertUi / wait / assert（有租约那侧）。**没有** device，也

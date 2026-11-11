@@ -419,7 +419,9 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
        *
        * 原先的判据是一个**扁平游标** `leaseAcquiredAt`：整条 walk 上只要先前见过一个
        * `device`，后面所有位置的裸设备步都算有租约。顺序无关的容器（parallel）配上
-       * 顺序相关的游标，就会给出与运行事实矛盾的判定，实测（`.scratch/probe-parallel-lint.mts`）：
+       * 顺序相关的游标，就会给出与运行事实矛盾的判定，实测（`.scratch/probe-parallel-lint.mts`；
+       * 永久落点 `lease-scope.test.ts` 的 L1「两种声明顺序同判」——
+       * 那条一次覆盖两个顺序，正是为了钉住"取决于书写顺序"这个病）：
        *
        * | 分支声明顺序 | 旧 lint | 运行时（本轮修法后） |
        * | --- | --- | --- |

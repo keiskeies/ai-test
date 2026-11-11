@@ -44,7 +44,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { checkRefs, violations, candidates, isPast, resolveTarget, REF_RE, WEAK_POOL } from '../ref-lint.mjs';
+import { checkRefs, checkProbes, violations, candidates, isPast, resolveTarget, REF_RE, WEAK_POOL } from '../ref-lint.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const CHECKER = join(import.meta.dirname, '..', 'ref-lint.mjs');
@@ -333,7 +333,163 @@ const FX = {
   },
 };
 
-/** 取一条夹具的判定（夹具里通常只有一条引用） */
+/* ══════════════════════════════════════════════════════════════════
+ * 探针引用规则（checkProbes）的夹具。与 FX 同一套纪律：
+ * **夹具只在这里定义一次**，描述性测试和变异扫都读这张表，
+ * 免得两边各写一份、其中一份过期（那是本仓记过好几次的形状）。
+ *
+ * ⚠ 这些夹具必须落在**非测试**文件里 —— 测试文件自己就是落点，
+ * 在自己的测试里点自己文件的名是噪声，那条规则刻意不查测试文件。
+ * ══════════════════════════════════════════════════════════════════ */
+const PFX = {
+  'p-landing-ok': {
+    want: 'ok',
+    why: '点名了一棵真存在的测试文件 => 这句"实测"在仓库之外可验证',
+    files: {
+      'packages/engine/src/a.ts': '// 改后该形状恒为 error，实测（`.scratch/probe-x.mts`），见 lease-lifecycle.test.ts',
+      'packages/engine/test/lease-lifecycle.test.ts': 'test("恒为 error", () => {});',
+    },
+  },
+  'p-no-landing': {
+    want: 'no-landing',
+    why: '只说"实测（探针）"。探针被 gitignore，clone 下来的人打不开 => 不可验证',
+    files: { 'packages/engine/src/a.ts': '// 实测（`.scratch/probe-x.mts`）两支各还各的' },
+  },
+  'p-landing-renamed': {
+    want: 'missing-landing',
+    why: '点了名但那个测试文件不存在（改名了）—— 与"没点名"修法不同，要单独一种判定',
+    files: {
+      'packages/engine/src/a.ts': '// 实测（`.scratch/probe-x.mts`），见 ghost.test.ts',
+      'packages/engine/test/other.test.ts': 'test("别的", () => {});',
+    },
+  },
+  'p-probe-certifies-itself': {
+    want: 'no-landing',
+    why: '探针自己叫 `xxx.test.ts` 时不许给自己当落点（本轮真踩到：`.scratch/vacuity.test.ts`）。'
+      + '判据是"clone 拿不到"，不是"长得像测试文件"',
+    files: { 'packages/engine/src/a.ts': '// 手工验过（`.scratch/vacuity.test.ts`）把选择器改回去它仍 pass' },
+  },
+  'p-measured-past': {
+    want: 'skip:measured-past',
+    why: '同一句自己承认量的是改前 => 免检。改前的行为本来就没有、也不该有测试',
+    files: { 'packages/engine/src/a.ts': '// 改前实测（`.scratch/probe-x.mts`）两种真相给出同一句摘要' },
+  },
+  'p-past-soft-wrap': {
+    want: 'skip:measured-past',
+    why: '标记在上行、引用在下行 —— 换行是**软**界，与行号规则同一口径',
+    files: { 'packages/engine/src/a.ts': '// 改前解释器统一说成超时，实测\n// （`.scratch/probe-x.mts`）' },
+  },
+  'p-past-other-sentence': {
+    want: 'no-landing',
+    why: '窄性对照：标记在**上一句**（句号切开）=> 不免检。放宽一寸，免检就吞掉该补落点的引用',
+    files: { 'packages/engine/src/a.ts': '// 这里从前写的是写死的端。实测（`.scratch/probe-x.mts`）今天仍然写死' },
+  },
+  'p-open-issue': {
+    want: 'skip:open-issue',
+    why: '"至今没修"那一类。它与"改前实测"必须分两档：一种有测试可看，一种**压根没有**',
+    files: { 'packages/engine/src/a.ts': '// 标量迭代一次这件事未决，实测（`.scratch/probe-x.mts`）' },
+  },
+  'p-landing-across-heading': {
+    want: 'no-landing',
+    why: '窄性对照：落点在**隔壁那一节**（隔了一个标题）。窗口 ±10 够得到，但块界把它截断 —— '
+      + '否则任何一段写得够长的说明都会提到测试名，判据退化成恒真。'
+      + '⚠ 必须写成 Markdown：标题那条判据要求行首就是 `#`，'
+      + '写成 `// ## 标题` 的话压根不构成块界，这条夹具就会什么都测不到',
+    files: {
+      'docs/x.md': [
+        '这条形状实测（`.scratch/probe-x.mts`）为 error。',
+        '',
+        '## 另一件事',
+        '',
+        '它的永久落点是 some.test.ts，每天在跑。',
+      ].join('\n'),
+      'packages/engine/test/some.test.ts': 'test("别的", () => {});',
+    },
+  },
+  'p-landing-across-blank-line': {
+    want: 'no-landing',
+    why: '同上，但块界换成了**空行**（JSDoc 里那根孤零零的 `*`）。两种块界是两条判据，'
+      + '只测一种的话，另一种写坏也能过关',
+    files: {
+      'packages/engine/src/a.ts': [
+        '/*',
+        ' * 这条形状实测（`.scratch/probe-x.mts`）为 error。',
+        ' *',
+        ' * 另一件事的永久落点是 some.test.ts。',
+        ' */',
+      ].join('\n'),
+      'packages/engine/test/some.test.ts': 'test("别的", () => {});',
+    },
+  },
+  'p-landing-other-doc': {
+    want: 'ok',
+    why: '**别的**登记文档可以当落点（未决问题没有测试，那一行本身就是永久记录）。'
+      + '与 p-doc-cannot-certify-itself 成对：只排"自己指自己"，不是"文档一律不算"',
+    files: {
+      'packages/engine/src/a.ts': '// 这件事未决，实测（`.scratch/probe-x.mts`），详见 docs/08-未决问题与假设登记.md',
+      'docs/08-未决问题与假设登记.md': '# 登记\n',
+    },
+  },
+  'p-doc-cannot-certify-itself': {
+    want: 'no-landing',
+    why: '登记文档里引用探针时，点**自己这份文档**的名不算落点 —— 与探针自证是同一条禁令',
+    /*
+     * ⚠ 文件名与正文都**不能**出现 OPEN_ISSUE 里的词（"未决"那两个字一度写在文件名上，
+     * 于是句子从文件路径里捞到标记、这条夹具被 skip:open-issue 抢走，
+     * 什么自证都没测到）。夹具要只留它要测的那一个变量。
+     */
+    files: { 'docs/08-登记.md': '| 已登记 | 实测（`.scratch/probe-x.mts`）迭代 1 次，登记在 docs/08-登记.md |' },
+  },
+  'p-mutate-spec-landing': {
+    want: 'ok',
+    why: '变异集也是一等落点：它钉的是"把源码改坏之后这条会红"，比测试更强',
+    files: {
+      'packages/engine/src/interpreter.ts': '// 这一行今天走不到（实测 `.scratch/probe-x.mts`），删掉它没有测试变红：tooling/mutate/exec-target.json',
+      'tooling/mutate/exec-target.json': '{}',
+    },
+  },
+  'p-escaped': {
+    want: 'skip:escaped',
+    why: '行内标记是唯一的逃逸拼写，两条规则共用',
+    files: { 'packages/engine/src/a.ts': '// 实测（`.scratch/probe-x.mts`）（ref-lint:ignore：这条只在本机复现过）' },
+  },
+  'p-glob-mention-not-a-ref': {
+    want: null,
+    why: '讲规则本身时写的 `.scratch/probe-*.mts` 是**形状**、不是文件引用，不该进判定。'
+      + '本仓真栽过一次：README 里解释这道规则的那一行被 `probe-` 前缀匹配上，'
+      + '又因为句子里出现"改前实测"（作为**被讲解的词**）拿到一张 skip:measured-past —— '
+      + '一张靠巧合发出去的免检牌。与行号那道要求"扩展名紧贴冒号"是同一条范围划界',
+    /*
+     * 同一个文件里**并列**放一条真引用。只写 glob 那一行的话，
+     * "零条判定"既可能是 glob 没匹配上，也可能是整个文件被跳过了 ——
+     * 两者都能让这条绿，而后者意味着它什么都没测（本仓那条"空断言"的形状）。
+     */
+    files: {
+      'docs/README.md': [
+        '正文里凡是引用 `.scratch/probe-*.mts` 的地方，那个文件别人 clone 下来是不存在的；改前的行为本来就没有测试。',
+        '',
+        '另一条真引用：实测（`.scratch/probe-real.mts`）两支各还各的。',
+      ].join('\n'),
+    },
+  },
+  'p-test-file-exempt': {
+    want: null,
+    why: '测试文件自己就是永久落点，不查（在里面点自己文件的名是纯噪声）',
+    files: { 'packages/engine/test/a.test.ts': '// 实测（`.scratch/probe-x.mts`）' },
+  },
+  'p-self-skip': {
+    want: null,
+    why: '本检查自己的文件通篇在讲 `.scratch/probe-xxx.mts` 这个**形状**，那些是模式演示',
+    files: { 'tooling/ref-lint.mjs': '// 例如 `.scratch/probe-xxx.mts` 这种' },
+  },
+};
+
+/** 取一条探针夹具的判定。夹具通常只有一条引用 */
+const pfx = (id) => {
+  const hits = checkProbes(tree(PFX[id].files));
+  assert.ok(hits.length >= 1, `夹具 ${id} 一条探针引用都没产出 —— PROBE_RE 漏了这种写法，这条测试等于没跑`);
+  return hits[0];
+};
 const fx = (id) => {
   const refs = checkRefs(tree(FX[id].files));
   assert.ok(refs.length >= 1, `夹具 ${id} 一条引用都没产出 —— 正则漏了这种写法，这条测试等于没跑`);
@@ -393,13 +549,13 @@ const MUTATIONS = [
   },
   {
     label: 'weak 不计入退出码（常年"另有 N 条判不出"而从不拦人）',
-    anchor: `return refs.filter((r) => r.verdict === 'stale' || r.verdict === 'missing-file' || r.verdict === 'weak');`,
-    replace: `return refs.filter((r) => r.verdict === 'stale' || r.verdict === 'missing-file');`,
+    anchor: `|| r.verdict === 'weak' || r.verdict === 'no-landing' || r.verdict === 'missing-landing');`,
+    replace: `);`,
   },
   {
     label: 'missing-file 不计入退出码',
-    anchor: `return refs.filter((r) => r.verdict === 'stale' || r.verdict === 'missing-file' || r.verdict === 'weak');`,
-    replace: `return refs.filter((r) => r.verdict === 'stale' || r.verdict === 'weak');`,
+    anchor: `return refs.filter((r) => r.verdict === 'stale' || r.verdict === 'missing-file'`,
+    replace: `return refs.filter((r) => r.verdict === 'stale'`,
   },
   {
     label: '引用侧不开窗口（只看那一行 => 静默退化成 no-identifier）',
@@ -434,7 +590,10 @@ const MUTATIONS = [
   },
   {
     label: '硬句界不生效（标记在上一句也算同一句）',
-    anchor: `for (const m of buf.matchAll(/[。；;！!?？]/g)) {`,
+    // 锚在**句读那一层**（切完块之后），不锚块边界那一层：
+    // 这两个是两种判据，混在一条变异里会让"只坏一种"也能过关。
+    // 块边界那条有自己的变异，见下面 BLOCK_BREAK 那条。
+    anchor: `for (const m of chunk.matchAll(/[。；;！!?？]/g)) {`,
     replace: `for (const m of [].matchAll(/(?!)/g)) {`,
   },
   {
@@ -456,6 +615,80 @@ const MUTATIONS = [
     label: '词边界取消（子串命中即算活）',
     anchor: 'return new RegExp(`(?<![A-Za-z0-9_$.])${esc}(?![A-Za-z0-9_$])`).test(text);',
     replace: `return text.includes(tok);`,
+  },
+  /* ── 探针引用那道规则（下面这批是本轮新增的，一条都不能少） ───────────── */
+  {
+    label: '块界不生效（落点可以从隔壁那一节里捞）',
+    anchor: `let a = i; while (a > from && !PROBE_BLOCK_BREAK.test(lines[a - 1])) a--;
+        let b = i; while (b < to && !PROBE_BLOCK_BREAK.test(lines[b + 1])) b++;`,
+    replace: `const a = from;
+        const b = to;`,
+  },
+  {
+    label: '块界只认标题、不认空行（两种块界里坏一种）',
+    anchor: `const BLOCK_BREAK_SRC = '^[ \\\\t]*(?:\\\\*+[ \\\\t]*)?(?:#{1,6}\\\\s|\\\\||\`{3})|^[ \\\\t]*\\\\*?[ \\\\t]*$';`,
+    replace: `const BLOCK_BREAK_SRC = '^[ \\\\t]*(?:\\\\*+[ \\\\t]*)?(?:#{1,6}\\\\s|\\\\||\`{3})';`,
+  },
+  {
+    label: '探针文件能给自己当落点（.scratch/ 不再排除）',
+    anchor: `const named = rawNamed.filter((n) => !NOT_PERMANENT.test(n) && basename(n) !== selfName);`,
+    replace: `const named = rawNamed.filter((n) => basename(n) !== selfName);`,
+  },
+  {
+    label: '文档能给自己当落点（自证禁令失效）',
+    anchor: `const named = rawNamed.filter((n) => !NOT_PERMANENT.test(n) && basename(n) !== selfName);`,
+    replace: `const named = rawNamed.filter((n) => !NOT_PERMANENT.test(n));`,
+  },
+  {
+    label: '落点存不存在不再查（点一个改过名的测试也算过）',
+    anchor: `if (stemNamed || specNamed || docNamed) {`,
+    replace: `if (named.length) {`,
+  },
+  {
+    label: '变异集不再算落点（tooling/mutate 那一档失效）',
+    anchor: `const specNamed = named.some((n) => n.startsWith('tooling/mutate/') && existsSync(join(root, n)));`,
+    replace: `const specNamed = false;`,
+  },
+  {
+    label: '登记文档不再算落点（未决问题那三类无路可走）',
+    anchor: `const docNamed = named.some((n) => n.startsWith('docs/') && existsSync(join(root, n)));`,
+    replace: `const docNamed = false;`,
+  },
+  {
+    label: '"改前实测"免检整个关掉（老实交代历史的注释全被报成缺陷）',
+    anchor: `if (isMeasuredPast(wide, wideOff)) { item.verdict = 'skip:measured-past'; continue; }`,
+    replace: ``,
+  },
+  {
+    label: '"改前实测"免检放宽到邻句（本轮真量到的那一次：表格里的"原先"给下一节发了牌）',
+    anchor: `export function isMeasuredPast(buf, off, words = MEASURED_PAST) {
+  const s = sentenceAt(buf, off);
+  if (!s) return false;
+  return words.some((w) => s.text.includes(w));
+}`,
+    replace: `export function isMeasuredPast(buf, off, words = MEASURED_PAST) {
+  return words.some((w) => buf.includes(w));
+}`,
+  },
+  {
+    label: '"未决/没修"免检整个关掉（未决问题压根没有测试可指，会被永久拦住）',
+    anchor: `if (isMeasuredPast(wide, wideOff, OPEN_ISSUE)) { item.verdict = 'skip:open-issue'; continue; }`,
+    replace: ``,
+  },
+  {
+    label: '未决那一档并进"改前实测"（两种免检合成一个数，报告谎报有没有测试可看）',
+    anchor: `if (isMeasuredPast(wide, wideOff, OPEN_ISSUE)) { item.verdict = 'skip:open-issue'; continue; }`,
+    replace: `if (isMeasuredPast(wide, wideOff, OPEN_ISSUE)) { item.verdict = 'skip:measured-past'; continue; }`,
+  },
+  {
+    label: '探针正则放宽回"前缀匹配"（讲规则的 glob 说明也被当成引用）',
+    anchor: `export const PROBE_RE = /\\.scratch\\/[A-Za-z0-9._-]*\\.(?:mts|ts|mjs|js|json|md)/g;`,
+    replace: `export const PROBE_RE = /\\.scratch\\/[A-Za-z0-9._-]+/g;`,
+  },
+  {
+    label: '探针规则不查测试文件这条失效（在自己的测试里点自己文件的名被报成缺陷）',
+    anchor: `if (rel.includes('/test/') || /\\.test\\.[a-z]+$/.test(rel)) continue;`,
+    replace: ``,
   },
 ];
 
@@ -538,6 +771,47 @@ describe('每条夹具的判定', () => {
       assert.equal(r.verdict, f.want, `${f.why}\n实际 ${r.verdict}｜${r.detail}`);
     });
   }
+});
+
+describe('每条探针夹具的判定', () => {
+  for (const [id, f] of Object.entries(PFX)) {
+    if (f.want === null) continue;
+    test(`${id} => ${f.want}`, () => {
+      const r = pfx(id);
+      assert.equal(r.verdict, f.want, `${f.why}\n实际 ${r.verdict}｜${r.detail}`);
+    });
+  }
+
+  test('测试文件与本检查自己的文件压根不产出判定', () => {
+    for (const id of ['p-test-file-exempt', 'p-self-skip']) {
+      const hits = checkProbes(tree(PFX[id].files));
+      assert.deepEqual(hits, [], `${id}：${PFX[id].why}`);
+    }
+  });
+
+  test('glob 写法的规则说明不进判定，而同文件里的真引用要进', () => {
+    const hits = checkProbes(tree(PFX['p-glob-mention-not-a-ref'].files));
+    assert.equal(hits.length, 1,
+      `${PFX['p-glob-mention-not-a-ref'].why}\n实际抓到 ${hits.length} 条：${JSON.stringify(hits.map((h) => `${h.line}:${h.target}`))}`);
+    // 指到**第 3 行**那条真引用上。只断言"一条"不够：
+    // 真那条没匹配上、glob 那条匹配上了，长度同样是 1，而结论完全反过来。
+    assert.equal(hits[0].line, 3, `该只判真引用那一行（第 3 行），实际判了第 ${hits[0].line} 行`);
+    assert.equal(hits[0].verdict, 'no-landing', '真引用没有落点，要报，不能被旁边那句说明带过去');
+  });
+
+  test('no-landing 与 missing-landing 都计入退出码', () => {
+    for (const id of ['p-no-landing', 'p-landing-renamed', 'p-probe-certifies-itself', 'p-doc-cannot-certify-itself']) {
+      assert.equal(violations(checkProbes(tree(PFX[id].files))).length, 1,
+        `${id}：探针引用没有 clone 得到的落点，必须拦下来，不能安静放行`);
+    }
+  });
+
+  test('两种免检都不计入退出码', () => {
+    for (const id of ['p-measured-past', 'p-open-issue', 'p-escaped', 'p-past-soft-wrap']) {
+      assert.deepEqual(violations(checkProbes(tree(PFX[id].files))), [],
+        `${id}：${PFX[id].why}`);
+    }
+  });
 });
 
 describe('坏指针必须红（这条检查存在的唯一理由）', () => {
