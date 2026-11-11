@@ -301,6 +301,48 @@ function rowOf(r: StepResult, scoped: boolean): string {
 export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string {
   const id = opts.suiteId ?? report.runId;
   const leaf = report.results.filter((r) => !CONTAINER_SET.has(r.kind));
+  /*
+   * 容器**自己那句话**要说出来，但**不能靠给容器加一行表格**来说 —— 这一点本轮
+   * 先做错了一次，值得写下来。
+   *
+   * 上面那个 leaf 过滤是对的，而且有一条测试明确钉着它（`html.test.ts`「容器步骤不出行」），
+   * 因为它守的是**计数口径与 JUnit 一致** —— 容器不算用例。但它顺带把容器自己的
+   * 结论也从页面上抹掉了，而这两件事本来不相干：`forEach` / `while` 会自己记一句
+   * 结论（迭代被截断、撞上限、循环体一次没跑），那句话以前**只进 JSON 与证据包，
+   * 进不了人第一个看的那个页面**。
+   *
+   * 我第一版的解法是"只渲染**带着话**的容器"（把它们放进表里）。**实测否掉了它**：
+   * 一份 5 条数据 / 上限 2 的 forEach，表里出现 `fe` 这一行，而
+   * `toJUnitXml` 的 testsuite 是 `tests="3"`、testcase 是 `v,body,body` ——
+   * `fe` 在 CI 那一侧根本不是一条用例。页面行数与 CI 用例数对不上，正是这个文件
+   * 开头那段"最难查的那类不一致"。而且**现有那条钉子抓不到我**：它的判据是
+   * `htmlNames.filter(n => junitNames.includes(n))`，只查"JUnit 有的页面必须有"，
+   * 反方向（页面多出来的行）被那个 filter 吃掉了 —— 又一条"测试通过的原因和它
+   * 想验的东西无关"。所以本文件另加一条正反双向的钉子，而不是靠它。
+   *
+   * 结论：**表里照旧只有叶子**（`rowsOf` 与 HEAD 逐字同口径），容器那句话走
+   * 表格上方的一条独立提示带 —— 它不是行，所以不参与任何计数；
+   * 同时也**不进 `bad` / `attn` / `assertions` / `counted`** 那四个计数与分区，
+   * 动一个就会让页面用例数与 CI 对不上。容器自己记的 fail/error 该不该进
+   * "失败"那一区是另一个问题（退出码那一侧已经算了，见 docs/08 §3 那一行），这里不顺手改。
+   *
+   * 判据取**结构化字段**而不是去匹配摘要里的"上限"两个字 —— 匹配句子前缀正是本仓
+   * 在 noteNeverRun 那里写过的那类耦合（改个措辞就悄悄退化，而且没有任何编译期
+   * 东西会发现）。两个键都要：
+   *  - `truncated`：迭代被截断 / 撞上限（容器自己 pass，但结论不完整）；
+   *  - `neverRun`：循环体一次没跑。**这一条我以前在注释里写错过一次**，
+   *    写的是"它留下的痕迹是循环体那些 skipped 行，而叶子本来就出行" ——
+   *    实测**嵌套循环不成立**：外层数据为空时，标记挂在**内层容器**上
+   *    （`kc={"neverRun":"迭代 0 次…"}`，实测于一份两层 forEach 的场景），
+   *    那一行同样是容器，同样进不了表。
+   *
+   * 扫描范围**含 call 子场景的 results**：主表与子场景各写一遍判据，迟早只改一处
+   * —— 本仓那族毛病的标准形状。
+   */
+  const unfinished = [report, ...(report.childRuns ?? [])]
+    .flatMap((rs) => rs.results)
+    .filter((r) => CONTAINER_SET.has(r.kind)
+      && ((r.keyContext?.truncated) !== undefined || (r.keyContext?.neverRun) !== undefined));
   const bad = leaf.filter((r) => r.status === 'fail' || r.status === 'error');
   const attn = leaf.filter((r) => r.status === 'healed' || r.status === 'triaged' || isFlakyPass(r));
   const assertions = leaf.filter((r) => (ASSERTION_KINDS as readonly string[]).includes(r.kind));
@@ -344,9 +386,19 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
   // 把 head 放在它后面就是 TDZ ReferenceError（一跑到 call 子场景就炸，而不是编译期报错）。
   const head = `<thead><tr><th style="width:104px">状态</th><th>步骤 / 摘要</th><th style="width:110px">类型</th><th style="width:72px;text-align:right">耗时</th><th style="width:190px">备注</th></tr></thead>`;
 
-  const stepRows = leaf.map((r) => rowOf(r, false)).join('');
+  /**
+   * 一个结果列表 -> 表格行。**与 HEAD 逐字同口径：只有叶子出行。**
+   *
+   * 主表与 call 子场景**共用这一个函数**（两块各写一遍过滤，迟早只改一处 ——
+   * 本仓那族毛病的标准形状），但共用的是"只渲染叶子"这条判据本身，
+   * 容器那句话不从这里走（理由见上面 `unfinished` 那一大段）。
+   */
+  const rowsOf = (rs: StepResult[], scoped: boolean) =>
+    rs.filter((r) => !CONTAINER_SET.has(r.kind)).map((r) => rowOf(r, scoped)).join('');
+
+  const stepRows = rowsOf(report.results, false);
   const childBlocks = (report.childRuns ?? []).map((c) => {
-    const rows = c.results.filter((r) => !CONTAINER_SET.has(r.kind)).map((r) => rowOf(r, true)).join('');
+    const rows = rowsOf(c.results, true);
     return `<h2>call 子场景 · <span class="mono">${esc(c.scenario.id)}</span> <span class="hint">← 步骤 <span class="mono">${esc(c.callStepId)}</span>（不计入上面的用例数）</span></h2>
       <table>${head}${rows}</table>`;
   }).join('');
@@ -386,6 +438,33 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
     字段级密钥在**写盘那一刻**已按字段名 + 值形态双规则脱敏。</div>
   </div>`;
 
+  /*
+   * 「活没干完」那条提示带。**放在横幅下面、数字卡片上面** —— 一次"全绿但少跑了
+   * 3 条数据"的 run，页面上原来**一个字的痕迹都没有**，而它是人第一个看的那一页；
+   * 放在步骤表里则等于没放（表就在第二屏，且截断的循环自己不出行）。
+   *
+   * **标题只说"结论不完整"，不说"没跑完数据"**。第一版写的是后者，而它对
+   * `neverRun` 那一支是**假话**：数据本来就有 0 条，没有"该跑而没跑"的数据，
+   * 实情是循环体一次都没进（多半是上一步的数据准备没做）。两类的成因不同、
+   * 该去查的东西也不同，所以标题取两者共同的弱命题，具体是哪一类由每一行
+   * 自己的 `assertionSummary` 说（"迭代 2 次，但数据有 5 条…" / "迭代 0 次…"）。
+   *
+   * **不加 `role="note"`**。第一版写了，而 `npm run lint` 把它报出来了：字段覆盖扫描器
+   * 按"字段名的裸词命中"判"有没有人读"，`role` 是 `LocatorRuleSchema.role` 的裸词命中，
+   * 于是那个 IR 字段**从此算不出有没有人读**（本轮实测：234 > 登记的 233，门禁变红）。
+   * 这不是扫描器的毛病 —— 它明说了"HTML 里的字面词"是它的已知极限 —— 是我这个属性
+   * **本来就不需要**：整页零脚本、零 ARIA，信息已经由 `<b>` 里那句中文陈述句承载，
+   * 读屏软件读到的就是那句话。为一个用不上的属性去抬高 ceiling，等于花掉真预算买假收益。
+   *
+   * **不改 `bannerKind`**：把撞上限染成琥珀色，是在替"上限是不是故意的"这个问题
+   * 做决定（`while` 当"最多轮询 N 次"、`forEach` 当"只抽前 10 条冒烟"都是正常写法），
+   * 而那一格的状态/归因让位问题是 docs/14 §5 登记着的未决项，本轮只解决"必须看得见"。
+   */
+  const unfinishedList = unfinished.length
+    ? `<div class="body attn"><b>有 ${unfinished.length} 处循环的结论不完整（状态仍是"通过"，但活没干完）</b>`
+      + `<ul>${unfinished.map((r) => `<li><code>${esc(r.stepId)}</code> <span class="hint mono">${esc(r.assertionSummary ?? '')}</span></li>`).join('')}</ul></div>`
+    : '';
+
   return `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -394,6 +473,7 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
 <style>${CSS}</style></head>
 <body><div class="wrap">
 ${banner}
+${unfinishedList}
 <div class="grid">${cards}</div>
 ${badList}
 ${attnList}

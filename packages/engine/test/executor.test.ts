@@ -26,11 +26,22 @@ import type { Scenario as ScenarioT } from '@atest/ir';
  * 刻意**不**包含：durMs / events / costUsd / assertionSummary 文案 / retry / artifactIds。
  * 前三个预编译形态压根不产（那是它存在的理由）；文案对比会把测试变成字符串快照，
  * 谁也不敢改报错措辞，最后有人直接放宽整条断言 —— 测试就死了。
+ *
+ * **但 `note` 在比较范围里，而且这不是自相矛盾。** 上面那条"不比文案"的理由是
+ * "两条路径的措辞该各自演化"，对 error 文案成立（两侧各写一份，本来就不指望相同）。
+ * `note` 相反：它两侧**必须逐字相同**，因为"循环被截断"这件事在预编译形态里
+ * **只有这一个载体**（那个形态压根没有事件通道），一旦两侧措辞分叉，
+ * 表现就是"功能回归里有提示、压测报告里静默"，而那正是本文件开头写的那类分叉。
+ * 措辞来自 `resolve.ts` 里**同一份** `truncatedByCap` / `hitCeiling`，
+ * 所以改措辞会两侧一起改、这条照旧通过 —— **它钉不住"换了个说法"，
+ * 只钉得住"有一侧不说了"**，而后者才是这里要防的。（改法试过的另一条是给
+ * 它单独立一条测试，但那只有本文件这几条场景会走到；放进 norm 之后
+ * **每一条**走 `same()` 的场景都顺带守住了，包括那批随机属性测试。）
  */
 function norm(o: ExecOutcome): string {
   return JSON.stringify({
     status: o.status,
-    steps: o.steps.map((s) => [s.stepId, s.status, s.healed ? 'H' : '-']),
+    steps: o.steps.map((s) => [s.stepId, s.status, s.healed ? 'H' : '-', s.note ?? '']),
     outputs: o.outputs,
   });
 }

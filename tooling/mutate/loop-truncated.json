@@ -1,0 +1,149 @@
+{
+  "_comment": [
+    "循环「活没干完」（forEach 数据被上限截断 / while 跑满而条件仍真）必须在**两种执行形态**",
+    "和**人看的那个页面**上都说出来。tests: engine/test/loop-truncated.test.ts + executor.test.ts。",
+    "",
+    "**改前实测**（同一份 IR，只差数据量 / 只差条件何时变假）：",
+    "  forEach 数据 2 条 / 上限 2  => 该步 pass、摘要「迭代 2 次」、整场 100% 通过",
+    "  forEach 数据 5 条 / 上限 2  => 该步 pass、摘要「迭代 2 次」、整场 100% 通过  ← 逐字相同",
+    "  while 自然结束（3 次）与跑满 3 次而条件仍真 => 都是「循环 3 次」              ← 逐字相同",
+    "唯一的区别是一条 lint.reported 事件，而事件这条路在本仓被否过三次，理由各不相干：",
+    "门禁 gateAfterRun 一处 events 都没有、HTML 报告不渲染事件、**预编译形态压根没有事件通道**。",
+    "所以这一族的判据全落在 results / ExecOutcome.steps 那一层。",
+    "",
+    "**为什么这一族单独一份、不续进 loop-never-run.json**：判据不在同一层。",
+    "loop-never-run 管的是「一次都没进循环」（体里的断言压根没跑）；",
+    "这一份管的是「跑了一段但没跑完」—— 状态是 pass、体里的断言**真跑了**，",
+    "缺的只是「少了几条」这个信息。撤掉 loop-never-run 那两条判据，这一份**一条都不红**，",
+    "反之亦然。（同一个形状：interruption.json 与 artifacts.json 的分工。）",
+    "",
+    "**norm() 那一列 `s.note ?? ''` 是这一族里唯一的「测试侧镜像」缺陷类**，最该被读的一条：",
+    "把它从 executor.test.ts 的 norm() 里删掉之后，全量 `npm test` **一条不红**（实测）。",
+    "原因不是覆盖不够，而是**两种形态此刻都说同一句**，删掉这一列不会让任何东西分叉 ——",
+    "它守的是「将来某一侧悄悄不说」，而那只有把**那一侧**改坏才测得出来。",
+    "所以「预编译形态不再说截断」这条的 testFile 指 executor.test.ts：",
+    "那一列红不红，只有配着这种**生产侧**变异才答得出。",
+    "（实测同一变异在 loop-truncated.test.ts 上**也**红 —— 那个文件自己也跑两种形态。",
+    "  两边都指是对的，但别据此以为 norm 那一列多余：把它删掉、只留 loop-truncated 那份，",
+    "  executor.test.ts 那 37 条（含 40 例随机属性测试）就再也不比这句话了。）",
+    "",
+    "**F1/F2 与上面那些不在同一件事上**，但起因完全相同：本轮给 html.ts 加一条新判据时",
+    "直接写了 `r.keyContext.truncated`，结果**炸在引擎自己产出的 report 上**",
+    "（不是测试夹具缺字段）。根因是 finish() 把 schema 必填键的默认值写在 `...extra` **前面**，",
+    "而调用点传的是 `keyContext: outcome.keyContext`（可选，于是是 undefined）—— ",
+    "对象展开不认识「这个键在 schema 里必填」。实测 healed / nonReplayable / keyContext",
+    "**每一行**都是 undefined。所以 F 那两条守的是「别再回到那个形状」，",
+    "判据由 finish-defaults.test.ts 从 StepResultSchema 现取（不手抄键清单）。",
+    "",
+    "**刻意不做成变异的东西**（要钉的是「不许往那个方向改」，变异答不了这个）：",
+    " · 状态仍是 pass。上限常常是故意的（while 当最多轮询 N 次、forEach 当只抽前 10 条冒烟），",
+    "   判 error 会把正常写法变成用例错误，`while` 更坏：轮询后面通常跟着真断言，",
+    "   那才是「产品有没有 bug」的判据，用一个用例错误盖掉一个产品结论。",
+    "   钉它的是 loop-truncated.test.ts 里「误报方向」那一段（四种合法形状逐个断 status==='pass'）。",
+    " · HTML 横幅 bannerKind 不染色。同一条理由（那是在替「上限是不是故意的」做决定）。",
+    " · 表格行不许多。钉它的是那条**双向**判据（行 id 与 JUnit testcase 双向 deepEqual）——",
+    "   本轮第一版就是把带话的容器渲染成表格行，而 html.test.ts 那条老钉子**抓不到**：",
+    "   它的判据 `htmlNames.filter(n => junitNames.includes(n))` 把「页面多出一行」吃掉了。",
+    "",
+    "**本轮写这份 spec 时撞到的两条工具规矩**（都记在这里，下次别再撞）：",
+    " 1. **删除型变异的 replace 不许是空串，也不许留下「正常代码里本来就有的子串」**。",
+    "    开跑前的残留核对判的是「替换文本在文件里而锚点不见了」。",
+    "    本族有六条是「把某句删掉」，删完文件当然还是合法代码 —— 于是核对把",
+    "    `status: 'pass',`（正常代码里到处是）报成残留，**整轮直接不开跑**。",
+    "    loop-never-run.json 用 `void noteNeverRun;` 就是为这个；本族统一用 `// 变异 XX：…`。",
+    " 2. **钉措辞的判据会被等价的措辞改动咬红**。本轮第一次跑，「措辞改掉」那条",
+    "    expect:equivalent 直接判红 —— 三处 `assert.match(…/3 条从未被迭代过/)` 在钉半句话。",
+    "    改钉成数字（/3 条/）。反方向那组则**反过来**处理：不写否定式正则（fail-open，",
+    "    措辞一改就永真），改成逐字的特征化期望值 —— 那组要证的本来就是「逐字不变」。",
+    "    而「提示带不出现」那条补了正对照：先证明判据在脏页面上成立，再要求在干净页面上不成立。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "预编译形态不再说截断（那个形态压根没有事件通道，所以那半件事一个字都不剩）",
+      "file": "packages/engine/src/executor.ts",
+      "anchor": "          return items.length > cap ? { status: 'pass', note: truncatedByCap(n, items.length) } : { status: 'pass' };",
+      "replace": "          return { status: 'pass' }; // 变异 A1：预编译侧不说截断",
+      "testFile": "packages/engine/test/executor.test.ts"
+    },
+    {
+      "label": "解释器不再说截断（回到「5 条数据截到 2 条」与「刚好 2 条」逐字相同的报告）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            status: 'pass', summary: truncatedByCap(cap, items.length),",
+      "replace": "            status: 'pass', // 变异 B2：解释器不说截断",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "while 撞上限不再说（「条件仍为真时切断」与「自然跑完」又变成一个东西）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            status: 'pass', summary: hitCeiling(i),",
+      "replace": "            status: 'pass', // 变异 B3：while 不说撞上限",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "把共用措辞在调用点手抄一份（字节相同的字符串，所以今天没人报错 —— 分叉要等下一次只改一侧）",
+      "file": "packages/engine/src/executor.ts",
+      "anchor": "note: truncatedByCap(n, items.length)",
+      "replace": "note: `迭代 ${n} 次，但数据有 ${items.length} 条 —— ${items.length - n} 条从未被迭代过（撞 maxIterations 上限）`",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "functionalExecutor 不把截断映射成 note（功能形态这一侧的通路断掉）",
+      "file": "packages/engine/src/executor.ts",
+      "anchor": "          ...(x.keyContext?.truncated ? { note: x.assertionSummary ?? '' } : {}),",
+      "replace": "          // 变异 A3：不映射 note",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "HTML 提示带整个不渲染（引擎说了、页面上没有 => 人第一眼看到的仍是全绿）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "${unfinishedList}\n",
+      "replace": "<!-- 变异 A5：提示带不渲染 -->\n",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "HTML 只认 truncated、丢掉 neverRun（嵌套循环里外层数据为空时，痕迹挂在内层**容器**上，仍然进不了页面）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "      && ((r.keyContext?.truncated) !== undefined || (r.keyContext?.neverRun) !== undefined));",
+      "replace": "      && (r.keyContext?.truncated) !== undefined);",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "HTML 只扫主表、不扫 call 子场景（子场景里的循环被截断 => 只在一侧可见）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  const unfinished = [report, ...(report.childRuns ?? [])]",
+      "replace": "  const unfinished = [report] // 变异 A8：不扫子场景",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "带话的容器重新进表格（页面用例数与 CI 对不上；html.test.ts 那条老钉子抓不到这个方向）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "    rs.filter((r) => !CONTAINER_SET.has(r.kind)).map((r) => rowOf(r, scoped)).join('');",
+      "replace": "    rs.filter((r) => !CONTAINER_SET.has(r.kind) || (r.keyContext?.truncated) !== undefined).map((r) => rowOf(r, scoped)).join('');",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "等价变异：截断那句的措辞改掉（计数与状态都不变，本就不该有测试钉整句措辞）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  return `迭代 ${ran} 次，但数据有 ${total} 条 —— ${total - ran} 条从未被迭代过（撞 maxIterations 上限）`;",
+      "replace": "  return `迭代 ${ran}/${total} 条，${total - ran} 条没跑到`;",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/loop-truncated.test.ts"
+    },
+    {
+      "label": "finish() 回到「默认值写在 ...extra 前面」（healed/nonReplayable/keyContext 每行都是 undefined，而类型说它必有）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "      keyContext: keyContext ?? {},",
+      "replace": "      keyContext: keyContext as Record<string, unknown>, // 变异 F1：默认值让位给 undefined",
+      "testFile": "packages/engine/test/finish-defaults.test.ts"
+    },
+    {
+      "label": "keyContext 无条件给空对象（不再是 undefined，但把断言/循环带回来的上下文整个洗掉）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "      keyContext: keyContext ?? {},",
+      "replace": "      keyContext: {}, // 变异 F2：无条件空对象",
+      "testFile": "packages/engine/test/finish-defaults.test.ts"
+    }
+  ]
+}

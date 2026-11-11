@@ -25,7 +25,7 @@ import { compileExpr, truthy } from './expr.js';
 import { evalStructAssert } from './assertions.js';
 import { VarError, VarSpace, type InputDef, type VarSpace as VarSpaceT } from './vars.js';
 import { PathError } from './jsonpath.js';
-import { flattenTimes, looseEq, resolveValue, iterItems, type ValueScope } from './resolve.js';
+import { flattenTimes, looseEq, resolveValue, iterItems, truncatedByCap, hitCeiling, type ValueScope } from './resolve.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 
 /** docs/09 §4.2 里那个接口。两种形态实现同一个形状。 */
@@ -54,8 +54,17 @@ export interface ExecOutcome {
   status: StepStatus;
   /** 逐步结论，**含容器节点自身**（解释器对每个被执行的步骤都记一条，容器不例外）。
    *  `error` 仅在 status==='error' 时有值：压测形态不产 evidence，但"哪一步坏了、为什么"
-   *  必须留得下来，否则压测报告里的一堆 error 无从下手。 */
-  steps: Array<{ stepId: string; status: StepStatus; healed: boolean; error?: string }>;
+   *  必须留得下来，否则压测报告里的一堆 error 无从下手。
+   *
+   *  `note` 只给**状态是 pass 而结论不完整**的那些步骤（今天只有循环截断 / 撞上限）。
+   *  为什么需要它而不是发一条事件：本形态压根没有事件通道（`emit: () => {}`），
+   *  所以"发个 lint 事件就算说过"在这个形态里天然是空的 —— 这句话不是推测，
+   *  是 `executor.test.ts` 里那条注释早就写下的事实，也是 docs/04 M0.6 登记的那条
+   *  "用预编译形态跑过的用例不等于 lint 干净"的成因。**刻意不叫 summary**：
+   *  解释器那边真有一栏叫 `assertionSummary`，而同名不同型正是本仓骗过人的老手法
+   *  （`step.summary` 那个坑记在 docs/14 §6 第 15 条）。
+   *  读它的一侧是 `executor.test.ts` 里那条"两种形态都说同一句话"的钉子。 */
+  steps: Array<{ stepId: string; status: StepStatus; healed: boolean; error?: string; note?: string }>;
   outputs: Record<string, unknown>;
   /** 求值/结构问题（≠ 断言失败）。"用例跑不了"和"用例没过"必须能分开 */
   error?: string;
@@ -164,8 +173,8 @@ class FastState {
    * （status 是六态之一，healed 是"这一步发生过自愈"的旗标，参与整段归约）。
    * 把 healed 折进 status 丢掉一个维度，等价性测试就没法比对它了。
    */
-  add(s: Step | { id: string }, status: StepStatus): StepStatus {
-    this.steps.push({ stepId: s.id, status, healed: status === 'healed' });
+  add(s: Step | { id: string }, status: StepStatus, note?: string): StepStatus {
+    this.steps.push({ stepId: s.id, status, healed: status === 'healed', ...(note ? { note } : {}) });
     return status;
   }
   /** 结构断言：直接调解释器用的同一个 evalStructAssert */
@@ -218,6 +227,14 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
 
   /** 包装成"跑完子树后替容器自己记一条"。解释器对每个被执行的步骤都记，容器不例外 */
   const asContainer = (id: string, inner: (st: FastState) => StepStatus): RawNode => (st) => st.add({ id }, inner(st));
+  /**
+   * 同 asContainer，但容器**自己**那一行可以带一句 note（今天只有循环用得上）。
+   * 为什么单开一个而不是给 asContainer 加可选返回：那样每个容器都要过一遍
+   * "返回 StepStatus 还是返回对象"的分支判断，而六个容器里只有两个需要它 ——
+   * 多出来的那条分支今天没人走，正是 docs/14 §4.7 说的那种到不了的防护分支。
+   */
+  const asNotedContainer = (id: string, inner: (st: FastState) => { status: StepStatus; note?: string }): RawNode =>
+    (st) => { const r = inner(st); return st.add({ id }, r.status, r.note); };
 
   function compileStep(s: Step): FastNode {
     ops++;
@@ -294,7 +311,7 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
         const as = s.as;
         const indexAs = s.indexAs;
         const cap = s.maxIterations;
-        return asContainer(s.id, (st) => {
+        return asNotedContainer(s.id, (st) => {
           const items = iterItems(st.evalExpr(itemsSrc));
           const n = Math.min(items.length, cap);
           for (let i = 0; i < n; i++) {
@@ -302,11 +319,13 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
             const r = runSeq(kids, st);
             st.vars.popTo(depth); // 按深度回退，失败提前返回也不漏变量（同解释器）
             // 截断行为、以及 healed 继续迭代，都与解释器一致
-            if (r !== 'pass' && r !== 'healed') return r;
+            if (r !== 'pass' && r !== 'healed') return { status: r };
           }
           // 同 while：空数据时循环体一行都没跑，两种形态都得在 results 里留痕
           if (n === 0) for (const k of s.steps) st.add(k, 'skipped');
-          return 'pass';
+          // 截断这件事在本形态**以前一个字都没留**（那半件事只由事件承载，而本形态
+          // 没有事件通道）。现在与解释器共用 truncatedByCap 那一份措辞。
+          return items.length > cap ? { status: 'pass', note: truncatedByCap(n, items.length) } : { status: 'pass' };
         });
       }
       case 'while': {
@@ -314,7 +333,7 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
         refs.add(cond);
         const kids = compileList(s.steps);
         const cap = s.maxIterations;
-        return asContainer(s.id, (st) => {
+        return asNotedContainer(s.id, (st) => {
           let i = 0;
           while (i < cap) {
             if (st.aborted()) throw new ExecAborted();
@@ -325,7 +344,7 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
             const depth = st.vars.push('while');
             const r = runSeq(kids, st);
             st.vars.popTo(depth);
-            if (r !== 'pass' && r !== 'healed') return r;
+            if (r !== 'pass' && r !== 'healed') return { status: r };
             i++;
           }
           // 顶到上限且条件仍为真 = 疑似死循环。解释器在这里发 LOOP_CEILING_HIT 事件；
@@ -336,7 +355,9 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
           // 天然是空的，分叉的表现就是"功能形态有提示、压测形态静默"。
           // 补行是两种形态**共用同一个载体**（results）的唯一做法，也才谈得上等价。
           if (i === 0) for (const k of s.steps) st.add(k, 'skipped');
-          return 'pass';
+          // 重评一次条件与解释器同形（那一侧也是这么判的）。这里不担心"条件有副作用"：
+          // 两侧同一个表达式、同一份变量空间，要出岔一起出岔，而那由等价性测试负责发现。
+          return i === cap && truthyEval(st, cond) ? { status: 'pass', note: hitCeiling(i) } : { status: 'pass' };
         });
       }
       case 'repeat': {
@@ -518,7 +539,7 @@ function truthyEval(st: FastState, src: string): boolean {
  * 存在它是为了让调用方能拿同一个 `StepExecutor` 类型切换两种形态，
  * 而不是到处 `if (form === ...)`。
  */
-export function functionalExecutor(run: (input: ExecInput) => Promise<{ status: StepStatus; results: Array<{ stepId: string; status: StepStatus; healed?: boolean; assertionSummary?: string }>; outputs: Record<string, unknown> }>): StepExecutor {
+export function functionalExecutor(run: (input: ExecInput) => Promise<{ status: StepStatus; results: Array<{ stepId: string; status: StepStatus; healed?: boolean; assertionSummary?: string; keyContext?: Record<string, unknown> }>; outputs: Record<string, unknown> }>): StepExecutor {
   return {
     form: 'functional',
     async run(input) {
@@ -529,7 +550,18 @@ export function functionalExecutor(run: (input: ExecInput) => Promise<{ status: 
         // error 取 assertionSummary：**只用于"有没有错"的对比，不比对文案** ——
         // 两条路径的报错措辞本就该各自演化（一条面向人读、一条只要可定位），
         // 把文案写进等价性判据会让测试变成一个谁也不敢改的字符串快照。
-        steps: r.results.map((x) => ({ stepId: x.stepId, status: x.status, healed: x.healed ?? x.status === 'healed', ...(x.status === 'error' ? { error: x.assertionSummary ?? '' } : {}) })),
+        //
+        // note 是上面那条"不比对文案"的**刻意例外**：判据走结构化的
+        // `keyContext.truncated`（不是句子前缀），所以"这句话改了"不会让这条断言失效，
+        // 而"某一侧不再说这件事"会让它红。上面那个例外只适用于 error 文案 ——
+        // 截断这句话在两侧**必须逐字相同**，因为它两侧都有事件之外的义务
+        // （功能形态那句进 HTML 与 JSON，预编译形态**压根没有事件通道**）。
+        // 而 norm() 原本不比摘要，分叉没有任何东西会响，所以本轮给它加了 note 那一列。
+        steps: r.results.map((x) => ({
+          stepId: x.stepId, status: x.status, healed: x.healed ?? x.status === 'healed',
+          ...(x.status === 'error' ? { error: x.assertionSummary ?? '' } : {}),
+          ...(x.keyContext?.truncated ? { note: x.assertionSummary ?? '' } : {}),
+        })),
         outputs: r.outputs,
       };
     },

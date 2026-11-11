@@ -198,6 +198,65 @@ export function iterItems(v: unknown): unknown[] {
 }
 
 /**
+ * 「这一轮循环**没干完**」那句摘要。**两种执行形态共用一份措辞**（解释器与预编译）。
+ *
+ * 为什么必须共用：等价性测试的 `norm()` 原先只比 `[stepId, status, healed, outputs]`，
+ * **摘要文本压根不在它的比较范围里**。本轮给 norm() 加了一列 `note`，
+ * 那一列今天**抓不住任何东西**（两种形态此刻都说同一句，删掉那列全量测试一条不红 ——
+ * 实测，记在 docs/14 §6 第 16 条），它守的是"将来某一侧悄悄不说"。
+ * 所以"共用一份措辞"这件事**不能只靠那一列**：抄两份的话分叉发生在
+ * "两侧都不说同一句但各自说了一句别的"那种形态上，而那种分叉今天仍然没人守
+ * （变异集 `tooling/mutate/loop-truncated.json` 里有一条 `expect:"equivalent"`
+ * 就是专门把它摆出来的）。本文件是迭代语义的既定归属
+ * （`iterItems` / `toIterable` / `flattenTimes` 都在这），所以这句话写在这里
+ * 而不是两个调用点各写一遍。
+ *
+ * ## 为什么这两个函数存在
+ *
+ * 改前实测（同一份 IR，只差数据量 / 只差条件何时变假）：
+ *
+ * ```
+ * forEach  数据 2 条 / 上限 2   => 该步 pass，摘要「迭代 2 次」，整场「100% 通过」
+ * forEach  数据 5 条 / 上限 2   => 该步 pass，摘要「迭代 2 次」，整场「100% 通过」   ← 逐字相同
+ * while    自然结束（跑了 3 次） => 该步 pass，摘要「循环 3 次」
+ * while    撞上限且条件仍为真    => 该步 pass，摘要「循环 3 次」                      ← 逐字相同
+ * ```
+ *
+ * **"干完了"与"没干完"给出逐字节相同的报告**。唯一的区别是一条
+ * `lint.reported` 事件，而：
+ *  - 门禁不读 events（`gateAfterRun` 里一处 events 都没有，这条纪律写在
+ *    `interpreter.ts` 里 `LOOP_BODY_NEVER_RUN` 那一段的注释上）；
+ *  - HTML 报告不渲染事件（`html.ts` 里 `events` 零命中）；
+ *  - **预编译形态压根没有事件通道**（`emit: () => {}`），所以那一条在压测形态里
+ *    连"只有人眼能看见"都做不到 —— 这正是 `docs/04` M0.6 登记的
+ *    "`LOOP_TRUNCATED` / `LOOP_CEILING_HIT` 在预编译形态发不出去"。
+ *
+ * 于是"3 条数据从没被迭代过"这件事的**全部痕迹**是一个 JSONL 文件里的一行，
+ * 而报告说 100% 通过。`control.test.ts` 早就给同族立过规矩：
+ * 「**为什么不满足于发一条 lint 事件** —— 两个理由各自都足以让"有事件"变成
+ * "只有人眼能看见"，所以这里钉的是 **results 里有一行**」。那条规矩当时落在
+ * `LOOP_BODY_NEVER_RUN`（一次都没进循环）上，**没落在"进了但被截断"这一半**上，
+ * 这两个函数就是补的那一半。
+ *
+ * ## 为什么状态还是 `pass` 而不是 error
+ *
+ * 上限常常是**故意**的：`while` 用作"最多轮询 N 次"、`forEach` 用作"只抽前 10 条冒烟"。
+ * 把"撞上限"判成 error 会把这两种正常写法变成用例错误；更坏的是 `while` 那一支 ——
+ * 有界的轮询后面通常跟着一条真断言，那才是"产品有没有 bug"的判据，
+ * 把轮询本身判 error 会**用一个用例错误盖掉一个产品结论**（与 `onTimeout:'fail'`
+ * 那格未决的是同一个问题：状态与归因谁该让位）。所以本轮只让**看见**这件事成立，
+ * 不动状态。要不要让它进门禁，登记在 docs/14 §5。
+ */
+export function truncatedByCap(ran: number, total: number): string {
+  return `迭代 ${ran} 次，但数据有 ${total} 条 —— ${total - ran} 条从未被迭代过（撞 maxIterations 上限）`;
+}
+
+/** `while` 撞上限而条件仍为真：活没干完就停了。与"自然结束时刚好也跑了 cap 次"要能分开 */
+export function hitCeiling(ran: number): string {
+  return `循环 ${ran} 次后撞上 maxIterations 上限，而条件仍为真 —— 活没干完就停了`;
+}
+
+/**
  * 把一张 IR 值表求值成 `Record<string, string>`。**全仓一份**（原先长在
  * interpreter 的闭包里，与本文件的 resolveValue 隔一层闭包，`wait.ts` 用不到，
  * 于是三处 `db.query` 里有一处自己传了 `{}` —— 就是 docs/15 §3.2 那个洞）。

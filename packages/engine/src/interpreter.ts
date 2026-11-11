@@ -17,7 +17,7 @@ import { VarError, VarSpace } from './vars.js';
 import { causeOfError, EnvMissing } from './errors.js';
 import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ExecTarget, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
-import { resolveValue as resolveValueShared, strMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
+import { resolveValue as resolveValueShared, strMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, truncatedByCap, hitCeiling, type ValueScope } from './resolve.js';
 import { waitUntil, NoConditionAdapter } from './wait.js';
 import { ResponseLedger, ResponseWindow } from './responses.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
@@ -668,10 +668,41 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     s: Step, path: string[], status: StepStatus, at: number, summary?: string,
     extra: Partial<StepResult> = {},
   ): StepResult => {
+    /*
+     * **schema 声明必填的那几个键，默认值必须兜在 `...extra` 后面**（本轮之前它们兜在前面）。
+     *
+     * 原来写的是 `keyContext: {}, healed: false, ... , ...extra` —— 而 dispatch 那条调用点
+     * 传的是 `keyContext: outcome.keyContext`（StepOutcome 上这个键是可选的，没做断言的步骤就是
+     * `undefined`）。对象展开**不认识"这个键在 schema 里必填"**，于是显式的 `undefined`
+     * 把默认值吃掉：`Partial<StepResult>` 允许它编译通过，而 `StepResult` 的类型说它必有。
+     *
+     * 后果不止难看：
+     *  - **内存里** `r.keyContext` 是 undefined，而类型说它是 record ——
+     *    任何 `r.keyContext.xxx` 都编得过、跑必炸（本轮 html.ts 那条新判据就是这么炸的，
+     *    炸在一个**引擎自己产出的** report 上，不是测试夹具）；
+     *  - **磁盘上** `JSON.stringify` 整个丢掉值为 undefined 的键，于是证据包里落的是一份
+     *    缺 strict schema 必填键的 StepResult。`parseStepResults` 读回来时靠 `.default()`
+     *    补齐，所以"写出去不合格式"这件事**只有自己写的那条读回路径看得见**。
+     * 实测（三份步骤：set / sequence / noop，全部命中）：`healed`、`nonReplayable`、
+     * `keyContext` 三个键在**每一行**上都是 undefined。`retry`/`costUsd`/`artifactIds`
+     * 侥幸没中，只因为那两个调用点恰好写了 `?? 0` 和条件展开 —— 是运气不是设计。
+     *
+     * 这里刻意**不**改成"逐字段显式列出、去掉 `...extra`"：那样将来有人给 StepResult
+     * 加一个字段、在调用点传进来，就会被静默吞掉（比 undefined 更难查）。
+     * 所以其余键照旧整体展开，只有"必填 + 带默认"这一小组逐个兜底；
+     * 这一组是否列全**由 schema 派生着守**（见 finish-defaults.test.ts），不靠手抄。
+     */
+    const { retry, healed, nonReplayable, costUsd, artifactIds, keyContext, ...rest } = extra;
     const r: StepResult = {
-      stepId: s.id, kind: s.kind, status, durMs: clock.mono() - at, retry: 0,
-      assertionSummary: summary, costUsd: 0, healed: false, nonReplayable: false,
-      artifactIds: [], keyContext: {}, ...extra,
+      stepId: s.id, kind: s.kind, status, durMs: clock.mono() - at,
+      assertionSummary: summary,
+      ...rest,
+      retry: retry ?? 0,
+      healed: healed ?? false,
+      nonReplayable: nonReplayable ?? false,
+      costUsd: costUsd ?? 0,
+      artifactIds: artifactIds ?? [],
+      keyContext: keyContext ?? {},
       cause: extra.cause ?? (status === 'fail' ? 'product-bug' : status === 'error' ? 'untriaged' : undefined),
     };
     results.push(r);
@@ -932,6 +963,17 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           if (o.status !== 'pass' && o.status !== 'healed') return o;
         }
         if (cap === 0) noteNeverRun(s, path, '迭代 0 次（items 是空集合）');
+        // 截断那一半也要进 results，不能只有那条事件，理由全在 resolve.ts 的
+        // truncatedByCap 注释里（预编译形态压根没有事件通道 / 门禁不读 events /
+        // 改前"2 条数据"与"5 条截到 2"给出逐字相同的报告）。
+        // keyContext 带结构化计数：门禁与前端要判"是不是截断了"不该去匹配句子前缀
+        // （同 noteNeverRun 那条理由 —— 改个措辞就会悄悄退化）。
+        if (items.length > s.maxIterations) {
+          return {
+            status: 'pass', summary: truncatedByCap(cap, items.length),
+            keyContext: { truncated: { ran: cap, total: items.length, cap: s.maxIterations } },
+          };
+        }
         return { status: 'pass', summary: `迭代 ${cap} 次${cap ? '' : '，循环体一条未执行'}` };
       }
       case 'while': {
@@ -945,10 +987,30 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           if (o.status !== 'pass' && o.status !== 'healed') return o;
           i++;
         }
-        if (i === s.maxIterations && evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now })) {
+        const ceiling = i === s.maxIterations && evalBool(s.condition, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now });
+        if (ceiling) {
           emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'LOOP_CEILING_HIT', detail: `达到上限 ${s.maxIterations}，条件仍为真` } });
         }
         if (i === 0) noteNeverRun(s, path, '条件第一次就为假，一次都没进循环');
+        // 同 forEach：撞上限要进 results，不能只靠事件。改前"条件刚好在第 3 次变假"
+        // 与"跑满 3 次而条件仍为真"摘要逐字相同（都是「循环 3 次」），
+        // 于是"活没干完"与"活干完了"在报告上是一个东西。
+        if (ceiling) {
+          return {
+            status: 'pass', summary: hitCeiling(i),
+            /*
+             * 这里**不挂 `conditionStillTrue: true`**（第一版挂了）。它恒为字面量 true
+             * —— 只有 ceiling 成立时才走到这一行，所以那个键的信息量是 0，
+             * 而"schema 有字段、没人读"正是本仓一轮一轮在清的那一格：
+             * 写的人以为给了消费侧一个判据，读的人拿不到任何新东西，
+             * 于是从此所有人都以为"这件事有结构化标记了"。
+             * "是撞上限还是数据截断"这个真需要区分的問題，已经由**这一行自己的
+             * `kind`**（while / forEach）答了，加上 forEach 那份多一个 `total` 键；
+             * 措辞那一侧则由 hitCeiling 里的"条件仍为真"说给**人**听。
+             */
+            keyContext: { truncated: { ran: i, cap: s.maxIterations } },
+          };
+        }
         return { status: 'pass', summary: `循环 ${i} 次${i ? '' : '，循环体一条未执行'}` };
       }
       case 'repeat': return runChildren(flattenTimes(s.times, s.steps), [...path, s.id], vars, slot);
