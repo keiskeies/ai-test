@@ -27,7 +27,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { compilePlan, deterministicClock, lintScenario, dryRun, VarSpace, DefaultValueError, VarError, detectDefaultCycles, type RunReport } from '../src/index.js';
+import { compilePlan, deterministicClock, lintScenario, dryRun, runScenario, VarSpace, DefaultValueError, VarError, detectDefaultCycles, type RunReport } from '../src/index.js';
 import { b, run, scen, type StepDraft } from './helpers.js';
 import type { Scenario } from '@atest/ir';
 
@@ -113,6 +113,50 @@ describe('default 的四种形态都被求值（改前原样塞进变量空间�
     const x = await run(s, { inputs: { other: 'OTHER' } });
     const y = await run(s, { inputs: { other: 'OTHER' } });
     assert.deepEqual(x.outputs, y.outputs, 'default 里的生成器两次给出不同的值');
+  });
+
+  test('预编译形态：一个 plan 跑多次，每次迭代都重新求 default', async () => {
+    /*
+     * 这条是**量出来的**，不是设计的对偶。一开始我以为"每迭代不同值"是缺陷 ——
+     * docs/04 里写着"默认值是场景的属性，不是迭代的属性"，读起来像"一个 plan
+     * 只该求一次"。量完三件事：
+     *  1. **两形态逐轮同值**（`.scratch/probe-iter4.mts`：各形态各用同源 seed 的
+     *     独立时钟，单次与连跑三次都对得上）。所以这不是"同一个概念两条路只修一条"那一族。
+     *     ⚠ 这里我**先得到过一个假读数**：上一支探针让两种形态**串用同一台时钟**，
+     *     于是预编译读到 238781/913494、功能读到 926982/49342，看着像分叉 ——
+     *     那是探针自己的产物（后跑的形态时钟已经前进了），不是行为。
+     *     "两形态结论不同"这种判据**必须各用独立同时钟**，否则量的上是执行顺序。
+     *  2. **每迭代重求才是对的**：压测里每个虚拟用户都该有**自己**的一份生成值，
+     *     编译期只求一次的话所有 VU 会共用同一个 uuid/orderId —— 那不是负载测试，
+     *     那是拿同一个账号打 N 遍。
+     *  3. docs/04 那句话讲的是**声明从哪儿来**（`inputDefs` 由场景闭包进来、
+     *     不由每次迭代传），不是"只求一次值"。
+     * 所以钉死两条：**每迭代重求**，而**整条序列对 seed 可复现**（M7 要的是后者）。
+     */
+    const s = scen([{ ...b('a'), kind: 'set', assign: { x: '$.g' } }] as StepDraft[], {
+      inputs: [{ name: 'g', type: 'number', default: { gen: 'int', with: { min: 1, max: 1_000_000 } } }],
+      outputs: [{ name: 'gv', from: '$.g' }],
+    });
+    const seqPre = (seed: number, n: number): unknown[] => {
+      const clock = deterministicClock(seed);
+      const plan = compilePlan(s);
+      return Array.from({ length: n }, () => plan.run({ inputs: {}, env: {}, clock }).outputs.gv);
+    };
+    /** 功能形态：一台同源 seed 的时钟贯穿 n 次 runScenario（与 seqPre 严格同构） */
+    const seqFn = async (seed: number, n: number): Promise<unknown[]> => {
+      const clock = deterministicClock(seed);
+      const out: unknown[] = [];
+      for (let i = 0; i < n; i++) {
+        out.push((await runScenario({ scenario: s, adapters: {}, clock, inputs: {} })).outputs.gv);
+      }
+      return out;
+    };
+    const a = seqPre(11, 4);
+    assert.equal(new Set(a.map(String)).size, 4, `四次迭代拿到同一个值：${JSON.stringify(a)}（所有 VU 会共用一份生成值）`);
+    assert.deepEqual(seqPre(11, 4), a, '同一 seed 的两轮序列不一致 —— 破 M7 的确定性');
+    assert.notDeepEqual(seqPre(12, 4), a, '序列与 seed 无关，说明那个 gen 压根没在动');
+    // 两形态逐轮同值（各自独立、同源 seed 的时钟 —— 见上面那条假读数的教训）
+    assert.deepEqual(await seqFn(42, 3), seqPre(42, 3), '两种形态的 default 序列分叉了');
   });
 
   test('default 之间的相互引用与声明顺序无关（拓扑排序，而不是"恰好写对了顺序"）', async () => {
