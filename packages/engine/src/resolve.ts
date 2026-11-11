@@ -15,7 +15,7 @@
  */
 import { compileExpr } from './expr.js';
 import { VarError, type VarSpace } from './vars.js';
-import type { Step } from '@atest/ir';
+import { isValueForm, GEN_KINDS, type Step } from '@atest/ir';
 import type { Clock } from './adapters.js';
 
 export interface ValueScope {
@@ -24,24 +24,39 @@ export interface ValueScope {
 }
 
 /**
- * 把一个 IR 值解析成 JS 值。四种形态互斥，按 IR 的约定判定：
- * `{path}` / `{expr}` / `{gen}` 且**只有一个键**才算引用/表达式
- * （否则 `{"path": "src/a.ts"}` 这种普通对象会被误判成引用）。
+ * 把一个 IR 值解析成 JS 值。四种形态互斥，判据是 `@atest/ir` 的 `isValueForm`：
+ * **只含保留键 `path`/`expr`/`gen`（`gen` 可带 `with`）才算引用/表达式/生成器**，
+ * 其余都是字面量（所以 `{"path":"src/a.ts","lang":"ts"}` 是普通对象）。
+ *
+ * ## 判据为什么搬去 ir、而不是留在这里
+ *
+ * 改动前这里是三行手写的 `typeof o.path === 'string' && Object.keys(o).length === 1`，
+ * 而**同一条规则**在 `ir/values.ts` 的 schema 里已经写过一遍、
+ * 在 lint 的近邻拼写规则里还要写第三遍。三份手抄中每一份都各错过一次：
+ *  - `gen` 那一支**漏了键数条件**（因为它不能照抄 `keys === 1`：
+ *    `{gen:'int', with:{min:1}}` 是合法的两个键），于是 `{gen:'uuidd'}`
+ *    与 `{gen:'widget', size:'L'}` 双双被吞掉 —— 步骤判 pass、变量是空的。
+ *    实测数据在 `docs/14` §5 那一行，落点是 `packages/engine/test/value-forms.test.ts`。
+ *  - 而上面那段旧注释说闸是防 `{"path":"src/a.ts"}` 被误判 —— **单键恰恰过不了闸**，
+ *    它只挡两键的。实测那个单键写法是 `set=error`（PathError）。注释已照事实改掉。
+ *
+ * 现在两边共用一份判据，"改一处漏一处"这一族在这里就地消灭。
  */
 export function resolveValue(v: unknown, scope: ValueScope): unknown {
   if (v === null || typeof v !== 'object') return v;
   const o = v as Record<string, unknown>;
-  if (typeof o.path === 'string' && Object.keys(o).length === 1) {
-    const r = scope.vars.resolveRef(o.path);
+  const form = isValueForm(v);
+  if (form === 'ref') {
+    const r = scope.vars.resolveRef(o.path as string);
     // 未定义引用要抛：返回 undefined 会让它一路静默传下去，
     // 最后表现为"某字段是空的"，而真正的错在三步之前。
-    if (!r.found) throw new VarError('引用未定义', o.path);
+    if (!r.found) throw new VarError('引用未定义', o.path as string);
     return r.value;
   }
-  if (typeof o.expr === 'string' && Object.keys(o).length === 1) {
-    return compileExpr(o.expr).eval({ root: scope.vars.asExprRoot(), vars: scope.vars.visible(), now: scope.clock.now });
+  if (form === 'expr') {
+    return compileExpr(o.expr as string).eval({ root: scope.vars.asExprRoot(), vars: scope.vars.visible(), now: scope.clock.now });
   }
-  if (typeof o.gen === 'string') return generate(o.gen, (o.with as Record<string, unknown>) ?? {}, scope.clock);
+  if (form === 'gen') return generate(o.gen as string, (o.with as Record<string, unknown>) ?? {}, scope.clock);
   if (Array.isArray(v)) return v.map((x) => resolveValue(x, scope));
   return Object.fromEntries(Object.entries(o).map(([k, vv]) => [k, resolveValue(vv, scope)]));
 }
@@ -51,6 +66,13 @@ export function resolveValue(v: unknown, scope: ValueScope): unknown {
  *
  * 时间类生成器一律走注入的 clock —— 早先它们直接读 Date.now()，
  * 于是"冻结时钟后回放结果逐字一致"在用到 email/oid 的场景上并不成立。
+ *
+ * **`switch` 与 `GEN_KINDS` 是一对必须同步的清单**，两个方向的分叉都会响而不是静默：
+ *  - 往 `GEN_KINDS` 加了种类而这里漏写 case → 走到 `default` 抛错（用例报错，指回本文件）；
+ *  - 这里加了 case 而 `GEN_KINDS` 没加 → schema 在 parse 阶段就拒 `{gen:'新种类'}`。
+ * 所以**不需要**再写一个 `if (!GEN_KIND_SET.has(kind))` 的入口守卫：它比 `default`
+ * 弱（同样的错、同样的报处），加了只会让人以为"合法种类"这件事有第二道闸在管
+ * （docs/14 §4.7 那条"到不了的防护分支"讲的正是这种）。
  */
 export function generate(kind: string, w: Record<string, unknown>, clock: Pick<Clock, 'now' | 'random'>): unknown {
   const rnd = clock.random;
@@ -69,7 +91,62 @@ export function generate(kind: string, w: Record<string, unknown>, clock: Pick<C
     case 'datetime': return new Date(clock.now()).toISOString();
     case 'oneOf': { const arr = (w.values as unknown[]) ?? []; return arr[Math.floor(rnd() * arr.length)]; }
     case 'password': return `P@ss${String(Math.floor(rnd() * 1e6)).padStart(6, '0')}`;
-    default: return undefined;
+    default:
+      /*
+       * **拼错/未知的种类要抛，不许返回 undefined**（改动前是 `default: return undefined`）。
+       *
+       * 返回 undefined 的实测后果（本轮量过，六种写法全是 `set=pass`）：
+       *  `{gen:'uuidd'}`、`{gen:'uuid '}`（尾随空格）、`{gen:'UUId'}`、`{gen:'intt', with:…}`
+       * 全部**步骤判 pass、变量是空的**，下游 `notNull` 才报"期望非空，实际为空" ——
+       * 而那句读起来像被测系统返回了空数据，排查方向就此指错。
+       * 更糟的是 `{gen:'widget', size:'L'}`：它本意是个字面量对象，被 `gen` 分支
+       * 整个吞掉后**连业务对象都丢了**（这一半由上面的形态判据修掉：带第二个非法键
+       * 不再是 gen 形态，会照字面量走）。
+       *
+       * 抛的是 `GenKindError`，它是 **VarError 的子类**而不是一个新平级类：
+       * 两条执行路径**已经**按 `instanceof VarError` 把这类错归成"用例自己的问题"
+       * （解释器 `cause:'case-stale'`、预编译 executor.ts `status:'error'`），
+       * 新加平级类就得同时改两处映射 + FAILURE_CAUSE 枚举（那是改磁盘格式，
+       * 见下面 interpreter 里 TransportError 那段注释记的同一个坑），
+       * 而漏改一处的后果是这种用例错误被报成 `env-unavailable` —— 值班人去查
+       * 一个不存在的环境问题。
+       */
+      throw new GenKindError(kind);
+  }
+}
+
+/**
+ * 未知生成器种类。
+ *
+ * **是 `VarError` 的子类**，这一点是功能性的而不是分类洁癖：解释器按
+ * `e instanceof VarError` 归 `cause:'case-stale'`、预编译 executor.ts 按同一条归
+ * `status:'error'`，两条执行路径**已经**都把 VarError 当"用例自己的问题"。
+ * 新加一个平级错误类就得同时改两处映射，而漏一处的后果是这种用例错误
+ * 被报成 `env-unavailable`（"环境不可用"），值班人去查一个不存在的环境问题 ——
+ * 本轮实测到 `PathError` 正卡在这个位置上，另记（docs/14 §5）。
+ *
+ * 为什么不直接把清单塞进 `VarError` 的第二个参数：那个参数叫 `varName`，
+ * 构造器会拼成 `…（变量：${varName}）`，于是得到
+ * `未知生成器种类 "uuidd"（变量：uuidd）` 或
+ * `…（变量：gen（可用：int / float / …））` —— 一句自己都读不通的报错
+ * （两种都实测得到过）。`gen` 是**键名**不是变量名，而种类名已经在主句里了。
+ * 所以走 VarError 那条"varName 传空串就不拼后缀"的分支（见 vars.ts 构造器），
+ * 整句话由这里给全。
+ *
+ * ⚠ **这里刻意不再覆写 `this.message`**。先前是 `super('', kind)` 之后
+ * 再 `this.message = …`，那样 VarError 里那个三元判断**永远看不见**这个类
+ * （覆写发生在它之后），于是那条分支成了"到不了的防护"—— 变异集 R5
+ * 把三元改回无条件拼接，测试照样全绿，就是这么暴露出来的（docs/14 §4.7）。
+ * 现在整句话从 super() 一次给进去，那条分支是这个类**真正依赖**的机制。
+ */
+export class GenKindError extends VarError {
+  constructor(public readonly kind: string) {
+    // 清单照 `GEN_KINDS` 全列，不做"你是不是想用 uuid"那种近似猜测：
+    // 14 个词一屏就读完了，而猜测会在 `int` / `intt` 这种距离 1 的例子上猜错，
+    // 猜错的修法建议比没有建议更费时间。
+    // 种类名是 IR 里的字面词、不是被测系统的数据，所以进报错不涉敏。
+    super(`未知生成器种类 "${kind}"。可用：${GEN_KINDS.join(' / ')}（区分大小写、不许带空格）`, '');
+    this.name = 'GenKindError';
   }
 }
 

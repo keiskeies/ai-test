@@ -23,7 +23,12 @@ export { SECRET_PLACEHOLDER } from './redact.js';
 
 export class VarError extends Error {
   constructor(message: string, public readonly varName: string) {
-    super(`${message}（变量：${varName}）`);
+    // varName 为空时**不拼那个后缀**。留空是为了让子类（resolve.ts 的 GenKindError）
+    // 能复用 VarError 的归因（两条执行路径都按 instanceof VarError 归"用例自己的问题"）
+    // 而不被塞进一句"（变量：gen）" —— gen 是**键名**不是变量名，
+    // 而一句自己都读不通的报错会让人怀疑整条报错的可信度。
+    // 现有调用方全部传非空 varName，所以这一改动对它们一字未变。
+    super(varName ? `${message}（变量：${varName}）` : message);
     this.name = 'VarError';
   }
 }

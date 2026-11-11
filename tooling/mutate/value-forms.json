@@ -1,0 +1,129 @@
+{
+  "_comment": [
+    "值的四种形态（字面量/引用/表达式/生成器）的**形态判据**与它的静态闸。",
+    "",
+    "这一份管的是 docs/14 §5 那条老账：\"引用写错键名会静默变成字面量\"。",
+    "根因是 schema 层面没法收紧 —— ValueSchema 的 union 里含 LiteralSchema，",
+    "而它的 record(string, Literal) 让**任何 JSON 对象都是一个合法字面量**，",
+    "所以 `{pathh:'$.x'}`、`{gen:'uuidd'}` 全都过 schema。改动前的实测（六种写法全是 set=pass）：",
+    "  - `{gen:'uuidd'}` / `{gen:'uuid '}` / `{gen:'UUId'}` / `{gen:'intt',with:…}`",
+    "    -> set=pass 而**变量是空的**，下游 notNull 才报\"期望非空，实际为空\"，",
+    "       而那句读起来像被测系统返回了空数据，排查方向就此指到被测系统那边去；",
+    "  - `{gen:'widget', size:'L'}`（本意是业务对象）-> 被 gen 分支整个吞掉，**连 size 都没了**；",
+    "  - `{gen:'int', widh:{min:1}}` -> 生成器整个没了。",
+    "",
+    "**为什么 gen 那一支当初没有 keys===1 这道闸**（这不是漏写，是照抄会写错）：",
+    "`{gen:'int', with:{min:1}}` 是合法的**两个键**。所以修法是给三形态共用一张",
+    "键形状表（ir 的 isValueForm，allowed 键从已写好的 schema.shape 派生），",
+    "而不是给 gen 补一个 keys===1。R1/R2 就是钉这张表的。",
+    "",
+    "**为什么运行时那半还留着**（R3）而不完全交给 lint：lint 在跑之前响，",
+    "但 `atest run` 不带 --strict 时 warning 不拦人；而\"步骤判 pass、变量是空的\"",
+    "是这一族唯一**会让排查方向指错**的失效形态，必须硬停。R3 是这一族的核心一条。",
+    "",
+    "R4/R5 钉归因：GenKindError 必须是 VarError 的子类。两条执行路径都按",
+    "`instanceof VarError` 把它归成\"用例自己的问题\"（解释器 cause=case-stale、",
+    "预编译 status=error）。不再是子类的话它落到默认分支 cause=env-unavailable ——",
+    "一个用例拼错键名被报成\"环境不可用\"，值班人去查一个不存在的环境问题，",
+    "而 CI 的提示语还会叫它\"标 error 重试一次\"（白重试）。实测过这个分界：",
+    "PathError 与 ExprError 现在就正卡在 env-unavailable 那一格（本轮量到，",
+    "已单独登记在 docs/14 §5，不在本轮范围内改，因为它牵动 52 处归因断言）。",
+    "",
+    "R6 起是**静态闸那一半**，而且故意一半以上测的是**误报**（不许命中）：",
+    "这条规则是 warning，但误报的代价从来不是\"多一条黄字\"，是大家把 lint 关掉，",
+    "于是 lint.ts 里其余二十几条规则一起失效。宽度判据（isObj）、首字母相同、",
+    "isValueForm 那第三道，都是为了让一条合法的 `{gen:'uuid', width:100}`",
+    "（本平台测界面，width/height 到处都是）与一条合法的 extract `{var,path}` 不吃假 warning。",
+    "R6-R10 每一条都是\"删掉一道防误报的条件\"，红了才说明那道条件在干活 ——",
+    "防误报的代码最容易\"看起来在防\"而实际不防，正对本仓 §4.7 那条纪律。",
+    "",
+    "V1/V2 是声明等价的存活（见各自 label），不是漏抓。"
+  ],
+  "cases": [
+    {
+      "label": "R1 形态表退化：gen 那一支照抄 path 的 keys===1 —— 合法的 {gen:'int',with:{…}} 不再是生成器",
+      "file": "packages/ir/src/values.ts",
+      "anchor": "  if (!reserved || keys.length > 2) return undefined;\n  if (keys.length === 2 && !FORM_ALLOWED[reserved]?.includes(keys.find((k) => k !== reserved)!)) return undefined;",
+      "replace": "  if (!reserved || keys.length !== 1) return undefined;",
+      "testFile": "packages/engine/test/value-forms.test.ts"
+    },
+    {
+      "label": "R2 老缺陷复活：带第二个键的 {gen:'widget',size:'L'} 又被 gen 分支吞掉（业务对象连 size 都没了）",
+      "file": "packages/ir/src/values.ts",
+      "anchor": "  if (keys.length === 2 && !FORM_ALLOWED[reserved]?.includes(keys.find((k) => k !== reserved)!)) return undefined;",
+      "replace": "  // 变异：第二道键形状检查拿掉（等价于改动前 gen 那一支没有 keys 条件）",
+      "testFile": "packages/engine/test/value-forms.test.ts"
+    },
+    {
+      "label": "R3 核心回归：未知生成器种类回到 default 返回 undefined（步骤判 pass、变量是空的）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "      throw new GenKindError(kind);",
+      "replace": "      return undefined;",
+      "testFile": "packages/engine/test/value-forms.test.ts"
+    },
+    {
+      "label": "R4 归因跑偏：解释器不再把 VarError 家族算作用例自己的问题 -> 拼错键名被报成\"环境不可用\"",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "e instanceof VarError ? 'case-stale' : 'env-unavailable',",
+      "replace": "e instanceof TypeError ? 'case-stale' : 'env-unavailable',",
+      "testFile": "packages/engine/test/value-forms.test.ts"
+    },
+    {
+      "label": "R5 报错句子被 VarError 的后缀污染（得到\"…（变量：uuidd）\"那种读不通的话）",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "    super(varName ? `${message}（变量：${varName}）` : message);",
+      "replace": "    super(`${message}（变量：${varName}）`);",
+      "testFile": "packages/engine/test/value-forms.test.ts"
+    },
+    {
+      "label": "R6 误报复活：形状 (3) 不再问 isValueForm -> 合法业务对象 {gen:'widget',size:'L'} 吃一条假 warning",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "        if (k === 'gen' && vs !== undefined && isValueForm(obj) === 'gen' && !kinds.has(vs)) {",
+      "replace": "        if (k === 'gen' && vs !== undefined && !kinds.has(vs)) {",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "R7 误报复活：形状 (2) 不看值形态 -> {gen:'uuid', width:100} 被说成 with 拼错（测界面的平台里 width 到处都是）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "          const isObj = typeof sv === 'object' && sv !== null && !Array.isArray(sv);",
+      "replace": "          const isObj = true;",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "R8 误报复活：近邻判据不再要求首字母相同 -> len 被当成 gen 的近邻",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  if (a === b || a[0] !== b[0] || Math.abs(a.length - b.length) > 1) return false;",
+      "replace": "  if (a === b || Math.abs(a.length - b.length) > 1) return false;",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "R9 误报复活：值的第二条件拿掉 -> {expr2:'红色'} 这种业务字段被说成打错的表达式",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  if (reserved === 'path') return vs.startsWith('$');",
+      "replace": "  if (reserved === 'path') return true;",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "R10 漏抓：对调那一支拿掉 -> paht / gne 不再算近邻（编辑距离是 2，增删换那三路覆盖不到）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (i < a.length - 1 && a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2)) return true;",
+      "replace": "    // 变异：相邻两位调换那一支拿掉",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "V1 判据不变只改写法：GEN_KINDS 的清单从 ir 派生这条性质与写法无关（声明等价）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    const kinds = new Set<string>(GEN_KINDS);",
+      "replace": "    const kinds: ReadonlySet<string> = new Set<string>(GEN_KINDS);",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "R11 两份清单分叉：往 GEN_KINDS 加一个种类而 resolve.ts 的 switch 没加 case（schema 收下、运行时抛）",
+      "file": "packages/ir/src/values.ts",
+      "anchor": "export const GEN_KINDS = ['int', 'float', 'string', 'bool', 'email', 'phone', 'idcard', 'uuid', 'oid', 'date', 'datetime', 'timestamp', 'oneOf', 'password'] as const;",
+      "replace": "export const GEN_KINDS = ['int', 'float', 'string', 'bool', 'email', 'phone', 'idcard', 'uuid', 'oid', 'date', 'datetime', 'timestamp', 'oneOf', 'password', 'coinflip'] as const;",
+      "testFile": "packages/engine/test/value-forms.test.ts"
+    }
+  ]
+}

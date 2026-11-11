@@ -9,7 +9,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lintScenario, toReport, LINT_DOCS, type LintCode, type LintContext } from '../src/index.js';
+import { lintScenario, toReport, LINT_DOCS, isNearMiss, type LintCode, type LintContext } from '../src/index.js';
+import * as irSchema from '@atest/ir';
+import { ZodType } from 'zod';
 import { CONTAINER_KINDS } from '@atest/ir';
 import { b, scen, getStep, tapStep, run, res, type StepDraft } from './helpers.js';
 
@@ -632,5 +634,178 @@ describe('HOVER_THEN_NOT_IMPLEMENTED（声明了第二件事而平台一件都�
     } as never);
     assert.ok(lintScenario(s).some((i) => i.code === 'HOVER_THEN_NOT_IMPLEMENTED' && i.stepId === 'a'),
       '只查 body 的话"前置里点了一次不会发生的操作"照样静默 —— 前置里 hover 出菜单再点是很常见的写法');
+  });
+});
+
+/*
+ * ## RESERVED_KEY_REWRITE —— path / expr / gen 是 IR 的保留键名
+ *
+ * 这一组的判据重心在**下半截**：三种写错都要报，以及（更要紧的）
+ * 三种合法写法不许报。误报的代价不是"多一条黄字"，是大家把 lint 关掉，
+ * 于是本文件其余二十几条规则一起失效 —— 所以下面"不许命中"的用例
+ * 与"必须命中"的用例同样重要，缺任何一半，这条规则都不算被钉住。
+ *
+ * 为什么这条规则的运行时对照面在 value-forms.test.ts 而不是这里：
+ * lint 只负责"在跑之前就响"，而"跑起来到底存下了什么"由那边判。
+ * 两边同问 `isValueForm` 那一个判据（lint 侧第 (3) 种形状用的就是它），
+ * 所以"运行时报错的场景 lint 必报"这件事是结构性的，不靠两边各抄一份清单。
+ */
+const reserved = (assign: unknown) =>
+  lintScenario(scen([{ ...b('mk'), kind: 'set', assign } as StepDraft as never]))
+    .filter((i) => i.code === 'RESERVED_KEY_REWRITE');
+
+describe('保留键名写错（RESERVED_KEY_REWRITE）', () => {
+  test('path 拼成 pathh + 值是 $ 开头 -> 报，且说清"引用没生效"', () => {
+    const i = reserved({ row: { pathh: '$.step.s' } })[0];
+    assert.ok(i, '把 path 拼错一个字母必须报 —— schema 收得下（值位置允许任意字面量），不报就是静默');
+    assert.equal(i!.level, 'warning', 'warning 不 error：业务对象恰好撞保留键名是合法写法，error 会让 run --strict 拒跑跑得通的场景');
+    assert.match(i!.message, /按字面量存进变量空间|没生效/, '必须说清"实际存下了什么"，只说"键名可疑"会被当成无害的命名提醒');
+    assert.match(i!.fix ?? '', /path/, 'fix 要给出该用的键名');
+    assert.equal(i!.stepId, 'mk', '要指到步骤，否则两百步的场景里没人找得到那行');
+  });
+  test('expr 拼成 expr2 + 值像表达式 -> 报', () => {
+    assert.ok(reserved({ row: { expr2: '1+1' } }).length > 0);
+  });
+  test('gen 拼成 gien / gene / gn + 值是合法种类 -> 报', () => {
+    // 这三种是"多一个字母 / 少一个字母"那一族，都在 isNearMiss 的契约内（差一位）。
+    // 这里以前写的是 `geean`，而它与 gen 差**两位**，本来就不该报 ——
+    // 是我把测试写错了，不是规则漏了（用一个规则不该覆盖的写法去测"必须命中"，
+    // 得到红了会去改判据，那就把误报面白白放宽了一档）。
+    for (const k of ['gien', 'gene', 'gn']) {
+      assert.ok(reserved({ row: { [k]: 'uuid' } }).length > 0, `${k} 该报`);
+    }
+  });
+  test('相邻两位调换也算：paht / gne -> 报（编辑距离是 2，靠对调那一支抓到）', () => {
+    // 人打字最容易错的就是相邻两位调换，而它**不在**"增/删/换"那三路里
+    assert.ok(reserved({ row: { paht: '$.step.s' } }).length > 0, 'paht 该报');
+    assert.ok(reserved({ row: { gne: 'uuid' } }).length > 0, 'gne 该报');
+  });
+  test('种类拼错 {gen:"uuidd"} -> 报，且 fix 列出全部可用种类', () => {
+    const i = reserved({ row: { gen: 'uuidd' } })[0];
+    assert.ok(i);
+    assert.match(i!.message, /uuidd/);
+    assert.match(i!.fix ?? '', /uuid/);
+    assert.match(i!.fix ?? '', /区分大小写/, '尾随空格与大小写是这一族最常见的两种错法，fix 要直说');
+  });
+  test('with 拼成 widh -> 报，并说清整个 {gen:…} 会按字面量存下', () => {
+    const i = reserved({ row: { gen: 'int', widh: { min: 1 } } })[0];
+    assert.ok(i, '`with` 拼错时生成器整个没了，而这一步照样 pass —— 必须报');
+    assert.match(i!.message, /按字面量存下|参数也没生效/);
+  });
+
+  // ── 以下是**不许误报**的对照组 ────────────────────────────────
+  test('合法写法一律不报：引用 / 表达式 / 生成器（含带 with 的）', () => {
+    for (const v of [{ path: '$.step.mk' }, { expr: '1+1' }, { gen: 'uuid' }, { gen: 'int', with: { min: 1, max: 9 } }]) {
+      assert.deepEqual(reserved({ row: v }), [], `${JSON.stringify(v)} 是合法形态，不该报`);
+    }
+  });
+  test('业务对象恰好用了保留键名 -> 不报（这是 IR 明确允许的写法）', () => {
+    // `{gen:'widget', size:'L'}` 运行时按字面量整存，是完全合法的业务对象。
+    // 上一版这条规则按"有 gen 键 + 种类不认识"判，对着它报了"种类 widget 不存在" ——
+    // 一个误报，而它报的理由（"schema 会收下"）倒是真的，所以特别容易被当成真问题留下。
+    // 现在判据换成 isValueForm(obj)==='gen'，与运行时同一个问题、同一个答案。
+    assert.deepEqual(reserved({ row: { gen: 'widget', size: 'L' } }), []);
+    assert.deepEqual(reserved({ row: { path: 'src/a.ts', lang: 'ts' } }), []);
+    assert.deepEqual(reserved({ cfg: { expr: '红色', unit: 'px' } }), []);
+  });
+  test('extract 的规则形状 {var,path} 不被误报（每条 extract 都有 path 键）', () => {
+    const c = lintScenario(scen([
+      getStep('h'),
+      { ...b('x'), kind: 'extract', from: '$.step.h.resp', rules: [{ var: 'id', path: '$.id' }] },
+    ] as never[])).filter((i) => i.code === 'RESERVED_KEY_REWRITE');
+    assert.deepEqual(c.map((i) => i.message), [], 'extract 的 path 是正牌 IR 字段，两个键也不该被认成"引用写错"');
+  });
+  test('len / gen 只差一个字母，但 len 不报（首字母不同这一条挡住的就是它）', () => {
+    /*
+     * 值刻意用 'uuid' 而不是 'abc'：判据是"键近保留键 **且** 值像那个形态"两条件同时成立才报，
+     * 值随便是个不像种类的词时，第二条本来就把整条拦住了 —— 那样的对照组
+     * 对"首字母相同"这一支**没有区分度**（变异集 R8 拿掉首字母条件照样全绿，就是这么活下来的）。
+     * 只有值也踩上形态特征，报不报才只由首字母那一支决定。
+     */
+    assert.deepEqual(reserved({ row: { len: 'uuid' } }), [], 'len 是常见字段名，不该因为与 gen 差一个字母就被说成生成器');
+    assert.deepEqual(reserved({ row: { len: 'abc' } }), []);
+  });
+  test('值不像那个形态时不报：引用位要 $ 开头，表达式位要像表达式', () => {
+    // 三种形态各测一条"键名踩线但值不像"的：判据是两条件同时成立，
+    // 所以每一支的第二个条件都得有对照组 —— 只测其中一支时，另两支的条件被拿掉没人知道
+    // （变异集 R9 改的是 path 那一支的条件，而这里原先只有 expr 的对照组，于是它活了下来）。
+    assert.deepEqual(reserved({ row: { pathh: 'src/a.ts' } }), [], '值不以 $ 开头 -> 不像引用');
+    assert.deepEqual(reserved({ row: { expr2: '红色' } }), [], '值不含运算符 -> 不像表达式');
+    assert.deepEqual(reserved({ row: { geean: ' widget ' } }), [], '值不是种类名也不是种类的近邻 -> 不像生成器');
+    // 而值踩上线时照报（证明这几条对照组不是靠"整条规则不工作"通过的）
+    assert.ok(reserved({ row: { pathh: '$.step.s' } }).length > 0);
+    assert.ok(reserved({ row: { expr2: '1+1' } }).length > 0);
+  });
+  test('业务对象 {gen:"uuid", width:100} 不报 —— width 与 with 近邻，但值不是对象', () => {
+    /*
+     * 这一条是规则写完**当场实测出来的误报**，不是设想的：本平台测的是界面，
+     * width / height 这类字段名到处都是，而 `width` 与 `with` 只差两个字母。
+     * 上一版形状 (2) 只判"有 gen 键 + 伴随键近 with"，于是
+     * `{gen:'uuid', width:100}`（运行时按字面量整存的合法业务对象）
+     * 吃了一条"with 拼错了"的假 warning。修法不是给 width 开特例，
+     * 是补上第二条件"值必须是对象"—— 判据来自 schema：`GenValue.with` 是
+     * `z.record(...)`，真的 with 值本来就是对象。
+     */
+    assert.deepEqual(reserved({ row: { gen: 'uuid', width: 100 } }), []);
+    assert.deepEqual(reserved({ row: { gen: 'uuid', height: 30 } }), []);
+    // 而真的拼错照报（值这次是对象）
+    assert.ok(reserved({ row: { gen: 'int', widh: { min: 1 } } }).length > 0);
+  });
+  test('一个错只报一条（种类与伴随键同时写坏时不许刷屏）', () => {
+    const n = reserved({ row: { gen: 'uuidd', widh: { min: 1 } } }).length;
+    assert.equal(n, 1, `本该一条，实际 ${n} 条`);
+  });
+
+  /*
+   * ## 误报面的**活**护栏：拿真判据去扫真 schema
+   *
+   * RESERVED_KEY_REWRITE 的成立前提是"合法 IR 不会被报"。这个前提**不能写成注释里的
+   * 一句结论** —— 近邻判据每放宽一档（本轮就从"增删换"加到了"含对调"），
+   * 上一次扫描的结论就自动失效，而注释不会红。所以这里让**导出的** `isNearMiss`
+   * 去扫 `@atest/ir` 导出的**那些 schema 对象本身**：
+   * 判据放宽到能命中任何一个正牌字段名，这条就红。
+   *
+   * 扫描用的是 schema 对象而不是"抄一份字段名清单"—— 后者会退化成
+   * "两份清单是否抄得一样"（本文件 380 行那段记的就是这个坑：手抄的码名单飘了）。
+   */
+  // 判据的靶子键。前三个从 ir 的 VALUE_KEY_FORM 取而不是在这里抄一遍 ——
+  // 这条测试的职责是"合法字段别被撞"，而它自己撞上一份手抄清单就太讽刺了
+  // （本文件 380 行那段记的正是手抄名单飘掉的事故）。
+  // `with` 不在 VALUE_KEY_FORM 里（它是生成器的**伴随**键，不是形态键），所以只能列在这里。
+  const RESERVED: string[] = [...Object.keys(irSchema.VALUE_KEY_FORM as Record<string, unknown>), 'with'];
+
+  test('IR 的正牌字段名没有一个撞在近邻面上', () => {
+    const keys = new Set<string>();
+    const seen = new Set<unknown>();
+    // zod v4：对象schema 的字段在 .shape，union/optional/默认值等包装在 ._def 里。
+    // 这里不追求覆盖每一个 zod 组合子，追求的是"路径够深 + 覆盖到 shape"，
+    // 而**够不够**由下面那条自检判（少一条自检，这个循环可以空转而全绿）
+    const walk = (sch: unknown, depth: number): void => {
+      if (!sch || typeof sch !== 'object' || depth > 10 || seen.has(sch)) return;
+      seen.add(sch);
+      const o = sch as { shape?: Record<string, unknown>; _def?: Record<string, unknown> };
+      if (o.shape && typeof o.shape === 'object') {
+        for (const [k, v] of Object.entries(o.shape)) { keys.add(k); walk(v, depth + 1); }
+      }
+      const d = o._def;
+      if (d) {
+        for (const key of ['innerType', 'type', 'left', 'right', 'in', 'element', 'valueType']) walk(d[key], depth + 1);
+        const opts = d['options'] ?? d['values'];
+        if (Array.isArray(opts)) for (const x of opts) walk(x, depth + 1);
+      }
+    };
+    for (const exp of Object.values(irSchema)) if (exp instanceof ZodType) walk(exp, 0);
+
+    // 自检 ①：名单本身非空。空的下面那个 for 恒通过 —— 正是本仓点名的"名单永远成立"形状
+    assert.ok(keys.size > 100, `只扫到 ${keys.size} 个字段名，这个扫描不可信，下面的循环是空转`);
+    // 自检 ②：四个靶子键自己必须在名单里（不在 = 根本没走到那几个 schema）
+    for (const t of RESERVED) assert.ok(keys.has(t), `名单里没有 ${t}，说明没扫到 GenValue/RefValue/ExprValue`);
+    // 自检 ③：判据坏掉（恒 false）时，这四个 must-fire 会立刻露馅
+    for (const [typo, target] of [['pathh', 'path'], ['paht', 'path'], ['pth', 'path'], ['widh', 'with']] as const) {
+      assert.ok(isNearMiss(typo, target), `判据抓不到 ${typo}，"零命中"不可信`);
+    }
+
+    const hits = [...keys].filter((k) => RESERVED.some((t) => k !== t && isNearMiss(k, t)));
+    assert.deepEqual(hits, [], `这些正牌 IR 字段会被 RESERVED_KEY_REWRITE 误报：${hits.join(', ')}`);
   });
 });

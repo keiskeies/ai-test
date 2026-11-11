@@ -11,7 +11,7 @@ import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '
 import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, iterConditions, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
-import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern } from '@atest/ir';
+import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern, GEN_KINDS, isValueForm } from '@atest/ir';
 
 export type LintLevel = 'error' | 'warning';
 
@@ -33,7 +33,7 @@ export type LintCode =
   | 'PIXEL_ASSERT_ON_NONHIERARCHY' | 'NEGATIVE_ASSERT_VISION_BASED' | 'TEMPLATE_NOT_UNIQUE'
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
-  | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND';
+  | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE';
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
@@ -73,29 +73,102 @@ const CREDENTIAL_FIELD_RE = /^(password|passwd|pwd|pass|secret|secretKey|token|a
 /** 允许出现在凭证字段里的值：密钥引用、变量引用、模板占位。其余字面量一律算硬编码。 */
 const SAFE_VALUE_RE = /^(secret:[A-Za-z0-9_-]+)$/;
 
-/** 深度遍历 IR，把「凭证字段名 + 明文值」的位置连同样例值一起交出来。 */
-function findHardcodedSecrets(node: unknown, stepId: string | undefined, path: string, out: { stepId?: string; path: string; key: string; sample: string }[]): void {
+/**
+ * 两个词是否"差一个字母"（增/删/换其一），或**相邻两位调换**（`path` -> `paht`）。
+ *
+ * 为什么还要额外要求**首字母相同**：纯编辑距离在三个字母的词上太宽松 ——
+ * `len` 与 `gen` 距离正好 1，而 `len` 是本仓表达式函数清单里的常见词、
+ * 也可能是业务字段名。首字母相同这条排掉的是"两个不相干的短词偶然相近"，
+ * 保留的是真实 typo 族（相邻键误触、漏敲一个、多敲一个 —— 都不动首字母）。
+ * 长度差限制在 1：`path` -> `pth` 那种跳着漏敲本就不在这一条的靶子里（它离保留键太远，
+ * 报出来更像是猜），宁可漏报也不要让作者怀疑 lint 在瞎猜。
+ *
+ * **对调那一支是编辑距离覆盖不到的**：`paht` 与 `path` 的编辑距离是 2（换两次），
+ * 而它恰是人打字最常见的一种错法，所以单列。放宽判据要付出的代价是误报面变宽，
+ * 而这里能放宽是因为有一道**活**的护栏在：本函数是导出的，
+ * `packages/engine/test/lint.test.ts` 里「IR 的正牌字段名没有一个撞在近邻面上」
+ * 那条会用它去扫**真的 IR schema**（不是扫一份抄下来的字段清单），
+ * 一份合法 IR 会被这条规则报 = 那条测试红。
+ * ⚠ 所以放宽这个判据之前不用"记得去重跑一遍测绘"——测试自己会红。
+ * 这条规则的误报代价见 RESERVED_KEY_REWRITE 那段。
+ */
+export function isNearMiss(a: string, b: string): boolean {
+  if (a === b || a[0] !== b[0] || Math.abs(a.length - b.length) > 1) return false;
+  if (a.length === b.length) {
+    // 对调：找第一处不同，若是"a[i]==b[i+1] 且 a[i+1]==b[i] 且两边余下部分相同"就算
+    let i = 0;
+    while (i < a.length && a[i] === b[i]) i++;
+    if (i < a.length - 1 && a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2)) return true;
+  }
+  // 只关心"最多差一个"，所以不需要完整矩阵：逐位比，遇到第一处不同就分三路试
+  let j = 0;
+  while (j < a.length && j < b.length && a[j] === b[j]) j++;
+  if (j >= Math.min(a.length, b.length)) return Math.abs(a.length - b.length) <= 1; // 前缀相同，只差尾巴
+  const rest = (s: string, from: number): string => s.slice(from);
+  return rest(a, j + 1) === rest(b, j + 1) // 替换
+    || rest(a, j + 1) === rest(b, j)       // a 多一个
+    || rest(a, j) === rest(b, j + 1);      // b 多一个
+}
+
+/**
+ * 这个值像不像"作者本意是写第 reserved 那种形态"。
+ *
+ * **这一条是整条规则里防止误报的关键**，不是修饰：形状判据（键名相近）单独用会命中
+ * 每一个 `{var:'id', path:'$.id'}` 之外的业务对象。要求值也对得上，
+ * 报出来的才是"你八成想写引用但打错了"，而不是"你的字段名长得像保留键"。
+ *  `expr` 用"含运算符或 $"：`ExprSchema` 是 `z.string().min(1)`，任何非空串都合法，
+ * 所以形态本身给不出信息，只能从内容上找证据（`{expr2:'1+1'}` 中，`{expr2:'红色'}` 不中）。
+ */
+function looksLikeForm(reserved: 'path' | 'expr' | 'gen', vs: string | undefined, kinds: ReadonlySet<string>): boolean {
+  if (vs === undefined || vs.length === 0) return false;
+  if (reserved === 'path') return vs.startsWith('$');
+  // 运算符/空格任一即算"像表达式"。`ExprSchema` 是 `z.string().min(1)`，任何非空串都合法，
+  // 所以形态本身给不出信息，只能从内容上找：`{expr2:'1+1'}` 中、`{expr2:'红色'}` 不中
+  if (reserved === 'expr') return /[$()+\-*/<>=!&| ]/.test(vs);
+  return kinds.has(vs) || [...kinds].some((k) => isNearMiss(vs, k));
+}
+
+/**
+ * IR 子树里**每一个对象节点**，连同路径与最近的步骤 id。
+ *
+ * 为什么单开：本文件里有两条规则都是"按对象的**键名**判"（明文凭证、保留键撞名），
+ * 而遍历 IR 这件事本身有讲究 —— 步骤 id 要从沿途的 `id` 字段上捡（报错得指到步骤）、
+ * 数组下标要进路径、标量要停。`findHardcodedSecrets` 原先自带这一整套，
+ * 新规则再抄一遍就是"两份遍历各自演化"：以后有人改路径格式或改 stepId 捡法，
+ * 只会改到他正在看的那一条。
+ */
+function iterObjects(node: unknown, stepId: string | undefined, path: string, visit: (obj: Record<string, unknown>, stepId: string | undefined, path: string) => void): void {
   if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') return;
   if (Array.isArray(node)) {
     node.forEach((v, i) => {
       const id = (v as { id?: unknown })?.id;
-      findHardcodedSecrets(v, typeof id === 'string' ? id : stepId, `${path}[${i}]`, out);
+      iterObjects(v, typeof id === 'string' ? id : stepId, `${path}[${i}]`, visit);
     });
     return;
   }
   if (!node || typeof node !== 'object') return;
-  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-    if (typeof v === 'string') {
-      const isRef = (v as unknown) !== undefined && (SAFE_VALUE_RE.test(v) || v.includes('$') || v.includes('{{'));
+  const obj = node as Record<string, unknown>;
+  visit(obj, stepId, path);
+  for (const [k, v] of Object.entries(obj)) {
+    const id = (v as { id?: unknown })?.id;
+    iterObjects(v, typeof id === 'string' ? id : stepId, `${path}.${k}`, visit);
+  }
+}
+
+/** 深度遍历 IR，把「凭证字段名 + 明文值」的位置连同样例值一起交出来。 */
+function findHardcodedSecrets(scenario: unknown): { stepId?: string; path: string; key: string; sample: string }[] {
+  const out: { stepId?: string; path: string; key: string; sample: string }[] = [];
+  iterObjects(scenario, undefined, '$', (obj, stepId, path) => {
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v !== 'string') continue;
+      const isRef = SAFE_VALUE_RE.test(v) || v.includes('$') || v.includes('{{');
       if (CREDENTIAL_FIELD_RE.test(k) && v.length >= 4 && !isRef) {
         // 只交出前 4 个字符。整条明文出现在报错里，等于把密钥贴进 CI 日志
         out.push({ stepId, path: `${path}.${k}`, key: k, sample: `${v.slice(0, 3)}…(${v.length} 字符)` });
       }
-    } else {
-      const id = (v as { id?: unknown })?.id;
-      findHardcodedSecrets(v, typeof id === 'string' ? id : stepId, `${path}.${k}`, out);
     }
-  }
+  });
+  return out;
 }
 
 /** 疑似「唯一值」的字段名。出现字面量就该改用生成器（docs/11 Q6） */
@@ -119,6 +192,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   RETRY_ON_CONTAINER: 'docs/05 §4',
   HOVER_THEN_NOT_IMPLEMENTED: 'docs/06 §2',
   SQL_PLACEHOLDER_UNBOUND: 'docs/15 §3.2',
+  RESERVED_KEY_REWRITE: 'docs/02 §5、docs/14 §5',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
   LITERAL_OVERFIT: 'docs/02 §4、docs/00 §6.3',
@@ -785,7 +859,7 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
   for (const [re, label] of SECRET_PATTERNS) {
     if (re.test(text)) push({ code: 'HARDCODED_SECRET', level: 'error', message: `疑似硬编码凭证（${label}）`, fix: '改用 secret:<opaque_ref>；引擎在发请求那一刻才解析，Agent 上下文永远看不到真实值', doc: 'docs/02 §5、docs/03 §5' });
   }
-  for (const hit of (() => { const out: { stepId?: string; path: string; key: string; sample: string }[] = []; findHardcodedSecrets(scenario, undefined, '$', out); return out; })()) {
+  for (const hit of findHardcodedSecrets(scenario)) {
     push({
       code: 'HARDCODED_SECRET', level: 'error', stepId: hit.stepId,
       message: `字段 "${hit.key}"（${hit.path}）里写了明文凭证 ${hit.sample}`,
@@ -797,6 +871,111 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
   for (const m of text.matchAll(/"(uuid|orderId|orderNo|traceId|mobile|phone|email|idNo)"\s*:\s*"([^"]{4,})"/gi)) {
     if (!m[2]?.includes('$') && !m[2]?.includes('{')) {
       push({ code: 'LITERAL_OVERFIT', level: 'warning', message: `疑似唯一字段 "${m[1] ?? ''}" 写死了具体值 "${(m[2] ?? '').slice(0, 24)}"`, fix: '改用 {gen:"uuid"} 之类的生成器或 inputs 传入，否则换个环境必失败', doc: 'docs/05 §5' });
+    }
+  }
+
+  /*
+   * ## RESERVED_KEY_REWRITE —— `path` / `expr` / `gen` 是 IR 的**保留键名**
+   *
+   * 判据的出发点是一条 schema 层面的事实（本轮实测）：`ValueSchema` 的 union 里含
+   * `LiteralSchema`，而它的 `record(string, Literal)` 让**任何 JSON 对象都是一个合法字面量**。
+   * 所以"引用写错"永远不会被 schema 拒 —— 写错的形态按字面量静静存下，
+   * 引用/生成器压根没生效，而步骤判 pass。三族实测（数据在 docs/14 §5 那一行）：
+   *  - `assign:{row:{pathh:'$.step.s'}}`（`path` 少个字母）→ set=pass，存下的是那个对象本身；
+   *  - `{gen:'uuidd'}`（种类多个 d）→ set=pass 而**变量是空的**，下游 `notNull` 才响，
+   *    而那句读起来像"被测系统返回了空数据"，排查方向就此指到被测系统那边去；
+   *  - `{gen:'int', widh:{min:1}}`（`with` 拼错）→ 生成器整个没了。
+   *
+   * **运行时那半本轮也修了**（未知 gen 种类抛 VarError，见 `resolve.ts` 的 `generate`），
+   * 但那是**跑起来、且那一步真被执行**才响。静态闸在 `atest lint` / `run --strict` /
+   * CI 生成期就响，而本平台的主力产出者是 LLM（docs/00 §6.1），拼错键名恰是它的常见病 ——
+   * 所以这一条属于 docs/02 §7 那张表里的 P1 静态闸。
+   *
+   * 级别取 **warning** 不取 error，理由要说清：形状 (1)(2) 里"业务对象恰好用了保留键名"
+   * 是**合法写法**（IR 没禁止字面量对象里有 `gen` 这个键），error 会让 `run --strict`
+   * 拒跑一个本来跑得通的场景。而那种误报的代价不是"多一条红"，是**大家把闸关掉**，
+   * 于是本文件全部规则一起失效（本仓为这件事已经付过一次学费，见 CREDENTIAL_FIELD_RE 那段）。
+   *
+   * ## 三种形状都带**第二条件**，否则就是词汇巧合而不是证据
+   *
+   * 只看"键名像保留键"会大面积误报，两个反例是本仓里现成的：
+   *  - `extract` 的规则本来就是 `{var:'id', path:'$.id'}` —— 每条 extract 都满足"有个 path 键";
+   *  - `len` 与 `gen` 只差一个字母，而 `len` 是常见业务字段名。
+   * 所以每种形状都额外要求**值也长得像那个形态**（引用得 `$` 开头、gen 的值得是个种类名），
+   * 或者要求那个伴随键是 `with` 的近似拼写。两条"不许误报"的用例写在
+   * `packages/engine/test/lint.test.ts` 的 RESERVED_KEY_REWRITE 那一组里。
+   */
+  {
+    const kinds = new Set<string>(GEN_KINDS);
+    const nodes: Array<{ obj: Record<string, unknown>; stepId?: string; path: string }> = [];
+    iterObjects(scenario, undefined, '$', (obj, stepId, path) => { nodes.push({ obj, stepId, path }); });
+    for (const { obj, stepId, path } of nodes) {
+      const at = (k: string): string => `${path}.${k}`;
+      for (const [k, v] of Object.entries(obj)) {
+        const vs = typeof v === 'string' ? v : undefined;
+
+        /*
+         * (3) 运行时**会**把这对象当生成器（`isValueForm` 说 gen），而种类不在清单里。
+         *
+         * 判据用的是 `isValueForm` 而不是"这个对象有个 gen 键"，这不是写法偏好而是
+         * 少了它会误报：`{gen:'widget', size:'L'}`（业务对象恰好用了 gen 键）运行时按
+         * 字面量整存，是完全合法的写法，上一版这里按"有 gen 键 + 种类不认识"判，
+         * 于是对着一个合法业务对象报"种类 widget 不存在"。
+         * 现在两边同问一个判据，**lint 与运行时会说同一句话**：运行时报错的场景
+         * 这里必报，运行时当字面量的场景这里必不报。
+         */
+        if (k === 'gen' && vs !== undefined && isValueForm(obj) === 'gen' && !kinds.has(vs)) {
+          push({
+            code: 'RESERVED_KEY_REWRITE', level: 'warning', stepId,
+            message: `生成器种类 "${vs}"（${at('gen')}）不存在 —— schema 会收下（值位置允许任意字面量），运行时那一步会报错，但在跑之前就该修`,
+            fix: `可用种类：${GEN_KINDS.join(' / ')}（区分大小写、不许带空格）`,
+          });
+          continue;
+        }
+
+        // (1) 保留键的近似拼写 + 值确实像那个形态
+        const reserved = (['path', 'expr', 'gen'] as const).find(
+          (r) => k !== r && isNearMiss(k, r) && looksLikeForm(r, vs, kinds),
+        );
+        if (reserved) {
+          const what = reserved === 'path' ? '引用' : reserved === 'expr' ? '表达式' : '生成器';
+          push({
+            code: 'RESERVED_KEY_REWRITE', level: 'warning', stepId,
+            // "你以为得到了什么"与"实际存下了什么"两句都要有：只说"键名可疑"的话，
+            // 作者会当成无害的命名提醒，而实际后果是${what}没生效
+            message: `键 "${k}"（${at(k)}）不是 IR 的键，但它与保留键 "${reserved}" 只差一点、值又长得像${what} —— 这个对象会**整个按字面量存进变量空间**，${what}压根没生效`,
+            fix: `改成 {${reserved}: …}；若这本来是个业务对象，换个键名别撞保留键`,
+          });
+          continue;
+        }
+
+        /*
+         * (2) `gen` 对、伴随键是 `with` 的近似拼写 -> 对象不再合法，整个 {gen:…} 按字面量存下
+         *
+         * **第二条件是"值必须是对象"**，与形状 (1) 同一个道理（键名相近只是词汇巧合，
+         * 还得值也对得上才算证据），而且这条尤其必要：本平台测的是界面，
+         * `width` / `height` 这类字段名到处都是，而 `width` 与 `with` 正好差两个字母
+         * （实测 `{gen:'uuid', width:100}` 上一版会被报成"with 拼错"——
+         * 一个合法业务对象吃了一条假 warning，而这正是让人关掉 lint 的那种报错）。
+         * 判据不是我自己定的：`GenValue.with` 在 schema 里是 `z.record(...)`，
+         * 所以"真正的 with 值是对象"是 schema 说了的，这里是照它判。
+         * 残留：`{gen:'uuid', width:{a:1}}`（业务上给 width 塞了个对象）仍会报。
+         * 接受这一条残留 —— 它同时满足"撞 gen 键 + 伴随键近 with + 值是对象"三个条件，
+         * 已经不像巧合；而收紧到排除它，就得反过来放宽别的条件。
+         */
+        if (k === 'gen' && Object.keys(obj).length === 2) {
+          const sibling = Object.keys(obj).find((x) => x !== 'gen');
+          const sv = sibling === undefined ? undefined : obj[sibling];
+          const isObj = typeof sv === 'object' && sv !== null && !Array.isArray(sv);
+          if (sibling && sibling !== 'with' && isObj && isNearMiss(sibling, 'with')) {
+            push({
+              code: 'RESERVED_KEY_REWRITE', level: 'warning', stepId,
+              message: `键 "${sibling}"（${at(sibling)}）像是生成器参数 "with" 的拼写错误 —— 带这个键的对象不再是生成器，**整个 {gen:…} 会按字面量存下**，参数也没生效`,
+              fix: '把参数放进 "with" 里，例如 {gen:"int", with:{min:1, max:9}}',
+            });
+          }
+        }
+      }
     }
   }
 

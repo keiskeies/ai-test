@@ -24,6 +24,20 @@ export const RefSchema = z
 export const ExprSchema = z.string().min(1);
 
 /**
+ * 生成器种类。**这一份是唯一来源**：下面的 `GenValue` 从它派生 enum，
+ * 引擎 `resolve.ts` 的 `generate()` 从它派生"合法种类"集合。
+ *
+ * 为什么不能像以前那样把 14 个词直接写在 `z.enum([...])` 里：那样 IR 说"合法种类是这 14 个"、
+ * 引擎的 switch 说"我认识这 14 个"，**是两份手抄的清单**。它们一旦分叉（改一处漏一处），
+ * 后果是 schema 收下、运行时 `default:` 返回 undefined、**步骤判 pass 而变量是空的** ——
+ * 而"空值"在断言里长得像业务数据空，一路查到被测系统那边去。本轮实测过这个形状
+ * （`{gen:'uuidd'}`：set=pass、变量为空），永久落点是
+ * `packages/engine/test/value-forms.test.ts` 里「拼错的 gen 种类要报错」那组。
+ */
+export const GEN_KINDS = ['int', 'float', 'string', 'bool', 'email', 'phone', 'idcard', 'uuid', 'oid', 'date', 'datetime', 'timestamp', 'oneOf', 'password'] as const;
+export type GenKind = (typeof GEN_KINDS)[number];
+
+/**
  * 值 = 字面量 | 引用 | 表达式 | 生成器。
  * 四者互斥由引擎在求值时判定（互斥性靠 union 的顺序，不靠 schema 硬约束，
  * 因为 `{ path: "$.x" }` 与字面量对象在结构上可能重叠 —— 见 docs/02 §5 的注意事项）。
@@ -32,7 +46,7 @@ const RefValue = z.object({ path: RefSchema }).strict();
 const ExprValue = z.object({ expr: ExprSchema }).strict();
 const GenValue = z
   .object({
-    gen: z.enum(['int', 'float', 'string', 'bool', 'email', 'phone', 'idcard', 'uuid', 'oid', 'date', 'datetime', 'timestamp', 'oneOf', 'password']),
+    gen: z.enum(GEN_KINDS),
     /** 生成器参数：min/max/length/values/pattern 等，由引擎按 gen 类型解释 */
     with: z.record(z.string(), z.unknown()).optional(),
   })
@@ -54,13 +68,90 @@ export type ExprValue = z.infer<typeof ExprValue>;
 export type GenValue = z.infer<typeof GenValue>;
 
 export function isRefValue(v: unknown): v is RefValue {
-  return typeof v === 'object' && v !== null && 'path' in v && typeof (v as RefValue).path === 'string';
+  return isValueForm(v) === 'ref';
 }
 export function isExprValue(v: unknown): v is ExprValue {
-  return typeof v === 'object' && v !== null && 'expr' in v && typeof (v as ExprValue).expr === 'string';
+  return isValueForm(v) === 'expr';
 }
 export function isGenValue(v: unknown): v is GenValue {
-  return typeof v === 'object' && v !== null && 'gen' in v && typeof (v as GenValue).gen === 'string';
+  return isValueForm(v) === 'gen';
+}
+
+/**
+ * 三种"非字面量"值的**键形状表**：保留键是什么、除保留键外还允许什么键。
+ *
+ * ## 为什么要有这张表
+ *
+ * "哪个键把对象变成引用/表达式/生成器"这件事，改动前在本仓**抄了三份**：
+ *  1. 这里的 `z.object({ path })` / `{ expr }` / `{ gen, with? }`（形状）；
+ *  2. 引擎 `resolve.ts` 里 `typeof o.path === 'string' && Object.keys(o).length === 1`（求值时判）；
+ *  3. 引擎 `lint.ts` 里如果要报"键名拼错的近邻"，就得再抄一遍 `{path,expr,gen}` 这个词表。
+ *
+ * 三份手抄必然分叉，而分叉的后果本仓已经记过好几轮（docs/08 §3 那一族"两处规则各自演化"）。
+ * 所以这里把键形状从**已经写好的 schema 上派生**出来（`shape` 直接读），
+ * 运行时与 lint 都读这一份。派生而非重抄的关键收益：往 `GenValue` 加一个可选键，
+ * 这里自动跟着变，不需要"记得去改第二处"。
+ *
+ * ## `allowed` 为什么是派生而不是写死
+ *
+ * `RefValue` / `ExprValue` 除了保留键**什么都不许有**（`.strict()`，一个键），
+ * `GenValue` 许 `with`。这不是我定的规则，是 schema 里本来就这么写的 ——
+ * 而它恰好解释了本轮那个缺陷：`{gen:'int', with:{min:1}}` 是**合法的两个键**，
+ * 所以 `gen` 那一支的运行时守卫**不能**照抄 `path` 的 `keys === 1`。
+ * 手写一份"看着像"的规则就会把它写错，而派生不会。
+ */
+const VALUE_FORMS = {
+  ref: { reserved: 'path', schema: RefValue },
+  expr: { reserved: 'expr', schema: ExprValue },
+  gen: { reserved: 'gen', schema: GenValue },
+} as const;
+
+/** 保留键 -> 它属于哪一种值形态。`path -> 'ref'`、`gen -> 'gen'` */
+export const VALUE_KEY_FORM: Readonly<Record<string, keyof typeof VALUE_FORMS>> = Object.freeze(
+  Object.fromEntries(Object.entries(VALUE_FORMS).map(([form, d]) => [d.reserved, form as keyof typeof VALUE_FORMS])) as Record<string, keyof typeof VALUE_FORMS>,
+);
+
+/** 某种值形态除保留键外还允许的键（`gen` 有 `with`，另两种没有） */
+const FORM_ALLOWED: Readonly<Record<string, readonly string[]>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(VALUE_FORMS).map(([form, d]) => [
+      d.reserved,
+      Object.keys((d.schema as unknown as { shape: Record<string, unknown> }).shape).filter((k) => k !== d.reserved),
+    ]),
+  ),
+);
+
+/**
+ * 这个对象是不是**按 IR 约定**的引用/表达式/生成器；不是则返回 undefined（= 字面量）。
+ *
+ * 判据是"**只含保留键 + 该形态允许的伴随键**"，与引擎求值时那一版同一条规则
+ * （引擎侧 `resolveValue` 现在也调这里，两边不可能分叉）。
+ * 保留键的值还必须是字符串 —— 与 schema 一致，`{path: 123}` 是字面量对象。
+ *
+ * ## 这一段解释了一件事：为什么 `{"path":"src/a.ts"}` 会**报错**而不是当字面量
+ *
+ * `resolve.ts` 里那句注释（"否则 `{"path": "src/a.ts"}` 这种普通对象会被误判成引用"）
+ * 说的是 `keys === 1` 这道闸的动机，但**单键恰恰过不了这道闸** —— 闸只挡得住
+ * `{"path":"src/a.ts","extra":1}` 那种两个键的。本轮实测：单键那个是
+ * `set=error`（`PathError`：引用必须以 `$` 开头），两键那个才是 `set=pass`（真字面量）。
+ * 也就是说：**IR 的约定是"保留了这三个键名"，不是"这三个键名随便用"**。
+ * 注释与事实不符这点已在本轮改掉；约定本身没动 —— 动它才是大改（会牵动所有已冻结场景的 irSha）。
+ */
+export function isValueForm(v: unknown): keyof typeof VALUE_FORMS | undefined {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return undefined;
+  const keys = Object.keys(v as Record<string, unknown>);
+  if (keys.length === 0) return undefined;
+  const reserved = keys.find((k) => k in VALUE_KEY_FORM);
+  // 混合键（如 `{path:'$.a', extra:1}`）里的保留键**不算**形态键：那是业务对象，
+  // 让作者拿到"字段 extra 不是 with"这种报错反而是误导（他本来就不是在写引用）
+  if (!reserved || keys.length > 2) return undefined;
+  if (keys.length === 2 && !FORM_ALLOWED[reserved]?.includes(keys.find((k) => k !== reserved)!)) return undefined;
+  const val = (v as Record<string, unknown>)[reserved];
+  if (typeof val !== 'string') return undefined;
+  // gen 的形态键还要求种类合法吗？**不要求**，刻意不要求：
+  // 种类拼错要在**运行时**报（引擎那边有种类清单），lint 那边报近邻；
+  // 这里若也判一份清单，就成了第四份手抄清单 —— 正是这张表要消灭的东西。
+  return VALUE_KEY_FORM[reserved];
 }
 
 /**
