@@ -622,8 +622,28 @@ export function requireAdapters(scenario: Scenario, registry: DocRegistry, local
   );
 }
 
+/**
+ * runId → 能当目录名/文件名的形态。
+ *
+ * **清洗字符集不够，还必须显式拒掉 `.` 与 `..`。** 这不是理论问题，实测过：
+ * `atest run <场景> --run-id ..` 一路跑到底，`safeRunId('..')` 原样返回 `..`
+ * （`.` 恰好是 `[A-Za-z0-9._-]` 里的合法字符），于是
+ * `join(evidenceDir, '..')` = **项目根**，四份产物直接落在仓库根上：
+ * `trace.jsonl` / `junit.xml` / `report.html` / `evidence....pass.zip`。
+ * 后果不是"文件难看"而是**这些文件会被 git 收走**：`.gitignore` 忽略的是
+ * `evidence/` 与 `*.trace.jsonl`，而 `report.html`、`junit.xml`、
+ * `evidence....pass.zip` 三个名字一个都不在其中 —— 证据包含**真实响应体**
+ * （可能带未脱敏 PII），就这么进了一次普通提交。
+ * `--run-id` 的说明写着"CI 里用构建号"，也就是说它的值本来就是人/流水线给的，
+ * 手滑打两个点完全在正常操作范围内，所以这一格必须自己防，不能靠"没人会这么写"。
+ *
+ * 判据写成"整个名字是不是保留段"，而不是继续收紧字符集：
+ * `..` 是**合法字符组成的非法名字**，按字符永远判不住，而按名字判一次就完。
+ */
 function safeRunId(s: string): string {
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'run';
+  const safe = s.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'run';
+  // 清洗之后还要再判一次：`...` 不在保留段里，但它 join 出来同样是往上跳
+  return safe === '.' || safe === '..' || /^\.+$/.test(safe) ? `_${safe}` : safe;
 }
 
 /**

@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
 
 import { parseOpenApi, startMockServer, type MockServer } from '@atest/adapter-http';
@@ -739,5 +739,65 @@ test('被砍断的 run：退出码 10，且**三个产物**都不说自己是 pa
     assert.equal((manifest.tally as { pass: number }).pass, 3, `夹具要让 seed/a1/slow 跑过、a2 没跑到：${JSON.stringify(manifest.tally)}`);
     const junit = text('junit.xml');
     assert.ok(!junit.includes('name="a2"'), 'a2 没执行，JUnit 里就不该有它的 testcase');
+  } finally { await f.close(); }
+});
+
+/**
+ * `--run-id` 不许把产物写到证据目录**之外**。
+ *
+ * 缺陷是这样来的：`safeRunId()` 只做字符清洗（`[^A-Za-z0-9._-]` → `_`），
+ * 而 `.` 与 `..` **每个字符都在那个字符集里**，于是 `--run-id ..` 原样穿过，
+ * `join(evidenceDir, '..')` 就是证据目录的上一级 —— 真实项目里那是**仓库根**。
+ *
+ * 实测过的落点（改前）：项目根上出现 `trace.jsonl`、`junit.xml`、`report.html`、
+ * `evidence....pass.zip` 四个文件。要紧的不是难看，是**它们会被 git 收走**：
+ * `.gitignore` 忽略的是 `evidence/`、`tmp/`、`*.trace.jsonl`，
+ * 而 `report.html` / `junit.xml` / `evidence....pass.zip` 三个名字一个都不在里面。
+ * 证据包内容是**真实响应体**（可能带未脱敏 PII），`.gitignore` 那条注释专门写了
+ * "误提交后删除也不会从历史里消失" —— 一个 `--run-id ..` 就能把它送进一次普通提交。
+ * `--run-id` 的说明写着"CI 里用构建号"，值来自人或流水线，打错两个点在正常操作范围内。
+ */
+test('--run-id 不能把产物写到证据目录之外（`..` 是合法字符组成的非法名字）', async () => {
+  const f = await fixture();
+  try {
+    const casePath = await writeCase(f.dir, [
+      { id: 'mk', kind: 'set', assign: { resp: { status: 200, body: { id: 'ORD-1' } } } },
+      { id: 'chk', kind: 'assert', against: '$.step.mk.resp', status: 200 },
+    ]);
+    const evDir = join(f.dir, 'travEv');
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', evDir, '--run-id', '..'], io);
+    // 夹具自检：这条 run 本身要跑成。否则"外面没文件"可能只是因为压根没产出
+    assert.equal(code, EXIT.OK, `夹具要是一次成功的 run。实际 ${code}：${io.stderr.join(' | ')}`);
+
+    // ① 证据目录外面**一个产物都不许多**（改前这四样躺在 f.dir 上）
+    const stray = (await readdir(f.dir)).filter((n) => /report\.html|junit\.xml|trace\.jsonl|^evidence\.|manifest\.json|summary\.txt/.test(n));
+    assert.deepEqual(stray, [], `产物漏到证据目录外了：${stray.join(', ')}`);
+
+    // ② 产物照旧齐全，只是落在证据目录**里面**的那个改名目录里。
+    //（manifest.json 与 summary.txt 在 zip **里面**，不在这一层 —— 别把它们列进这格）
+    const runDir = await onlyRunDir(evDir);
+    assert.notEqual(basename(runDir), '..', '目录名不能还是 ..，否则 join 出来的还是外面');
+    const names = await readdir(runDir);
+    for (const need of ['trace.jsonl', 'junit.xml', 'report.html']) {
+      assert.ok(names.includes(need), `run 目录里缺 ${need}：${names.join(', ')}`);
+    }
+    assert.ok(names.some((n) => n.startsWith('evidence.') && n.endsWith('.zip')), `run 目录里没有证据包：${names.join(', ')}`);
+
+    // ③ 两个保留段都不放过（`.` 与 `..` 的 join 语义不同，要各测一次）
+    for (const rid of ['.', '..', '...', './..']) {
+      const io2 = ioCapture();
+      const c = await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                            '--evidence-dir', evDir, '--run-id', rid], io2);
+      assert.ok(c === EXIT.OK || c === EXIT.TEST_FAILED, `不该因为 runId 而变成用法/运行时错：${c} ${io2.stderr.join(' | ')}`);
+      const outside = (await readdir(f.dir)).filter((n) => /report\.html|junit\.xml|trace\.jsonl|^evidence\./.test(n));
+      assert.deepEqual(outside, [], `runId=${JSON.stringify(rid)} 把产物写到了外面：${outside.join(', ')}`);
+    }
+    // ④ 正常 runId 不受影响（防"为了安全把所有 runId 都改名"这种修法）
+    const io3 = ioCapture();
+    assert.equal(await main(['run', casePath, '--env-var', `baseUrl=${f.addr()}`,
+                             '--evidence-dir', join(f.dir, 'travOk'), '--run-id', 'ci-4711'], io3), EXIT.OK);
+    assert.equal(basename(await onlyRunDir(join(f.dir, 'travOk'))), 'ci-4711', '正常 runId 的目录名要被原样保留');
   } finally { await f.close(); }
 });
