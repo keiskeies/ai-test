@@ -1,0 +1,143 @@
+{
+  "_comment": [
+    "前端那一侧的取消：id 谁造、按钮何时挂、话说成什么。",
+    "tests: packages/web/test/run-job.test.ts（契约，node 里跑）+ packages/web/test/browser-run-button.test.ts（接线，真 Chrome + 桩服务端）。",
+    "",
+    "**为什么这一族单独存在，而 cancel-http.json 那 15 条已经绿着**：",
+    "cancel-http 测的是**服务端与引擎那两道闸**（收到取消位之后会不会真停）。",
+    "这一族测的是**人能不能把取消位送出去**：端点上一轮就有了，而 `app.ts` 的「运行」",
+    "按钮当时不带 `jobId`，于是服务端那一格永远回 `cancellable:false` —— 服务端与引擎",
+    "全对，人手里的按钮永远没用。**上一轮的 cancel-http 全绿，恰恰证明不了这一半有人接**",
+    "（docs/14 §3「有生产者、没有载体」那一亚种的字面复现）。",
+    "",
+    "**两半各测一半，所以每条 case 都点名 testFile**：",
+    " · 契约类（W1/W2/W4/W5/W6/W7/W8/W9）红在 `run-job.test.ts`：id 形状、四档措辞、409 不重试。",
+    " · 接线类（W3/W10/W11/W12）红在 `browser-run-button.test.ts`：按钮真挂了、带的是**提交时那个** id、",
+    "   没被隔壁功能的正常重绘抹掉。这几条 node 侧一条都不会红 —— 契约测的是模块，不是那个按钮。",
+    "",
+    "**W3 是这份 spec 最贵的一条，因为它测的是「改动前」**：把提交体里的 jobId 去掉，",
+    "就是本轮改动之前的真实行为。`run-job.test.ts` 里那条「提交时带上 jobId」是**绿的**",
+    "（它喂给 submitRun 的 jobId 当然会被带上去），只有浏览器那条红。这就是为什么",
+    "接线测试不能被契约测试替掉，反之亦然。",
+    "",
+    "**W11 的负控不是「等价」也不是「编译不过」，而是第三个样子：抓不到。**",
+    "把 `runLine.append` 改回 `statusLine.append`（改动前的布局）后，只有第二条浏览器测试红。",
+    "红的原因是「点校验把取消按钮抹掉了」—— 屏幕上什么都不剩，人只会以为取消功能坏了。",
+    "这类「载体被另一个功能的正常重绘干掉」在本仓没有别的观测点。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "W1 提交体里不带 jobId（屏幕上那个按钮从此永远打在空处）",
+      "_why": "服务端那一格靠调用方给的 id 才能把取消位挂到具体 job 上。不带 => `cancellable:false`，症状是「我点了取消，说什么没这个 job」。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "        scenario: o.scenario, jobId: o.jobId,",
+      "replace": "        scenario: o.scenario,",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「提交时带上 jobId —— 不带的话取消这条路根本没有落点」）。"
+    },
+    {
+      "label": "W2 跑动中的取消话说成「已取消」（三档里没有一档为真）",
+      "_why": "正在跑的那条是在**下一步开头**停下，已发出的请求不追回。说「已取消」人会立刻去点第二次运行，而上一条可能正在写数据。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "    : '它会在**下一步开头**停下；已经发出去的请求不追回，已完成的步骤照常出证据';",
+      "replace": "    : '已取消';",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「跑动中的取消：说\"下一步开头停下、已发出不追回\"，**不说已取消**」）。这一条的断言就是 `doesNotMatch(/已取消/)`，措辞塌成两个字时正倒都咬。"
+    },
+    {
+      "label": "W3 屏幕上的提交不带 jobId（= 本轮改动之前的行为），契约测试仍全绿",
+      "_why": "这是「有生产者、没有载体」的字面复现：run-job.ts 一直会把 jobId 带上去，而 app.ts 上一轮根本没调它。",
+      "file": "packages/web/src/app.ts",
+      "anchor": "    const r = await submitRun({ scenario: id, jobId });",
+      "replace": "    const r = await submitRun({ scenario: id, jobId: undefined as unknown as string });",
+      "testFile": "packages/web/test/browser-run-button.test.ts",
+      "build": true,
+      "_measured": "抓到（「提交体里没有 jobId（{\"scenario\":\"scn.ui\"}）…」）。同一变异下 `run-job.test.ts` 14 条**全绿** —— 这就是接线测试不能被契约测试替掉的实测依据。"
+    },
+    {
+      "label": "W4 404 的措辞里丢掉「提交还在路上」那一档（把竞态说成\"你根本没提交\"）",
+      "_why": "点完运行立刻点取消会抢到 `/api/run` 登记 job 之前。此时说「从未提交」是假话：人确实提交了，只是界面快了一步。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "    return { ok: false, actedOn: false, message: `服务端还不认这个 job：要么提交还在路上（稍等再点一次），要么它从未提交成功 / 结束后被后续 job 挤出了表（${o.jobId}）` };",
+      "replace": "    return { ok: false, actedOn: false, message: `没有登记过 jobId ${o.jobId}` };",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到，红在「404 不说\"或它已经结束了\"（那是假归因）」那条的 `match(/从未提交/)` 上。**别把这条的判据记成\"id 有没有回显\"**：我原先那句就是这么写的，而替身文本（`没有登记过 jobId ${o.jobId}`）恰恰**带着** id —— 真咬住的是那句里\"要么提交还在路上\"那一档没了。措辞类变异只能由措辞断言抓到；别的断言再多数也是旁证。"
+    },
+    {
+      "label": "W5 排队中那一档与跑动中合并成同一句话（下一步动作完全不同）",
+      "_why": "排队中的取消是「压根不会开始」，跑动中的取消是「把手上这一步做完」。合成一句，人就不知道要不要等下去。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "    ? '它还没开工，一个请求都不会发'",
+      "replace": "    ? '它会在**下一步开头**停下；已经发出去的请求不追回，已完成的步骤照常出证据'",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「排队中的取消：话说成\"一个请求都不会发\"」）。"
+    },
+    {
+      "label": "W6 重复点取消不再可见（第二下与\"取消没生效\"分不开）",
+      "_why": "`alreadyCancelled` 是服务端在 cancel() **之前**读的那一位。丢掉它，「早就点过了」与「点了没作用」显示成同一句，人会去点第三下或者以为服务坏了。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "  const again = body.alreadyCancelled === true ? '（之前已经点过一次取消）' : '';",
+      "replace": "  const again = '';",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「重复点取消看得见」）。"
+    },
+    {
+      "label": "W7 已结束当作失败报（慢一拍点按钮是常态）",
+      "_why": "run 结束到人手按下去之间常常就是一秒。报成错误，人会以为自己的取消没生效、进而去查一个不存在的问题。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "  if (!actedOn) return { ok: true, actedOn: false, message: `它已经跑完了，没有东西因为这一下停下${again}` };",
+      "replace": "  if (!actedOn) return { ok: false, actedOn: false, message: `取消失败：它已经跑完了${again}` };",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「已结束： actedOn=false 也要回一句人话，不能报错」）。"
+    },
+    {
+      "label": "W8 jobId 只靠随机段，页内自增没生效",
+      "_why": "服务端把同一个 jobId 的第二次提交回成 409（不重试，见 W9）。同一毫秒内两次点击若撞上同一个 id，屏幕上就是「我点了运行，什么都没发生」。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "  seq += 1;",
+      "replace": "  seq += 0;",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「同一个\"此刻\"里 300 次调用只造出 1 个 id…」）。**这一条是本轮把测试改过一遍才抓到的**：原先那版是「抽 500 次、不同 id ≥ 490 就算过」，而只剩随机段时期望碰撞不到 0.1 次 —— 阈值永远够不着，等于用「大概不会撞」证「不会撞」。改成把 Math.random 钉成常量，同毫秒的 id 之间只剩自增这一个区分量，它没生效就立刻全撞。"
+    },
+    {
+      "label": "W9 提交被拒后换个 id 悄悄再跑一遍",
+      "_why": "docs/02 §5 的不可逆动作纪律：重试 = 替用户又跑了一遍场景，里面可能有 POST/下单/删除。这条在**前端**也要钉，因为重试最容易写在客户端（「网络抖了，再试一次」）。",
+      "file": "packages/web/src/run-job.ts",
+      "anchor": "  if (res.status === 409) {",
+      "replace": "  if (false) {",
+      "testFile": "packages/web/test/run-job.test.ts",
+      "_measured": "抓到（「409 要说得出\"没提交成功\"，且**不许悄悄换个 id 再跑一遍**」里 `calls.length === 1` 那一句）。注意退化的不是崩溃：409 的响应体会被当成「没有 exitCode」走通用失败分支，所以 message 那一格也能兜住 —— 真正分得开的是**请求次数**。"
+    },
+    {
+      "label": "W10 取消按钮在 run 结束之后才挂出来（`onAccepted` 那个错误在界面上的形态）",
+      "_why": "阻塞式 API 给不出「已受理」的时机：`await submitRun` 之后回调等于「run 结束了才告诉你该挂按钮」。按钮出现了，却没有可取消的东西 —— 比没有按钮更坏，因为它看起来像功能坏了。",
+      "file": "packages/web/src/app.ts",
+      "anchor": "    runLine.append(cancelBtn, note);\n    const r = await submitRun({ scenario: id, jobId });",
+      "replace": "    const r = await submitRun({ scenario: id, jobId });\n    runLine.append(cancelBtn, note);",
+      "testFile": "packages/web/test/browser-run-button.test.ts",
+      "build": true,
+      "_measured": "抓到，红在「点\"运行\"就真的挂出取消按钮…」那条。另有一处**手动**负控实测补上：同一变异下**两条**浏览器测试都红（`pass 0 / fail 2`，都停在「等不到表达式给出值：document.querySelector('[id^=\"cancel-\"]')」），而驱动每条 case 只打第一条红，所以驱动日志里看不见第二那条 —— 这句记的是手动那一轮的读数，不是日志的。夹具刻意把 `/api/run` 挂着不回，\"跑动中\"是构造出来的：按钮晚挂一步就根本不存在。"
+    },
+    {
+      "label": "W11 跑动状态挂回 statusLine：点一下「校验」就把取消按钮抹掉",
+      "_why": "runCheck 用 `statusLine.replaceChildren(...)` 画校验结论，而「改完文本顺手点一下校验」是真会发生的动作，那时 run 常常还在跑。载体被隔壁功能的正常重绘干掉，屏幕上什么都不剩。",
+      "file": "packages/web/src/app.ts",
+      "anchor": "    runLine.append(cancelBtn, note);",
+      "replace": "    statusLine.append(cancelBtn, note);",
+      "testFile": "packages/web/test/browser-run-button.test.ts",
+      "build": true,
+      "_measured": "抓到（「跑动中点\"校验\"不会把取消按钮从屏幕上抹掉」：「点校验把取消按钮抹掉了」）。另两条浏览器测试在这个变异下仍绿 —— 它们不点校验，所以这条判据**只有**这一条测试有载体。"
+    },
+    {
+      "label": "W12 取消没生效之后按钮仍然禁用（逼人刷新，而刷新会清掉正在跑的那条的提示）",
+      "_why": "404 是慢一拍的常态而不是异常。按钮禁着，人只能刷新页面，而刷新会把那条 job 的 jobId 与状态一起从屏幕上清掉 —— 此后连「它还在跑」都看不见。",
+      "file": "packages/web/src/app.ts",
+      "anchor": "            if (!c.ok) el.disabled = false;",
+      "replace": "",
+      "testFile": "packages/web/test/browser-run-button.test.ts",
+      "build": true,
+      "_measured": "抓到（「取消没生效时按钮要能再点」里 `disabled === false` 那一句）。第一条浏览器测试不受影响（它走的是 200 那一档），所以这一条单独点名。"
+    }
+  ]
+}
