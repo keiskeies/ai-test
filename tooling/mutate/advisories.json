@@ -24,7 +24,16 @@
     "**V2 是这一组里最值钱的**：它坏掉时那张「每个 code 都在三个出口上」的表全绿 ——",
     "只验「说了」的测试集，对一个逢人就说的实现免疫。所以**每条提醒都配一条反着写的测试**",
     "（「没写这个字段时，不许出现这句话」），与 wait-not-wired.json 的 I3、",
-    "wait-world.json 的 W8 是同一条纪律。"
+    "wait-world.json 的 W8 是同一条纪律。",
+    "",
+    "## 一条关于**这一族条目怎么写**的规矩（V3 的第一版教的）",
+    "replace 里若要引入**跨调用的累加状态**（Set / Map 去重、计数器、缓存），",
+    "**不许写成 `let x = new Set()`** —— 锚点在函数或 case 块里时，那行**每执行到一次就重跑**，",
+    "于是变异是个**等价变异**（行为与原始一字不差），而它报出来的样子与\"测试真漏了\"逐字相同。",
+    "这一档**不在 harness 那四个\"给不出结论\"的入口里**：编译过、测试跑了、还原干净，",
+    "所以驱动没有痕迹可查。唯一的防法是**写的人自己核对**：每条变异都要能说出",
+    "\"它把哪一行改成了什么行为\"，说不出就重写。所以本表凡需要跨调用状态，",
+    "一律写成 `globalThis` 上的 `??= new Set()`（驱动只有一个锚点，模块顶层加不了声明）。"
   ],
   "cases": [
     {
@@ -153,9 +162,9 @@
       "label": "V3 emit 侧按 ref 自己记一张 Set（两个步骤 call 同一个 ref 时，第二个的坐标被压掉）",
       "file": "packages/engine/src/interpreter.ts",
       "anchor": "        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined) {",
-      "replace": "let __vDedup: Set<string> = new Set();\n        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined && !__vDedup.has(s.scenarioRef)) { __vDedup.add(s.scenarioRef); // 变异 V3：emit 侧自己去重",
+      "replace": "        const __vd = ((globalThis as any).__atestVDedup ??= new Set()) as Set<string>; // 变异 V3：emit 侧自己去重\n        const wantedVersion = scenarioVersionOfRef(s.scenarioRef);\n        if (wantedVersion !== undefined && !__vd.has(s.scenarioRef)) { __vd.add(s.scenarioRef);",
       "testFile": "packages/engine/test/call.test.ts",
-      "_note": "这条打的 bug 是本轮真写过的一版实现：我当时想「同一个子场景被 call 十次不该吼十遍」，于是在解释器里记了一张按 ref 的 Set。方向对、层次错 —— 合并是展示侧的事（collectAdvisories 按 (code, detail) 合并并带 count），放到 emit 侧之后，第二个 call 步骤的那条 emit 压根没发出去，提醒里的 stepIds 只剩第一个步骤：报告说的比发生过的少，而那一步确确实实也在跑这份没有版本语义的 IR。抓住它的是「两个不同步骤 call 同一个带版本的 ref 时，提醒里两个步骤都在」那条。通用的一条：已经有聚合载体的地方，生产者不要自己去重 —— 生产者一压，聚合就看不见那些坐标了（同族：日志 / trace / metrics 的客户端侧采样都会吃掉归属）。"
+      "_note": "这条打的 bug 是本轮真写过的一版实现：我当时想「同一个子场景被 call 十次不该吼十遍」，于是在解释器里记了一张按 ref 的 Set。方向对、层次错 —— 合并是展示侧的事（collectAdvisories 按 (code, detail) 合并并带 count），放到 emit 侧之后，第二个 call 步骤的那条 emit 压根没发出去，提醒里的 stepIds 只剩第一个步骤：报告说的比发生过的少，而那一步确确实实也在跑这份没有版本语义的 IR。抓住它的是「两个不同步骤 call 同一个带版本的 ref 时，提醒里两个步骤都在」那条。通用的一条：已经有聚合载体的地方，生产者不要自己去重 —— 生产者一压，聚合就看不见那些坐标了（同族：日志 / trace / metrics 的客户端侧采样都会吃掉归属）。\n      **但这一条的 replace 写法本身先错过一次，而它错的样子值得记**：第一版把声明写成 `let __vDedup: Set<string> = new Set();` 塞在锚点前面，而那个锚点在 `case 'call': { … }` 的块里 —— 于是**每执行一步 call 都重新初始化**，去重压根没发生，变异是个**等价变异**，跑出来「未抓到」。它**编译得过、测试照跑、输出与真漏检逐字相同**（不同于 BUILD_BROKEN 那一档，那一档自己会喊），本仓那四个\"给不出结论\"的入口一个都没命中：这是**第五个入口**。\n      所以这里刻意写成 `globalThis … ??= new Set()` 而不是 `let`：**驱动只有一个锚点、只能改一处**，没法同时在模块顶层加声明，那么要一个活得比一步长的累加器就只剩这一种写法。看着别扭是代价，**\"等价变异伪装成漏检\"的代价更大**。凡是 replace 里要引入跨调用状态的条目，都照这个写法（详见 `docs/14` §4.5 第 9 坑）。"
     }
   ]
 }
