@@ -105,7 +105,7 @@
       "anchor": "          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'product-bug', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
       "replace": "          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
       "testFile": "packages/engine/test/error-cause.test.ts",
-      "_measured": "待实测（本轮写完后统一跑）"
+      "_measured": "抓到（「真·等满超时的归因：fail + product-bug」）。**行级读数是手工复跑量的**：驱动只印每条 case 第一个红的**测试标题**、不印落点，所以我把 C9 单独贴上去跑了一遍 —— 红在 error-cause.test.ts:131，正是 x.cause === 'product-bug' 那一断，消息里带出「实际 env-unavailable」；全文件 23 pass / 1 fail。"
     },
     {
       "label": "C10 把 onTimeout='error' 那一支也一起改成 product-bug（\"三态统一\"这种顺手改）",
@@ -114,7 +114,7 @@
       "anchor": "          if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
       "replace": "          if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}${hint}`, cause: 'product-bug', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
       "testFile": "packages/engine/test/error-cause.test.ts",
-      "_measured": "待实测（本轮写完后统一跑）",
+      "_measured": "抓到（同一条测试，但红在**另一个落点**：手工复跑量到 error-cause.test.ts:145，那是 e.cause === 'env-unavailable' —— onTimeout='error' 那一支自己的钉子，不是本轮新改的那一断）。同样 23 pass / 1 fail。两条 case 红在同一测试标题下、红在相差 14 行的两个断言上，这才是「三态各被独立钉着」的实证：只看驱动的日志，它们读起来是同一条红线。",
       "_锚点": "只取这一整行，不连下面那段注释：注释一改锚点就断，报出来是「没跑成」而不是结论。"
     }
   ]
