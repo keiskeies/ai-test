@@ -307,6 +307,55 @@ describe('等待：条件而非时长（docs/02 §3）', () => {
     }
   });
 
+  test('槽位**在场而那个口没有**：仍然说"没接线"，不许退回超时（三种界面条件逐个）', async () => {
+    /*
+     * 与上一条**不是重复**，而是它漏掉的那一半 —— 而且这一半是我自己写漏的：
+     * 上一条的夹具是"压根没有 ui/device"，那条路今天由 `resolveWaitWorld` 拦下；
+     * 而 `if (!('resolve' in a))` 这三行要的是**另一种现场**：槽位在场，
+     * 只是这一个口没有。上一条跑不到这三行，所以把这三行改成裸 `Error`
+     * **全仓没有任何测试变红**（变异集 wait-not-wired 的 W3/W4/W5 第一轮就是这么活的）。
+     *
+     * 为什么这个现场值得单独测，而不是当成"顺手覆盖到"：
+     * 它是真实可达的 —— `capabilities()` 那一天、或者有人写一个只读快照的
+     * 观察型 adapter 时，槽位就在场而 `resolve` 不在。到那时这三行是唯一的闸。
+     *
+     * 判据与上一条同一组（error + env-unavailable + 不出现"等待超时"），
+     * 因为坏法的表现也同一组：裸 Error 落到兜底 `untriaged`，
+     * 随即被 `waitUntil` 那句"求值报错也再等一轮"收成一次普通超时 + product-bug。
+     */
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['uiPredicate', { type: 'uiPredicate', state: 'visible', target: loc() }],
+      ['template', { type: 'template', expect: 'hit', minConfidence: 0.8, target: loc() }],
+      ['uiIdle', { type: 'uiIdle', quietMs: 10 }],
+    ];
+    for (const [type, condition] of cases) {
+      // 一个"只有 snapshot 没有 resolve"的槽位（uiIdle 反过来用只有 resolve 的那个），
+      // 目的是让**选择器成功而口缺失** —— 两个都用同一种空对象的话，
+      // uiIdle 那一支会在同一个地方挂掉而看不出它判的是 snapshot 口。
+      const slot = type === 'uiIdle'
+        ? { async resolve() { return { resolvedBy: 'css', rung: 1, confidence: 1, nonReplayable: false, handle: 'h' }; } }
+        : { async snapshot() { return { kind: 'aria', data: '', sha: 'x' }; } };
+      const r = await run(scen([
+        { ...b('w'), kind: 'wait', condition: condition as never, timeoutMs: 30_000, pollMs: 100, onTimeout: 'fail' },
+      ]), { adapters: { ui: slot as never } });
+      const w = res(r, 'w');
+      assert.equal(w.status, 'error', `${type}: 实际 ${w.status} / ${(w.assertionSummary ?? '').slice(0, 90)}`);
+      assert.equal(w.cause, 'env-unavailable', `${type}: 归因是"环境缺这个口"，不是产品 bug`);
+      assert.match(w.assertionSummary ?? '', new RegExp(type), `${type}: 摘要没点出自己的条件名，可能压根没跑到那一步`);
+      assert.ok(!/等待超时/.test(w.assertionSummary ?? ''),
+        `${type}: 不许被"再等一轮"收成超时 —— 那会把"这个口没有"说成"等了一会儿没等到"`);
+      /*
+       * `missingAdapters` 仍然是 `['ui','device']` 那一档的清单，
+       * 而**这里刻意不断言它是别的**：那句报错此刻写着"没有 ui adapter"，
+       * 措辞不准（槽位在场，只是这一个口没有），而 `wait.ts` 里明写了
+       * **刻意不拆成第二个错名**（两条路的下一步是同一句话：去看接线）。
+       * 所以这一条钉的是"别退回超时"，不是"措辞要精确到这个口"。
+       */
+      assert.deepEqual(w.keyContext?.missingAdapters, ['ui', 'device'], `${type}: 缺的槽位清单`);
+      assert.equal(w.keyContext?.waitCondition, type, `${type}: 条件类型要单独可得`);
+    }
+  });
+
   test('onTimeout=continue 不能把"一次都没查成"洗成 pass（改前整场 pass）', async () => {
     /*
      * 本仓目前最贵的一个假绿，实测在 `.scratch/probe-dbrow4.mts`：

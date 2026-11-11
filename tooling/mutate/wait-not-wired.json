@@ -8,7 +8,7 @@
     "整场 pass、退出码 0（实测 `.scratch/probe-dbrow4.mts`）。",
     "一次数据库都没查过，报告说这一步过了。",
     "",
-    "**W2/W3/W4/W5 是四处判定点，逐个变异，不抽代表**：它们在 wait.ts 里是四个",
+    "**W2/W3/W4/W5 曾是四处判定点，逐个变异，不抽代表**：它们在 wait.ts 里曾是四个**不相邻的 `if`，各写各的 `??`。本轮之后这个集计的账变了，要如实改口**：三处界面条件收敛进 `resolveWaitWorld` 之后，「压根没有槽位」那一种现场改由它拦下，于是 W3/W4/W5 剩下的那三行**只剩另一种现场能到**（槽位在场而那个口没有）。**我改锚点时没看出这件事，第一轮它们三条双双复活**（21/25 而不是 25/25）——修法不是放宽判据，是给那个**仍然可达的现场**补测试（lang.test.ts 里「槽位**在场而那个口没有**」那条，三种条件各用一种空槽位：resolve-only 与 snapshot-only）。**这是「夹具也会恒真」的第三种形态**：断言不恒真、夹具也不空，但夹具**跑不到被测那一行** —— 与前两种一样，表现都是「变异活了而我以为它一直被抓着」。",
     "不相邻的 `if`，`??` 选择器还各不相同（`ui ?? device` / `device ?? ui` / `ui ?? device`）。",
     "只测一种的话，另外三行可以悄悄写回 `throw new Error(...)` —— 这正是本仓",
     "『同一件事抄三遍然后其中一遍不一样』那个老形状的第二次立项（第一次见 lease-slot T1/T8/T9）。",
@@ -60,7 +60,8 @@
       "file": "packages/engine/src/wait.ts",
       "anchor": "      if (!('resolve' in a)) throw new NoConditionAdapter('uiPredicate', ['ui', 'device']);",
       "replace": "      if (!('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');",
-      "testFile": "packages/engine/test/lang.test.ts"
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "**本轮复活过一次**（更早几轮是 caught）。原因在 _comment 那段：三处选择合并成 `resolveWaitWorld` 之后，`lang.test.ts` 那份「压根没有 ui/device」的夹具**在到达这一行之前**就被上游拦下，于是把这一行改成裸 `Error` 全仓无一变红。现在由 lang.test.ts「槽位在场而那个口没有」那条钉住（那才是这三行今天唯一的到达路径：capabilities() 落地那天，或有人写一个只读快照的观察型 adapter 时）。"
     },
     {
       "label": "W4 template 缺 adapter 时写回裸 Error（第三处判定点）",
@@ -68,14 +69,15 @@
       "anchor": "      if (!('resolve' in a)) throw new NoConditionAdapter('template', ['ui', 'device']);",
       "replace": "      if (!('resolve' in a)) throw new Error('template 条件需要 device/ui adapter');",
       "testFile": "packages/engine/test/lang.test.ts",
-      "_note": "**这条的 _note 本轮被证伪过一次，留下来**：它原先写的是\"这一处是四处里唯一 `??` 顺序反过来的（device 在前）…留这条是为了下次有人『统一一下顺序』时能发现两处的意图本来就不一样\"。后来真有人统一了顺序，而那次查下去的结论是：**那个意图从来不存在**。`template` 走的是 `resolve()`，不是像素专用口，所以\"优先设备\"换来的不是\"在设备上跑模板匹配\"，是\"去问另一个世界的界面树\" —— 两个槽位都在场时它真的会这么干（改前实测 `.scratch/probe-which.mts`）。所以这条现在的价值换了：**它盯的是这一处仍然要抛具名错**，而顺序那半边已经由 `wait-world.json` 那组接管。\n      一次\"这条变异的存在理由错了\"的记录，比一条没人再读的注释值钱 —— 注释会说对的东西，_note 会说我们**怎么错的**。"
+      "_note": "**这条的 _note 本轮被证伪过一次，留下来**：它原先写的是\"这一处是四处里唯一 `??` 顺序反过来的（device 在前）…留这条是为了下次有人『统一一下顺序』时能发现两处的意图本来就不一样\"。后来真有人统一了顺序，而那次查下去的结论是：**那个意图从来不存在**。`template` 走的是 `resolve()`，不是像素专用口，所以\"优先设备\"换来的不是\"在设备上跑模板匹配\"，是\"去问另一个世界的界面树\" —— 两个槽位都在场时它真的会这么干（改前实测 `.scratch/probe-which.mts`）。所以这条现在的价值换了：**它盯的是这一处仍然要抛具名错**，而顺序那半边已经由 `wait-world.json` 那组接管。\n      一次\"这条变异的存在理由错了\"的记录，比一条没人再读的注释值钱 —— 注释会说对的东西，_note 会说我们**怎么错的**。\n      **本轮复活过一次**（更早几轮是 caught）。原因在 _comment 那段：三处选择合并成 `resolveWaitWorld` 之后，`lang.test.ts` 那份「压根没有 ui/device」的夹具**在到达这一行之前**就被上游拦下，于是把这一行改成裸 `Error` 全仓无一变红。现在由 lang.test.ts「槽位在场而那个口没有」那条钉住（那才是这三行今天唯一的到达路径：capabilities() 落地那天，或有人写一个只读快照的观察型 adapter 时）。"
     },
     {
       "label": "W5 uiIdle 缺 ui/device 时写回裸 Error（第四处，判的是 snapshot 口不是 resolve 口）",
       "file": "packages/engine/src/wait.ts",
       "anchor": "      if (!('snapshot' in a)) throw new NoConditionAdapter('uiIdle', ['ui', 'device']);",
       "replace": "      if (!('snapshot' in a)) throw new Error('uiIdle 条件需要 ui/device adapter');",
-      "testFile": "packages/engine/test/lang.test.ts"
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "**本轮复活过一次**（更早几轮是 caught）。原因在 _comment 那段：三处选择合并成 `resolveWaitWorld` 之后，`lang.test.ts` 那份「压根没有 ui/device」的夹具**在到达这一行之前**就被上游拦下，于是把这一行改成裸 `Error` 全仓无一变红。现在由 lang.test.ts「槽位在场而那个口没有」那条钉住（那才是这三行今天唯一的到达路径：capabilities() 落地那天，或有人写一个只读快照的观察型 adapter 时）。"
     },
     {
       "label": "W6 求值报错时不给 evalError 赋值（字段在、没人写）",
