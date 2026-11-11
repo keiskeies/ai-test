@@ -1,0 +1,23 @@
+{
+  // 服务端这一层和 CLI 一样碰磁盘与进程，所以 types 里有 node。
+  // 它与 CLI 的分工要说清：**这一层不做任何判定**。
+  // 判定全在 cli/engine 那一侧，这里只做"HTTP 形态 ↔ 命令形态"的翻译。
+  // 理由不是整洁：一旦这里也写一份"怎么跑一条场景"，就会出现
+  // "CLI 绿而平台红"这种谁也说不清的分叉（docs/01 §8.2 反的是同一个坑，
+  // 只是那次是 GUI 与执行器，这次是 HTTP 与 CLI）。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "../../.tsbuild/server.tsbuildinfo",
+    "types": ["node"],
+    "lib": ["ES2023"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../ir" },
+    { "path": "../engine" },
+    { "path": "../store" },
+    { "path": "../cli" }
+  ]
+}

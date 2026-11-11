@@ -1,0 +1,13 @@
+{
+  // 服务端测试需要 node:test / node:assert / node:fs（临时目录、真起端口）。
+  // src 那份已经是 types: ["node"]，所以这里没有"放宽"可言 —— 只是 rootDir/noEmit 的差别。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "composite": false,
+    "types": ["node"]
+  },
+  "include": ["test/**/*.ts"],
+  "references": [{ "path": "../ir" }, { "path": "../engine" }, { "path": "../store" }, { "path": "../cli" }, { "path": "./" }]
+}
