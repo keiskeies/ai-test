@@ -748,11 +748,37 @@ test('readRunMember：白名单外的名字一个都不给，坏包不拖垮整�
     assert.equal(isEvidenceMember(ok), true, `${ok} 该被认作成员`);
   }
 
-  // 坏包：读不出来的那个 zip 不许让整次读取失败，也不许假装读到了
+  // 坏包：读不出来的那个 zip 不许让整次读取失败，也不许假装读到了。
+  // 用**CRC 改坏**的包而不是"随便一堆字节"：实测 `readZipEntries(垃圾)` **不抛**
+  // （它按本地头签名循环，第一个 4 字节就对不上，于是当"零个成员"正常返回），
+  // 所以垃圾文件走的是"扫过、没找到"那条路，压根进不了 catch —— 上一版这条就是这么假绿的。
   const broken = await mkdtemp(join(tmpdir(), 'atest-broken-'));
-  writeFileSync(join(broken, 'evidence.r.bad.zip'), Buffer.from('这不是 zip'));
+  const badPkg = await corruptCrc((await buildEvidencePackage({ scenario, report, store: await freshStore() })).bytes);
+  writeFileSync(join(broken, 'evidence.r.bad.zip'), badPkg);
   assert.equal(await readRunMember(broken, EVIDENCE_FILES.manifest), undefined);
 });
+
+/**
+ * 把一个真包改成**读的时候一定抛**的形状：改首成员本地头里的 CRC 字段（偏移 14）。
+ *
+ * 必须有这个函数而不是随手 `bytes[0] ^= 0xff`：`readZipEntries` 对不认识的包
+ * 是"零成员返回"而不是抛，只有签名正确、CRC 不符的包才走到 `throw`。
+ * 而这条判据（"坏包要被 catch 住"）**只有抛了才算被测到** —— 本文件上一版的
+ * "坏包"夹具喂的是垃圾字节，于是不管实现写 `continue` 还是 `return`，它都绿。
+ * 所以下面这条 assert 是**夹具自检**，不是锦上添花：它红了说明整条测试在测空气。
+ */
+async function corruptCrc(bytes: Uint8Array): Promise<Uint8Array> {
+  const bad = new Uint8Array(bytes);
+  // 偏移 14 是本地文件头里的 CRC-32 字段。先量长度：包比这还短说明夹具拿错了东西，
+  // 那时继续改下去，改坏的是**别的字节**，测试会以一种和判据无关的方式红。
+  if (bad.byteLength < 31) throw new Error(`夹具：包太小（${bad.byteLength} 字节），不像 buildEvidencePackage 的产物`);
+  // 走 DataView 而不是 `bad[14] ^= 0xff`：后者在 noUncheckedIndexedAccess 下
+  // 是 `number | undefined`，编译不过 —— 与其 cast 掉，不如用它本来就有的类型。
+  const view = new DataView(bad.buffer, bad.byteOffset, bad.byteLength);
+  view.setUint8(14, view.getUint8(14) ^ 0xff);
+  assert.throws(() => readZipEntries(bad), /CRC/, '夹具：这份"坏包"必须真的让读取抛，否则测不到 catch 那一支');
+  return bad;
+}
 
 test('坏包排在前面时，后面那个好包仍然要读得出（坏一个不等于全死）', async () => {
   /*
@@ -771,7 +797,7 @@ test('坏包排在前面时，后面那个好包仍然要读得出（坏一个�
   const store = await freshStore();
   const { scenario, report } = await failingRun(store);
   const pkg = await buildEvidencePackage({ scenario, report, store });
-  writeFileSync(join(dir, 'evidence.aaa.bad.zip'), Buffer.from('这不是 zip'));
+  writeFileSync(join(dir, 'evidence.aaa.bad.zip'), await corruptCrc(pkg.bytes));
   writeFileSync(join(dir, 'evidence.zzz.fail.zip'), pkg.bytes);
   assert.deepEqual(await readdir(dir), ['evidence.aaa.bad.zip', 'evidence.zzz.fail.zip'],
     '夹具：坏包必须排在好包**前面**，否则测不到 continue 那一支');
