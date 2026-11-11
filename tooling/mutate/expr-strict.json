@@ -29,6 +29,7 @@
     "「往输入框里填的字面量里带 `$` 也不许被当表达式校验」钉的是后者。",
     "",
     "**「字段判据退回手抄清单」钉的是本轮那处收敛**：lint 从前手抄 `condition`/`when` 两个",
+    "**派生本体在 `packages/ir/src/values.ts` 的 `deriveExprFields()`**（本轮从 steps.ts 搬过去的：\n等待条件那一族需要同模一样的遍历，而复制一份的成本是零、分叉的代价是\"步骤里的表达式\n有人管、等待条件里的没人管\"）。所以下面那两条改 `unwrapSchema` / 那条字段过滤的条目\n**改的是 values.ts**，而 testFile 仍然指 engine 侧的测试 —— 跨包改 src 会让驱动强制重建\n（见 mustBuild 那条坑），读结论前确认驱动建过了。",
     "字段名，于是 `forEach.items` 与 `switch.value`（都是真 `ExprSchema`）**没有任何",
     "生产可达的静态闸管着**。改回手抄之后 lint 与运行时/dry-run 的答案重新开始不一致。",
     "",
@@ -132,7 +133,7 @@
     {
       "label": "**反方向**：字段判据放宽成\"是字符串就算表达式\" => 合法输入值被 --strict 拒",
       "_why": "过度修。act.value 填 `价格 3$` 这类合法值会得到 error 级 EXPR_SYNTAX，而误报的代价是大家把 lint 关掉。",
-      "file": "packages/ir/src/steps.ts",
+      "file": "packages/ir/src/values.ts",
       "anchor": "      .filter(([, v]) => v !== undefined && unwrapSchema(v) === (ExprSchema as unknown as z.ZodTypeAny))",
       "replace": "      .filter(([, v]) => v !== undefined && typeof v === 'object') // 变异：不再比对对象同一性",
       "testFile": "packages/engine/test/expr-strict.test.ts"
@@ -140,7 +141,7 @@
     {
       "label": "派生时不剥 optional => Base 里那个 `when` 从所有 kind 上消失",
       "_why": "守卫条件静默失去静态校验：`when: '$.n['` 又一次不响，而这份表看着仍然\"是从 schema 派生的\"。",
-      "file": "packages/ir/src/steps.ts",
+      "file": "packages/ir/src/values.ts",
       "anchor": "  return def?.innerType ? unwrapSchema(def.innerType) : schema;",
       "replace": "  return schema; // 变异：不剥 optional / nullable / default",
       "testFile": "packages/engine/test/expr-strict.test.ts"

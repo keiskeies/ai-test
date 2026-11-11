@@ -7,7 +7,7 @@
  * 需要干等只能显式写 sleep 节点，且被 lint 警告。
  */
 import { z } from 'zod';
-import { ExprSchema, RefSchema, ValueSchema } from './values.js';
+import { ExprSchema, RefSchema, ValueSchema, deriveExprFields } from './values.js';
 import { LocatorSpecSchema } from './locator.js';
 
 /** 单个条件 */
@@ -100,6 +100,29 @@ export const WaitConditionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('newPage') }).strict(),
 ]);
 export type WaitCondition = z.infer<typeof WaitConditionSchema>;
+
+/**
+ * 条件类型 → 该条件里**是表达式**的字段名。今天只有 `{type:'expr', expr}` 一个。
+ *
+ * **派生而不是手写**（判据与步骤那一族同一个：`values.ts` 的 `deriveExprFields`，
+ * 判别键换成 `type`）。手抄这一条的坏法与 `lint.ts` 从前抄 `['condition','when']`
+ * 完全一样：往 `WaitConditionSchema` 加一种带表达式的条件（比如
+ * `{type:'scalarTruth', exprEq: ExprSchema}`），静态闸就对新条件静默失效，
+ * 而这份表看着仍然"是从 schema 派生的"。
+ *
+ * **它给的是"哪一种条件的哪个字段"，不是"谓词树里有哪些表达式"** ——
+ * 后者要靠 `iterConditions()` 遍历（本文件下面那个）。两者在 `lint.ts` 里接起来。
+ *
+ * 守着它的是 `ir/test/wait-expr-fields.test.ts`：一条用
+ * `WaitConditionSchema.options.length` 自检扫描没扫空，一条逐成员核对表与源码一致。
+ */
+export const EXPR_CONDITION_FIELDS: Readonly<Record<string, readonly string[]>> =
+  deriveExprFields(WaitConditionSchema as unknown as z.ZodTypeAny, 'type');
+
+/** 这一族条件的这个字段是不是表达式。**lint 用它，别自己列字段名**。 */
+export function isExprConditionField(type: string, field: string): boolean {
+  return EXPR_CONDITION_FIELDS[type]?.includes(field) ?? false;
+}
 
 /** 复合条件：至少保留一层 anyOf/allOf/noneOf，便于 Agent 生成与人类阅读 */
 export const WaitPredicateSchema: z.ZodType<unknown> = z.lazy(() =>

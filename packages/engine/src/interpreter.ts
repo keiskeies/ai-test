@@ -1435,8 +1435,59 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const headers = strMap(s.request.headers, (v) => resolveValue(v, vars));
         const query_ = strMap(s.request.query, (v) => resolveValue(v, vars));
         const url = buildUrl(resolveUrl(s.request.url, ctxBase.env), query_);
+        /*
+         * **`formData` 必须真的进请求。** 改动前这一栏引擎一个字段都不读：
+         * IR 写着 `formData: {user:'a'}`，`send()` 的入参里压根没有它，
+         * 于是**表单一条都没发出去，而步骤判 pass**。`docs/02` §IR 那张表里
+         * `formData` 就列在 `http` 那一行的请求字段里，作者照 IR 写它是正当的。
+         * 这是缺陷类 (a) 本轮的第二例（第一例是 `act.value` 那族，见 `opOf` 上面那段），
+         * 而它是靠"把值形态位置的遍历改成递归"才扫出来的 ——
+         * 一层遍历看不见嵌套对象里的字段（`value-positions.test.ts` 里记着）。
+         *
+         * `strMap` 与 headers/query 同一个：值先过 `resolveValue`，
+         * 再把非字符串收成 JSON 文本（`adapter-http` 那一侧
+         * `new URLSearchParams(form)` 只吃字符串）。**不在这里 JSON.stringify 整个 map**，
+         * 那是"发一个 JSON 字符串当作表单"，content-type 与后端解析都会对不上。
+         */
+        const formData = strMap(s.request.formData, (v) => resolveValue(v, vars));
+        /*
+         * `body` 与 `formData` 同时写 => **报错，不猜**。
+         * 为什么不学某些客户端"formData 优先、body 忽略"：那等于平台替作者决定
+         * 哪个字段作废，而两者内容通常不同（一个是 JSON 载荷、一个是表单），
+         * 静默丢弃的结果是"请求发出去了、后端说少了字段"，要一路查到网关才知道
+         * 是 IR 自己写了两个载荷。adapter 那侧也是同样的顺序（`form` 先、`body` 后），
+         * 也就是说改前那种"同时写"的实际行为是**body 被静默丢掉** —— 只是这次丢的是
+         * 作者看得见的字段，而不是他看不见的 formData。归 `case-stale`：用例写坏了。
+         */
+        if (s.request.body !== undefined && Object.keys(formData).length > 0) {
+          return {
+            status: 'error', cause: 'case-stale',
+            summary: '同一个请求既写了 body 又写了 formData：平台不会替你决定发哪个（两者内容通常不同，静默丢弃一个就会变成"后端说少了字段"）。只留一个',
+          };
+        }
+        /*
+         * `files[]` 非空 => **报错，不发一个少了文件的请求**。
+         * 端口里没有 multipart 那条路（`HttpExec.send` 无 files 字段，
+         * `adapter-http` 全仓没有 multipart 编码器），而更根本的缺口是
+         * `fixtureRef` **没有任何解析器**：IR 里那是一个字符串引用，
+         * 全仓没有任何地方把它变成字节流（`unread-baseline.json` 里这一格
+         * 本来就登记着 P1）。
+         *
+         * 为什么这里不"至少把表单字段发出去"：那会产出一条**看起来成功**的
+         * 上传用例 —— 附件根本没上传而后端通常照收（字段可选），
+         * 于是"上传发票"这条用例永久绿。宁可这一步不跑。
+         * lint 侧同名规则（`REQUEST_PART_NOT_IMPLEMENTED`）让它在**跑之前**就红，
+         * 这一条是防"没跑 lint 直接 run"那条路（`run` 不带 `--strict` 时 lint 不拦）。
+         */
+        if (s.request.files.length > 0) {
+          return {
+            status: 'error', cause: 'env-unavailable',
+            summary: `http 请求带 ${s.request.files.length} 个文件（${s.request.files.map((f) => f.field).join('、')}），multipart 上传尚未实现，且 fixtureRef 没有解析器：这一步不会发出请求（免得产生一条"附件没上传而用例绿了"的结果）`,
+          };
+        }
         const res = await adapters.http.send({
           method: s.request.method, url, headers, body: s.request.body === undefined ? undefined : resolveValue(s.request.body, vars),
+          ...(Object.keys(formData).length > 0 ? { form: formData } : {}),
           timeoutMs: s.timeoutMs ?? 30_000, maxBytes: s.maxResponseBytes, followRedirects: s.followRedirects,
           // 只交**引用与身份**，不交值。原先这里是
           // `headers.authorization = 'Bearer ' + ctxBase.secret(s.auth)` ——
@@ -1695,7 +1746,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         }
         const performed = 'perform' in uiOrDev
           ? await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<{ artifactIds?: string[] } | void> })
-            .perform(opOf(s), resolved, execCtx(targetOf(s, slot), s.id))
+            .perform(opOf(s, (v) => resolveValue(v, vars)), resolved, execCtx(targetOf(s, slot), s.id))
           : undefined;
         /*
          * **动作步骤上的两个"声明了就必须发生"的检查：`expectResponse`（docs/06 §3）
@@ -1935,7 +1986,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // 传的是**分支作用域**那一份（dispatch 的 vars 形参），不是 vars：
         // 断言里 `$xxx` 读的是这一支看得见的变量。写成 vars 的话，
         // "parallel 分支里断言自己那一支刚算出来的值"会读到共享帧那份或干脆读不到。
-        const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, slot), s.id), clock, addCost, emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
+        const r = await evaluateAssertions(s, { vars, adapters, ctx: execCtx(targetOf(s, slot), s.id), clock, addCost, resolveValue: (v) => resolveValue(v, vars), emit: (e) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, data: e.data }) });
         vars.exportStep(s.id, { assertion: r });
         return r;
       }
@@ -2380,10 +2431,33 @@ function targetOf(s: Step, ctx: LeaseSlot): ExecTarget {
   // mobile 档与 any 档都走这里：平台那一维的唯一实现在 platformOf
   return platformOf(ctx);
 }
-function opOf(s: Step): unknown {
-  if (s.kind === 'act') return { op: s.action, value: s.value };
+/*
+ * **`value` 必须过 `resolveValue`，不许原样递给 adapter。**
+ *
+ * `act.value` / `input.value` 在 IR 里是 `ValueSchema` —— 四种形态都合法
+ * （字面量 / `{path}` / `{expr}` / `{gen}`）。改动前这里把 `s.value` 直接塞进 op，
+ * 于是**引用/表达式/生成器三种形态一个都没生效，而步骤判 pass**。实测改前
+ * （`.scratch/probe-act-value.mts`）：`act{action:'fill', value:{expr:'1 + 1'}}`
+ * => 该步 `pass`，adapter 收到的 `op.value` 是 `{"expr":"1 + 1"}` **这个对象本身**，
+ * 而 `adapter-web/src/ui.ts` 里那句 `String(o.value ?? '')` 把它变成
+ * **往输入框里打进 `[object Object]`** —— 表单填错了，断言照样绿。
+ * `{path:'$.v'}` 与 `{gen:'uuid'}` 同形（都是把对象交给 adapter）。
+ *
+ * 这是本仓记过多次的缺陷类 (a)：**schema 承诺了一件执行侧没做的事**。
+ * 它比"没这个功能"坏 —— `ValueSchema` 就写在那儿，作者照着 IR 的类型写
+ * `{expr: ...}` 是完全正当的写法，而平台一声不响。
+ *
+ * 只改这两个 `value`，**不改** `navigate.url` / `key.key`：那两个在 schema 里是
+ * `z.string()`（不是 ValueSchema），原样递下去才是对的 —— 顺手"全都解析一遍"
+ * 会把 `url: 'a?x=1'` 这种字面量喂进求值器，那是反方向的错。
+ *
+ * 走的是**共享的 `resolveValue`**（与 `set` / `http` / `db` 那十几处同一个），
+ * 不在这里另写一份四形态判断 —— 另写一份就是"同一个 IR 概念两处含义"。
+ */
+function opOf(s: Step, resolve: (v: unknown) => unknown): unknown {
+  if (s.kind === 'act') return { op: s.action, value: s.value === undefined ? undefined : resolve(s.value) };
   if (s.kind === 'navigate') return { op: 'navigate', url: s.url, waitUntil: s.waitUntil };
-  if (s.kind === 'input') return { op: 'fill', value: s.value };
+  if (s.kind === 'input') return { op: 'fill', value: resolve(s.value) };
   if (s.kind === 'swipe') return { op: 'swipe', to: s.to ?? [0, 0] };
   if (s.kind === 'key') return { op: 'press', key: s.key };
   if (s.kind === 'capture') return { op: 'snapshot' };

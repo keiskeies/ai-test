@@ -180,6 +180,16 @@ class FastState {
     const r = evalStructAssert(s as unknown as Parameters<typeof evalStructAssert>[0], {
       vars: this.vars, adapters: this.ctx.adapters ?? {}, ctx, clock: this.ctx.clock,
       addCost: () => {}, emit: () => {},
+      /*
+       * 传**真的** `resolveValue`，不给 `() => undefined` 之类的占位：
+       * `Deps.resolveValue` 是 `evalUiAssert` 用到的字段（`contains` / `expected`
+       * 是 ValueSchema，必须求值后才交给 adapter），而这一支今天只走
+       * `evalStructAssert`（它不读这个字段）。给占位函数的话，将来有人把
+       * `assertPage` 也接进预编译形态，就会拿到"字段存在但恒返回 undefined"
+       * —— 那正是本轮在解释器那边修掉的同一个静默。给真的实现零成本
+       * （`this.resolve` 就是共享的那一个），于是这里没有"看着能用其实空转"的口子。
+       */
+      resolveValue: (v) => this.resolve(v),
     });
     // 解释器对 assert 步骤还做一步 exportStep(s.id, { assertion: r })，
     // 让断言结果可被下游 `$steps.<id>.assertion` 引用。这里不导：

@@ -28,9 +28,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { EXPR_STEP_FIELDS, STEP_KINDS, StepSchema, isExprField, type Step } from '../src/index.js';
+import { assertScannerWorks, stripComments } from './src-text.js';
 
 const ALL = STEP_KINDS as readonly Step['kind'][];
 const SRC = readFileSync(join(import.meta.dirname, '../src/steps.ts'), 'utf8');
+/** 剥掉注释的同一份源码。**所有按位置切片的扫描都走它**（含下面那条 `Base.when` 的断言：
+ *  拿 SRC 判的话，一段写着 `when: ExprSchema.optional()` 的注释就能伪造出"字段还在"）。 */
+const CODE = stripComments(SRC);
 
 test('每一个 kind 都在表里（少一个 = 那种步骤的 when 与它自己的表达式字段**全部**没有静态校验）', () => {
   const missing = ALL.filter((k) => EXPR_STEP_FIELDS[k] === undefined);
@@ -44,13 +48,23 @@ test('**独立来源核对**：正则从 steps.ts 源码里找到的每一处 `�
    * 步骤 schema 的写法在本仓是统一的：`const XxxStepSchema = z.object({ kind: z.literal('if'), … })`，
    * 有的写成一行、有的换行。所以先按 `const …StepSchema` 切块，块内找 kind 与 ExprSchema 字段。
    * 这是**文本**判据，与派生表用的 zod 结构判据完全无关 —— 两个独立来源对不上才有信息量。
+   *
+   * **注释先剥掉**（理由与 `wait-expr-fields.test.ts` 里同一条一样，那边本轮真的被
+   * 一段散文里的假想字段绊过一次：正则是哑的，读不出代码与散文）。
+   * 本文件今天没有这种巧合，但**"今天没有"不是一条判据** —— 这个文件的注释里
+   * 恰好也写着 `ExprSchema` 若干次，只差一个冒号就不会红。
    */
   const blocks: Array<{ kind: string; fields: string[] }> = [];
-  const starts = [...SRC.matchAll(/const \w*StepSchema\s*=/g)];
+  // 扫描器自己的自检：剥完注释后仍要认得出这两个**必然存在**的写法。
+  // 没有这一步，"剥多了把真字段也吃掉"会让下面那条恒通过（`src-text.ts` 里那条
+  // "不许放宽断言、要改扫描器"的规矩就是给这一刻准备的）。
+  assertScannerWorks(CODE, [/const IfStepSchema\s*=/, /kind:\s*z\.literal\('if'\)/]);
+  const starts = [...CODE.matchAll(/const \w*StepSchema\s*=/g)];
   for (let i = 0; i < starts.length; i++) {
     const from = starts[i]!.index!;
-    const to = i + 1 < starts.length ? starts[i + 1]!.index! : SRC.length;
-    const text = SRC.slice(from, to);
+    // 切片的源必须与 matchAll 的源同一个，否则下标错位（踩过，见另一个文件里那条注释）
+    const to = i + 1 < starts.length ? starts[i + 1]!.index! : CODE.length;
+    const text = CODE.slice(from, to);
     const kind = /kind:\s*z\.literal\('([\w]+)'\)/.exec(text)?.[1];
     if (!kind) continue;
     const fields = [...text.matchAll(/(\w+)\s*:\s*ExprSchema(?:\.optional\(\))?/g)].map((m) => m[1]!);
@@ -76,7 +90,7 @@ test('Base 里那个共有的 when 在**每一个** kind 上都在表里（丢�
   // `when` 定义在 `Base` 里、由 `...Base` 摊进每个步骤，所以上面那条按块扫的正则
   // 看不见它（块里没有 `when: ExprSchema`）。它必须单独立一条：
   // 一旦有人把 `Base.when` 改名或挪走，派生表会静默地在所有 kind 上少一个字段。
-  assert.match(SRC, /when:\s*ExprSchema\.optional\(\)/, 'steps.ts 里 `Base.when` 的写法变了：同步改这条与派生逻辑');
+  assert.match(CODE, /when:\s*ExprSchema\.optional\(\)/, 'steps.ts 里 `Base.when` 的写法变了：同步改这条与派生逻辑');
   const missing = ALL.filter((k) => !isExprField(k, 'when'));
   assert.deepEqual(missing, [], `这些 kind 没有 when：${missing.join('、')}`);
 });

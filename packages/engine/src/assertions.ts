@@ -23,6 +23,15 @@ export interface AssertOutcome {
 
 interface Deps {
   vars: { resolveRef(p: string): { found: boolean; value: unknown }; asExprRoot(): Record<string, unknown>; visible(): Record<string, unknown> };
+  /**
+   * 值形态求值（与引擎 `resolve.ts` 的 `resolveValue` 同一个实现，由解释器注入）。
+   *
+   * **必填、不给默认值**：给了默认值，"忘了接这一线"就编译得过去，而它对应的失效
+   * 是静默的 —— `assertPage.contains` 在 IR 里是 `ValueSchema`，改动前这里
+   * 从来没调用过任何求值，于是 `{expr:'len($.list) > 0'}` 会**整个对象**
+   * 交给 adapter，而步骤判 pass。实测数据与完整推理见 `evalUiAssert` 上方那段。
+   */
+  resolveValue: (v: unknown) => unknown;
   adapters: AdapterRegistry;
   ctx: ExecContext;
   clock: Clock;
@@ -224,9 +233,23 @@ export async function evalLlmAssert(payload: { question: string; evidenceFrom: s
  * 所以那里"该用哪一个"今天**在 IR 里根本没有答案** —— 硬选一个等于替 schema 做决定，
  * 而那个决定（要不要给 wait 条件加端字段、默认哪一档）是设计问题不是缺陷修复。
  * 已登记为待决，见 docs/15 §3.6 末段。
+ *
+ * ## `contains` / `expected` 要先过值形态求值（本轮）
+ *
+ * 这两个字段在 IR 里是 `ValueSchema`（四种形态都合法），而改动前这里
+ * **把步骤对象整个 `as` 一下就交给 adapter**，一个字段都没求值。实测改前：
+ * `assertPage{assertKind:'text', contains:{expr:'len($.list) > 0'}}`
+ * => 该步 **pass**，adapter 收到的 `contains` 是 `{"expr":"…"}` **这个对象本身**。
+ * 与 `act.value` 那一处同一个根（schema 承诺了、执行侧没做 —— docs/14 的缺陷类 (a)），
+ * 所以修在同一个机制上而不是只修动作那一半：只修一处造出的症状是
+ * "动作步骤里的 `{expr}` 生效、断言里的不生效"，而两处字段同名同形。
+ *
+ * **只碰这两个 ValueSchema 字段**：`ariaYaml` / `target` / `previousFrameRef`
+ * 在 schema 里分别是 `z.string()` / `z.string()` / `RefSchema`，
+ * 求值它们会把合法字面量喂进表达式编译器（反方向的错，与 `navigate.url` 同理）。
  */
 export async function evalUiAssert(s: Step, deps: Deps): Promise<AssertOutcome> {
-  const p = s as unknown as { assertKind: string; target?: string; contains?: unknown; expected?: unknown; ariaYaml?: string };
+  const raw = s as unknown as { assertKind: string; target?: string; contains?: unknown; expected?: unknown; ariaYaml?: string };
   const world = STEP_TARGET[s.kind];
   const wantUi = world === 'web';
   const adapter = wantUi ? deps.adapters.ui : deps.adapters.device;
@@ -236,6 +259,11 @@ export async function evalUiAssert(s: Step, deps: Deps): Promise<AssertOutcome> 
      * 报错点名"缺的是哪一个 adapter"，并且**不再提另一个**。
      * 旧文案写的是 `ui/device`，那等于告诉排查人"另一个也行" ——
      * 而这条修复的全部内容就是"另一个不行"。
+     *
+     * **值求值排在这道闸之后**（本轮把求值加在这里，位置是选出来的）：
+     * 放在前面的话，`contains:{expr:'写坏了'}` 又恰好没配 adapter 时，
+     * 先抛出的是 ExprError，于是这一步的归因变成"表达式写坏了"，
+     * 而该说的是"平台没配 adapter"。**两道闸的先后决定报错里哪句是真话。**
      */
     return {
       status: 'error',
@@ -243,6 +271,11 @@ export async function evalUiAssert(s: Step, deps: Deps): Promise<AssertOutcome> 
       cause: 'env-unavailable',
     };
   }
+  const p = {
+    ...raw,
+    contains: raw.contains === undefined ? undefined : deps.resolveValue(raw.contains),
+    expected: raw.expected === undefined ? undefined : deps.resolveValue(raw.expected),
+  };
   const r = await (adapter as unknown as { assertUi: (p: unknown, c: ExecContext) => Promise<{ passed: boolean; actual: unknown; expected: unknown }> }).assertUi(p, deps.ctx);
   if (!r.passed) {
     const negative = p.assertKind === 'absent' || p.assertKind === 'templateMiss';

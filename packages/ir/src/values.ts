@@ -180,6 +180,70 @@ export type TargetKind = z.infer<typeof TargetKindSchema>;
 export const TargetRefSchema = z.enum(['any', ...TargetKindSchema.options]);
 export type TargetRef = z.infer<typeof TargetRefSchema>;
 
+/*
+ * ── "这一族 schema 里，哪些字段是表达式"的**唯一一份派生实现** ──────────────
+ *
+ * 为什么在这里而不是各自的使用处：同一条派生规则要被**两族** schema 用 ——
+ * 步骤（判别键 `kind`，`steps.ts`）与等待条件（判别键 `type`，`waits.ts`）。
+ * 各写一份就是本仓记过十几轮的那个形状（"一件事抄 N 份，每份各错过一次"），
+ * 而这一条尤其容易分叉：两族的写法看着一样（union → 成员 → `def.shape` →
+ * 找 `ExprSchema`），复制粘贴零成本，分叉之后表现是"步骤里的表达式有静态校验、
+ * 等待条件里的没有"—— 与本文件上面 `isValueForm` 那段修掉的是同一个毛病。
+ *
+ * 放在 values.ts 是因为 `ExprSchema` 就定义在这里，而本模块是 IR 的叶子
+ * （不 import 任何同层模块），两族 schema 都能 import 它而不造成循环。
+ *
+ * 判据用**对象同一性**（剥掉 optional/nullable/default 之后 `=== ExprSchema`），
+ * 不是"它是不是 string"：IR 里 string 字段几十个（`url`、`note`、`sql`、`name`、
+ * `urlPattern`），按类型筛会把 `url: 'a b'` 这类合法值判成表达式写坏。
+ * 这条判据不是理论选择 —— `dryrun.ts` 那份手抄清单就是因为把 `value`
+ * （`ValueSchema`，往输入框填的字面量）当表达式而误报，实测数据在
+ * `docs/14` §5 与 `steps.ts` 里那段注释上。
+ */
+
+/** 剥掉 optional / nullable / default 包装，拿到最里面那个 schema 实例。 */
+function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  const def = (schema as unknown as { def?: { innerType?: z.ZodTypeAny } }).def;
+  return def?.innerType ? unwrapSchema(def.innerType) : schema;
+}
+
+/**
+ * 从一个 union 派生「判别值 → 该成员里是表达式的字段名」。
+ *
+ * 两个方向的失效都要防，而它们不对称：
+ *  - **漏一个成员** = 那一族的表达式写坏了没人静态报（静默，本仓最常见那类）；
+ *  - **多算一个字段** = 合法场景被 `--strict` 拒（误报，代价是**大家把整道闸关掉**，
+ *    于是那道闸里其余规则一起失效）。
+ * 所以这里宁缺毋滥：认不出判别值的成员**整条跳过**而不是猜一个键。
+ *
+ * **调用方要自己保证扫不到的东西会红**（本函数做不到 —— 它看不见"该有几个成员"）。
+ * 两处调用方各自立了这条自检：`ir/test/expr-fields.test.ts` 用正则读源码文本，
+ * `ir/test/wait-expr-fields.test.ts` 用 `WaitConditionSchema.options.length`。
+ * 一个恒通过的护栏比没有护栏更糟，理由同文件里写了多次。
+ */
+export function deriveExprFields(
+  union: z.ZodTypeAny,
+  discriminator: string,
+): Readonly<Record<string, readonly string[]>> {
+  const out = new Map<string, string[]>();
+  const options = (union as unknown as { options?: z.ZodTypeAny[] }).options ?? [];
+  for (const opt of options) {
+    const shape = (opt as unknown as { def?: { shape?: Record<string, z.ZodTypeAny> } }).def?.shape;
+    if (!shape) continue;
+    // 判别值通常是 z.literal（值直接挂在 .value 上）；z.enum 之类把它挂在 .def.value 上。
+    const disc = shape[discriminator] as unknown as { value?: unknown; def?: { value?: unknown } } | undefined;
+    const key = disc?.value ?? disc?.def?.value;
+    if (typeof key !== 'string') continue;
+    const fields = Object.entries(shape)
+      .filter(([, v]) => v !== undefined && unwrapSchema(v) === (ExprSchema as unknown as z.ZodTypeAny))
+      .map(([k]) => k);
+    out.set(key, fields);
+  }
+  const rec: Record<string, readonly string[]> = {};
+  for (const [k, v] of out) rec[k] = Object.freeze([...v]);
+  return Object.freeze(rec) as Readonly<Record<string, readonly string[]>>;
+}
+
 export const RetrySchema = z
   .object({
     count: z.int().min(0).max(10).default(0),

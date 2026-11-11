@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, isExprField, iterConditions, parallelHazards, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, isExprConditionField, isExprField, iterConditions, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern, GEN_KINDS, isValueForm } from '@atest/ir';
@@ -33,7 +33,8 @@ export type LintCode =
   | 'PIXEL_ASSERT_ON_NONHIERARCHY' | 'NEGATIVE_ASSERT_VISION_BASED' | 'TEMPLATE_NOT_UNIQUE'
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
-  | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE';
+  | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE'
+  | 'REQUEST_PART_NOT_IMPLEMENTED';
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
@@ -191,6 +192,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   LOOP_UNBOUNDED: 'docs/02 §2',
   RETRY_ON_CONTAINER: 'docs/05 §4',
   HOVER_THEN_NOT_IMPLEMENTED: 'docs/06 §2',
+  REQUEST_PART_NOT_IMPLEMENTED: 'docs/02 §2、docs/14 §5',  // fixture 仓库是 P1；本轮只保证它不再静默发一个少附件的请求
   SQL_PLACEHOLDER_UNBOUND: 'docs/15 §3.2',
   RESERVED_KEY_REWRITE: 'docs/02 §5、docs/14 §5',
   VAR_UNDEFINED: 'docs/02 §5',
@@ -462,6 +464,72 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
       if (typeof v !== 'string') continue;
       const e = validateExpr(v);
       if (e) push({ code: 'EXPR_SYNTAX', level: 'error', stepId: s.id, message: `${key} 表达式语法错误：${e}`, fix: EXPR_SYNTAX_FIX });
+    }
+    /*
+     * `wait` 的 `condition` 上面对那一查**必然是空的** —— `isExprField('wait','condition')`
+     * 为假，因为那个字段不是字符串而是一棵谓词树（`WaitPredicateSchema`）。
+     * 从前它就到这里为止，于是 `{type:'expr', expr:'1 +'}` 写坏了静态闸一声不响，
+     * 只能等跑起来才由运行时报（运行期那一半本轮之前已经修好了：`error` + `case-stale`，
+     * 不是"超时"）。缺的是"跑之前就报"这一半，而本平台的主力产出者是 LLM。
+     *
+     * 两个零件都现成、都不是新写的判据：
+     *  - 遍历谓词树用 `iterConditions()`（`waits.ts` 里那个，本文件上面的 SQL 那一查
+     *    已经在用它，所以"加一种条件忘了更新遍历"这件事早就是同文件两处编辑）；
+     *  - "哪一种条件的哪个字段是表达式"用 `isExprConditionField()`，**从
+     *    `WaitConditionSchema` 派生**（`waits.ts`），与步骤那一族共用 `deriveExprFields`。
+     *
+     * 刻意**不**在这里写 `if (c.type === 'expr')` 那种分派：那正是本仓抄了十几轮的
+     * "N 份手抄清单"，而且它比手抄更隐蔽 —— 今天它对（只有 expr 这一种条件带表达式），
+     * 所以任何测试都抓不到它哪天不再对。
+     *
+     * 级别与步骤那一族一致：**error**。理由是判据同一个 —— `validateExpr` 与运行时
+     * 用同一个 `parsePath` / 同一个编译器（见 `expr.ts` 与 `expr-strict.test.ts`
+     * 里那条等价测试），所以这里报的表达式在**真走到它**时必然抛。
+     * "必然"两字要说清边界：`allOf` 短路时后面的条件不会被求值，那种场景
+     * 静态报而运行期一次都没抛 —— 但那是**静态闸比单次执行看得全**，不是误报：
+     * 表达式本身确实写坏了，下一轮数据变了它就会抛。
+     * 与 `act.value` 填 `价格 3$` 那一族方向不同（那是 ValueSchema 的字面量，
+     * 当表达式校验才是真误报），这里没有那一类合法写法被拦的风险。
+     */
+    if (s.kind === 'wait') {
+      for (const cond of iterConditions(s.condition as WaitPredicate)) {
+        const o = cond as Record<string, unknown>;
+        const type = typeof o.type === 'string' ? o.type : undefined;
+        if (!type) continue;
+        for (const field of Object.keys(o)) {
+          if (!isExprConditionField(type, field)) continue;
+          const v = o[field];
+          if (typeof v !== 'string') continue;
+          const e = validateExpr(v);
+          if (e) push({ code: 'EXPR_SYNTAX', level: 'error', stepId: s.id, message: `等待条件 ${type} 的 ${field} 表达式语法错误：${e}`, fix: EXPR_SYNTAX_FIX });
+        }
+      }
+    }
+    /*
+     * `request.files` 非空 => **error**（不是 warning）。
+     *
+     * 判据是"这一栏非空"这一件事，不涉及值、不涉及 fixture 存不存在 ——
+     * 因为要报的**不是**"你的 fixture 有问题"，是"平台没有 multipart 这条路"。
+     * 层级选 error 的理由与 `HOVER_THEN_NOT_IMPLEMENTED` 同一条（下面那段就是它）：
+     * 改前这一栏**连读都没人读**，所以一条"上传发票"的用例是
+     * **附件一个没发出去而步骤判 pass**。假绿必须拦在跑之前。
+     *
+     * 与 `formData` 的区别要说清（不然下一个人会把两条读成同一条）：
+     * `formData` 本轮**真的接上了**（`strMap` -> `send({form})` -> adapter 的
+     * `URLSearchParams`，端口与 adapter 那一半本来就在），所以它**没有** lint 规则 ——
+     * 有规则反而会把合法写法拒掉。`files` 这一条拦的是**下一轮实现完就要删掉**的东西，
+     * 那句写在 fix 里，免得它变成一条永久挂着没人敢动的规则。
+     *
+     * 走的是 checkRefs 这个 walk，也就是 **setup + body + teardown 三段都查**
+     * （上面 hoverThen 那段论证过为什么必须是三段：解释器对三段都真跑，
+     * 而"前置里先上传一个附件"正是最常见的位置）。
+     */
+    if (s.kind === 'http' && s.request.files.length > 0) {
+      push({
+        code: 'REQUEST_PART_NOT_IMPLEMENTED', level: 'error', stepId: s.id,
+        message: `http 请求声明了 ${s.request.files.length} 个文件（${s.request.files.map((f) => f.field).join('、')}），multipart 上传尚未实现，且 fixtureRef 没有任何解析器 —— 这一步现在不会发出请求（改前是照发，附件全丢而步骤判 pass）`,
+        fix: '暂时把附件内容当字符串走 JSON body / formData；真做上传要先把 fixtureRef 变成"能解析出字节流的东西"（那是 P1 的 fixture 仓库），再给 HttpExec.send 加 files 与 multipart 编码',
+      });
     }
   };
   walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => checkRefs(s));

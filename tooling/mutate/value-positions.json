@@ -1,0 +1,127 @@
+{
+  "_comment": [
+    "「IR 说这里可以写引用/表达式/生成器，执行侧就必须真的求值它」这一轮的变异集。",
+    "原始失效与实测数据见 docs/14 §5，永久落点是",
+    "packages/engine/test/value-positions.test.ts。",
+    "",
+    "**这一族的原始失效**（缺陷类 (a) 里后果最直接的一例）：`act.value` / `input.value` /",
+    "`assertPage.contains` / `assertPage.expected` / `http.request.formData` 在 IR 里都是",
+    "`ValueSchema` —— 四种形态（字面量 / `{path}` / `{expr}` / `{gen}`）都合法，",
+    "而这些位置**一个都没求值**。实测改前：",
+    "  act{action:'fill', value:{expr:'1 + 1'}} => 该步 **pass**，adapter 收到的 op.value",
+    "    是 `{\"expr\":\"1 + 1\"}` **这个对象本身**，而 adapter-web/src/ui.ts 里那句",
+    "    `String(o.value ?? '')` 把它变成**往输入框里打进 [object Object]**；",
+    "  http{request:{formData:{user:'a'}}} => 表单**一条都没发出去**（send 的入参里",
+    "    压根没有这一栏），而步骤判 pass。",
+    "也就是**表单填错了 / 附件没了，用例全绿、退出码 0**。它不是'少个能力'，",
+    "是'给你一个看起来成功的错误结果'。",
+    "",
+    "**为什么这一族的条目全是'拆线'形状**：缺陷在接线（把共享的 `resolveValue` 递进",
+    "`opOf` / `evalUiAssert` / `http` 分支），不在判据。所以没有'判据写松/写严'那种条目，",
+    "只有'线断了'与'两道闸的先后'两类。",
+    "",
+    "**这份集子自己踩的一个坑（值得留着，它比条目更有用）**：写第一版时我加了一条",
+    "`value: resolve(s.value ?? undefined)`，_why 里写着'把 undefined 也喂进求值器'。",
+    "**实测它是恒等变换**：`resolveValue(undefined, scope)` 第一行就是",
+    "`if (v === null || typeof v !== 'object') return v` —— 原样返回 undefined。",
+    "跑下去必然显示'未被抓到'，而读起来像'这条判据没人守'，这就是 mutate.mjs 注释里",
+    "那条**恒不命中的假变异**。删掉它的唯一依据是把 `resolveValue` 的前三行读一遍 —— ",
+    "写变异条目之前先问'它在合法样本上会改变行为吗'，这条规矩在这里第三次应验。",
+    "",
+    "**`switch.cases[].is` 那一格的 testFile 指 executor.test.ts，不指本族的落点文件**，",
+    "这是量出来的：拆掉那一处的求值之后，`control.test.ts`（30/30）、`lang.test.ts`、",
+    "`value-positions.test.ts`（24/24）**一个都不红**，只有 `executor.test.ts` 红 ——",
+    "因为前两处里 `is:` 全写的字面量。**假绿在字面量上不可见**（本仓反复那条规矩），",
+    "所以选 testFile 要问的是'哪个文件里有**用了值形态的** switch 测试'。",
+    "指错文件的后果不是报错，是那条变异显示'未被抓到'，而文档里会多一条假的结论。",
+    "",
+    "**只有 1 条 `expect: equivalent`（末尾那条空语句），而曾经有过第 2 条被我删了**：",
+    "  那一条取的是\"把 `Deps.resolveValue` 从必填改成可选\"，预期 BUILD_BROKEN（缺这个字段的调用点编译不过）。",
+    "  **删掉它的理由不是那条不重要，是驱动没有 BUILD_BROKEN 这一档**：`expect` 只有",
+    "  `caught` / `equivalent` 两值，BUILD_BROKEN 计进\"没跑成\"，于是这条**每次都让退出码非零** ——",
+    "  一份每次都红的集子的下场是被人整体跳过，而那会带走其余真有条目。",
+    "  \"必填由编译器守\"这件事仍然要说清（所以留在这里而不进 cases）：它**不该有测试**，",
+    "  给一条编译器会拒的写法补测试，等于给一条永不变红的断言占一个\"已验证\"名额（docs/14 §4.7）。",
+    "    给一条编译器会拒的写法补测试，就是给一条永不变红的断言占一个'已验证'名额",
+    "    （docs/14 §4.7）。写出来是让'这件事由谁守'有明确记录。",
+    "  · 最后那条 `void 0;` 是**行为逐字节不变**的对照。它钉的是这份集子自己：哪天测试套件",
+    "    对任何改动都红（比如有人给源文件加了内容指纹快照），那一批'抓到了'里有多少是真的，",
+    "    看这条就知道。mutate.mjs 把 expect=equivalent 做成一等公民，为的就是这种对照有地方放。"
+  ],
+  "cases": [
+    {
+      "label": "动作步骤的值不再求值（`act.value` 填 `{expr}` 又变成往输入框里打 [object Object]）",
+      "_why": "改前就是这个形状：`opOf` 从前压根没有 resolve 这个参数。拆掉之后步骤仍 pass —— 这个缺陷不产生错误，只产生一个错值。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  if (s.kind === 'act') return { op: s.action, value: s.value === undefined ? undefined : resolve(s.value) };",
+      "replace": "  if (s.kind === 'act') return { op: s.action, value: s.value }; // 变异：不求值，原样交给 adapter",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    },
+    {
+      "label": "ADB 按键入值那一侧不再求值（同一个字段名在两端两种语义）",
+      "_why": "`act.value` 与 `input.value` 同名同形。只修动作那一半造出的症状是'Web 步骤里的 {expr} 生效、移动端的不动'，比'两边都静默'更难查（一半能用）。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  if (s.kind === 'input') return { op: 'fill', value: resolve(s.value) };",
+      "replace": "  if (s.kind === 'input') return { op: 'fill', value: s.value }; // 变异：只修了 Web 那一半",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    },
+    {
+      "label": "界面断言的 contains / expected 不再求值（断言收到对象、照样 pass）",
+      "_why": "与动作那一处同一个根。改前 adapter 收到的是 `{\"expr\":\"len($.list) > 0\"}` 那个对象本身，该步 pass。",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "    contains: raw.contains === undefined ? undefined : deps.resolveValue(raw.contains),\n    expected: raw.expected === undefined ? undefined : deps.resolveValue(raw.expected),",
+      "replace": "    contains: raw.contains,\n    expected: raw.expected, // 变异：把步骤对象整个交给 adapter（改前的写法）",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    },
+    {
+      "label": "**反方向**：值求值排到 adapter 可用性那道闸**之前**（报错从此说假话）",
+      "_why": "两道闸的先后决定报错里哪句是真话。改坏之后 `contains:{expr:'1 +'}` + 没配 adapter 时先抛 ExprError，归因变成'用例写坏了'，而该说的是'平台没配 adapter'。归错因的代价是值班人去查一个不存在的问题（docs/14 §4.9 同一族）。",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "  const wantUi = world === 'web';\n  const adapter = wantUi ? deps.adapters.ui : deps.adapters.device;",
+      "replace": "  const pre = {\n    contains: raw.contains === undefined ? undefined : deps.resolveValue(raw.contains),\n    expected: raw.expected === undefined ? undefined : deps.resolveValue(raw.expected),\n  }; // 变异：先求值，再问有没有 adapter\n  const wantUi = world === 'web';\n  const adapter = wantUi ? deps.adapters.ui : deps.adapters.device;",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    },
+    {
+      "label": "switch 的比较值不再求值（`cases[].is` 写 `{expr}` 时永远落 default）",
+      "_why": "同一个 resolveValue 在第三个调用点上。default 是空数组时**一条都不跑还判 pass**（loop-never-run 那一族同形）。testFile 指 executor.test.ts 的理由见文件头那一段（另三个文件全绿，只有它红）。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          if (looseEq(value, resolveValue(c.is, vars))) return runChildren(c.steps, [...path, s.id], vars, slot);",
+      "replace": "          if (looseEq(value, c.is)) return runChildren(c.steps, [...path, s.id], vars, slot); // 变异：case 的值不Binding",
+      "testFile": "packages/engine/test/executor.test.ts"
+    },
+    {
+      "label": "http 的 formData 算出来了但**没交给 adapter**（表单整栏消失、步骤判 pass）",
+      "_why": "本轮查出的第二例同类缺陷。注意这一条**不是**'不再 strMap'：那种变异会被求值断言抓到，而这一条抓的是更靠后的一段 —— 算对了、传丢了。改前正是这个形状（`send({...})` 的入参里压根没有 form）。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          ...(Object.keys(formData).length > 0 ? { form: formData } : {}),",
+      "replace": "          // 变异：不把表单交给 adapter（改前就是这个形状）",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    },
+    {
+      "label": "files 非空那道运行时拦被条件恒假化（于是照发一个**没有附件**的请求而用例绿）",
+      "_why": "'未实现'登记着但没人执行 —— 与 HOVER_THEN_NOT_IMPLEMENTED 同族。假绿的具体形状：附件字段可选的后端照收 200，于是'上传发票'这条用例永久绿。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (s.request.files.length > 0) {",
+      "replace": "        if (false as boolean) { // 变异：拦闸恒假（登记还在，执行没了）",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    },
+    {
+      "label": "空 formData 也硬塞一个 `form: {}`（adapter 从此以为这是表单请求）",
+      "_why": "这条**起初被我写成 equivalent，理由是'空表单本来就该等于没有表单，测不出区别'—— 那个理由是错的，量出来它红。红的原因是 zod 的 `.default({})`：不写 formData 字段时 IR 里也是 `{}`，所以'恒塞'会让`没有 formData 时不凭空多一个 form 键` 那条直接失败（`'form' in sent` 变 true）。后果不是测试好看不好看：`adapter-http/src/http/client.ts` 里 `if (r.form)` 一支**先于 body** 命中，于是 content-type 定成 `application/x-www-form-urlencoded`、body 空 —— **一个 JSON 请求被平台改成了表单请求**。教训：'这两种写法测不出区别'这类理由必须**先跑一遍**再说。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          ...(Object.keys(formData).length > 0 ? { form: formData } : {}),",
+      "replace": "          ...(Object.keys(formData).length >= 0 ? { form: formData } : {}), // 变异：非空判据恒真，空表单也塞进 send 入参",
+      "testFile": "packages/engine/test/value-positions.test.ts",
+      "_measured": "red（`没有 formData 时不凭空多一个 form 键` 那条）。这一条换了三次写法，前两次都**不是结论**：第一次 `{ form: formData },` 与第二次 `form: formData,` 跑出来都是 BUILD_BROKEN ——锚点那一行在对象字面量**内部**，把展开语法换成裸键会得到 `TS1109: Expression expected`。第二次我拿 python 手跑 `npm run build` 看到 rc=0，就断定'条目没问题、是驱动别处的事'，而那个 rc=0 是**假的**：同一段脚本先 `open(f,'w')` 再算参数，参数里 `split().join()` 抛了 AttributeError（把 list 传给了 str.join），于是文件被开成空文件 —— 空文件的 build 当然过。**同一轮里我因此连着犯了两次'我相信了还原/测量'**（另一次是 `git checkout --` 把本轮未提交的84 行改动直接抹掉，靠本轮早先存的 /tmp/interp.bak 恢复）。复现要**照驱动的样子做**（node + execFileSync + split/join），别换一门语言的手感重跑。改成 `>= 0` 之后语法合法，这才是这条想要的那个形状。"
+    },
+    {
+      "label": "等价变异：在 formData 那一行后面加一句 `void 0;`（行为逐字节不变）",
+      "_why": "真的等价：只加一条空语句。排在最后是有用处的 —— **它钉的是这份集子自己**：哪天测试套件对'任何一次改动'都变红（比如有人给源文件加了内容指纹快照），这一条会红，于是那批'抓到了'里有多少是真的就有了一次对照。mutate.mjs 把 expect=equivalent 做成一等公民（而不是不许出现），为的就是这种对照有地方放。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const formData = strMap(s.request.formData, (v) => resolveValue(v, vars));",
+      "replace": "        const formData = strMap(s.request.formData, (v) => resolveValue(v, vars));\n        void 0; // 变异：空语句，行为不变",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/value-positions.test.ts"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "「等待条件里的表达式，跑之前就要报」这一轮的变异集。原始失效见 docs/14 §5，",
+    "永久落点是 packages/engine/test/wait-expr-lint.test.ts（静态闸）与",
+    "packages/ir/test/wait-expr-fields.test.ts（派生表本体）。",
+    "",
+    "**原始失效**：`wait{condition:{type:'expr',expr:'1 +'}}` 写坏了，",
+    "**lint 与 dry-run 一句不响**，只能等跑起来才由运行时报。而本平台的主力产出者是 LLM，",
+    "lint 是它提交前唯一拿得到反馈的那道闸。运行期那一半在上一轮就修好了",
+    "（`error` + `case-stale`，不是超时），**缺的正是'跑之前就报'这一半** —— ",
+    "所以这份集子问的全是'静态闸还在遍历谓词树吗、还在用那张派生表吗'。",
+    "",
+    "**为什么 `wait` 要单开一份而不是并进 expr-strict.json**：步骤那一族的判据是",
+    "`isExprField(kind, field)`，而 `isExprField('wait','condition')` **必然为假** —— ",
+    "`condition` 不是字符串，是一棵谓词树（`WaitPredicateSchema`）。两张表来自同一个",
+    "`deriveExprFields` 但喂的 union 与判别键不同（`StepSchema`/`kind` vs",
+    "`WaitConditionSchema`/`type`）。**派生代码正确不代表参数正确**：判别键写成 `'kind'`",
+    "的话这一族会得到一张**空表**，空表不报错、只让闸静默失效 —— 就是本轮那个洞换个位置",
+    "复活。所以专门有一条改判别键的变异。",
+    "",
+    "**这份集子只有一条反向（误报）条目，而它是本族最要紧的一条**：把遍历从",
+    "'问派生表'换成'条件对象上任何字符串都当表达式'，`dbRow.sql` 那种 SQL 文本",
+    "（`WHERE a = $1 -- x`：含 $、含括号、含 --）就会被判成表达式写坏。",
+    "`EXPR_SYNTAX` 是 error 级，于是**一条完全合法的等待被 --strict 拒掉**；",
+    "而误报的真实代价从来不是多一条红字，是大家把整道闸关掉，其余二十几条规则一起失效。"
+  ],
+  "cases": [
+    {
+      "label": "静态闸这一半回来了：wait 的谓词树整块不再被遍历（写坏了只有运行时报）",
+      "_why": "改前就是这个形状 —— checkRefs 走到 wait 就只查步骤自己的字段，`condition` 那棵树一个节点都不看。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (s.kind === 'wait') {\n      for (const cond of iterConditions(s.condition as WaitPredicate)) {",
+      "replace": "    if (s.kind === 'wait') {\n      for (const cond of [] as WaitPredicate[]) { // 变异：整块不再遍历谓词树",
+      "testFile": "packages/engine/test/wait-expr-lint.test.ts",
+      "_measured": "**第一次写法是 `if (s.kind === 'wait' && false)`，跑出来 BUILD_BROKEN，而原因不是我预期的语法问题**：TS 把 `X && false` 这个恒假条件拿来收窄，分支里的 `s` 变成 `never`，于是 `s.condition` 报 TS2339、后面两个实参报 TS2345。**`if (false)` 在带判别式收窄的类型上不是合法的关掉方式** —— 这条对以后写任何\"把某段闸关掉\"的变异都成立，所以记在条目里而不是只改条目。换成\"保留 if、让被遍历的集合为空\"之后语法合法，而且它正是原缺陷的形状：块还在、遍历还在、一个节点都不进。"
+    },
+    {
+      "label": "遍历只走顶层：内层 anyOf/allOf/noneOf 里的坏表达式重新没人管",
+      "_why": "最自然的漏法：`iterConditions` 就在那儿，但有人为了'少绕一层'直接读 s.condition 的键。三种复合键共用一次遍历，所以只测顶层等于没测。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (s.kind === 'wait') {\n      for (const cond of iterConditions(s.condition as WaitPredicate)) {",
+      "replace": "    if (s.kind === 'wait') {\n      for (const cond of [s.condition as WaitPredicate]) {",
+      "testFile": "packages/engine/test/wait-expr-lint.test.ts"
+    },
+    {
+      "label": "**反方向**：判据从派生表换成'是字符串就算表达式' => SQL/URL 片段被误报",
+      "_why": "过度修。dbRow.sql / response.urlPattern / uiPredicate.state 都是 z.string()，喂进 validateExpr 得到 error 级 EXPR_SYNTAX，合法场景被 --strict 与 atest lint 拒掉。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      if (!isExprConditionField(type, field)) continue;",
+      "replace": "      if (typeof (o as Record<string, unknown>)[field] !== 'string') continue; // 变异：不看是哪一种条件的哪个字段",
+      "testFile": "packages/engine/test/wait-expr-lint.test.ts"
+    },
+    {
+      "label": "派生时判别键写错（'type' 写成 'kind'）=> 整张表为空，闸静默失效",
+      "_why": "这一条是这份集子里最值得跑的一条。空表**不抛**：`isExprConditionField` 对任何 (type, field) 都给 false，于是那一圈 continue 全部命中，代码看起来仍在遍历、仍在问判据。派生表自己的测试（ir/test/wait-expr-fields.test.ts）里有'每一种条件都在表里'那条会红 —— 所以这条同时验证**两张网各自都还在**。",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "  deriveExprFields(WaitConditionSchema as unknown as z.ZodTypeAny, 'type');",
+      "replace": "  deriveExprFields(WaitConditionSchema as unknown as z.ZodTypeAny, 'kind'); // 变异：判别键抄错",
+      "testFile": "packages/engine/test/wait-expr-lint.test.ts"
+    }
+  ]
+}

@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { LlmAssertPayloadSchema, PerfAssertPayloadSchema, StructAssertPayloadSchema, UiAssertPayloadSchema } from './asserts.js';
 import { DeviceRequirementSchema, SessionSchema, TargetKindSchema } from './targets.js';
-import { ExprSchema, RefSchema, RetryOverrideSchema, SecretRefSchema, ValueSchema, VarNameSchema, type RetryOverride } from './values.js';
+import { ExprSchema, RefSchema, RetryOverrideSchema, SecretRefSchema, ValueSchema, VarNameSchema, deriveExprFields, type RetryOverride } from './values.js';
 import { LocatorSpecSchema, type LocatorSpec } from './locator.js';
 import { WaitOptionsSchema, WaitPredicateSchema, type WaitPredicate } from './waits.js';
 import { FailureCauseSchema } from './status.js';
@@ -507,22 +507,25 @@ export type { WaitPredicate, LocatorSpec };
  * IR 里 `string` 字段几十个（`url`、`note`、`sql`、`name`），按类型筛会把
  * `url: 'a b'` 这类合法值判成表达式写坏，那比原来那两份清单更错。
  *
+ * **派生本体在 `values.ts` 的 `deriveExprFields()`，这里只是调用一次。**
+ * 从前这段就在本文件里，而等待条件那一族（判别键是 `type` 不是 `kind`）
+ * 需要一模一样的遍历 —— 复制一份的成本是零、分叉的代价是"步骤里的表达式有人管、
+ * 等待条件里的没人管"，正是上面那两段手抄清单的坏法。所以判据搬去叶子模块，
+ * 两族各自在这里与 `waits.ts` 里派生一张表。
+ *
  * ⚠ **两个已知边界**（都是"派生不到"，不是"派生错了"，所以宁可少报也不猜）：
- *  1. `wait` 步骤谓词树里的 `{type:'expr', expr}` **不在这里** —— 它藏在
- *     `WaitPredicateSchema` 的 union 里，不是步骤上的直接字段。那一族的静态校验
- *     至今没有（本轮把它的**运行期**归因接上了 `causeOfError`）。
- *  2. 只走一层 `shape`。嵌套对象里的 `ExprSchema`（目前没有）不会被找到。
+ *  1. 只走一层 `shape`。嵌套对象里的 `ExprSchema` 不会被找到 —— 实际存在的那一处是
+ *     `http.request.body` 等**值位置**上的 `{expr: "…"}`（`ExprValue`，不是步骤字段）。
+ *     它的**运行期**本轮已经通了（`resolveValue` 会求值它，写坏了就 error），
+ *     缺的只是"跑之前就报"那一半；已登记 docs/14 §5。
+ *  2. `WaitPredicateSchema` 是 `z.lazy(union)`，谓词树本身要有人遍历才拿得到条件
+ *     （`iterConditions`），派生表给的是"**哪一种条件**的哪个字段是表达式"。
+ *     lint 侧把两者接起来，见 `lint.ts` 里 `EXPR_CONDITION_FIELDS` 那一处。
  *
  * 与 `CHILD_KEYS` / `CONTAINER_KINDS` 同处一地的理由一样：**这份清单错了会同时
  * 影响 lint 与 dry-run 两道闸**，而它们各自抄一份的时候，正是这两道闸给出
  * 不同答案的那两年。
  */
-
-/** 剥掉 optional / nullable / default 包装，拿到最里面那个 schema 实例。 */
-function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
-  const def = (schema as unknown as { def?: { innerType?: z.ZodTypeAny } }).def;
-  return def?.innerType ? unwrapSchema(def.innerType) : schema;
-}
 
 /**
  * kind → 该步骤里**是表达式**的字段名（含所有步骤共有的 `when`）。
@@ -531,26 +534,8 @@ function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
  * 敏感的地方（见 `childSteps()` 那里的 `z.lazy`），但这段只碰 `StepSchema.options`
  * 与各自的 `def.shape`，不触发任何校验，所以放在 `StepSchema` 之后是安全的。
  */
-export const EXPR_STEP_FIELDS: Readonly<Partial<Record<Step['kind'], readonly string[]>>> = (() => {
-  const out = new Map<string, string[]>();
-  const options = (StepSchema as unknown as { options?: z.ZodTypeAny[] }).options ?? [];
-  for (const opt of options) {
-    const shape = (opt as unknown as { def?: { shape?: Record<string, z.ZodTypeAny> } }).def?.shape;
-    if (!shape) continue;
-    // kind 是 z.literal，值就是那个字面量；拿不到就整条跳过（宁缺毋滥：
-    // 认不出 kind 的 schema 贡献一个字段名，等于凭空给所有步骤加一条 lint）。
-    const kindDef = shape.kind as unknown as { value?: unknown; def?: { value?: unknown } } | undefined;
-    const kind = kindDef?.value ?? kindDef?.def?.value;
-    if (typeof kind !== 'string') continue;
-    const fields = Object.entries(shape)
-      .filter(([, v]) => v !== undefined && unwrapSchema(v) === (ExprSchema as unknown as z.ZodTypeAny))
-      .map(([k]) => k);
-    out.set(kind, fields);
-  }
-  const rec: Record<string, readonly string[]> = {};
-  for (const [k, v] of out) rec[k] = Object.freeze([...v]);
-  return Object.freeze(rec) as Readonly<Partial<Record<Step['kind'], readonly string[]>>>;
-})();
+export const EXPR_STEP_FIELDS: Readonly<Partial<Record<Step['kind'], readonly string[]>>> =
+  deriveExprFields(StepSchema as unknown as z.ZodTypeAny, 'kind') as Readonly<Partial<Record<Step['kind'], readonly string[]>>>;
 
 /** 这个步骤的这个字段是不是表达式。**lint 与 dry-run 同问这一个函数**。 */
 export function isExprField(kind: string, field: string): boolean {
