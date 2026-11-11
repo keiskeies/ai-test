@@ -108,6 +108,85 @@ test('用到 Web 而没配浏览器 => **装配期**报错并点名 ATEST_BROWSE
   });
 });
 
+test('报错点名"Web 需求来自哪几步"：容器不当罪名、截断要说出口', async () => {
+  /*
+   * docs/15 §3.3 五步链的第 3 步，本轮第一次量到：一份只有 `app` 步骤
+   * + 一条**误写的** `assertPage` 的纯移动端场景，装配期报
+   * 「本次场景用到 Web 步骤，但没配浏览器」—— 字面没错，而人会去装 Chrome，
+   * 不会去想"我这个纯 app 场景里哪来的 Web 步骤"。
+   * 现在文案要点名来源，并且：
+   *  1. **只点真要 web 的步骤**。本轮第一版把容器的子步骤判据写成了
+   *     `deriveTargets([s])`（那个函数会 walk 进子步骤），于是报错报出
+   *     「sequence（seq1）、navigate（n2）」—— 一句**精确的错指责**比原先
+   *     那句含糊的话更坏：含糊让人去查环境，精确的错指责让人去改无辜的用例。
+   *     所以下面那条"真 web 场景"的正向对照里，`seq1` 只能以**父链**身份出现，
+   *     不能以罪名出现（两种文本都含 `seq1`，所以判据写成"不能有 `sequence（seq1）`"）。
+   *  2. **截断必须说出来**：一份列了 8 处的报告读起来像"就这 8 处"，
+   *     而第 9 处很可能正是那条误写的那一条。
+   *  3. 名字必须与 `needsWeb` 同判据（共用 ir 的 targetsOfStep）：
+   *     分叉的表现是"报错点名的步骤里没有一个需要浏览器"，
+   *     而两个函数各自看都自洽 —— 所以这里只能从**外部**比：
+   *     报出的 id 集合 == 该场景里所有 web 档步骤的 id 集合。
+   */
+  const registry = await DocRegistry.load([]);
+  const run = async (steps: unknown[]): Promise<string> => {
+    let err: unknown;
+    // withoutBrowser 只透传 Promise、不透传返回值，所以报错文本从这里往外带
+    await withoutBrowser(async () => {
+      try {
+        await assemble({
+          scenario: scen(steps),
+          env: {}, registry, evidenceDir: '/tmp/atest-wiring-test',
+          clock: { now: () => 0, mono: () => 0, sleep: async () => {}, random: () => 0, mode: 'frozen' as const },
+        });
+      } catch (e) { err = e; }
+    });
+    assert.ok(err instanceof CliError, `该抛 CliError，实际 ${err === undefined ? '没抛' : `${(err as Error).name}: ${(err as Error).message}`}`);
+    const m = (err as Error).message;
+    assert.match(m, /ATEST_BROWSER_BIN/, '仍然要指名该设哪个变量（点名来源不能顶掉这一句）');
+    assert.equal((err as CliError).code, 4, '退出码仍是 ENV=4：改了文案不许改退出码');
+    return m;
+  };
+
+  // ① 真实形状：纯 app 场景里那条误写的 assertPage
+  const mis = await run([
+    { id: 'dev1', kind: 'device', target: 'android' },
+    { id: 'app1', kind: 'app', action: 'launch', package: 'com.x' },
+    { id: 'ap1', kind: 'assertPage', assertKind: 'url', expected: 'x' },
+  ]);
+  assert.match(mis, /assertPage（ap1）/, `要直接点出那条误写的步骤：${mis}`);
+  assert.ok(!/app（app1）|device（dev1）/.test(mis), `不许把无辜的移动端步骤列成 Web 需求来源：${mis}`);
+  assert.match(mis, /assertUi/, `名单里有 assertPage 时，要给"你大概想写 assertUi"这条提示：${mis}`);
+
+  // ② 正向对照：真 web 场景 + 容器 —— 罪名是里面那一步，容器只作为父链出现
+  const real = await run([
+    { id: 'seq1', kind: 'sequence', steps: [{ id: 'n2', kind: 'navigate', url: 'https://x/' }] },
+  ]);
+  assert.match(real, /seq1 > navigate（n2）/, `容器里的步骤要说得出在哪个容器里：${real}`);
+  assert.ok(!/sequence（seq1）/.test(real), `容器自己不需要浏览器，不许当罪名（它可以出现在父链里）：${real}`);
+  // **反向对照**：真的要跑浏览器的场景，不该收到"你大概想写 assertUi"
+  // （那句是命名陷阱的提示，对一份纯 web 用例是错建议；挂在每一句报错上，
+  //  读的人会以为自己写错了 kind 而去改一条本来对的 navigate）
+  assert.ok(!/assertUi/.test(real), `名单里没有 assertPage 时不该给那条提示：${real}`);
+
+  // ③ 截断：9 处只列 8 处时，**少的几个必须写在脸上**
+  const many = await run(Array.from({ length: 9 }, (_, i) => ({ id: `nv${i + 1}`, kind: 'navigate', url: 'https://x/' })));
+  assert.match(many, /另有 1 处/, `列到上限时要说少了几个：${many}`);
+  assert.match(many, /（nv8）/, '前 8 处仍要逐个列出（少了几个 ≠ 少列）');
+  assert.ok(!/（nv9）/.test(many), '第 9 处确实被截掉了（否则"另有 1 处"是句假话）');
+
+  // ④ 名字与 needsWeb 同判据：报出的 id 集合恰好等于场景里所有 web 档步骤
+  const mixed = await run([
+    { id: 'navA', kind: 'navigate', url: 'https://x/' },
+    { id: 'httpA', kind: 'http', request: { method: 'GET', url: 'https://x/' } },
+    { id: 'capA', kind: 'capture', mode: 'screenshot' },
+    { id: 'uiA', kind: 'assertUi', assertKind: 'visible', target: 'x' },
+  ]);
+  assert.match(mixed, /navA/, 'web 档步骤必须被点名');
+  assert.match(mixed, /capA/, 'capture 也属于 web 档，同要被点名');
+  assert.ok(!/httpA/.test(mixed) && !/uiA/.test(mixed), `http 与 assertUi 都不属于 web 档，不许出现在名单里：${mixed}`);
+});
+
 test('纯 API 场景在**没配浏览器**的机器上照跑（不被 Web 端的配置问题连累）', async () => {
   /*
    * 这条是"按需建"存在的全部理由，也是它唯一能被证伪的方式：

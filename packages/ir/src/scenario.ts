@@ -102,19 +102,121 @@ export const ScenarioSchema = z
   .strict();
 export type Scenario = z.infer<typeof ScenarioSchema>;
 
-/** 从步骤推导目标端集合（IR 里 targets 是冗余字段，推导函数是它的唯一权威来源）。 */
+/**
+ * **单一步骤自己**需要哪些端 —— `deriveTargets` 与 `targetSources` 共用的那一格判据。
+ *
+ * 抽出来不是为了好看，是因为"逐步"与"整段"两个问法都要问同一个问题，
+ * 而两处各写一遍 `STEP_TARGET[s.kind]` 再各写一遍 mobile 那一支的细分，
+ * 迟早只更新一处。
+ *
+ * 返回数组而不是单个值：`targetsOfStep` 的判据是"这一步自己需要什么"，
+ * 而一个步骤需要什么**由表说**，表今天是单值的**不代表判据是单值的** ——
+ * 写死返回一个 `TargetKind` 会让"某个 kind 需要两个端"变成改签名而不是加一个元素
+ * （而改签名的那一轮会波及所有调用点，正是没人愿意改、于是随手 if 一下的形状）。
+ *
+ * ⚠ mobile 那一支的 `s.target` **只有 `device` 的那个是平台**（本轮实测，不是推断）：
+ * `tap`/`input`/`key` 的 `target` 是 **LocatorSpec**（点哪个元素，是个对象，永远不等于 `'ios'`），
+ * `app`/`swipe`/`watcher`/`logcat`/`manualHandoff` 压根没有这个字段，
+ * 于是它们无条件落进 `android`；而 `assertUi.target` 是**字符串引用**（指向哪一步的输出），
+ * 所以 `assertUi{target:'ios'}`（"那个叫 ios 的元素"）会被读成"这条场景要 iOS 设备"。
+ * 一漏一多，后果与为什么本轮不改判据，
+ * 由 `ir/test/target-sources.test.ts` 第 2 条与最后那条测试完整记着（改它 = 改所有
+ * 已冻结场景的 irSha，那是一次迁移而不是一个修复）。
+ * **别把这一支读成"按平台细分"** —— 它是"只有 device 认平台，其余默认 android，
+ * 而撞名字的被误读"。
+ */
+export function targetsOfStep(s: Step): TargetKind[] {
+  const t = STEP_TARGET[s.kind];
+  if (t === 'api') return ['api'];
+  if (t === 'web') return ['web'];
+  if (t === 'mobile') {
+    const kind = (s as { target?: unknown }).target;
+    return [kind === 'ios' ? 'ios' : kind === 'harmony' ? 'harmony' : 'android'];
+  }
+  // 'any' 那一档（sequence / if / forEach …）自己不需要任何端，所以返回空。
+  // **容器的子步骤不算在这里** —— 整段的端是 deriveTargets 靠 walk 累出来的。
+  // 这一格必须返回空，否则"这一步为什么需要浏览器"会把一个 sequence 也点名列出，
+  // 而 sequence 自己什么都不要。本轮第一版就是让它去调 deriveTargets([s])
+  // （那个函数会 walk 进子步骤），实测报错文案报出
+  // 「Web 需求来自这些步骤：sequence（seq1）、navigate（n2）」——
+  // **我要修的错归因，被我的修法复制了一份**：容器被指认为需求来源，
+  // 而真正需要浏览器的只有它里面那条 navigate。改成共用这一格判据之后，
+  // 容器天然不在名单里，而整段那份清单一个字没变（walk 照旧累加子步骤）。
+  return [];
+}
+
+/**
+ * 从步骤推导目标端集合（IR 里 targets 是冗余字段，推导函数是它的唯一权威来源）。
+ *
+ * ⚠ 移动端那一侧的集合**含一个多余项**：一份 iOS 场景（`device{target:'ios'}` +
+ * `tap` + `assertUi`）推出来是 `["ios","android"]`，因为 `tap`/`assertUi` 没有平台可分
+ * （而 `assertUi{target:'ios'}` 反过来会**凭空**造出一个 ios —— 那里的 `target` 是变量引用）。
+ * 今天不咬人的原因要说准：`needsWeb` 只看 `includes('web')`；`lint.ts` 的 `needsDevice`
+ * 是 `.some([android,ios,harmony])`，多一个也算同一个人（它**刻意不读**本函数写进 IR 的那个
+ * 冗余字段，而是现算三层）；`dryrun.ts` 的 `estimate.needsDevice` **确实读那个冗余字段**，
+ * 但同样只 `.some(...)`，而它回显的 `estimate.targets` 今天就会列出不存在的端 ——
+ * 只是 `dryRun()` 还没有生产调用方。**"没人读"和"读的人还不存在"不是一回事**，后者才是现状。
+ * 而它的输出进了 `canonicalScenario`，所以**不能顺手改**。全部细节与"改了会红的那条测试"在
+ * `ir/test/target-sources.test.ts` 最后一条。**别把这里当"场景用到哪些端"的精确答案读**，
+ * 需要"因为哪一步"的时候用 `targetSources`：它说得出是谁，但**共用同一格判据**，
+ * 所以判据本身错时它会忠实复述那个错（这是刻意的 —— 分叉的话报错点名的步骤里
+ * 没有一个需要那个端，而两个函数各自看都自洽）。
+ */
 export function deriveTargets(steps: Step[]): TargetKind[] {
   const set = new Set<TargetKind>();
-  walk(steps, (s) => {
-    const t = STEP_TARGET[s.kind];
-    if (t === 'api') set.add('api');
-    else if (t === 'web') set.add('web');
-    else if (t === 'mobile') {
-      const kind = (s as { target?: unknown }).target;
-      set.add(kind === 'ios' ? 'ios' : kind === 'harmony' ? 'harmony' : 'android');
-    }
-  });
+  walk(steps, (s) => { for (const t of targetsOfStep(s)) set.add(t); });
   return [...set];
+}
+
+/**
+ * 是哪**几步**让这个场景需要 `target` 那个端。给报错文案用（`cli/wiring.ts` 里
+ * "没配浏览器"那一句要点名来源），不参与任何门禁判据。
+ *
+ * ## 为什么要有它（它不是"再做一个遍历"）
+ *
+ * `deriveTargets` 只回答"要不要"，答不了"因为谁"。缺了"因为谁"，报错只能说
+ * "本次场景用到 Web 步骤" —— 那句话**字面没错，而它是 IR 写错时最误导人的一句归因**。
+ * 实测（docs/15 §3.3 那条五步链的第 3 步，本轮第一次量到）：一份只有
+ * `app` 步骤 + 一条**误写的** `assertPage` 的纯移动端场景，`targets` 推出来是
+ * `["android","web"]`，装配期抛「本次场景用到 Web 步骤，但没配浏览器」。
+ * 人于是去装 Chrome，不会去想"我这个纯 app 场景里哪来的 Web 步骤"。
+ * 点名之后那句话能自己说明白：`assertPage` 是 Web 世界的能力，
+ * 而作者要的大概是 `assertUi`。
+ *
+ * ## 为什么逐步判据走 `targetsOfStep` 而不是自己查 `STEP_TARGET`
+ *
+ * 这一条**必须**与 `deriveTargets` 同判据，而判据里有一处**不是查表**的：
+ * `mobile` 那一档要再读 `s.target` 才细分成 android/ios/harmony
+ * （`STEP_TARGET` 只有 `'mobile'` 这一档，不区分平台）。
+ * 所以这里若自己写 `STEP_TARGET[s.kind] === 'web'`，今天对（web 那一档确实不细分），
+ * **而任何测试都抓不到它哪天不再对** —— 与权威表分叉的表现是
+ * "报错说这些步骤是 Web 需求来源，而 `needsWeb` 判的是另一套"，
+ * 也就是把一条错归因换成两条互相打脸的错归因。两步共用 `targetsOfStep`
+ * 让这件事在结构上不可能发生。
+ *
+ * ⚠ 但**不能**图省事写成 `deriveTargets([s])`：那个函数会 `walk` 进子步骤，
+ * 于是容器也算"需要 web"，报错就把 `sequence` 一起点名列出 —— 本轮第一版正是这样，
+ * 详见 `targetsOfStep` 里那段。
+ *
+ * **不返回整个 Step**：调用方要的是"说得出是谁"，给对象会把 IR 内容整份带进报错文案，
+ * 而报错是要进 CI 日志的。
+ */
+export interface TargetSource {
+  /** 步骤 id */
+  at: string;
+  /** 步骤 kind（就是作者写的那个词，报错要点名它） */
+  what: string;
+  /** 从顶层到这一步的 id 链，用于容器里的步骤（"sequence s1 > navigate n2"） */
+  chain: string[];
+}
+
+export function targetSources(steps: Step[], target: TargetKind): TargetSource[] {
+  const out: TargetSource[] = [];
+  walk(steps, (s, path) => {
+    // 逐步判据与 deriveTargets 共用一格：判据不许有第二份，理由见函数头
+    if (targetsOfStep(s).includes(target)) out.push({ at: s.id, what: s.kind, chain: path });
+  });
+  return out;
 }
 
 export const ScenarioVersionMetaSchema = z

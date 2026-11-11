@@ -61,15 +61,15 @@
     {
       "label": "W5 needsWeb 退回只看 body（缺陷原样：setup/teardown 里的 Web 步骤看不见）",
       "file": "packages/cli/src/wiring.ts",
-      "anchor": "  return deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown]).includes('web');",
-      "replace": "  return deriveTargets(scenario.body).includes('web');",
+      "anchor": "  return targetSources([...scenario.setup, ...scenario.body, ...scenario.teardown], 'web');",
+      "replace": "  return targetSources(scenario.body, 'web');",
       "testFile": "packages/cli/test/wiring-web.test.ts"
     },
     {
       "label": "W6 只补 setup 不补 teardown（半吊子改法：收尾截图仍漏）",
       "file": "packages/cli/src/wiring.ts",
-      "anchor": "  return deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown]).includes('web');",
-      "replace": "  return deriveTargets([...scenario.setup, ...scenario.body]).includes('web');",
+      "anchor": "  return targetSources([...scenario.setup, ...scenario.body, ...scenario.teardown], 'web');",
+      "replace": "  return targetSources([...scenario.setup, ...scenario.body], 'web');",
       "testFile": "packages/cli/test/wiring-web.test.ts",
       "_note": "W5 的另一半年份。这条**只有** teardown 那一句断言会红，所以 setup/teardown 两句必须分开写 —— 合成一句 `assert(setup || teardown)` 的话这条就能混过去。"
     }

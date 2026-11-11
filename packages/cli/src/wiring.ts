@@ -22,7 +22,7 @@ import {
 } from '@atest/adapter-http';
 import { createWebAdapter, type WebAdapter } from '@atest/adapter-web';
 import { DiskArtifactStore } from '@atest/store';
-import { deriveTargets, parseScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
+import { parseScenario, targetSources, type Scenario, type ScenarioDraft, type TargetSource } from '@atest/ir';
 
 import { EXIT } from './exit.js';
 
@@ -542,8 +542,38 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
       // 确定的配置缺失，让它以 env-unavailable 的身份进退出码，流水线就会照
       // CI_HINT 重试一次 —— 而配置缺失重试一万次也不会好。
       // 报错里不打印任何 ATEST_SECRET_* 之类的环境值，只说该设哪个变量。
+      //
+      // **并且点名是哪几步**（docs/15 §3.3 五步链的第 3 步，本轮实测后修的文案）。
+      // 原先这里只说"本次场景用到 Web 步骤"：字面没错，而它是**一条 IR 缺陷能得到的
+      // 最误导人的归因** —— 实测一份只有 `app` 步骤 + 一条误写的 `assertPage` 的
+      // 纯移动端场景，推出来的 targets 是 `["android","web"]`，于是人去装 Chrome，
+      // 不会去想"我这个纯 app 场景里哪来的 Web 步骤"。
+      // 点名之后那句话自己会说话：`assertPage` 属于 Web，作者要的大概是 `assertUi`
+      // （两个 kind 的命名陷阱正是 §3.3 那条链的起点）。
+      const src = webSources(o.scenario);
+      // 容器里的步骤要说得出在哪个容器里（chain 最后一段就是它自己的 id，所以父链是去掉末段）
+      const labelOf = (s: TargetSource): string => {
+        const parent = s.chain.slice(0, -1).join(' > ');
+        return `${parent ? `${parent} > ` : ''}${s.what}（${s.at}）`;
+      };
+      const MAX_LISTED = 8;
+      const where = src.length <= MAX_LISTED
+        ? src.map(labelOf).join('、')
+        // 截断要**说出来**：一份列了 8 处的报告读起来像"就这 8 处"
+        : `${src.slice(0, MAX_LISTED).map(labelOf).join('、')}…另有 ${src.length - MAX_LISTED} 处`;
+      /*
+       * 命名陷阱那句提示**只在真的出现 assertPage 时说**。
+       * 无条件挂上它的话，一份真的要跑浏览器的场景（navigate + act）也会收到
+       * "你大概想写 assertUi" —— 那是一句**错建议**，而它写在最像建议的位置上。
+       * （顺带一提：写这条测试时我差点把它写成恒真断言 —— 无条件的那一版
+       *  里，任何场景都能匹配到 /assertUi/。）
+       */
+      const trap = src.some((s) => s.what === 'assertPage')
+        ? '\n  如果其中有 assertPage：它属于 Web 端（浏览器页面），移动端界面断言要用 assertUi。'
+        : '';
       throw new CliError(
-        '本次场景用到 Web 步骤，但没配浏览器：设环境变量 ATEST_BROWSER_BIN=<chrome/chromium 路径>。',
+        `本次场景用到 Web 步骤，但没配浏览器：设环境变量 ATEST_BROWSER_BIN=<chrome/chromium 路径>。\n`
+        + `  Web 需求来自这些步骤：${where}${trap}`,
         EXIT.ENV,
         '本工具不自动探测浏览器安装路径：静默挑一个，等于让"用的是哪个浏览器版本"变成不可复现的事',
       );
@@ -621,8 +651,8 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
 /**
  * 场景是否用到 Web 端的步骤。
  *
- * 直接用 IR 的 **deriveTargets**（那张 kind → 端 的表的唯一权威消费者），
- * 不自己扫 kind 列表，也不自己写递归。三个理由同一个形状：
+ * 判据本身在 IR 那一侧（`targetSources` -> `targetsOfStep`，走 walk 覆盖嵌套与
+ * switch 的 cases），本层不自己扫 kind 列表，也不自己写递归。三个理由同一个形状：
  *  - 列一份 `['navigate','act','capture','assertPage']` 会一直"对"到某天新增一个
  *    web kind，之后它安静地不再命中，症状是"新 kind 报 ui adapter 未注册"；
  *  - 自己写递归会漏 switch 的 cases（CHILD_KEYS 之外），漏了的表现与清单漂移一样；
@@ -648,7 +678,22 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
  * 那是一次迁移而不是一个修复。
  */
 export function needsWeb(scenario: Scenario): boolean {
-  return deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown]).includes('web');
+  return webSources(scenario).length > 0;
+}
+
+/**
+ * 这个场景里**是哪几步**要求有浏览器。给上面那句报错点名来源用。
+ *
+ * **`needsWeb` 就是"这个数组非空"**，不是并列的第二个判据 —— 这一点是本条存在的理由。
+ * 分成两个判据的话（一个决定要不要建、一个决定报错怎么说），两者一旦分叉，
+ * 表现是"报指责错了一群步骤，而真正让装配启动的是别的步骤"，
+ * 那比原先那句含糊的话更糟：含糊让人去查环境，精确的错指责让人去改无辜的用例。
+ * 现在它们不可能分叉：`needsWeb` 写的就是"这个数组非空"，没有第二条路径。
+ *
+ * 三层数组在这里取一次（`needsWeb` 的注释说过为什么必须是三层）。
+ */
+export function webSources(scenario: Scenario): TargetSource[] {
+  return targetSources([...scenario.setup, ...scenario.body, ...scenario.teardown], 'web');
 }
 
 /** 环境里的 `viewport: "1440x900@2"` -> adapter 的参数。写错就报错，不猜默认值 */

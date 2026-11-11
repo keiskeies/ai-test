@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "`targetSources` / `targetsOfStep` / needsWeb 这条**归因链**。tests: ir/test/target-sources.test.ts + cli/test/wiring-web.test.ts。",
+    "",
+    "这一批的靶子不是'某个字段没人读'，而是**报错文案与门禁判据是否同一个判据**。",
+    "本轮改的东西很特殊：它不改任何门禁行为，只改'装配期那句报错说得出谁'。",
+    "这种改动最容易只写'文案里出现了某个词'的测试 —— 于是把 labelOf 改坏、把逐步判据",
+    "换回查表，测试全绿而报错开始**指认无辜的步骤**。所以每条变异都在问：",
+    "报错说的与 needsWeb 判的，还是同一件事吗？",
+    "",
+    "两条真实翻车各占一条（T1 / T3）：本轮第一版把逐步判据写成 `deriveTargets([s])`",
+    "（那个函数 walk 进子步骤），实测报错报出「Web 需求来自这些步骤：sequence（seq1）、",
+    "navigate（n2）」—— 我要修的错归因被我的修法复制了一份。",
+    "T1/T3 存活不了，才说明'共用一格判据 + 容器自己不承担端'这两句话有内容。",
+    "",
+    "没有 expect=equivalent 的条目：这批每条都是行为改动（报错文本或集合内容），",
+    "没有'改了而不可观测'的那一类。上一轮 prose-redaction 里那条 equivalent 是",
+    "'先转义再脱敏'那种**顺序在今天不可观测**的情形，这里没有对应物 —— 不为了凑数编一条。"
+  ],
+  "cases": [
+    {
+      "label": "逐步判据退回成自己查 STEP_TARGET（与 deriveTargets 分叉：报错点不出 ios/harmony 那一步）",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "    if (targetsOfStep(s).includes(target)) out.push({ at: s.id, what: s.kind, chain: path });",
+      "replace": "    if ((STEP_TARGET[s.kind] as string) === target) out.push({ at: s.id, what: s.kind, chain: path }); // 变异 T1：逐步判据不共用那一格，退回查表",
+      "testFile": "packages/ir/test/target-sources.test.ts"
+    },
+    {
+      "label": "mobile 那一支不再读 target（device{target:'ios'} 的端凭空变成 android）",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "    return [kind === 'ios' ? 'ios' : kind === 'harmony' ? 'harmony' : 'android'];",
+      "replace": "    return ['android']; // 变异 T2：整个 mobile 档无条件落 android",
+      "testFile": "packages/ir/test/target-sources.test.ts"
+    },
+    {
+      "label": "'any' 那一档把自己也算成一个端（容器被指认为需求来源）",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "  return [];",
+      "replace": "  return [STEP_TARGET[s.kind] as unknown as TargetKind]; // 变异 T3：容器不再返回空，'any' 这个字符串进了端集合",
+      "testFile": "packages/ir/test/target-sources.test.ts"
+    },
+    {
+      "label": "needsWeb 另起一个判据、只看 body（setup/teardown 里的 Web 步骤不再拉起浏览器）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "  return webSources(scenario).length > 0;",
+      "replace": "  return targetSources(scenario.body, 'web').length > 0; // 变异 W1：判据与报错来源脱钩，且退回 body-only",
+      "testFile": "packages/cli/test/wiring-web.test.ts"
+    },
+    {
+      "label": "列到上限时不说'另有 N 处'（9 处的报告读起来像就这 8 处）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "        : `${src.slice(0, MAX_LISTED).map(labelOf).join('、')}…另有 ${src.length - MAX_LISTED} 处`;",
+      "replace": "        : src.map(labelOf).join('、'); // 变异 W2：截断标记不写（截断本身还在，只是不说）",
+      "testFile": "packages/cli/test/wiring-web.test.ts"
+    },
+    {
+      "label": "容器里的步骤不说父链（报错只剩一句 navigate（n2），没人知道它在哪个容器）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "        const parent = s.chain.slice(0, -1).join(' > ');",
+      "replace": "        const parent = ''; // 变异 W3：chain 读了不用",
+      "testFile": "packages/cli/test/wiring-web.test.ts"
+    },
+    {
+      "label": "'你大概想写 assertUi'那句无条件挂上（真 web 场景收到一句错建议）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "      const trap = src.some((s) => s.what === 'assertPage')",
+      "replace": "      const trap = src.length >= 0 // 变异 W4：不看名单里有没有 assertPage，逢报错就给这句",
+      "testFile": "packages/cli/test/wiring-web.test.ts"
+    },
+    {
+      "label": "targetSources 不看判据、每一步都列（报错把 http 与移动端步骤一起点名）",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "    if (targetsOfStep(s).includes(target)) out.push({ at: s.id, what: s.kind, chain: path });",
+      "replace": "    if (targetsOfStep(s).length >= 0) out.push({ at: s.id, what: s.kind, chain: path }); // 变异 T4：无中生有那一侧的判据失效",
+      "testFile": "packages/ir/test/target-sources.test.ts"
+    }
+  ]
+}
