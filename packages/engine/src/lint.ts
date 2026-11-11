@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveTargets, eachValuePosition, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { redactSecretText } from './redact.js';
@@ -35,7 +35,7 @@ export type LintCode =
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
   | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE'
-  | 'REQUEST_PART_NOT_IMPLEMENTED' | 'CALL_GRAPH_INCOMPLETE';
+  | 'REQUEST_PART_NOT_IMPLEMENTED' | 'CALL_GRAPH_INCOMPLETE' | 'REF_PATH_SYNTAX';
 
 /**
  * `call` 调用图，给 `DEPENDENCY_CYCLE` 用。
@@ -386,6 +386,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   SELF_REFERENCING_CALL: 'docs/02 §2',
   INPUT_UNUSED: 'docs/02 §5',
   PARALLEL_VAR_RACE: 'docs/08 §3、docs/02 §5',
+  REF_PATH_SYNTAX: 'docs/02 §5',
 };
 
 /**
@@ -703,6 +704,132 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     }
   };
   walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => checkRefs(s));
+
+  /*
+   * ## 值形态位置里的 `{expr}` / `{path}` 写坏了 —— 上面两查**对它们是空的**
+   *
+   * 上面那两查走的是 `isExprField(kind, field)` / `isExprConditionField(type, field)`，
+   * 而这两张派生表说的都是"**这个字段是字符串表达式**"。值形态（`ValueSchema`）
+   * 不是那一种：它是 `{expr:"…"}` 这样一个**对象**，字符串藏在里面。
+   * 于是 `assign:{v:{expr:'1 +'}}`、`query:{q:{expr:'1 +'}}`、
+   * `body:{deep:{inner:{expr:'1 +'}}}` 这些位置写坏了，**静态闸一条都不报**
+   * （**改前实测**：把 `engine/test/value-form-syntax.test.ts` 表格里那些位置各放一个
+   *  坏表达式，逐个喂给从 HEAD 单独 build 出来的 `lintScenario`（用 git worktree 拉的
+   *  一份干净 HEAD），**每一个位置的相关 finding 都是 0 条** —— 不是拿"我以为改前没有"
+   *  当读数，这些夹具现在都在那个测试文件里，改前的读数可以照原样复现），
+   * 只能等跑到那一步由运行期抛 `error` + `case-stale`。
+   *
+   * 缺的就是"跑之前就报"这一半，而这一半对本平台不是锦上添花：
+   * IR 的主力产出者是 LLM（docs/00 §6.1），而"表达式写半个"恰是它最常见的坏法之一。
+   *
+   * ## 为什么这一条不用位置清单，而用 `eachValuePosition`（schema 与数据成对走）
+   *
+   * 值形态能嵌在 record / 数组 / 任意深嵌套对象里（`rows:[{k:{expr:…}}]`、
+   * `body:{a:{b:{c:[{d:{path:…}}]}}}`），**任何"列一张字段名表"的写法都列不全**，
+   * 而列不全的表现是漏报 —— 漏报与"这一处合法"在报告上逐字相同。
+   * 本仓那份 20 格的 `resolved` 清单就是现成样本：它写的时候是对的，而它漏了两格
+   * （`wait.condition.dbRow.vars` 与 `inputs[].default`），因为那份遍历**不进 `z.lazy`**，
+   * 于是整棵谓词树压根不在它的扫描结果里，而"没扫到"与"扫了没问题"输出一样。
+   *
+   * 走 schema 与数据成对，新增一个值形态字段不需要"记得来登记"，它天然被走到。
+   * 完整性由 `engine/test/value-form-syntax.test.ts` 里那条**独立走一遍 schema 图**的
+   * 自检钉着（两份走法必须认出同一批位置 —— 一条恒通过的护栏比没有护栏更糟）。
+   *
+   * ## 值位置**以下**还要再按数据走一层，判据换成运行期的 `isValueForm`
+   *
+   * `resolveValue` 对字面量对象是 `Object.fromEntries(entries.map(resolveValue))`，
+   * **递归进任意深度**（实测：`body:{deep:{inner:{expr:'1 +'}}}` 运行期就是 error）。
+   * 所以只在校验"schema 说这是 ValueSchema 的那一格"会漏掉它下面那片同样被求值的地方。
+   * 下面那一趟没有 schema 可依（值形态以下是 `LiteralSchema` 的
+   * `record(string, Literal)`，schema 不再给信息），于是**借用运行时那一条判据**
+   * `isValueForm` —— 两边同问一个函数，"lint 报了而运行时不当它是引用"这种分叉
+   * 在结构上写不出来（`RESERVED_KEY_REWRITE` 那段记过它一次真实代价）。
+   *
+   * ## 两个 code，每个只管一件事
+   *
+   *  `{expr}` 复用 `EXPR_SYNTAX`：判据同一个（`validateExpr` 与运行期共用同一个
+   *  编译器）、修法同一句（`EXPR_SYNTAX_FIX` 那张函数清单），换个码就是把同一句话
+   *  抄两遍。`{path}` 用新的 `REF_PATH_SYNTAX`：**不能**复用 `EXPR_SYNTAX`，
+   *  那句 fix 讲的是表达式语言，而引用写坏的人需要的是"以 `$` 开头 / 下标只许
+   *  数字、`*`、引号键名"——给错修法的报错等于没有修法。
+   *
+   * `gen` 的**种类**不在这里判：那是 `RESERVED_KEY_REWRITE` 已经在判的（同为 warning），
+   * 两处各判会报两遍。
+   *
+   * ## 级别取 error，而"必抛"的边界要说清
+   *
+   * 与上面两查同一条论证：判据与运行期同一个，所以报出来的表达式在**真走到它**时必抛。
+   * 边界照旧要说白：`if` 的假分支、`allOf` 短路后面的条件、`forEach` 空数据，
+   * 那些位置静态报而单次执行一次都不会抛 —— 那是**静态闸比一次执行看得全**，
+   * 不是误报（表达式本身确实写坏了，下一轮数据变了它就抛）。
+   *
+   * ⚠ **有一类位置运行期压根不求值，所以那句话对它是假话：`inputs[].default`。**
+   * 它在 schema 里是货真价实的 `ValueSchema`（四种形态都收），而
+   * `applyInputDefaults` 只是 `out[d.name] = d.default` —— 原样塞进变量空间，不求值。
+   * 实测 `inputs:[{name:'who',default:{expr:'1 + 2'}}]` ⇒ 下游 `$.who` 拿到的是
+   * **对象本身**、发出去的 body 里就是 `{"expr":"1 + 2"}`，而**步骤判 pass**。
+   * 那是缺陷类 (a) 的又一例，**不是本条规则能覆盖的**（本条只校语法，
+   * 而它的语法是好的），所以这里对它**单独措辞**：不说"运行期会抛"，
+   * 只说"这一处的 default 今天不被求值"，级别降到 warning（error 会让人以为
+   * 修好语法就能用，而那恰恰不成立）。真正的修法在求值侧，登记在 docs/14 §5。
+   */
+  {
+    /** 值形态里那个不被求值的例外位置（判据见上面那段 ⚠） */
+    const NOT_EVALUATED = /^inputs\[\d+\]\.default$/;
+    eachValuePosition(ScenarioSchema, scenario, ({ value, path, stepId }) => {
+      const form = isValueForm(value);
+      if (!form || form === 'gen') return; // gen 的种类由 RESERVED_KEY_REWRITE 判，两处各判会报两遍
+      const key = form === 'ref' ? 'path' : 'expr';
+      const text = (value as Record<string, unknown>)[key];
+      if (typeof text !== 'string') return;
+      const bare = path.replace(/^\$\.?/, '');
+      const unevaluated = NOT_EVALUATED.test(bare);
+
+      /*
+       * **报错里不许带源码**。值形态所在的位置正是请求体与表单 ——
+       * 也就是明文凭证最常出现的地方（`HARDCODED_SECRET` 整条规则的存在就是证据），
+       * 而 lint 的输出会进 CI 日志，读者比仓库的读者宽。
+       * 上面 `condition` / `when` 那一查回显源码是**可以**的（表达式里放凭证不是常规写法），
+       * 这一查不行。
+       *
+       * 做法是**把手上那个源串从消息里挖掉**而不是正则猜：
+       * 解析器的消息形如 `意外记号 "末尾"（表达式：1 +）`，
+       * 而 expr.ts 还会把 PathError 再包一层（`引用路径写坏：X（中括号未闭合（路径：X））`），
+       * 嵌套括号用正则剥会剥错。我们知道那个串的**原文**，直接整段替换，
+       * 剥不干净的可能性不存在。再叠一层 `redactSecretText` 兜"源码之外别处混进来的密钥"。
+       */
+      const scrub = (msg: string): string =>
+        redactSecretText(msg.split(text).join('«表达式源码已省略»')).slice(0, 200);
+
+      if (form === 'expr') {
+        const e = validateExpr(text);
+        if (!e) return;
+        push({
+          code: 'EXPR_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId,
+          message: unevaluated
+            ? `inputs[].default 里的表达式语法错误：${scrub(e)}。⚠ 而更根本的是**这个 default 今天压根不被求值**（`
+              + '缺陷类 (a)：`applyInputDefaults` 原样塞进变量空间），所以修好语法它也不会按你预期生效'
+            : `值形态里的表达式语法错误（${bare}）：${scrub(e)}`,
+          fix: unevaluated ? '暂时只能填字面量；default 的值形态待平台接上求值（docs/14 §5）' : EXPR_SYNTAX_FIX,
+        });
+        return;
+      }
+      try {
+        parsePath(text);
+      } catch (e) {
+        push({
+          code: 'REF_PATH_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId,
+          message: unevaluated
+            ? `inputs[].default 里的引用写坏了：${scrub(e instanceof PathError ? e.message : '?')}。`
+              + '⚠ 而更根本的是**这个 default 今天压根不被求值**（缺陷类 (a)），修好语法它也不会按你预期生效'
+            : `值形态里的引用写坏了（${bare}）：${scrub(e instanceof PathError ? e.message : '?')}`,
+          fix: unevaluated
+            ? '暂时只能填字面量；default 的值形态待平台接上求值（docs/14 §5）'
+            : '引用以 $ 开头；下标只许数字、`*` 或引号键名（`$[0]` / `$["带 空格"]`），变量作用域见 docs/02 §5',
+        });
+      }
+    });
+  }
 
   /*
    * **租约规则单开一次遍历，走三层**（缺陷与取证见 `docs/15` §3.3 末尾那张探针表）。

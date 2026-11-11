@@ -244,6 +244,250 @@ export function deriveExprFields(
   return Object.freeze(rec) as Readonly<Record<string, readonly string[]>>;
 }
 
+/*
+ * ── 「这个数据位置在 schema 里是不是 `ValueSchema`」的**唯一一份遍历** ──────────
+ *
+ * ## 为什么不是又一张位置清单
+ *
+ * 本仓为"哪些字段是表达式/引用"抄过三份清单，而清单这一族记录的还是**步骤顶层字段**
+ * （`EXPR_STEP_FIELDS`）。值形态（`ValueSchema`）比它难一层：值能嵌在
+ * record / 数组 / 嵌套对象里（`query:{q:{…}}`、`rows:[{k:{…}}]`、`body:{a:{b:{…}}}`），
+ * 所以"列一张字段名表"这条路今天列不全，而**列不全的表现是漏报**——
+ * 漏报与"这一处合法"在报告上逐字相同。`engine/test/value-positions.test.ts` 里那份
+ * 20 格清单就是这一族的现成样本：它自己写的时候是对的，而它**漏了两格**
+ * （`wait.condition.dbRow.vars` 与 `inputs[].default`），漏的原因见下面第 2 条。
+ *
+ * 所以这里不给清单，给**遍历**：拿 schema 与数据**成对**走，走到
+ * `unwrap(...) === ValueSchema` 的那个位置就把值交出去。新增一个值形态字段
+ * 不需要"记得来登记"，因为它天然被走到 —— 这正是清单做不到的那件事。
+ *
+ * ## 三条会让"自称完整的遍历"静默不完整的形状（本函数逐条处理）
+ *  1. **包装层**。`optional` / `nullable` / `default` 都把真 schema 藏在 `def.innerType`，
+ *     不剥就认不出 `=== ValueSchema`（`db.vars` 是 `.optional()`，`query` 是 `.default({})`）。
+ *  2. **`z.lazy`**。子步骤列表、谓词树都是 lazy，藏在 `def.getter()`。
+ *     早先那份遍历**根本不进 lazy**，于是 `wait` 的谓词树整棵不在扫描结果里，
+ *     而"没扫到"与"扫了没问题"给的是同一个答案。这里进去，且只在一处认停。
+ *  3. **union 成员**。`ValueSchema` 自己就是 union，而 `assertPage`/`assertUi`
+ *     的 payload 也是 union —— 只走第一个成员等于漏报。
+ *
+ * ## 停机条件（防死循环，而且要说清防的是什么）
+ * 步骤树是**递归**的：`sequence.steps` → `z.lazy(array(union(…步骤…)))` → 绕回 StepSchema。
+ * 所以走到"就是 StepSchema 的那个数组元素"时**不展开它**，而是交给 `onStep`
+ * 由调用方按数据侧的实际步骤recurse —— 数据侧天然是有限树，走不到环。
+ *
+ * ## 为什么这个函数住在 ir 而不是 engine
+ * 它读的是 zod 内部形状（`def.type` / `def.shape` / `def.getter`），而这只有
+ * schema 的**定义方**才该依赖 —— engine 依赖它等于把"zod 版本内部结构"这条
+ * 依赖线穿过分层闸（`tooling/lint-layers.mjs`）。`isValueForm` 同理住在这里。
+ */
+
+/** `eachValuePosition` 交出来的一个值形态位置。 */
+export interface ValuePosition {
+  /** 那个位置上的**数据**（值形态位置上的东西一律是 JSON 形状，不含 undefined） */
+  value: unknown;
+  /** 人读的坐标，如 `http.request.query.q`、`table.rows[0].k`、`wait.condition.dbRow.vars.v` */
+  path: string;
+  /** 最近一层步骤的 id（顶层字段如 `inputs[0].default` 没有它）。报错要点名是谁 */
+  stepId?: string;
+  /**
+   * 这个位置上 schema 声明的类型。今天恒为 `'value'`（只有值形态会被交出），
+   * 留着这一格是因为调用方需要一个**能核对**的东西：
+   * 若遍历坏到把非值形态的字段也交出来，测试就能拿它响，而不是靠"看起来报得对"。
+   */
+  kind: 'value';
+}
+
+/** 剥掉 optional / nullable / default / lazy，拿到最里面那个 schema 实例。 */
+function unwrapDeep(schema: unknown): unknown {
+  const def = (schema as { def?: { innerType?: unknown; getter?: () => unknown } } | null)?.def;
+  if (def?.innerType) return unwrapDeep(def.innerType);
+  // lazy 也在这里剥：调用方要的是"这一格是什么类型"，而 lazy 只是延迟构造。
+  // 步骤树那个 lazy 绕回 StepSchema 自身，**递归深度靠下面 holdsValue 的 depth 上限挡**，
+  // 不靠"认不出 lazy"挡 —— 认不出 lazy 正是早那份扫描漏掉整棵谓词树的原因。
+  if (def?.getter) {
+    try {
+      return unwrapDeep(def.getter());
+    } catch {
+      return schema; // getter 只在 schema 图完整时可用；取不到就按原样
+    }
+  }
+  return schema;
+}
+
+type ZodDef = { type?: string; shape?: Record<string, unknown>; valueType?: unknown; element?: unknown; options?: unknown[] };
+const defOf = (s: unknown): ZodDef | undefined => (unwrapDeep(s) as { def?: ZodDef } | null)?.def;
+
+/** union 成员的判别键。IR 里三种判别键都在用（步骤 `kind`、条件 `type`、断言 `assertKind`）。 */
+const DISCRIMS = ['kind', 'type', 'assertKind'] as const;
+
+/** 成员 m 对判别键 key 要求的那个字面量值；这个成员没有这个判别键则 undefined。 */
+function memberDiscrim(m: unknown, key: string): string | undefined {
+  const lit = defOf(m)?.shape?.[key] as { value?: unknown; def?: { value?: unknown } } | undefined;
+  const v = lit?.value ?? lit?.def?.value;
+  return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * 这一格（往任意深度走）装不装得下一个 `ValueSchema`。
+ *
+ * 用途是**剪枝**，而剪枝在这里不是性能问题：整棵场景树里绝大多数子树
+ * （`locator`、`retry`、`capabilities`……）压根不可能出现值形态，
+ * 不剪就会把非值形态的字段也交出去 —— 那正是 `dryrun` 早年把 `url`
+ * 当表达式校验而误报的同一个形状（判据从"字段叫什么名"错成"字段装得下什么"）。
+ *
+ * ⚠ **`depth` 上限不是性能保险，是防死循环**：步骤树是递归的
+ * （`sequence.steps` → `z.lazy(array(union(…步骤…)))` → 绕回 `StepSchema`），
+ * 而 `unwrapDeep` 会把那个 lazy 展开，于是 object 分支顺着 `steps` 字段
+ * 会**永远走下去**。这里靠深度上限截断是**安全**的：能被这个上限挡住而漏掉的
+ * 只有"嵌套超过 24 层 schema 才出现"的值位置，而 IR 里没有那种形状
+ * （值形态最深处是 `request.body`，而 body 以下是 `record(string, Literal)`，
+ * schema 不再往下给结构）。数据侧的递归走的是下面另一条路，
+ * 那里数据是有限树，不受这个上限影响 —— 这点要说清，**截断数据侧就是静默漏报**。
+ */
+function holdsValue(schema: unknown, depth = 0): boolean {
+  if (depth > 24) return false;
+  const u = unwrapDeep(schema);
+  if (u === (ValueSchema as unknown)) return true;
+  const d = defOf(schema);
+  if (!d) return false;
+  switch (d.type) {
+    case 'record':
+      return holdsValue(d.valueType, depth + 1);
+    case 'array':
+      return holdsValue(d.element, depth + 1);
+    case 'object':
+      return Object.values(d.shape ?? {}).some((v) => holdsValue(v, depth + 1));
+    default:
+      // union / intersection：任一成员装得下就算
+      return Array.isArray(d.options) && d.options.some((o) => holdsValue(o, depth + 1));
+  }
+}
+
+/**
+ * 成对走 schema 与数据，把每个 `ValueSchema` 位置上的值交出来。
+ *
+ * 步骤树**不需要特殊处理**：步骤 union 的每个成员都带 `kind` 字面量，
+ * 下面那套"按判别值筛成员"的通法天然会把 `sequence.steps[3]` 走到它自己的成员上，
+ * 于是嵌套步骤、容器里的 `set`、谓词树里的 `dbRow.vars` 全都自动覆盖。
+ * （早先那份遍历需要给谓词树单开一条 `iterConditions` 路，就是因为它只走一层 shape。）
+ *
+ * 误报与漏报的代价不对称，所以判据往"不误报"一侧靠：
+ * **带判别键而数据的判别值不匹配的 union 成员，整条不走** ——
+ * 否则一份 `assertPage` 的数据会被塞进 `assertUi` 的 schema 里走一遍，
+ * 于是同一个位置报两次、或在不该报的字段上报。
+ */
+export function eachValuePosition(
+  rootSchema: unknown,
+  rootData: unknown,
+  onValue: (pos: ValuePosition) => void,
+  /** 走查根坐标，默认 `$`。给调用方留的：自检要拿它比对路径 */
+  rootPath = '$',
+): void {
+  /**
+   * 值位置**以下**按数据走。schema 到这里就没信息了（值形态以下是
+   * `LiteralSchema` 的 `record(string, Literal)`），所以唯一正确的判据是
+   * **运行时那一条** `isValueForm` —— 拿同一个判据，静态与运行期就不可能分叉
+   * （分叉一次的代价见 lint 里 `RESERVED_KEY_REWRITE` 那段：两边各判一份，
+   * 于是"lint 报了而运行时不当它是引用"）。
+   *
+   * 为什么必须往下走（本轮实测定的，不是想当然）：`resolveValue` 对字面量对象是
+   * `Object.fromEntries(entries.map(resolveValue))` —— **递归进任意深度**，
+   * 所以 `body:{deep:{inner:{expr:'1 +'}}}` 运行期是 error（实测），
+   * 而只在"schema 说这是 ValueSchema 的那一格"停手就看不见它。
+   *
+   * 只交出 `isValueForm` 认得出的那些节点（= 运行期真会求值的），
+   * 字面量原样带过，交出去由调用方判它的文本坏没坏。
+   */
+  const walkValueData = (data: unknown, path: string, stepId: string | undefined, depth: number): void => {
+    if (depth > 64 || data === undefined) return;
+    if (Array.isArray(data)) {
+      data.forEach((v, i) => walkValueData(v, `${path}[${i}]`, stepId, depth + 1));
+      return;
+    }
+    if (typeof data !== 'object' || data === null) return;
+    if (isValueForm(data) !== undefined) {
+      onValue({ value: data, path, stepId, kind: 'value' });
+      return; // 形态对象内部不再有值形态（`{expr:'…'}` 里那个字符串就是最终文本）
+    }
+    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+      walkValueData(v, `${path}.${k}`, stepId, depth + 1);
+    }
+  };
+
+  const walk = (schema: unknown, data: unknown, path: string, stepId: string | undefined, depth: number): void => {
+    if (depth > 64 || data === undefined || schema === undefined || schema === null) return;
+    if ((unwrapDeep(schema) as unknown) === (ValueSchema as unknown)) {
+      // 值位置本身可能是裸字面量（`query:{q:'abc'}`）—— 那种没有文本可校，
+      // 但统一交给 walkValueData：它认得形态就交，认不出就往下钻，两种都覆盖。
+      walkValueData(data, path, stepId, depth);
+      return;
+    }
+    const d = defOf(schema);
+    if (!d) return;
+
+    switch (d.type) {
+      case 'record': {
+        if (typeof data !== 'object' || data === null || Array.isArray(data)) return;
+        if (!holdsValue(d.valueType)) return;
+        for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+          walk(d.valueType, v, `${path}.${k}`, stepId, depth + 1);
+        }
+        return;
+      }
+      case 'array': {
+        if (!Array.isArray(data) || !holdsValue(d.element)) return;
+        data.forEach((v, i) => walk(d.element, v, `${path}[${i}]`, stepId, depth + 1));
+        return;
+      }
+      case 'object': {
+        if (typeof data !== 'object' || data === null) return;
+        const obj = data as Record<string, unknown>;
+        /*
+         * 步骤坐标。**必须同时有 `kind`** 才算一步 —— 只认 `id` 的话，
+         * 场景对象自己那个 `id`（IR 必填）会被当成步骤 id，
+         * 于是顶层字段（`inputs[0].default`）的报错会挂在一个压根不存在的步骤上，
+         * 点"跳到该步骤"会跳空。本轮实测到过。
+         */
+        const isStep = typeof obj.kind === 'string';
+        const sid = isStep && typeof obj.id === 'string' ? obj.id : stepId;
+        for (const [f, sub] of Object.entries(d.shape ?? {})) {
+          const v = obj[f];
+          if (v === undefined) continue;
+          if (DISCRIMS.includes(f as (typeof DISCRIMS)[number])) continue;
+          if (!holdsValue(sub)) continue;
+          walk(sub, v, `${path}.${f}`, sid, depth + 1);
+        }
+        return;
+      }
+      default: {
+        const options = Array.isArray(d.options) ? d.options : [];
+        if (!options.length) return;
+        const obj = typeof data === 'object' && data !== null && !Array.isArray(data)
+          ? (data as Record<string, unknown>)
+          : undefined;
+        for (const m of options) {
+          // 只排除**明确不匹配**的成员；成员没有判别键时不排除（宁可多走也不漏）
+          const clash = DISCRIMS.some((k) => {
+            const want = memberDiscrim(m, k);
+            return want !== undefined && obj !== undefined && typeof obj[k] === 'string' && obj[k] !== want;
+          });
+          if (clash) continue;
+          if (!holdsValue(m)) continue;
+          walk(m, data, path, stepId, depth + 1);
+        }
+        return;
+      }
+    }
+  };
+  walk(rootSchema, rootData, rootPath, undefined, 0);
+}
+
+/**
+ * `holdsValue` 的对外面。**只给完整性自检用**（它要拿独立的 schema 走法对撞本模块），
+ * 生产侧一律走 `eachValuePosition`，不要拿它自己拼一套遍历 —— 那就是清单分叉的开始。
+ */
+export const schemaHoldsValueSchema = holdsValue;
+
 export const RetrySchema = z
   .object({
     count: z.int().min(0).max(10).default(0),
