@@ -28,7 +28,8 @@
     "",
     "最后一条是**故意等价**的：locatorBudget 的兜底 Infinity 改成 0.02 测不出来，",
     "因为只有 app/logcat 这类**根本没有 locator** 的步骤会走兜底，而那种 adapter 压根不报成本",
-    "（`costUsd ?? 0` => 0 > 0.02 为假）。它不是在为兜底值背书，只是如实记下「目前没有可观测差异」。"
+    "（`costUsd ?? 0` => 0 > 0.02 为假）。它不是在为兜底值背书，只是如实记下「目前没有可观测差异」。",
+    "最后一条（原「超预算不往外抛」）本轮把锚点从 wait.ts 搬进 errors.ts 的归因表：那句专门的 instanceof 成了表判据的重复品，删了全绿，所以它不在了。这一条因此多测一件事——归因表那一行**改错值**会让等待循环不再停，是花钱问题不是报表问题。"
   ],
   "build": false,
   "cases": [
@@ -48,11 +49,12 @@
       "testFile": "packages/engine/test/locator.test.ts"
     },
     {
-      "label": "超预算不往外抛，被当成「条件还没满足」继续轮（单次超支变成 20 次）",
-      "file": "packages/engine/src/wait.ts",
-      "anchor": "      if (e instanceof LocatorBudgetError) throw e;\n",
-      "replace": "",
-      "testFile": "packages/engine/test/locator.test.ts"
+      "label": "超预算不再掀翻等待循环（表里那一行改判）：被当成「条件还没满足」继续轮，单次超支变成 20 次",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: LocatorBudgetError,\n    cause: 'case-stale',",
+      "replace": "    base: LocatorBudgetError,\n    cause: 'env-unavailable',",
+      "testFile": "packages/engine/test/locator.test.ts",
+      "_note": "锚点本轮从 wait.ts 那句 `if (e instanceof LocatorBudgetError) throw e;` 搬进 errors.ts 的表项。\n      搬的原因是那句**没了**，而且它不是因为写错才没的：本轮把 LocatorBudgetError 登记进归因表之后，\n      wait.ts 那句 `causeOfError(e) === 'case-stale'` 已经会把整族（含超预算）外抛，\n      于是那句成了**同一件事的第二份**。变异检查当场抓到这件事 —— 删掉它**全绿**，\n      也就是说那个\"删了会变 20 次\"的旧结论已经不在那句代码上了。\n      留着一句删了不影响任何行为的代码，比删掉它更糟：下一个人会以为它在守着什么。\n\n      所以现在这条测的是**真正的耦合点**：把表里那一行改成别的归因，\n      wait.ts 那一族就不再外抛 -> 超支被当成\"条件还没满足\" -> 每轮再花一次同样的钱。\n      判据数的是**轮询次数**（locator.test.ts 那条\"第一次 poll 就停\"），不是状态 ——\n      这种情况下状态照样是 fail，只看状态就是假绿。\n      一句话：**\"给这个类登记什么归因\"在 wait 里是一个花钱问题，不只是报表问题。**\n\n      与 error-cause.json 的 C8 不重复：C8 删**整行**，问的是\"表少一行会不会被那两条\n      活护栏发现\"（覆盖面）；这一条只改**值**，问的是\"归因改错会不会让人多花钱\"（行为）。"
     },
     {
       "label": "上限退回写死的 0.02（人写的 maxCostUsdPerResolve 一路传到这里被丢掉）",
@@ -65,7 +67,7 @@
       "label": "超预算判 error（进退出码 5 -> CI 按 CI_HINT 重试一次 -> 同一笔钱再花一遍）",
       "file": "packages/engine/src/interpreter.ts",
       "anchor": "      const overBudget = e instanceof LocatorBudgetError;",
-      "replace": "      const overBudget = false; // 变异：让它落进默认的 error/env-unavailable 分支",
+      "replace": "      const overBudget = false; // 变异：让它落进默认的 error 分支（归因走表：LocatorBudgetError -> case-stale）",
       "testFile": "packages/engine/test/locator.test.ts"
     },
     {

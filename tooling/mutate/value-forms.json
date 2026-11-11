@@ -62,10 +62,11 @@
       "testFile": "packages/engine/test/value-forms.test.ts"
     },
     {
-      "label": "R4 归因跑偏：解释器不再把 VarError 家族算作用例自己的问题 -> 拼错键名被报成\"环境不可用\"",
-      "file": "packages/engine/src/interpreter.ts",
-      "anchor": "e instanceof VarError ? 'case-stale' : 'env-unavailable',",
-      "replace": "e instanceof TypeError ? 'case-stale' : 'env-unavailable',",
+      "label": "R4 归因跑偏：那张表不再把 VarError 家族算作用例自己的问题 -> 拼错键名被报成\"环境不可用\"",
+      "_note": "锚点从 interpreter 那句三元搬进 errors.ts 的表项：本轮把判据收成一张表之后那句三元不存在了。表项比原句更好改 —— 一个类一族归因，改一处即可。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: VarError,\n    cause: 'case-stale',",
+      "replace": "    base: VarError,\n    cause: 'env-unavailable',",
       "testFile": "packages/engine/test/value-forms.test.ts"
     },
     {

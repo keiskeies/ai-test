@@ -173,9 +173,10 @@
       "testFile": "packages/engine/test/lang.test.ts"
     },
     {
-      "label": "B8 VarError 不再外抛（引用写错重新被吞成超时 + env-unavailable）",
+      "label": "B8 用例自己写错的错不再外抛（引用/路径/表达式写错重新被吞成超时）",
+      "_note": "锚点本轮从 `if (e instanceof VarError) throw e;` 改成 `if (causeOfError(e) === 'case-stale') throw e;`：\n      判据收进 errors.ts 那张表之后，这里外抛的不再只有 VarError 一族（PathError / ExprError 也算）。\n      这条变异测的**还是同一件事** —— 那一族被吞回去就退回本轮修掉的假超时 ——\n      只是它现在一次盖住整族，而不是只盖住一族里的一个类。",
       "file": "packages/engine/src/wait.ts",
-      "anchor": "      if (e instanceof VarError) throw e;",
+      "anchor": "      if (causeOfError(e) === 'case-stale') throw e;",
       "replace": "      // 删掉：让它落到『当成还没满足』",
       "testFile": "packages/engine/test/lang.test.ts"
     },

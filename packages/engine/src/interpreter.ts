@@ -14,6 +14,7 @@ import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parall
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
+import { causeOfError, EnvMissing } from './errors.js';
 import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ExecTarget, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
 import { resolveValue as resolveValueShared, strMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
@@ -195,8 +196,10 @@ class RunAborted extends Error {
     super(message);
   }
 }
-/** 环境缺配置（如没配 baseUrl）。区别于"用例错了"：它该让人去改环境，不是改用例。 */
-class EnvMissing extends Error {}
+/* EnvMissing 搬去 errors.ts 了：它原先是本文件的私有类，于是外层那个
+ * "按异常类型定归因"的判据**看不见它**（跨不到模块私有），只能靠 errSummary 认它，
+ * 归因则一路落到兜底那格。搬过去挂上 NotWiredError 之后，"环境里没配 baseUrl"
+ * 与"没接 device adapter"才得到同一个归因 —— 它们的下一步动作本来就是同一个。 */
 
 /**
  * 事件入参：kind 必须是 TraceEvent['kind'] 字面量。
@@ -495,11 +498,37 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     const stepStart = clock.mono();
     emit({ kind: 'step.started', stepId: s.id, path });
 
-    // 守卫：条件不成立 → skipped（不是 pass，也不是 fail）
+    /*
+     * 守卫：条件不成立 → skipped（不是 pass，也不是 fail）。
+     *
+     * **求值报错绝不能落到"条件不成立"那一格**。改动前这句 catch 是
+     * `catch (e) { … cause: 'env-unavailable' }` —— 归因写死了，但更糟的是
+     * 它上面那句 `let ok = false`：`evalBool` 里**不抛异常、只返回 undefined**
+     * 的写法照样把 `ok` 留在 false，于是步骤记成 `skipped`。实测（`.scratch/probe-guard-green.mts`，
+     * 永久落点是 `docs/14` §5「`when` 守卫里的假绿」那一行 —— 这件事**至今没修**，
+     * 所以没有测试钉它，钉了就等于宣称它修好了）：
+     *  `when: '$.n['`（下标没闭合）=> 这步 **skipped**、整场 **pass**、退出码相关
+     *  的 tally 是 `{pass:1, skipped:1}`、**lint 一句没响**。
+     * 一句写坏的路径读起来像"条件不成立、这步不该跑"，而 `executor.ts` 里
+     * 那句注释恰恰写着"拼错的守卫条件伪装成'这步没跑'是最难查的假绿" ——
+     * 它说预编译形态刻意不在这里抓、让外层记 error，**实测两种形态都是 skipped**，
+     * 那个防护并不存在（两种形态都从 `expr.ts` 的 `catch { return undefined }` 拿到 undefined）。
+     *
+     * ⚠ **"lint 没响"只对 `$.` 路径这一族成立，别读成"lint 不查表达式"**：
+     * 同一位子上 `when: '1 +'` 是**有** lint 的（`EXPR_SYNTAX` 实测报"意外记号 末尾"）。
+     * 差别在 `validateExpr` 只遍历 AST 查未知函数名，**`$.` 引用节点从不校验路径本体**，
+     * 而它 catch 里那句 `e instanceof PathError` 是永远为假的一支（parse 不解析路径内部）。
+     * 所以那条假绿**有两层**（运行期那个吞 + 静态闸这一层），只修运行期的话
+     * 运行时会红而 lint 照旧静默 —— 两层都要修，明细与实测在 docs/14 §5 那一行。
+     *
+     * 那条假绿本轮**没修**（要改的是表达式引擎那个吞异常的地方，另记 docs/14 §5），
+     * 这里只把"真抛出来的那部分"归对因：`when: '1 +'` 与 `when: 'nopefn(1)'`
+     * 报 case-stale，落点是 `packages/engine/test/error-cause.test.ts`。
+     */
     if (s.when) {
       let ok = false;
       try { ok = evalBool(s.when, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }); }
-      catch (e) { return finish(s, path, 'error', stepStart, errSummary(e), { cause: 'env-unavailable' }); }
+      catch (e) { return finish(s, path, 'error', stepStart, errSummary(e), { cause: causeOfError(e) }); }
       if (!ok) return finish(s, path, 'skipped', stepStart, `守卫条件不成立：${s.when}`);
     }
 
@@ -572,20 +601,27 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     } catch (e) {
       if (e instanceof RunAborted) throw e;
       /*
-       * **定位超预算要走 fail 而不是 error**，而且这条必须在 `AssertionFailure`
-       * 那一行**之前**判掉：两个都是"这一步的结论"，但 cause 完全不同 ——
-       * 让 LocatorBudgetError 落到默认的 error/env-unavailable 分支的话，
-       * 退出码变成 5，而 CI_HINT 教 CI"5 → 标 error 重试一次"。
+       * **定位超预算要走 fail 而不是 error**：让 LocatorBudgetError 落到
+       * error 分支的话，退出码变成 5，而 CI_HINT 教 CI"5 → 标 error 重试一次"。
        * 那一次重试会**把同一笔开销再花一遍**：一个"防止 LLM 定位把预算烧穿"的闸门，
        * 反过来变成烧穿预算的加速器。这是本文件里唯一一处"状态选错会放大它本该拦住的损失"。
        *
-       * cause 用 case-stale 而不是 product-bug：这一步用了一个比声明更贵的定位法，
-       * 是用例/定位器选型的问题。报 product-bug 会让值班人去查一个不存在的功能 bug。
+       * cause 一律交给 `causeOfError`（`errors.ts`）。改动前这里是
+       * `overBudget ? 'case-stale' : e instanceof AssertionFailure ? 'product-bug'
+       *  : e instanceof VarError ? 'case-stale' : 'env-unavailable'`，两个毛病：
+       *  1. **兜底那格是"编一个像样的答案"**：没登记的新错误类一律报"环境不可用"，
+       *     值班人去查一个不存在的环境问题、CI 白重试一次。现在兜底是 `untriaged`
+       *     （"没人认领"），它是 FAILURE_CAUSE 里本来就有的合法值，含义就是它字面意思。
+       *  2. `AssertionFailure` **全仓没有任何 throw 点**（本轮 grep 过 src+test+tooling，
+       *     只有这里的三处引用与 errSummary 里的一处），所以那两个分支是到不了-code
+       *     （docs/14 §4.7 那条"到不了的防护分支"）。断言不成立在这里是**返回值**
+       *     （`outcome.status === 'fail'`），从来不是异常。删掉之后 fail/error 的
+       *     分界只剩"超预算 → fail，其余 → error"，与实测行为一字未变。
        */
       const overBudget = e instanceof LocatorBudgetError;
-      const status: StepStatus = overBudget || e instanceof AssertionFailure ? 'fail' : 'error';
+      const status: StepStatus = overBudget ? 'fail' : 'error';
       return finish(s, path, status, stepStart, errSummary(e), {
-        cause: overBudget ? 'case-stale' : e instanceof AssertionFailure ? 'product-bug' : e instanceof VarError ? 'case-stale' : 'env-unavailable',
+        cause: causeOfError(e),
         keyContext: {
           errorName: (e as Error).name,
           stack: firstFrames(e),
@@ -2053,7 +2089,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
      */
     if (aborted) interruption = { kind: (e as RunAborted).kind, reason: (e as RunAborted).message };
     emit({ kind: 'error', status: aborted ? 'skipped' : 'error', data: { message: errSummary(e), aborted } });
-    if (!aborted) results.push({ stepId: '__run__', kind: 'noop', status: 'error', durMs: clock.mono() - t0, retry: 0, healed: false, nonReplayable: false, costUsd: 0, artifactIds: [], keyContext: {}, assertionSummary: errSummary(e), cause: 'env-unavailable' });
+    if (!aborted) results.push({ stepId: '__run__', kind: 'noop', status: 'error', durMs: clock.mono() - t0, retry: 0, healed: false, nonReplayable: false, costUsd: 0, artifactIds: [], keyContext: {}, assertionSummary: errSummary(e), cause: causeOfError(e) });
     /*
      * **位置在 push 之后**，这一点是有意的：`__run__` 那条 error 必须落在
      * resultBoundary **之前**，否则整体状态就不再是 error（异常被"洗白"成
@@ -2215,7 +2251,16 @@ function flakyOf(r: StepResult, attempt: number, waitedMs: number): FlakyAttempt
   return { attempt, status: r.status, waitedMs, ...(r.cause ? { cause: r.cause } : {}), ...(r.assertionSummary ? { summary: r.assertionSummary } : {}) };
 }
 
-class AssertionFailure extends Error {}
+/*
+ * 这里原本有一行 `class AssertionFailure extends Error {}`，本轮删掉：
+ * **全仓没有任何 throw 点**（src / test / tooling 全 grep 过，只剩 runStep 的
+ * 两个分支与 errSummary 的一处判据在"用"它），而那两个分支因此永远走不到 ——
+ * docs/14 §4.7 那条"到不了的防护分支"讲的正是这种。断言不成立在本文件里是
+ * **返回值**（`outcome.status === 'fail'`），从来不是异常，所以这个类不是
+ * "暂时没人抛、将来会有"，是从一开始就接错了一件事。
+ * 留着它的代价不是多一行代码，是**读代码的人会以为 fail 有一条异常路径**，
+ * 于是去 trace 里找那条不存在的路径。
+ */
 
 /**
  * 耗时写进**人读摘要**时的固定格式。
@@ -2358,7 +2403,17 @@ function preview(v: unknown): string {
   return s.length > 300 ? `${s.slice(0, 300)}…` : s;
 }
 function errSummary(e: unknown): string {
-  if (e instanceof PathError || e instanceof VarError || e instanceof AssertionFailure || e instanceof EnvMissing) return e.message;
+  /*
+   * 这一串是"**消息本身是不是一句完整的话**"的判据，与 `causeOfError` 那个
+   * "这是谁的错"的判据**不是同一件事**，所以刻意没有合并：
+   *  `ExprError` 的消息是完整句子但**不在这个名单里** —— 于是它带着
+   *  `ExprError: ` 前缀出去，而那前缀对语法错是有用的（一眼看出是表达式引擎报的）。
+   *  合并成一份会逼着两边取同一个立场，而它们本来立场不同。
+   *
+   * 名单里没有 `AssertionFailure`：那个类**没有任何 throw 点**（本轮 grep 过
+   *  src+test+tooling），已从本文件删除。
+   */
+  if (e instanceof PathError || e instanceof VarError || e instanceof EnvMissing) return e.message;
   if (e instanceof Error) return `${e.name}: ${e.message}`;
   return String(e);
 }

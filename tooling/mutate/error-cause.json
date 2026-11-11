@@ -1,0 +1,102 @@
+{
+  "_comment": [
+    "**错误 → 归因（cause）** 那张表（`engine/src/errors.ts`）。",
+    "",
+    "这一份管的是 docs/14 §5 那条老账的另一半：那条判据改动前**抄在五处、五处互相矛盾**",
+    "（同一个 `PathError` 在 assert 里是 case-stale、在 set 里是 env-unavailable）。",
+    "本轮把它收成一张表，于是'表里的值对不对'第一次变成一个**可以被改坏试试**的东西。",
+    "",
+    "**为什么这一族的变异要专门写一份而不是并进 value-forms.json**：",
+    "R4/R5 那两条测的是'值的形态'这一族怎么被归因，锚点在**表项**上但结论来自",
+    "`value-forms.test.ts` 那批用例。这一份测的是**表本身**（顺序、兜底、覆盖面、",
+    "以及报告里那一格有没有中文说法），结论来自 `error-cause.test.ts`。",
+    "两件事的失效方式也不同：那边跑偏的是'一个具体错法被归错'，",
+    "这边跑偏的是'整族被归错'或'新错误类静默落到兜底'。",
+    "",
+    "**C5 是这一份的核心一条**（把兜底改回改动前的 'env-unavailable'）。",
+    "它抓的是本轮真正买到的那个东西：新增一个没登记的错误类时，",
+    "旧写法会**编出一个像样的假答案**（值班人去查一个不存在的环境问题，",
+    "CI 照 CI_HINT 白重试一遍），新写法给的是'没归因'。",
+    "这个差别在改前没有任何测试能区分 —— 因为当时根本没有第二档可对照。",
+    "",
+    "C1/C8 是**覆盖面**那两条：删掉表里的一整行。它们红的是文件末尾那两条活护栏",
+    "（扫 `@atest/engine` 导出的每个错误类 + 扫 src 里每个类声明走父类链）。",
+    "这两条存在的意义是：如果只有'值对不对'的测试，那么'表少一行'这种错**只有",
+    "在有人正好用到那个类时**才会被发现 —— 而'少登记的那个类'天生就是没人用过的类。",
+    "",
+    "C6 容易被当成装饰，实际不是：`untriaged` 从'刚失败那一瞬间'变成了常规出口之后，",
+    "报告里那一格是值班人唯一的下一步指引。把标签删了，测试红的是渲染结果里",
+    "出现了裸枚举词（判据取自渲染出来的文本，不是 CAUSE_LABEL 里有没有这个键）。",
+    "",
+    "C4 是**声明等价的存活**（把 PathError 与 ExprError 两条整块对调）：",
+    "两个类互不为祖先，`instanceof` 的匹配结果与行序无关，所以行为一模一样。",
+    "它和 `\"expect\": \"equivalent\"` 那几条（V1/V2）同一个用途 ——",
+    "'顺序有意义'那句注释需要有个东西证明它指的是**子类会被父类先接住**这件事，",
+    "而不是'随便调个顺序都会坏'。真正会坏的那一条是 C3。"
+  ],
+  "cases": [
+    {
+      "label": "C1 覆盖面破了：表里少一行 PathError -> 写坏 `$.` 路径静默落到兜底，而那正是最常用的一类错法",
+      "_note": "删掉整行而不是改它的值 —— 改值由 C2 管。这一条要红的是那两条活护栏：\n      它们扫的是'每个错误类都得有条目'，所以表少一行必须被抓出来，\n      而不是等到某人哪天真的踩到 PathError 才发现。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: PathError,\n    cause: 'case-stale',\n    why: '`$.` 路径写坏（不以 $ 开头、下标未闭合、命中多值）。IR 里的字面写法错了，重试不会让它变合法。',\n  },\n  {\n",
+      "replace": "",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C2 归因跑偏：路径写坏被报成'环境不可用' -> 值班人去查环境，改用例的人被跳过",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: PathError,\n    cause: 'case-stale',",
+      "replace": "    base: PathError,\n    cause: 'env-unavailable',",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C3 '顺序有意义'那句注释是假的：把子类判得和父类不同（NotWiredError 一族改判 case-stale）",
+      "_note": "这一条与 C4 配对着读。C3 改的是**值**（子类跟着一起变），C4 改的是**行序**（什么都不变）。\n      两个都能改，只有前者该红 —— 那才证明表的结构是'一类一族'，行序只在父子关系上才要紧。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: NotWiredError,\n    cause: 'env-unavailable',",
+      "replace": "    base: NotWiredError,\n    cause: 'case-stale',",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C4 行序与匹配无关：PathError 与 ExprError 两条整块对调（互不为祖先）—— 声明等价",
+      "_note": "真正的整块对调：把 PathError 与 ExprError 两条**互换位置**（不是加注释）。\n      两者互不为祖先，`instanceof` 的匹配结果与行序无关，所以行为逐字节相同 —— 测试必须还是绿的。\n      如果这一条**红了**，说明有测试在依赖表里的行序（按 index 取条目、或断言'第一条是 VarError'），\n      那就是测试写错了：判据的语义是'第一个命中的类'，不是'第几行'。\n      真该依赖顺序的只有父子关系（子类被父类那条先接住），那是 C3 的地盘。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "  {\n    base: PathError,\n    cause: 'case-stale',\n    why: '`$.` 路径写坏（不以 $ 开头、下标未闭合、命中多值）。IR 里的字面写法错了，重试不会让它变合法。',\n  },\n  {\n    base: ExprError,\n    cause: 'case-stale',\n    why: '表达式语法错 / 未知函数 / 未知运算符。同上一条：错在 IR 里。（两类引擎自身的 ExprError 见文件顶部\"没做的两件事\"。）',\n  },\n",
+      "replace": "  {\n    base: ExprError,\n    cause: 'case-stale',\n    why: '表达式语法错 / 未知函数 / 未知运算符。同上一条：错在 IR 里。（两类引擎自身的 ExprError 见文件顶部\"没做的两件事\"。）',\n  },\n  {\n    base: PathError,\n    cause: 'case-stale',\n    why: '`$.` 路径写坏（不以 $ 开头、下标未闭合、命中多值）。IR 里的字面写法错了，重试不会让它变合法。',\n  },\n",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C5 核心回归：兜底回到改动前的 env-unavailable -> 没登记的新错误类被编出一个像样的假答案",
+      "_note": "这就是本轮买到的那件事。改前没有任何测试能区分这两档，因为只有一档。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "  return 'untriaged';",
+      "replace": "  return 'env-unavailable';",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C6 报告里那一格退回裸枚举词：untriaged 变成常规出口之后没人告诉值班人下一步做什么",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  untriaged: '没归因 → 看下面那句原始报错，并在 engine/src/errors.ts 登记这个错误类',",
+      "replace": "  // 删掉这一格：CAUSE_LABEL 里没有的键，渲染时原样显示 r.cause",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C7 过度修的形态：'平台没接线'被判成用例过期 -> 有人去改一条没坏的用例",
+      "_note": "本轮最担心的不是把用例错判成环境（难查），而是反过来（会改掉好东西）。\n      所以'不许过度修'那一组是这一族里最重要的测试，它需要一条自己的变异。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: TransportError,\n    cause: 'env-unavailable',",
+      "replace": "    base: TransportError,\n    cause: 'case-stale',",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C8 覆盖面破了（第二个位置）：少 LocatorBudgetError 那一行 -> 超预算静默落兜底",
+      "_note": "与 C1 同一条护栏、不同的一行。为什么留两条而不是一条：\n      护栏的实现是'扫全集再逐个查'，只删一行的话，\n      '扫描只对我恰好想到的那个类有效'这种写错法照样绿。",
+      "file": "packages/engine/src/errors.ts",
+      "anchor": "    base: LocatorBudgetError,\n    cause: 'case-stale',\n    why: '这一步用了比 IR 声明的 maxCostUsdPerResolve 更贵的定位法，是用例/定位器选型问题。报 product-bug 会让人去查一个不存在的功能 bug。',\n  },\n  {\n",
+      "replace": "",
+      "testFile": "packages/engine/test/error-cause.test.ts"
+    }
+  ]
+}

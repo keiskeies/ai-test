@@ -41,6 +41,7 @@
  * 宁可多等到超时（红，看得见）也不悄悄绿 —— 与本文件 `wait.ts` 里 gone 方向同一条立场。
  */
 import type { NetworkObserver, ObservedResponse } from './adapters.js';
+import { NotWiredError } from './errors.js';
 
 /**
  * pattern 与 url 的匹配口径：**子串包含**，区分大小写。
@@ -197,7 +198,7 @@ export class ResponseWindow {
  * 恰好退回本轮修掉的那个形态（被吞成超时）。求值时判一次，
  * 覆盖的是真实走到的分支，且只有一份判据。
  */
-export class NoNetworkObserver extends Error {
+export class NoNetworkObserver extends NotWiredError {
   constructor() {
     super('等待条件里有 response（等某个接口回来），但没配 adapters.network —— '
       + '页面内请求只有浏览器看得见，引擎不碰网络，所以没有任何东西能提供这个数据。'

@@ -5,9 +5,9 @@
 import type { WaitPredicate, WaitCondition } from '@atest/ir';
 import { describePredicate } from '@atest/ir';
 import { queryOne } from './jsonpath.js';
-import { locatorGate, chargeResolve, LocatorBudgetError } from './resolve.js';
+import { locatorGate, chargeResolve } from './resolve.js';
 import { NoNetworkObserver, ResponseWindow } from './responses.js';
-import { VarError } from './vars.js';
+import { NotWiredError, causeOfError } from './errors.js';
 import type { AdapterRegistry, Clock, ExecContext, NetworkObserver, ResolveResult } from './adapters.js';
 
 export interface WaitDeps {
@@ -83,7 +83,7 @@ export interface NewPageObserver {
 }
 
 /** 缺新窗口观测口。抛的时机与理由同 `NoNetworkObserver`（见 responses.ts）。 */
-export class NoNewPageObserver extends Error {
+export class NoNewPageObserver extends NotWiredError {
   constructor() {
     super('等待条件里有 newPage（等页面新开标签页/窗口），但没配 adapters.newPage —— '
       + '新窗口只有浏览器看得见，引擎不碰窗口生命周期，所以没有任何东西能提供这个数据。'
@@ -115,7 +115,7 @@ export class NoNewPageObserver extends Error {
  * 预检 —— 新增一种需要 adapter 的条件时没人会记得回来加一项，漏加的那种恰好退回
  * "被吞成超时"。求值时判一次，覆盖的是**真实走到的**分支。
  */
-export class NoConditionAdapter extends Error {
+export class NoConditionAdapter extends NotWiredError {
   /** 哪一种等待条件要不到东西（`dbRow` / `uiPredicate` / `template` / `uiIdle`）。 */
   readonly conditionType: string;
   /** 试过哪些 adapter 槽位都没有。给 CI 摘要与测试用，不让它只活在文案里。 */
@@ -214,19 +214,6 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
       ok = await evalPredicate(d.predicate, edeps);
     } catch (e) {
       /*
-       * **定位超预算必须掀翻整个等待循环**，不能被下面那句"当成还没满足"吞掉。
-       *
-       * 这是本文件里唯一一处"异常类型选错就放大损失"的地方：超支在语义上长得像
-       * "条件没成立"（都是"这一步还没成"），所以用一个普通 Error 会让它
-       * 被当成普通求值错误 -> 继续轮询 -> **每轮再花一次同样的钱**。
-       * 一个 10s / pollMs=500 的 uiPredicate 等待 = 20 次付费定位。
-       * 一个本来只超预算 $0.001 的等待，变成超 $0.02。
-       *
-       * 抛出后由 runStep 的 catch 收成 fail + case-stale（不是 error，
-       * 因为 error 走退出码 5、而 CI_HINT 教 CI 重试一次 = 再花一遍）。
-       */
-      if (e instanceof LocatorBudgetError) throw e;
-      /*
        * **"没接网络观测口"也不是"条件还没成立"**，同理必须往外抛。
        *
        * 本轮修的就是这个：`wait{response}` 以前恒为假（读一个没人写的变量），
@@ -255,22 +242,47 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
        */
       if (e instanceof NoConditionAdapter) throw e;
       /*
-       * **用例自己写错了引用，要让 runStep 那一份 cause 判据去定归因**，
-       * 不能在这里带 evalError 回来。
+       * **用例自己写错了（引用/路径/表达式/生成器种类/定位超预算），要让 runStep
+       * 那一份 cause 判据去定归因**，不能在这里把它降级成一句 evalError 字符串。
        *
-       * 解释器的 catch 里那句 `VarError -> case-stale，其它 -> env-unavailable`
-       * 是全仓唯一一处"按异常类型定归因"的判据（resolve.ts 顶部特意写了这条契约，
-       * 就是为了让抛 VarError 成为"这是用例写错"的唯一表达方式）。
-       * 我在下面那个 return 里再写一遍 `r.evalErrorName === 'VarError' ? …`，
-       * 就等于同一件事两处各写一份 —— 本仓为这类漂移记过不止一次账。
+       * 改动前这一行是 `if (e instanceof VarError) throw e;` —— 只放 VarError 出去。
+       * 于是**同一条写坏的 `$.` 路径**（PathError）在 `set` 步与在 `wait` 条件里
+       * 得到不同的归因：前者走到 runStep 的 catch，后者被下面那个 return 吞成
+       * 字符串，再由解释器那两句**无条件** `cause: 'env-unavailable'` 定案。
+       * 改前实测（`.scratch/probe-cause-default.mts`，改前的两种写法都是
+       * `error + env-unavailable`；永久落点是
+       * `packages/engine/test/error-cause.test.ts` 里「同一个错换位置」那组）：
+       * `wait` 条件里的 PathError/ExprError 与 `assign` 里的**同一条**，
+       * 在改前**都**归错（都成"环境不可用"），而 `docs/14` §5 登记这一条时
+       * 只记了 `assign` 那一行，**没记 wait 这条路**。
        *
-       * 为什么这件事值得单独一条：实测（`.scratch/probe-varref.mts`）改前
-       * `wait{httpStatus, ref:'$.step.nope.resp'}` 报 **env-unavailable**，
-       * 而**同一个未定义引用**写在 `db` 步的 vars 里、或 `extract` 的 from 里，
-       * 报的都是 **case-stale**。一个"引用了没有输出的步骤"的用例错误，
-       * 换一种写法就变成"环境不可用"，CI 会照 CI_HINT 重试一次（而引用不会因为重试而存在）。
+       * **判据用 `causeOfError(e) === 'case-stale'`，而不是在这里再列三个类名**：
+       * 列类名等于把"哪些错属于用例自己写错"抄第二遍，而本文件下面那段注释
+       * （"我在下面那个 return 里再写一遍 `r.evalErrorName === 'VarError' ? …`
+       * 就等于同一件事两处各写一份"）说的正是这件事 —— 那段注释本身是对的，
+       * 只是它下面那行代码违反了它。
+       *
+       * ⚠ **这一行同时守着"钱"**（原来由上面那句独立的
+       * `if (e instanceof LocatorBudgetError) throw e;` 守，本轮删了它，
+       * 因为把 LocatorBudgetError 登记进表之后那一行就成了这句的**重复**：
+       * 删掉它，行为逐字节相同 —— 变异检查实测到"删了照样全绿"，
+       * 那正是 docs/14 §4.7 说的"到不了 / 多余的分支"）。
+       * 超支在语义上长得像"条件没成立"（都是"这一步还没成"），一旦被下面那句
+       * 当成普通求值错误 -> 继续轮询 -> **每轮再花一次同样的钱**：
+       * 一个 10s / pollMs=500 的 uiPredicate 等待 = 20 次付费定位，
+       * 本来只超预算 $0.001 的等待变成超 $0.02。
+       * 所以**"给 LocatorBudgetError 登记什么归因"是一个花钱问题，不只是报表问题**：
+       * 把它从表里删掉（或改判成别的值）=> 这里不再外抛 => 单次超支变成 20 次。
+       * 这条跨文件耦合由 `tooling/mutate/locator-budget.json` 盯着
+       * （它的锚点本轮就搬到了表那一行），永久落点是
+       * `locator.test.ts` 里「等待里超预算 => 第一次 poll 就停」那条（它数次数，不只看状态
+       * —— 状态在这种情况下照样是 fail，只看状态就是假绿）。
+       *
+       * 反过来，**不满足这条的一律照旧吞**（adapter 抛的错、数据库拒了这条 SQL）：
+       * 那些可能是瞬时故障，"求值报错就再等一轮"对它们是**对的**，
+       * 外抛会把一次抖动变成红灯。这条界线是本轮量出来的，不是我推的。
        */
-      if (e instanceof VarError) throw e;
+      if (causeOfError(e) === 'case-stale') throw e;
       // 条件求值本身报错（变量未定义等）不能当成「还没满足」干等到超时 ——
       // 那会把一个配置错误伪装成一次超时，是最难查的一类 flake
       return {

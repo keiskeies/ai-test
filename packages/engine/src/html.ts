@@ -83,6 +83,12 @@ const stateOf = (s: string): { icon: string; label: string; v: string } =>
 /**
  * 归因的中文说法。值班人看这个决定"找谁"，所以措辞要能直接指向下一步动作。
  * 词表与 ir 的 FAILURE_CAUSE 封闭枚举一致；没列出来的原样显示（不猜）。
+ *
+ * `untriaged` 这一条本轮加：它从前只出现在"刚失败、还没人看"那一瞬间，
+ * 而 `errors.ts` 把归因判据的**兜底**从 env-unavailable 换成它之后，
+ * 它成了"新错误类没登记"的常规出口。那时报告里印一个裸的英文枚举词
+ * 是不够用的 —— 这一张表的用处就是让人知道下一步做什么，
+ * 而这一格的下一步动作很具体：看那句原始报错，然后去 errors.ts 登记这个类。
  */
 const CAUSE_LABEL: Record<string, string> = {
   'product-bug': '产品缺陷 → 提 BUG',
@@ -91,6 +97,7 @@ const CAUSE_LABEL: Record<string, string> = {
   'locator-stale': '定位失效 → 重新录定位器',
   'data-conflict': '数据冲突 → 查数据/租约',
   flaky: 'flaky → 看历史抖动，别急着改代码',
+  untriaged: '没归因 → 看下面那句原始报错，并在 engine/src/errors.ts 登记这个错误类',
 };
 
 /**

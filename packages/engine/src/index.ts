@@ -13,6 +13,10 @@ export * from './adapters.js';
 export * from './jsonpath.js';
 export * from './expr.js';
 export * from './vars.js';
+// 归因判据。导出的理由与 redact.ts 同一条：**判据只许有一份**。
+// 少了这行，调用方（CLI 的 triage 面板、store 的看板）就会自己写一份
+// `instanceof` 链，于是"这一步为什么失败"在报告和看板里能有两种答案。
+export * from './errors.js';
 export * from './wait.js';
 export * from './assertions.js';
 export * from './interpreter.js';

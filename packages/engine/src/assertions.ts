@@ -10,6 +10,7 @@ import type { StepResult, TraceEvent } from '@atest/ir';
 import { STEP_TARGET } from '@atest/ir';
 import { query, queryOne, PathError } from './jsonpath.js';
 import { compileExpr } from './expr.js';
+import { causeOfError } from './errors.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
 
 export interface AssertOutcome {
@@ -148,7 +149,19 @@ export function evalStructAssert(payload: { against: string; status?: number | n
         if (!one.ok) { failures.push(`${r.paths[i] ?? path}: ${one.why}`); break; }
       }
     } catch (e) {
-      if (e instanceof PathError) return { status: 'error', summary: `断言路径错误：${e.message}`, cause: 'case-stale' };
+      /*
+       * 这里**以前**写的是 `cause: 'case-stale'` —— 数值上恰好与 `causeOfError` 相同，
+       * 但它是那条判据的**第五份手抄**（详见 errors.ts 顶部那张表），
+       * 而且正是它让"同一条写坏的 `$.` 路径"在 assert 里是"用例过期"、
+       * 在 set 里是"环境不可用"。改成调判据之后，**这里不再持有分类立场**，
+       * 只保留本地那个"要不要把异常咽成返回值"的决定（那是本函数的事，不是判据的事）。
+       *
+       * 判据仍是 `instanceof PathError` 而**不是** `causeOfError(e) === 'case-stale'`：
+       * 这一处吞的是"断言里那条路径写坏了"这一件具体的事，
+       * 换成后者会把 ExprError / 超预算也一起咽进"断言路径错误"这句摘要里，
+       * 摘要就开始说谎（`payload.expr` 的语法错走不到这里，它有自己的分支）。
+       */
+      if (e instanceof PathError) return { status: 'error', summary: `断言路径错误：${e.message}`, cause: causeOfError(e) };
       throw e;
     }
   }
