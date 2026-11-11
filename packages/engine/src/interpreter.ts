@@ -263,9 +263,44 @@ const newLeaseSlot = (from?: Lease): LeaseSlot => ({ lease: from, owns: false })
 export async function runScenario(opts: RunOptions): Promise<RunReport> {
   const { scenario, adapters, clock } = opts;
   const runId = opts.runId ?? `run_${clock.now().toString(36)}`;
-  // inputDefs 传 scenario.inputs：声明了 default 的输入要能被兜住，
-  // 否则 IR 里的 default 是个没人读字段（详见 vars.ts 的 applyInputDefaults）
-  const rootVars = new VarSpace({ inputs: opts.inputs, inputDefs: scenario.inputs, env: opts.env, secretResolver: opts.secretResolver });
+  // 提到最前面：下面那条"inputs 的 default 求值失败"的早退报告也要算 durMs。
+  const startedAt = clock.now();
+  const t0 = clock.mono();
+  /*
+   * `inputDefs` 传 scenario.inputs：声明了 default 的输入要能被兜住，而 default 里写的
+   * `{expr}` / `{path}` / `{gen}` 也要被**求值**（详见 vars.ts 的 applyInputDefaults）。
+   * 求值器就在下面这几行里现造 —— 它要的 clock 是运行时的东西，所以由这一侧的闭包给出，
+   * `VarSpace` 自己不持有 clock。
+   *
+   * ⚠ **这一条求值路径上没有 try**，因为构造器在这里、而 run 级的那个 try 在两百行之后。
+   * 所以 default 求不出来时**不能靠 catch**：catch 不到，异常会一路冒到 CLI 顶层，
+   * 而顶层那段是写给"我们的 bug"的 —— 用户会在屏幕上读到
+   * 「atest run 内部错误：… 这不是你的用例的问题（用例问题会给出具体规则名与位置）。请报 bug」，
+   * 一句恰好说反的话。所以这里显式收口成一份**正常的 error 报告**，走与任何用例错误同一条出口。
+   */
+  let rootVars: VarSpace;
+  try {
+    rootVars = new VarSpace({
+      inputs: opts.inputs, inputDefs: scenario.inputs, env: opts.env, secretResolver: opts.secretResolver,
+      resolveDefault: (def, vars) => resolveValueShared(def.default, { vars, clock }),
+    });
+  } catch (e) {
+    const msg = errSummary(e);
+    return {
+      runId, status: 'error', startedAt, durMs: clock.mono() - t0,
+      results: [{
+        stepId: '__inputs__', kind: 'noop', status: 'error', durMs: 0, retry: 0, healed: false,
+        nonReplayable: false, costUsd: 0, artifactIds: [], keyContext: {},
+        assertionSummary: msg, cause: causeOfError(e),
+      }],
+      // 一条 run.started 都不发：这条 run 确实一步没跑，而 report.ts 里
+      // "没有 run.started" 与 "有但场景 id 不认识" 的处置本来就不同（见那里那段退回逻辑）。
+      events: [{ kind: 'error', status: 'error', data: { message: msg }, seq: 0, ts: new Date(clock.now()).toISOString(), mono: clock.mono(), path: [], }],
+      outputs: {}, costUsd: 0,
+      tally: { pass: 0, fail: 0, error: 1, healed: 0, skipped: 0, triaged: 0 },
+      summary: `error · inputs 的 default 求值失败 · ${msg}`,
+    };
+  }
   const events: TraceEvent[] = [];
   const results: StepResult[] = [];
   /**
@@ -284,8 +319,6 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
   let seq = 0;
   let costUsd = 0;
   const maxCost = opts.maxCostUsd ?? scenario.config.maxCostUsd;
-  const startedAt = clock.now();
-  const t0 = clock.mono();
 
   const emit = (e: EmitIn): void => {
     const ev: TraceEvent = { seq: seq++, ts: new Date(clock.now()).toISOString(), mono: clock.mono(), path: [], data: {}, ...e };
@@ -1306,6 +1339,11 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           // 子场景自己的 inputs 声明：call.args 没给全时由子场景的 default 兜。
           // 用 child.inputs 而不是父场景的 —— default 属于被调用方
           inputDefs: child.inputs,
+          // 子的 default 用**子这一台**变量空间求值（不是父的）：它引用的是子自己的输入。
+          // 求不出来时不在这里收口 —— 它冒到 runStep 的 catch，变成这一步的 error 结果
+          // （cause 由 causeOfError 定，VarError → case-stale），
+          // 与"子场景里任何一句求值炸了"同一条出口，不需要特殊照顾。
+          resolveDefault: (def, v) => resolveValueShared(def.default, { vars: v, clock }),
           env: opts.env, secretResolver: opts.secretResolver,
         });
         const rep = await runScenarioIn({ scenario: child, vars: childVars, adapters, clock, emit: (e: EmitIn) => emit({ kind: e.kind as TraceEvent['kind'], stepId: e.stepId, status: e.status as TraceEvent['status'], durMs: e.durMs, data: e.data, path: [...path, s.id] }), addCost, secretResolver: opts.secretResolver, envRevision: opts.envRevision, callStack: [...callStack, child.id], responseLedger, signal: opts.signal });

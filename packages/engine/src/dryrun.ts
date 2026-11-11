@@ -67,9 +67,27 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
    *    像什么都没少"），已登记 docs/14 §5。
    */
 
-  // 变量空间只做结构初始化，确认 inputs/env 能建起来（构造期报错说明 IR 有问题）。
-  // 带上 inputs 声明，好让 VAR_UNDEFINED 不把"有 default 的输入"报成未定义
-  new VarSpace({ inputs, inputDefs: scenario.inputs, env: scenario.env });
+  /*
+   * 只**结构自检**，不求值 default。
+   *
+   * `new VarSpace(...)` 的返回值在这一行就丢了，所以它唯一能做的事是**抛** ——
+   * 而它的 `inputs` 是调用方（编辑器面板 / Agent 那道闸）**已经填好的实参**：
+   * 面板按 IR 的 `default` 预填表单之后才调 dry-run，于是"补 default"这一查在这里
+   * 本来就是空转。真正的 default 求值发生在两个真入口（interpreter / executor），
+   * default 里写坏的东西由 `lint.ts` 那条值形态语法查负责报（`eachValuePosition` 那一块）。
+   *
+   * 改前两件事顺带修掉：
+   *  1. `env: scenario.env` 是**类型对错而形状错**的对象 —— `ScenarioSchema.env` 是
+   *     `{environmentRef, pinRevision?}`（环境引用），而 interpreter / executor 传的是
+   *     **环境变量表**（`process.env` 那一类）。于是 `$env.baseUrl` 在 dry-run 这一侧
+   *     永远查不到，在真跑那一侧能查到。形状不同的两侧给相反答案，正是本轮删掉
+   *     dry-run 自己那套表达式校验时处理的同一个毛病（见上面第 40 行那段）。
+   *     干跑拿不到真实环境（那要靠真环境 + 版本锁定），所以这里给**空表**，
+   *     而不是继续挂着那个形状不对的东西。
+   *  2. `inputDefs` 一并去掉：自 `VarSpaceInit` 起，带声明就**必须**带求值器
+   *     （类型上强制，漏接一个入口会编译不过），而这里既不求值、也不读它。
+   */
+  new VarSpace({ inputs, env: {} });
 
   let steps = 0;
   const count = (arr: unknown[]): void => {

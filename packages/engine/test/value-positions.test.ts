@@ -379,6 +379,21 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
      */
     const deliberatelyUnresolved: Record<string, string> = {};
     /*
+     * ⚠ **这一张表管不到场景级的位置**，而这不是疏忽而是上面那个扫描器的边界：
+     * 它走的是 `StepSchema` 的 union 成员，所以 `inputs[].default`（不在任何步骤里）
+     * **压根不会出现在 `sites` 里**。于是"清单里有而 schema 扫不到 = 过期"那一条
+     * 也不会因为我没列它而响 —— 也就是说**这一格在本文件里既查不到也漏不掉**。
+     *
+     * 记在这里而不是"顺手把它加进 resolved"：加进去会被 `stale` 那一条判成过期
+     * （扫描器扫不到它），那是对的 —— 这张表只能装**扫描器认得的**位置。
+     *
+     * `inputs[].default` 现在的守卫在别处，两处都是实的：
+     *  · 求值本身（四种形态 × 三个真入口）→ `input-defaults.test.ts`
+     *  · 语法预先校验 → `value-form-syntax.test.ts` 那一组
+     * 要真把它也纳入本文件的对撞，得先给扫描器加"从 `ScenarioSchema` 起扫、
+     * 跳过三段步骤树"的第二条根，而那是另一件事（登记在 docs/14 §5）。
+     */
+    /*
      * 同一个 request 对象上紧挨着 formData 的那一格 —— `files[].fixtureRef`
      * —— **不是 ValueSchema**（`z.string()`），所以它不进这张表（进了就会被下面
      * 那条"清单里有而 schema 扫不到"判成过期，那是对的：这张表只能装值形态位置）。

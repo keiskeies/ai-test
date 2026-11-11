@@ -15,7 +15,11 @@
  * secret.* 换成不透明占位符，真实值只在 adapter 发请求那一刻取。
  */
 import { PathError, parsePath, queryOne, setPath } from './jsonpath.js';
-import { CONTEXT_LIMITS, SECRET_PLACEHOLDER, redactForDisk } from './redact.js';
+import { compileExpr } from './expr.js';
+import { CONTEXT_LIMITS, SECRET_PLACEHOLDER, redactForDisk, redactSecretText } from './redact.js';
+// 值形态判据取自 ir —— **与运行期求值、lint 三处同一个函数**，
+// 这里若自己再手写一遍"什么算引用/表达式"，就是本仓反复那一族"三份手抄各错一次"。
+import { isValueForm } from '@atest/ir';
 
 /** 单一策略在 redact.ts。这里只是**再导出**，不是又写一份 ——
  *  两份脱敏规则各自演化的后果见 redact.ts 顶部。 */
@@ -41,9 +45,27 @@ export interface InputDef {
 }
 
 /**
- * 把 `scenario.inputs[].default` 兜进运行输入。
+ * 求值器注入点 —— **由调用方把 `resolve.ts` 的 `resolveValue` 交进来**，而不是这里 import。
  *
- * **这行代码之前是不存在的**，后果不是"少一个便利功能"而是行为与声明相反：
+ * 为什么不让 `vars.ts` 直接 `import { resolveValue } from './resolve.js'`：
+ * `resolve.ts` 顶层有 `class GenKindError extends VarError`，也就是**模块加载期**就要读到
+ * `vars.ts` 的 `VarError`。让 vars 反过来 import resolve 就成一个模块环，
+ * 而模块环的表现取决于两侧谁先被加载：从 `index.js` 进是好的，
+ * 单独 `import { VarSpace } from '../src/vars.js'` 可能就是 `Class extends value undefined`。
+ * 这类"换个入口就炸"的东西没法靠测试穷举（每条入口路径都得测一遍才知道有没有炸），
+ * 所以挡在结构上：**本文件不 import resolve**。
+ *
+ * 传进来的仍然是 `resolve.ts` 里那**同一份** `resolveValue`，所以"两条执行形态共用一份
+ * 求值"这件事没有因此多出第二个版本。第二个入参是**正在构造中的那一台变量空间**：
+ * 求值 default 要走的正是它自己（`$other` 与 `$run.inputs.other` 都得命中已求出的那些），
+ * 由构造器把自己交进来，调用方因此不需要知道"构造到一半的 VarSpace 能不能用"这件事。
+ */
+export type DefaultValueResolver = (def: InputDef, space: VarSpace) => unknown;
+
+/**
+ * 把 `scenario.inputs[].default` 兜进运行输入，**并把值形态求值掉**。
+ *
+ * **这个函数之前是不存在的**，后果不是"少一个便利功能"而是行为与声明相反：
  * IR 里写 `inputs:[{name:"q", default:"DEF"}]`，作者以为不传就是 DEF，
  * 实际得到的是 `引用未定义（变量：$q）`；而 UI 的表单按 IR 的 default 预填了值，
  * 于是**从 UI 跑能过、从 CI 跑必炸** —— 同一份 IR 两种行为，
@@ -53,7 +75,31 @@ export interface InputDef {
  * （前 4 例：maxCostUsdPerResolve、wait.onTimeout:'error'、assertPerf.maxRegressionRatio、
  * Match.unordered —— 见 docs/08 §3 的清扫方法）。
  *
- * 三条语义决定：
+ * ## 第二阶段（本轮）：default 里写的 `{expr}` / `{path}` / `{gen}` 也要求值
+ *
+ * 上一轮把 default 兜住了，但只是**原样**塞进去。`{expr:'1 + 2'}` 到了下游
+ * 还是那个对象本身，发出去的 body 里就是 `{"expr":"1 + 2"}`，而**步骤判 pass**、
+ * 退出码 0（改前实测见 docs/14 §5 那一行）。判据是 `ParamDefSchema.default` 是
+ * 货真价实的 `ValueSchema`（四种形态都收），而执行侧只 `out[d.name] = d.default`
+ * —— 同一个缺陷类，这次是**字段读到了、值没求值**。
+ *
+ * ## 为什么是定点迭代而不是"按声明顺序来一遍"
+ *
+ * default 之间可以互相引用（`{path:'$other'}`）。按声明顺序单趟的话，
+ * `b` 引用 `a` 能成、`a` 引用 `b` 就永远报"引用未定义"，
+ * 而**"改一下 inputs 的书写顺序就能跑通"正是本文件通篇在反对的那类行为**
+ * （同一份 IR 挪个位置就换语义）。所以每轮只处理"现在求得出"的那些，
+ * 求出的写回 `target`（也就是活着的 `run.inputs`）成为后续几轮的可见值，直到某轮没有进展。
+ *
+ * 关键的一条：**没求出来的 default 一个字都不写进 target**。可见的只有"显式传入的 +
+ * 已求完的"，于是引用一个还没求出来的输入自然得到 `引用未定义`（下一轮再试），
+ * 而**不可能**拿到那个 `{expr:…}` 半成品 —— 半成品外泄正是本轮在修的那个缺陷，
+ * 把它当中间状态用等于换种方式留着它。
+ *
+ * 没有进展而仍有剩下的就是**互引成环**，抛而不是死循环：单看 `a`、`b` 各自都是合法 IR，
+ * 只有合起来才不成立，所以报出来必须点名这一组，否则人只会去改其中一个。
+ *
+ * ## 语义决定（沿用旧的那三条，未改）
  *  1. **只有"根本没传这个键"才用 default**，`{q: undefined}` 也算传了。
  *     区分不出来就会出现"传 null 想清掉默认值，结果又被兜回 DEF"。
  *  2. default **不做类型校验**。IR 的 ParamDef.type 由 lint/解析期保证，
@@ -61,15 +107,254 @@ export interface InputDef {
  *  3. default 与传入值**同放一层**（都在 run.inputs 下），不做"外层遮蔽内层"：
  *     二者不是两个来源的同名冲突，而是同一个输入的两个取值，
  *     分两层会让 `$.run.inputs` 的遍历结果出现重名键。
+ *
+ * @param target 已经装着**显式传入的**那些输入的对象；求出来的 default 就地写回它，
+ *   返回值就是它。构造器把准备挂上 `run.inputs` 的那个对象交进来，
+ *   于是"求出来"与"下游看得见"是同一个动作，没有第二份清单需要同步。
+ * @param resolve 求值器。**不传就是上一轮的行为（原样塞）**，而生产路径不会走到那一支：
+ *   `VarSpace` 的类型要求"传了 `inputDefs` 就必须给求值器"（见构造器的 init 联合类型），
+ *   漏一个入口不是"少个优化"而是**编译不过**。留着这一支只为"只要兜底、不求值"的夹具。
  */
-export function applyInputDefaults(defs: readonly InputDef[] | undefined, given: Record<string, unknown> | undefined): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...(given ?? {}) };
-  if (!defs) return out;
-  for (const d of defs) {
-    if (!d || typeof d.name !== 'string') continue;
-    if (!(d.name in out)) out[d.name] = d.default;
+export function applyInputDefaults(
+  target: Record<string, unknown>,
+  defs: readonly InputDef[] | undefined,
+  resolve?: (def: InputDef) => unknown,
+): Record<string, unknown> {
+  if (!defs?.length) return target;
+  // 待求的按**声明顺序**起排（拓扑排序的入队顺序也用它，于是同一份 IR 的求值顺序
+  // 与 `{gen:…}` 取值确定 —— 顺序随机会让两次运行的默认值不同，破 M7 的确定性断言）
+  const pending = defs.filter((d) => d && typeof d.name === 'string' && !(d.name in target));
+  if (!resolve) {
+    for (const d of pending) target[d.name] = d.default;
+    return target;
   }
+
+  // 名字 → 它依赖哪些**同样待求的** default。只连这一类边：
+  // 依赖显式传入的输入（已在 target 里）与依赖 env 都不需要等。
+  const pendingNames = new Set(pending.map((d) => d.name));
+  const deps = new Map(pending.map((d) => [d.name, defaultValueDeps(d, pendingNames)]));
+
+  const order: InputDef[] = [];
+  // 注意**不**去掉自引用那条边：`{path:'$self'}` 排不完，于是自然落进下面那一格，
+  // 拿到"点名这一组"的报错。若把它当"无依赖"先求，得到的是一句"引用未定义（变量：$self）",
+  // 而人会去查"我没传这个输入吗"—— 它传了，就在下一行。
+  const waitingOn = new Map(pending.map((d) => [d.name, [...deps.get(d.name)!]]));
+  // Kahn，队列按声明顺序种子化：先入队的先求，可解的图里每个节点恰好出队一次
+  let ready = pending.filter((d) => waitingOn.get(d.name)!.length === 0);
+  const done = new Set<string>();
+  while (ready.length) {
+    const next: InputDef[] = [];
+    for (const d of ready) {
+      order.push(d);
+      done.add(d.name);
+      for (const other of pending) {
+        if (done.has(other.name) || other.name === d.name) continue;
+        const w = waitingOn.get(other.name)!;
+        if (!w.includes(d.name)) continue;
+        w.splice(w.indexOf(d.name), 1);
+        if (w.length === 0) next.push(other);
+      }
+    }
+    ready = next;
+  }
+  /*
+   * 排不完就是**互引成环**（`a` 引 `b`、`b` 引 `a`，或自引 `$who`）。
+   *
+   * 为什么这一格值得单独判而不是"求值时抛引用未定义"：**单看每一条 default 都是合法 IR**，
+   * 只有合起来才不成立。留给求值侧的话，症状是"引用未定义（变量：$b）"，
+   * 人会去查"我没传 b 吗"，而 b 明明声明了 —— 本仓反复那类"把结构问题说成值问题"。
+   * 这里能点名整组，并且说清 default 求值发生在任何步骤之前（所以引用步骤产出也是同一类错）。
+   *
+   * ⚠ **一个名字的情况要说"自引用"，不能说"互相引用"。** 我第一版对
+   * `default:{path:'$who'}` 报的是「互相引用、求不出值（who）」—— 只点名了一个名字却说"互相"，
+   * 人会去找"和谁互相"，而答案就在自己这一行。这一格是实测出来的（`.scratch` 探针），
+   * 不是推想：单元素那一组在拓扑排序里和真环落在同一个桶，而它们的**人话**不一样。
+   */
+  if (order.length !== pending.length) {
+    const cyclic = pending.filter((d) => !done.has(d.name)).map((d) => d.name);
+    const shape = cyclic.length === 1
+      ? `inputs[].default "${cyclic[0]}" 引用了它自己，求不出值`
+      : `inputs 的 default 互相引用、求不出值（${cyclic.join(' ↔ ')}）`;
+    throw new VarError(
+      `${shape}。default 在**任何步骤跑之前**求值，`
+      + '所以只许引用显式传入的输入、环境变量，或不构成环的其它 default',
+      cyclic.join(','),
+    );
+  }
+
+  for (const d of order) target[d.name] = resolve(d);
+  return target;
+}
+
+/**
+ * 一条 default 依赖哪些输入名（拓扑排序的边）。**lint 侧也用它**（见下面"为什么导出"）。
+ *
+ * 走的是**值形态那一棵树**：`resolveValue` 对非值形态的对象/数组会递归下去，
+ * 所以 `{tag:'x', n:{expr:'$base + 1'}}` 里的 `$base` 也算依赖 ——
+ * 少递归一层就是"少一条边"，而少一条边的后果是**排序可能把依赖方排在前头**，
+ * 于是拿到 `undefined`（表达式对缺失引用返回 undefined，不抛）。
+ * 那正是这一族最难查的形状：值错了而状态是 pass。
+ *
+ * 两条刻意的取舍：
+ *  - **只认落在 `pendingNames` 里的名字**。`$env.baseUrl`、`$sku`（显式传入的输入）
+ *    都不需要等，连边只会让图无缘无故出现"排不完"的假环。
+ *  - **表达式解析不了就当没有依赖**，而不是在这里抛。语法错要由求值那一侧报，
+ *    那里知道是**哪一条输入**的 default 坏了；在这里抛就只能说"某条 default 语法错"。
+ *    排序对一条本来就会失败的 default 是否精确，没有意义。
+ */
+function defaultValueDeps(def: InputDef, pendingNames: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  const addRef = (ref: unknown): void => {
+    if (typeof ref !== 'string') return;
+    let segs: { kind: string; value?: string | number }[];
+    try {
+      segs = parsePath(ref) as unknown as typeof segs;
+    } catch {
+      return; // 写坏的路径由求值侧报错，这里不抢
+    }
+    const head = segs[0];
+    if (head?.kind !== 'key' || typeof head.value !== 'string') return;
+    // `$.run.inputs.<name>` 与裸名 `<name>` 两种写法指同一个输入（可见性一致性，见 asExprRoot），
+    // 所以两种都要认；而 `$.run.outputs.x` / `$.step.x` 不是输入依赖
+    if (head.value === 'run') {
+      if (segs[1]?.value === 'inputs' && typeof segs[2]?.value === 'string') {
+        const n = segs[2].value;
+        if (pendingNames.has(n)) out.add(n);
+      }
+      return;
+    }
+    if (pendingNames.has(head.value)) out.add(head.value);
+  };
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 24 || v === null || typeof v !== 'object') return;
+    const form = isValueForm(v);
+    if (form === 'ref') return addRef((v as Record<string, unknown>).path);
+    // expr 的引用从 AST 上取（`compileExpr().refs`），不拿正则猜：
+    // `'$a + $b'` 与 `'x$a'`（字符串字面量里的）在词法层不是一回事，
+    // 而漏一条边比多一条边的后果严重得多（见上面那段）。
+    if (form === 'expr') {
+      const src = (v as Record<string, unknown>).expr;
+      if (typeof src === 'string') {
+        try {
+          for (const r of compileExpr(src).refs) addRef(r);
+        } catch {
+          /* 语法错：交给求值侧报，见函数头 */
+        }
+      }
+      return;
+    }
+    if (form) return; // gen 不引用任何东西
+    for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x, depth + 1);
+  };
+  walk(def.default, 0);
   return out;
+}
+
+/**
+ * `inputs[].default` 之间互相引用而成的环，按**强连通分组**返回（每组一组名字）。
+ *
+ * 静态侧（`lint.ts` 的 `DEPENDENCY_CYCLE`）用它，于是"这一组互为依赖"这件事
+ * 只有**一份判据**：排序用什么边、报环就用什么边。两处各判过一次的话，
+ * 就会出现"lint 说有环而求值侧求出来了"或反过来 —— 而这两种结论在 CI 上
+ * 是两种完全不同的处理（前者改 IR，后者查平台）。`isValueForm` 在
+ * `RESERVED_KEY_REWRITE` 那段记过一次同形态的真实代价。
+ *
+ * ## 为什么这一族要报 error 而不是"留给求值时抛引用未定义"
+ *
+ * 环里的**每一条 default 单看都是合法 IR**（`a` 引用 `b`、`b` 引用 `a`，两句都合规），
+ * 只有合起来才不成立。留给求值侧的话，症状是一句"引用未定义（变量：$b）"，
+ * 而人会去查"我没传 b 吗"—— 他传了，就在下一行。这是本仓反复那类"把结构问题说成值问题"。
+ *
+ * ## 为什么求值侧自己也在判（`applyInputDefaults` 里那一格），两处不算重复
+ *
+ * 与 `lint.ts` 顶部 `call` 环那条同一个论证：`run` 不跑 lint（`--strict` 是可选的）、
+ * 引擎以 bundle 形态给前端做实时校验时没人强制 lint、`call` 的子场景是运行时才取回来的。
+ * lint 负责"写的时候早知道、并且能拦下 CI"，运行期那道负责"绕过 lint 也不会跑出错误答案"。
+ * **两边都必须能点名整组**，所以共用 {@link defaultValueDeps} 那一份边集。
+ */
+export function detectDefaultCycles(defs: readonly InputDef[]): string[][] {
+  const names = new Set(defs.filter((d) => d && typeof d.name === 'string').map((d) => d.name));
+  /*
+   * 边集**含自边**（`{name:'who', default:{path:'$who'}}`），于是单元素环也会被报出来。
+   *
+   * 这一点曾经反着做（把自引用从边里剔掉，理由是"运行期抛引用未定义才是那句真话"），
+   * 而那是错的：求值侧的拓扑排序**刻意保留**自边（见 applyInputDefaults 里那段），
+   * 于是"lint 说干净、真跑报 inputs 求不出值"这一对分叉就是这么来的 ——
+   * 本仓记过不止一次的那类"两道闸给相反答案"。现在两侧同一份边集、同一个结论。
+   */
+  const edges = new Map<string, Set<string>>();
+  for (const d of defs) {
+    if (!d || !names.has(d.name)) continue;
+    edges.set(d.name, defaultValueDeps(d, names));
+  }
+  /*
+   * Tarjan 强连通分量，**显式栈**而不是递归。
+   *
+   * 为什么不用递归 DFS：递归那版的栈深上界是"输入个数"，而 `ScenarioSchema.inputs`
+   * 是 `z.array(...)`、**没有 `.max()`**（"schema 没 cap"这件事在
+   * `packages/engine/test/` 里另有记录），于是一份几千个输入的 IR 就能把递归打穿；
+   * 而它会在**求值侧先炸**（构造期），那份环报错又被 interpreter 包成
+   * "这一轮 inputs 坏了" —— 深度问题伪装成语义问题，正是这一族最难查的形状。
+   * 迭代版的开销只有一个与输入数成正比的数组，和 lint 里其它规则同一量级。
+   * 代价是多二十行：换来的是"输入多到几千条"不再需要作者避开。
+   */
+  let counter = 0;
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const cycles: string[][] = [];
+  type Frame = { name: string; it: IterableIterator<string> };
+  const visit = (start: string): void => {
+    if (index.has(start)) return;
+    const work: Frame[] = [{ name: start, it: edges.get(start)!.values() }];
+    index.set(start, counter);
+    low.set(start, counter);
+    counter += 1;
+    stack.push(start);
+    onStack.add(start);
+    while (work.length) {
+      const f = work[work.length - 1]!;
+      const nxt = f.it.next();
+      if (!nxt.done) {
+        const m = nxt.value;
+        if (!index.has(m)) {
+          index.set(m, counter);
+          low.set(m, counter);
+          counter += 1;
+          stack.push(m);
+          onStack.add(m);
+          work.push({ name: m, it: edges.get(m)!.values() });
+        }
+        if (onStack.has(m)) low.set(f.name, Math.min(low.get(f.name)!, index.get(m)!));
+        continue;
+      }
+      work.pop();
+      const parent = work[work.length - 1];
+      if (parent) low.set(parent.name, Math.min(low.get(parent.name)!, low.get(f.name)!));
+      if (low.get(f.name) === index.get(f.name)) {
+        const group: string[] = [];
+        for (;;) {
+          const top = stack.pop()!;
+          onStack.delete(top);
+          group.push(top);
+          if (top === f.name) break;
+        }
+        /*
+         * 一组要报出来的条件：**多于一个点**（互引），或者**单个点带自边**（自引用）。
+         * 只判 `group.length > 1` 会把自引用整类漏掉 —— 强连通分量算法对自环给出的
+         * 组大小就是 1，而"一个点的组"同时也确实是"压根不在任何环上"的那些点的形状。
+         * 区分两者只能看它有没有指向自己的那条边，不能看组大小。
+         */
+        const only = group.length === 1 ? group[0] : undefined;
+        const selfLoop = only !== undefined && (edges.get(only)?.has(only) ?? false);
+        if (group.length > 1 || selfLoop) cycles.push(group.reverse());
+      }
+    }
+  };
+  // 起点按声明顺序（Set 保持插入序），于是报出来的那一组的名字顺序也是 IR 里的顺序
+  for (const n of names) visit(n);
+  return cycles;
 }
 
 /**
@@ -84,6 +369,71 @@ interface Frame {
   vars: Map<string, unknown>;
 }
 
+/**
+ * `VarSpace` 的构造参数。
+ *
+ * 拆成两个分支只为了一件事：**传了 `inputDefs` 就必须传 `resolveDefault`**。
+ * 这不是排版偏好 —— default 的求值有三个真入口（解释器根 / `call` 子场景 /
+ * 预编译计划），而类型上不分开的漏法是"某个入口少传一个键"，
+ * TS 一声不响，症状是那个入口把 `{expr:…}` 原样当值发出去、步骤判 pass。
+ * 上一轮 default 兜底靠注释与自觉接，结论就在 {@link applyInputDefaults} 顶上那段。
+ * （第四个 `new VarSpace` 调用点 `dryrun.ts` 刻意不带 `inputDefs`，因此落在
+ * 第一分支、编译得过：它的实例当场丢弃、`inputs` 是面板已预填过的实参。理由在原地。）
+ */
+export type VarSpaceInit = {
+  inputs?: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  secretResolver?: (ref: string) => string;
+} & (
+  | { inputDefs?: undefined; resolveDefault?: undefined }
+  | {
+      inputDefs: readonly InputDef[];
+      /** 第二个入参是**正在构造中的这一台**（构造器把自己交进来），见 {@link DefaultValueResolver} */
+      resolveDefault: DefaultValueResolver;
+    }
+);
+
+/**
+ * default 求值失败时的消息措辞。
+ *
+ * **不许把 default 里那个值本身带进消息**。default 与请求体是同一类位置 ——
+ * 写死口令/密钥的正是这些地方（`HARDCODED_SECRET` 整条规则的存在就是证据），
+ * 而这条消息会一路进 CI 日志与 junit。做法与 lint 那条同一条：**拿手上那个源串整段挖掉**
+ * （解析器的消息会把源码原样回带，形如 `意外记号 "末尾"（表达式：1 +）`），
+ * 再叠 `redactSecretText` 兜"源码之外别处混进来的密钥"。**顺序不可换**：
+ * 先脱敏的话，一条不是任何已知密钥形状的明文口令会照样漏过去
+ * （变异集 value-form-lint 的 W5 测的就是这个顺序）。
+ */
+/**
+ * `default` 求值失败。消息**已过脱敏 + 已挖掉源码片段**（见 scrubDefaultValueError），
+ * 所以任何载体（CI 日志 / HTML 报告 / 失败落盘）都能直接放它。
+ */
+export class DefaultValueError extends VarError {
+  /** 出错的输入名（同时是 VarError.varName，也就是报错后缀里那个名字） */
+  readonly inputName: string;
+  /** 原因那条消息本身，供需要自己拼标题的载体用（lint issue、dry-run） */
+  readonly reason: string;
+  constructor(inputName: string, reason: string) {
+    super(`inputs[].default "${inputName}" 求值失败：${reason}`, inputName);
+    this.name = 'DefaultValueError';
+    this.inputName = inputName;
+    this.reason = reason;
+  }
+}
+
+function scrubDefaultValueError(def: InputDef, e: unknown): string {
+  const raw = e instanceof Error ? e.message : '?';
+  const src = (def.default as Record<string, unknown> | undefined)?.expr;
+  const path = (def.default as Record<string, unknown> | undefined)?.path;
+  let msg = raw;
+  // 只挖**字符串**那两种形态（expr / path）。gen 与字面量没有"源码"可言，
+  // 而把对象 JSON 化再拿去替换会误伤消息里不相干的片段。
+  for (const s of [src, path]) {
+    if (typeof s === 'string' && s.length) msg = msg.split(s).join('«表达式源码已省略»');
+  }
+  return redactSecretText(msg).slice(0, 200);
+}
+
 export class VarSpace {
   private frames: Frame[] = [{ name: 'global', vars: new Map() }];
   /** 步骤导出。$ref 引用 $.step.<id> 走这里，而不是普通变量 */
@@ -93,22 +443,64 @@ export class VarSpace {
   /** 引擎解析密钥用；对 Agent 永不可见 */
   private secretResolver: ((ref: string) => string) | undefined;
   private writes: { name: string; frame: string; scopeId?: string }[] = [];
+  /**
+   * `default` 正在求值的那一段窗口（见构造器）。窗口内 `$secret.*` 直接拒。
+   * 它必须是**状态而不是靠调用方自觉**：漏一次就等于把密钥值写进 `run.inputs`，
+   * 而那一层会进 `asExprRoot()` 与 `snapshotForAgent()`。
+   */
+  private resolvingDefaults = false;
   /** forkBranch 给自己加的那一帧在本实例 frames 里的下标；根实例为 -1 */
   private ownIndex = -1;
 
   /**
-   * @param inputDefs `scenario.inputs`（声明带 default 的那一份）。传了就把 default 兜进去，
-   *   见 {@link applyInputDefaults} —— 不传就等于声明了 default 也没人兜。
+   * `inputDefs` 与 `resolveDefault` **成对必填**：传了声明就必须给求值器。
+   *
+   * 为什么要把这件事做成类型约束而不是注释：default 的求值要接**三个真入口**
+   * （解释器根 / `call` 子场景 / 预编译计划），而漏掉任何一个的症状是
+   * "解释器模式能跑、预编译模式静默把 `{expr:…}` 当值发出去" —— 正是本仓反复那一族
+   * （同一个概念两条路，只修一条）。上一轮 `default` 兜底就是靠注释与自觉接的，
+   * 而那一轮的结论是"注释说了没人读"。类型说"不给就编译不过"，漏不了。
+   * 第四个 `new VarSpace` 的调用点（`dryrun.ts`）**刻意不接**：它的实例当场丢弃、
+   * 而它的 `inputs` 是面板已按 default 预填过的实参，理由写在原处注释里。
+   *
+   * 求值器要 clock，而 clock 是运行时的东西，所以留在调用方那一侧的闭包里
+   * （`resolveValue(def.default, { vars, clock })`），本类不持有 clock。
    */
-  constructor(init: {
-    inputs?: Record<string, unknown>;
-    inputDefs?: readonly InputDef[];
-    env?: Record<string, unknown>;
-    secretResolver?: (ref: string) => string;
-  } = {}) {
-    this.runRoot = { inputs: applyInputDefaults(init.inputDefs, init.inputs), outputs: {} };
+  constructor(init: VarSpaceInit = {}) {
+    // 顺序有实质差别：env / secretResolver 必须先就位，因为求 default 时
+    // `$env.baseUrl` 是合法引用；而 runRoot.inputs 必须是**同一个对象**，
+    // 于是先建对象再挂上去 —— 反过来（先 apply 再挂）的话，
+    // 求值过程中引用 `$run.inputs.另一个输入` 会看不到本轮已经求出来的那些。
     this.envMap = init.env ?? {};
     this.secretResolver = init.secretResolver;
+    const target: Record<string, unknown> = { ...(init.inputs ?? {}) };
+    this.runRoot = { inputs: target, outputs: {} };
+    const defs = init.inputDefs;
+    if (!defs?.length || !init.resolveDefault) {
+      applyInputDefaults(target, defs);
+      return;
+    }
+    const resolve = init.resolveDefault;
+    // 拓扑排序在**写任何一个值之前**就跑完（见 applyInputDefaults），所以"有环"这种情况
+    // 不会留下半个求好的 inputs —— 要么全求出来，要么一个都没写。
+    this.resolvingDefaults = true;
+    try {
+      applyInputDefaults(target, defs, (def) => {
+        try {
+          return resolve(def, this);
+        } catch (e) {
+          // 补上"是哪一条输入"。底下那层（表达式/引用/生成器）只知道值长什么样，
+          // 不知道它挂在哪个输入名上，于是原样抛出会得到一句没有主语的报错。
+          // 消息本身还要过一遍脱敏 + 挖掉源码，理由见 scrubDefaultValueError。
+          // 用 DefaultValueError 而不是裸 VarError：interpreter 那一侧要能认出
+          // "这是 IR 里的一条 default 写坏了"，而不是把它当成引擎内部故障
+          // （CLI 的顶层 catch 会把后者说成"这不是你的用例的问题，请报 bug"）。
+          throw new DefaultValueError(def.name, scrubDefaultValueError(def, e));
+        }
+      });
+    } finally {
+      this.resolvingDefaults = false;
+    }
   }
 
   /*
@@ -325,6 +717,26 @@ export class VarSpace {
     const restPath = '$' + segs.slice(1).map(segStr).join('');
 
     if (root === 'secret') {
+      /*
+       * **求值 `inputs[].default` 期间一律拒**。这是本轮引入的新风险，不是旧行为：
+       * 修之前 default 是原样塞进变量空间的，`{path:'$secret.pw'}` 根本走不到这里；
+       * 修之后它会走通，于是密钥真值被写进 `run.inputs.pw` ——
+       * 而那一层会进 `asExprRoot()`（任何表达式都能 `$pw` 拿到）、进 `visible()`、
+       * 并且是 `snapshotForAgent()` 里 `__run.inputs` 那一栏的输入。
+       * 那条规则的原文是"密钥真值只在发请求那一刻存在"，而 default 求值发生在
+       * **任何请求之前**，所以这不是"多一层脱敏"能补的，只能拒。
+       *
+       * 拒而不是"存进去但脱敏"：那样 `$.run.inputs.pw` 在使用点上是错的，
+       * 一个恒错的引用比一条明确的报错坏得多（人会去查被测系统）。
+       * 也不带 ref 之外的任何信息 —— 不带值、不带长度。
+       */
+      if (this.resolvingDefaults) {
+        throw new VarError(
+          'inputs[].default 里不许引用密钥（`$secret.*`）。default 在任何请求之前求值，'
+          + '而密钥真值只在那一刻之后存在；把密钥写进变量空间会让它出现在表达式根与 Agent 上下文里',
+          ref,
+        );
+      }
       const ref2 = '$' + segs.slice(1).map(segStr).join('');
       const name = ref2.replace(/^\$\./, '').replace(/^\$/, '');
       return { found: true, value: this.secretResolver ? this.secretResolver(`secret:${name}`) : SECRET_PLACEHOLDER };

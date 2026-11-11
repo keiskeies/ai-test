@@ -98,6 +98,55 @@ describe('变量与引用', () => {
     const c = codes([{ ...b('a'), kind: 'assert', against: '$sku' }], {}, { inputs: [{ name: 'sku', type: 'string', required: true }] });
     assert.ok(!c.includes('INPUT_UNUSED'));
   });
+  test('…`$.sku` 这种点号写法也算被用到（改前误报）', () => {
+    /*
+     * 旧判据里有 `stepsText.includes('$' + name)`，而 `"$.sku"` 中**没有** `$sku`
+     * 这个子串（中间隔着点）。于是"步骤里只用 `$.sku` 引用输入"这种最常见的写法
+     * 每轮都收到一句"声明了但没有任何步骤使用"，让人去删一个真在用的输入。
+     * 运行期是认的：`resolveRef('$.sku')` 落到 `lookup` → 帧 → inputs → env。
+     * （这一条是本轮量出来的**改前就在**的误报 —— 它本来不会被注意到，
+     *   是 default 之间互相引用也写成 `$.base` 之后才撞出来的。）
+     */
+    const c = codes([{ ...b('a'), kind: 'set', assign: { v: '$.sku' } }], {}, { inputs: [{ name: 'sku', type: 'string', required: true }] });
+    assert.ok(!c.includes('INPUT_UNUSED'), JSON.stringify(c));
+  });
+  test('…被另一条 default 引用也算被用到', () => {
+    /* `default` 现在会被求值，所以 `{name:'b'}` 只被 `a` 的 default 引用是**合法用法**。
+     * 只搜三段步骤的话这里会误报，而照那句提示去删就会把 a 的 default 弄坏。
+     * 步骤里引用的是 a（不是 b）—— 否则 a 自己也"声明了没用"，那条真该报的会混进来，
+     * 这条测试就分不清报的是哪一个了。 */
+    const c = codes([{ ...b('a'), kind: 'set', assign: { v: '$.a' } }], {}, {
+      inputs: [{ name: 'b', type: 'string' }, { name: 'a', type: 'string', default: { path: '$.b' } }],
+    });
+    assert.ok(!c.includes('INPUT_UNUSED'), JSON.stringify(c));
+  });
+  test('…输入自己的声明不算被自己用到（那个恒真 bug 不许回来）', () => {
+    /*
+     * 反向的牙：把 inputs 的 default 放进被搜文本之后，
+     * "搜整个 IR"那种写法会再次恒为真（声明里就带 name）。
+     * 这里没有任何地方引用 unusedOne，必须报。
+     */
+    const c = codes([{ ...b('a'), kind: 'noop' }], {}, {
+      inputs: [{ name: 'unusedOne', type: 'string', default: 'unusedOne' }],
+    });
+    assert.ok(c.includes('INPUT_UNUSED'), JSON.stringify(c));
+  });
+  test('DEPENDENCY_CYCLE：inputs 的 default 互引成环（静态侧，error）', () => {
+    const i = find([{ ...b('a'), kind: 'noop' }], 'DEPENDENCY_CYCLE', {}, {
+      inputs: [{ name: 'x', type: 'string', default: { path: '$y' } }, { name: 'y', type: 'string', default: { path: '$x' } }],
+    });
+    assert.ok(i, '互引成环没报');
+    assert.equal(i!.level, 'error', '这种场景必然跑不起来，warning 等于让 CI 放过一份空报告');
+    assert.match(i!.message, /x/);
+    assert.match(i!.message, /y/, '只点名一个的话，人会去改那一条而另一条还是环');
+    assert.equal(i!.stepId, undefined);
+  });
+  test('DEPENDENCY_CYCLE：不构成环的 default 引用不报', () => {
+    const c = codes([{ ...b('a'), kind: 'noop' }], {}, {
+      inputs: [{ name: 'x', type: 'string', default: { path: '$y' } }, { name: 'y', type: 'string', default: 'lit' }],
+    });
+    assert.ok(!c.includes('DEPENDENCY_CYCLE'), JSON.stringify(c));
+  });
 });
 
 describe('断言质量', () => {

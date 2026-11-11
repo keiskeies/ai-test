@@ -12,6 +12,7 @@ import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioS
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { redactSecretText } from './redact.js';
+import { detectDefaultCycles } from './vars.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern, GEN_KINDS, isValueForm } from '@atest/ir';
 
 export type LintLevel = 'error' | 'warning';
@@ -763,23 +764,22 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
    * 那些位置静态报而单次执行一次都不会抛 —— 那是**静态闸比一次执行看得全**，
    * 不是误报（表达式本身确实写坏了，下一轮数据变了它就抛）。
    *
-   * ⚠ **有一类位置运行期压根不求值，所以那句话对它是假话：`inputs[].default`。**
-   * 它在 schema 里是货真价实的 `ValueSchema`（四种形态都收），而
-   * `applyInputDefaults` 只是 `out[d.name] = d.default` —— 原样塞进变量空间，不求值。
-   * 实测 `inputs:[{name:'who',default:{expr:'1 + 2'}}]` ⇒ 下游 `$.who` 拿到的是
+   * ⚠ **`inputs[].default` 曾经是一个例外，现在不是了。**
+   * 它在 schema 里是货真价实的 `ValueSchema`（四种形态都收），而**改前**
+   * `applyInputDefaults` 只是原样塞进变量空间、不求值：实测
+   * `inputs:[{name:'who',default:{expr:'1 + 2'}}]` ⇒ 下游 `$.who` 拿到的是
    * **对象本身**、发出去的 body 里就是 `{"expr":"1 + 2"}`，而**步骤判 pass**。
-   * 那是缺陷类 (a) 的又一例，**不是本条规则能覆盖的**（本条只校语法，
-   * 而它的语法是好的），所以这里对它**单独措辞**：不说"运行期会抛"，
-   * 只说"这一处的 default 今天不被求值"，级别降到 warning（error 会让人以为
-   * 修好语法就能用，而那恰恰不成立）。真正的修法在求值侧，登记在 docs/14 §5。
-   *
-   * `NOT_EVALUATED` 这一条例外是**临时的**：求值侧接上那天就要把它**整条删掉**
-   * （连同上面那段 ⚠ 和两处 `unevaluated ?` 分支），否则它会被后来人读成永久约定、
-   * 而"这一格不该报 error"这件事就从事实变成了习俗。与上面 `files` 那条同理。
+   * 那时本条规则对它**单独措辞**并降级到 warning（说"运行期会抛"是假话，
+   * 而 error 会让人以为修好语法就能用）。求值侧本轮接上了（`VarSpace` 构造期，
+   * 三个真入口各接一次，见 `vars.ts` 的 `applyInputDefaults`），于是那条例外、
+   * 那段特殊措辞、以及两处 `unevaluated ?` 分支**整条删掉**：
+   * 现在 default 里写坏的表达式/引用与任何其它值形态位置同码同级别，
+   * 因为"真走到它就必抛"这句话在它身上也成立了。
+   * 保留这段历史记录的理由：一个例外被删掉这件事如果没写下来，
+   * 下一个人会以为这一格从来没被特殊对待过，从而看不出"级别曾经取决于求值侧"
+   * 这条约定存在过 —— 而它还可能因为别的位置再次需要这条约定。
    */
   {
-    /** 值形态里那个不被求值的例外位置（判据见上面那段 ⚠） */
-    const NOT_EVALUATED = /^inputs\[\d+\]\.default$/;
     eachValuePosition(ScenarioSchema, scenario, ({ value, path, stepId }) => {
       const form = isValueForm(value);
       if (!form || form === 'gen') return; // gen 的种类由 RESERVED_KEY_REWRITE 判，两处各判会报两遍
@@ -787,7 +787,6 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
       const text = (value as Record<string, unknown>)[key];
       if (typeof text !== 'string') return;
       const bare = path.replace(/^\$\.?/, '');
-      const unevaluated = NOT_EVALUATED.test(bare);
 
       /*
        * **报错里不许带源码**。值形态所在的位置正是请求体与表单 ——
@@ -809,12 +808,9 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
         const e = validateExpr(text);
         if (!e) return;
         push({
-          code: 'EXPR_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId,
-          message: unevaluated
-            ? `inputs[].default 里的表达式语法错误：${scrub(e)}。⚠ 而更根本的是**这个 default 今天压根不被求值**（`
-              + '缺陷类 (a)：`applyInputDefaults` 原样塞进变量空间），所以修好语法它也不会按你预期生效'
-            : `值形态里的表达式语法错误（${bare}）：${scrub(e)}`,
-          fix: unevaluated ? '暂时只能填字面量；default 的值形态待平台接上求值（docs/14 §5）' : EXPR_SYNTAX_FIX,
+          code: 'EXPR_SYNTAX', level: 'error', stepId,
+          message: `值形态里的表达式语法错误（${bare}）：${scrub(e)}`,
+          fix: EXPR_SYNTAX_FIX,
         });
         return;
       }
@@ -822,14 +818,9 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
         parsePath(text);
       } catch (e) {
         push({
-          code: 'REF_PATH_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId,
-          message: unevaluated
-            ? `inputs[].default 里的引用写坏了：${scrub(e instanceof PathError ? e.message : '?')}。`
-              + '⚠ 而更根本的是**这个 default 今天压根不被求值**（缺陷类 (a)），修好语法它也不会按你预期生效'
-            : `值形态里的引用写坏了（${bare}）：${scrub(e instanceof PathError ? e.message : '?')}`,
-          fix: unevaluated
-            ? '暂时只能填字面量；default 的值形态待平台接上求值（docs/14 §5）'
-            : '引用以 $ 开头；下标只许数字、`*` 或引号键名（`$[0]` / `$["带 空格"]`），变量作用域见 docs/02 §5',
+          code: 'REF_PATH_SYNTAX', level: 'error', stepId,
+          message: `值形态里的引用写坏了（${bare}）：${scrub(e instanceof PathError ? e.message : '?')}`,
+          fix: '引用以 $ 开头；下标只许数字、`*` 或引号键名（`$[0]` / `$["带 空格"]`），变量作用域见 docs/02 §5',
         });
       }
     });
@@ -1449,14 +1440,76 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
   // 输入自己的声明（`{"name":"sku",…}`）就包含这个名字，所以旧写法恒为真，
   // 这条规则从来没报过。同时不再只查 required=false：声明了不用的必填输入
   // 更糟（它强迫每个调用方提供一个没人看的参数）。
-  const stepsText = JSON.stringify([...scenario.setup, ...scenario.body, ...scenario.teardown]);
+  /*
+   * 被搜的文本 = 三段步骤 **+ 各条 default**。
+   *
+   * 加 default 这一半是本轮"default 会被求值"带来的：`{name:'b'}` 只被
+   * `{name:'a', default:{path:'$b'}}` 引用的写法从此是**合法用法**，
+   * 而只搜步骤正文就会把它报成"声明了但没有任何步骤使用"——
+   * 一句假话，让人去删掉一个真在用的输入（删了之后 a 的 default 直接求不出值）。
+   * 仍然不含输入**自己的声明**（`name`/`type`/`required` 那些键），
+   * 否则就退回旧的那个恒真 bug。
+   */
+  const stepsText = JSON.stringify([
+    ...scenario.setup, ...scenario.body, ...scenario.teardown,
+    ...scenario.inputs.map((p) => p.default),
+  ]);
+  /*
+   * ⚠ **`$.name` 这一种写法以前不被认出来，于是这条规则会误报。**
+   * 旧判据是 `stepsText.includes('$' + name)`，而 `"$.who"` 里**没有** `$who`
+   * 这个子串（中间隔着点），于是"步骤里只用 `$.who` 引用输入"的场景
+   * 每轮都收到一句"声明了但没有任何步骤使用"，让人去删一个真在用的输入。
+   * 运行期是认的：`resolveRef('$.who')` 走 root 不在 run/env/step/secret 时的
+   * 兜底分支 → `lookup('who')` → 帧 → inputs → env（实测见 `.scratch` 探针，
+   * `assign:{got:'$.who'}` 与场景 `outputs` 都读到值）。
+   * 这是**改前就在**的误报，本轮因为它多了一个触发面（default 引用另一个输入
+   * 也是 `$.base` 这种写法）而顺手修掉。
+   */
   for (const p of scenario.inputs) {
-    const used = new RegExp(`\\$\\.(run\\.)?inputs\\.${p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(stepsText)
-      || new RegExp(`"${p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*:`).test(stepsText)
-      || stepsText.includes(`$${p.name}`);
+    const n = p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const used = new RegExp(`\\$\\.?((run\\.)?inputs\\.)?${n}\\b`).test(stepsText)
+      || new RegExp(`"${n}"\\s*:`).test(stepsText);
     if (!used) {
       push({ code: 'INPUT_UNUSED', level: 'warning', stepId: undefined, message: `输入参数 "${p.name}" 声明了但没有任何步骤使用${p.required ? '（而且是必填 —— 每个调用方都被迫提供它）' : ''}`, fix: `删掉它，或在步骤里用 $.run.inputs.${p.name} / $${p.name} 引用`, doc: 'docs/02 §5' });
     }
+  }
+
+  /*
+   * `inputs[].default` 互引成环 —— 静态侧的那一道。
+   *
+   * 判据不在这里，在 `vars.ts` 的 `detectDefaultCycles`（拓扑排序与这条规则共用同一份
+   * 边集；为什么必须共用、以及为什么"求值侧也判一次"不算重复，理由写在那个字段的注释上）。
+   *
+   * 级别取 **error**，与 `DEPENDENCY_CYCLE`（call 图成环）同一条论证：这种场景**必然**
+   * 跑不起来，而它坏的方式是"任何一步都没跑到、inputs 就求不出值"，
+   * 于是真跑出来的是一份 `status='error'` 而步骤表为空的报告 ——
+   * 归因指向"平台坏了"而不是"这两条 default 互为依赖"。
+   * 降成 warning 等于让 CI 放过一份注定空的报告。
+   *
+   * ⚠ **静态这一条比一次执行看得全，而这句话要说白**：调用方**把组内每一个都显式传入**时，
+   * 一次真跑根本不会去求这些 default，于是不会抛。但静态上它仍然是坏的写法 ——
+   * 那几条 default 成了"永远不许生效"的死字，而任何一次少传一个就整组求不出值。
+   * 与假分支里的坏表达式同一种取舍（静态闸报的是"这份 IR 写坏了"，不是"这次会抛"）。
+   * 消息里因此带上"只要有一个没被传入"这个条件，不假装它无条件必抛。
+   *
+   * `stepId` 留空：这是场景级的事实，不属于任何步骤，而伪造一个步骤 id
+   * 会让人去那个步骤里找（那里什么都没有）。
+   */
+  for (const group of detectDefaultCycles(scenario.inputs)) {
+    // 一个名字要说"引用了它自己"，不能说"互相引用"（同一个理由见 applyInputDefaults 里那格）
+    const shape = group.length === 1
+      ? `inputs[].default "${group[0]}" 引用了它自己`
+      : `inputs 的 default 互相引用：${group.join(' ↔ ')}`;
+    push({
+      code: 'DEPENDENCY_CYCLE',
+      level: 'error',
+      message: `${shape}。只要其中**任何一个没被显式传入**，`
+        + '这一组就求不出值（default 在**任何步骤跑之前**求值，所以它只能引用显式传入的输入、环境变量，或不构成环的其它 default）',
+      fix: group.length === 1
+        ? `把 ${group[0]} 的 default 改成不引用自己（字面量 / 环境变量 / 独立生成器），或者把它改成必填、由调用方传`
+        : '把其中一条的 default 改成不引用组内其它输入（字面量 / 环境变量 / 独立生成器），或者把它们改成必填、由调用方传',
+      doc: 'docs/02 §2',
+    });
   }
 
   return dedupe(issues);

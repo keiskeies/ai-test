@@ -82,14 +82,6 @@
       "testFile": "packages/engine/test/value-form-syntax.test.ts"
     },
     {
-      "label": "W4 对 `inputs[].default` 说假话：报成 error 并暗示『修好语法就能用』",
-      "_why": "那一格运行期压根不求值（`applyInputDefaults` 原样塞进变量空间），所以 error + 『运行期会抛』是**假话**，而假话的代价具体得很：作者把语法修好、用例照旧不生效。级别降到 warning 与那句『这个 default 今天压根不被求值』是一体的，本条把它一起拆掉。",
-      "file": "packages/engine/src/lint.ts",
-      "anchor": "      const unevaluated = NOT_EVALUATED.test(bare);",
-      "replace": "      const unevaluated = false as boolean; // 变异：不再区分那个不被求值的例外位置",
-      "testFile": "packages/engine/test/value-form-syntax.test.ts"
-    },
-    {
       "label": "W5 报错回显源码：带 JWT 的坏表达式把密钥带进 CI 日志",
       "_why": "值形态所在的位置正是**请求体与表单**，明文凭证最常出现的地方，而 lint 输出会进 CI 日志（读者比仓库的读者宽）。上面 condition/when 那一查回显源码是可以的，这一查不行 —— 所以这条不是『少做一步美化』，是把一条安全约束摘掉。",
       "file": "packages/engine/src/lint.ts",
@@ -108,9 +100,9 @@
     },
     {
       "label": "W7 级别整体降成 warning：语法写坏不再被 --strict 拦住",
-      "_why": "判据与运行期同一个（`validateExpr` 与运行时共用同一个编译器），所以真走到它时必抛，取 error 站得住。降成 warning 不改判据、只改**后果**：`run --strict` 放行，而这条规则的全部意义就是『跑之前就拦住』。方向与 W4 相反 —— W4 是不该严的地方严（说假话），这一条是该严的地方松。",
+      "_why": "判据与运行期同一个（`validateExpr` 与运行时共用同一个编译器），所以真走到它时必抛，取 error 站得住。降成 warning 不改判据、只改**后果**：`run --strict` 放行，而这条规则的全部意义就是『跑之前就拦住』。（改前这里还有一条反方向的变异 W4 ——『不该严的地方严』，因为 `inputs[].default` 当时压根不被求值、对它报 error 是假话。本轮求值侧接上之后那个例外整条删掉，W4 连锚点一起消失，而这一条的锚点从 `level: unevaluated ? 'warning' : 'error'` 换成了现在这一行。）",
       "file": "packages/engine/src/lint.ts",
-      "anchor": "          code: 'EXPR_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId,",
+      "anchor": "          code: 'EXPR_SYNTAX', level: 'error', stepId,",
       "replace": "          code: 'EXPR_SYNTAX', level: 'warning' as const, stepId, // 变异：整体降级",
       "testFile": "packages/engine/test/value-form-syntax.test.ts"
     },
@@ -127,8 +119,8 @@
       "label": "等价变异：把 push 那行的 stepId 换成显式 `stepId: stepId`（行为逐字节不变）",
       "_why": "真的等价：TS 的简写属性与显式写法编译产物相同。排在最后有用处 —— 它钉的是**这份集子自己**：哪天测试套件对任何改动都红（比如有人给源文件加了内容指纹快照），这一条会红，于是那批『抓到了』里有多少是真的就有了一次对照。",
       "file": "packages/engine/src/lint.ts",
-      "anchor": "          code: 'EXPR_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId,",
-      "replace": "          code: 'EXPR_SYNTAX', level: unevaluated ? 'warning' : 'error', stepId: stepId,",
+      "anchor": "          code: 'EXPR_SYNTAX', level: 'error', stepId,",
+      "replace": "          code: 'EXPR_SYNTAX', level: 'error', stepId: stepId,",
       "expect": "equivalent",
       "testFile": "packages/engine/test/value-form-syntax.test.ts"
     }

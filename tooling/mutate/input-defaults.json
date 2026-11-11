@@ -1,0 +1,95 @@
+{
+  "_comment": [
+    "「inputs[].default 里写的值形态真的被求值」这一轮的变异集。",
+    "原始失效与实测数据见 docs/14 §5，永久落点是 packages/engine/test/input-defaults.test.ts。",
+    "",
+    "**原始失效**（缺陷类 (a)『schema 有字段、执行侧没人读』的第 5 例）：",
+    "`inputs[].default` 在 schema 里是货真价实的 `ValueSchema`（四种形态都收），",
+    "而 `applyInputDefaults` 只是 `out[d.name] = d.default` —— 原样塞进变量空间，不求值。",
+    "实测（`.scratch/probe-default.mts`，走真 runScenario）：六个夹具**全部**把那个对象",
+    "本身交给下游、发出去的 body 里就是 `{\"expr\":\"1 + 2\"}`、**步骤判 pass**、退出码方向 0。",
+    "难写的地方在**失效方向看起来没事**：所以本集子里每一条『抓到』的判据都是",
+    "『下游引用那个输入时拿到的值』或『这一轮必须红』，不是『报错文案对不对』。",
+    "",
+    "**D1 是这份集子里最值得跑的一条**：它就是原始缺陷的形状（求值器交进来了、没人调用）。",
+    "它同时是『类型约束挡得住漏传、挡不住不求值』这件事的证据 ——",
+    "`VarSpaceInit` 那两个分支把『传了 inputDefs 就必须传 resolveDefault』做成编译错误，",
+    "而 D1 恰好是**两个都传了、而求值那一步不发生**，编译一片绿灯。",
+    "所以类型是必要不充分，这一组测试是第二道；两者都要在，删哪个都留一个洞。",
+    "",
+    "**D4（密钥那一格）的方向与别的条目不同**：它抓的不是『少做』而是『少挡』——",
+    "把 default 求值期间对 `$secret.*` 的拒绝拿掉之后，**没有任何一条测试会因为它少报**，",
+    "它红是因为密钥真值出现在报告里（报告要落盘）。这一条是本轮**新引入**的风险：",
+    "改前 default 不被求值，`{path:'$secret.pw'}` 压根走不到 secret 分支，",
+    "所以『修好一个缺陷顺手开了一条新的』在这里是字面意义上的发生过的形状，",
+    "而测试是那条新风险唯一的载体。"
+  ],
+  "cases": [
+    {
+      "label": "D1 求值器交进来了而没人调用：default 回到原样塞进变量空间（原始缺陷）",
+      "_why": "原始失效本体。刻意不做成『不传求值器』—— 那种写法被 `VarSpaceInit` 的类型挡住了，变异会 BUILD_BROKEN，量不出任何东西。真实世界里的漏法是『签名齐全、行为没接上』，这一条就是那个形状。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "  const pending = defs.filter((d) => d && typeof d.name === 'string' && !(d.name in target));",
+      "replace": "  const pending = defs.filter((d) => d && typeof d.name === 'string' && !(d.name in target));\n  if (resolve) { for (const d of pending) target[d.name] = d.default; return target; } // 变异：签名齐而不求值",
+      "testFile": "packages/engine/test/input-defaults.test.ts",
+      "_measured": "红 16 条（三种形态各读一次值、嵌套、数组、env、顺序无关、环、密钥、步骤产出、不 echo 源码、预编译形态、子场景两条等）。这一条是本轮**唯一**跑过『改前行为』的验证：把 vars.ts 临时改回原样，input-defaults.test.ts 从 26 pass 掉到 10 pass —— 也就是说剩下那 16 条每一条都能证伪一次『没修』。"
+    },
+    {
+      "label": "D2 拓扑排序的成环那一格被删：互引的 default 求不出值却说不出为什么",
+      "_why": "排不完那一格是这一族唯一能**点名整组**的地方。删掉之后剩下的行为是『按声明顺序求、遇到引用不到时表达式返回 undefined』，于是症状变成值错了而状态是 pass —— 正是本仓反复那类『把结构问题说成值问题』里最坏的那一格（连红都不红）。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "  if (order.length !== pending.length) {",
+      "replace": "  if (false) { // 变异：不再判环，按排出来的顺序硬求",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    },
+    {
+      "label": "D3 环检测把自引用漏掉：单元素的强连通分量不当环",
+      "_why": "Tarjan 对自环给出的组大小就是 1，而『一个点的组』同时也确实是『压根不在环上』那些点的形状 —— 只判 `group.length > 1` 就整类静默。这一条抓的是**边界形状**，而它两侧都得对上：静态侧不报而运行期报错，就是本仓记过不止一次的『两道闸给相反答案』。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "        const only = group.length === 1 ? group[0] : undefined;",
+      "replace": "        const only = undefined as string | undefined; // 变异：单点的组一律不当环",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    },
+    {
+      "label": "D4 default 求值期间不再拒 `$secret.*`：密钥真值被写进 run.inputs",
+      "_why": "本轮**新引入**的风险。窗口拿掉之后 `{path:'$secret.pw'}` 能求通，于是密钥真值进了 `run.inputs` —— 而那一层会进 `asExprRoot()`（任何表达式都能 `$pw` 拿到）、进 `visible()`、并且是 `snapshotForAgent()` 里 `__run.inputs` 那一栏的输入。规则的原文是『密钥真值只在发请求那一刻存在』。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "      if (this.resolvingDefaults) {",
+      "replace": "      if (false) { // 变异：default 求值窗口不再特殊对待密钥",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    },
+    {
+      "label": "D5 依赖边只认 `$.run.inputs.x`，不认裸名 `$x`：排序把依赖方排前头",
+      "_why": "两种写法指同一个输入，于是两种都得连边。少认一种的后果不是『少一条报错』而是**排序错**：依赖方先求、引用取不到值，而表达式对缺失引用**返回 undefined 而不抛** —— 值错了、状态 pass。这一条是『少一条边比多一条边严重得多』那句论证的载体。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "    if (pendingNames.has(head.value)) out.add(head.value);",
+      "replace": "    // 变异：裸名不连边（只认 $.run.inputs.x）",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    },
+    {
+      "label": "D6 环检测改成递归：输入很多时栈深度先炸（而伪装成语义问题）",
+      "_why": "`ScenarioSchema.inputs` 没有 `.max()`，所以『输入几千条』是一条走得通的路径。递归版会在求值侧（构造期）先炸，而那个异常又被 interpreter 包成『这一轮 inputs 坏了』—— 深度问题伪装成语义问题。溢出**用显式深度闸模拟**而不是真靠 V8 栈上限：真递归 20000 层到底炸不炸取决于帧大小与 `--stack-size`，而『这条变异抓不抓得到』不能建在一个 guesses 上（本仓那条老规矩：判断抓不抓得到要跑，不能靠推想）。测试侧那条夹具用的是 20000 条输入，所以阈值取 5000 一定命中。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "  for (const n of names) visit(n);",
+      "replace": "  const seen = new Set<string>();\n  const rec = (n: string, d: number): void => { if (d > 5000) throw new Error('模拟栈溢出'); const nx = edges.get(n); if (nx) for (const m of nx) if (!seen.has(m)) { seen.add(m); rec(m, d + 1); } };\n  for (const n of names) { seen.add(n); rec(n, 0); } // 变异：改成递归 DFS",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    },
+    {
+      "label": "D7 default 求值失败时不带输入名：报错变成一句没有主语的话",
+      "_why": "底下那层（表达式/引用/生成器）只知道值长什么样，不知道它挂在哪个输入名上。少了这层包装，作者看到的是『意外记号「末尾」』而不知道是哪一条输入的 default —— 与本轮修的那个缺陷同一族（红而说不出查哪儿）。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "          throw new DefaultValueError(def.name, scrubDefaultValueError(def, e));",
+      "replace": "          throw e; // 变异：不补是哪一条输入",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    },
+    {
+      "label": "等价变异：把 topo 排序的循环变量换个名字（行为逐字节不变）",
+      "_why": "真的等价：改名不改语义。留着它的作用是钉**这份集子自己** —— 哪天测试套件对任何改动都红，这一条会红，于是那批『抓到了』里有多少是真的就有了一次对照。",
+      "file": "packages/engine/src/vars.ts",
+      "anchor": "  for (const d of order) target[d.name] = resolve(d);",
+      "replace": "  for (const dd of order) target[dd.name] = resolve(dd);",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/input-defaults.test.ts"
+    }
+  ]
+}

@@ -219,28 +219,31 @@ describe('不许误报：合法写法一个都不许多报', () => {
   });
 });
 
-describe('inputs[].default：语法坏了要说，而措辞不许说"运行期会抛"', () => {
+describe('inputs[].default：语法坏了要说，而措辞与任何其它值形态位置一致', () => {
   /*
-   * 这一格是本轮量出来的**例外**，而它决定上面那条规则不能一刀切。
+   * 这一格曾经钉的是**相反**的约定，读代码的人会觉得它自相矛盾，所以把历史留在这里：
    *
-   * `inputs[].default` 在 schema 里是货真价实的 `ValueSchema`（四种形态都收），
-   * 而运行期**不求值它**：`applyInputDefaults` 只是 `out[d.name] = d.default`。
-   * 实测 `default:{expr:'1 + 2'}` ⇒ 下游 `$.who` 拿到**对象本身**、
-   * 发出去的 body 里就是 `{"expr":"1 + 2"}`、而**步骤判 pass**。
+   * `inputs[].default` 在 schema 里一直是货真价实的 `ValueSchema`（四种形态都收），
+   * 而运行期**曾经不求值它** —— `applyInputDefaults` 只是 `out[d.name] = d.default`。
+   * 那时"这里写坏了运行期必抛"是**假话**，所以规则对它单独措辞 + 降到 warning
+   * （error 会让人以为"把语法修好就能用"，而那恰恰不成立）。
    *
-   * 所以对本格说"这里写坏了运行期必抛"是**假话**。规则对它单独措辞 +
-   * 降到 warning：error 会让人以为"把语法修好就能用"，而那恰恰不成立。
-   * 真正的修法在求值侧（缺陷类 (a)），登记在 docs/14 §5。
+   * 求值侧现在接上了（`VarSpace` 构造期，三个真入口各接一次），
+   * "真走到它就必抛"这句话在 default 上也成立，于是那条例外**整条删掉**：
+   * 同一个判据、同一个 code、同一个 error 级别。
+   * 这里保留的三条断言因此是**新约定的牙**：级别必须是 error，
+   * 而消息里不许再出现"不被求值"那套话 —— 那句话说出来就是假话了，
+   * 而一句过期的安慰话比不安慰更坏（人会因此不去修）。
    */
   const withDefault = (def: unknown) =>
     lintScenario(scen([{ ...b('a'), kind: 'set', assign: { v: { path: '$who' } } }] as never[], { inputs: [{ name: 'who', type: 'string', default: def }] } as never))
       .filter((i) => i.code === 'EXPR_SYNTAX' || i.code === 'REF_PATH_SYNTAX');
 
-  test('default 里的坏表达式被报，而级别是 warning 不是 error', () => {
+  test('default 里的坏表达式被报，而级别是 error（求值侧已接上）', () => {
     const hit = withDefault(BAD_EXPR)[0];
     assert.ok(hit, 'inputs[].default 里的坏表达式没报');
-    assert.equal(hit!.level, 'warning', '本格运行期不求值，报 error 会误导成"修好语法就能用"');
-    assert.match(hit!.message, /不被求值/, '没说出更根本的那件事：这个 default 压根不被求值');
+    assert.equal(hit!.level, 'error', 'default 现在会在构造变量空间时被求值，坏语法必然抛 —— 报 warning 就是让人放过它');
+    assert.doesNotMatch(hit!.message, /不被求值/, '那句话已经过期：default 现在被求值，留着它就是在骗人');
     /*
      * 顶层字段**没有对应的步骤**，所以 stepId 必须留空。
      * 遍历器认步骤坐标的判据是"这个对象有 kind"，而场景对象自己也有 `id` ——
@@ -250,15 +253,27 @@ describe('inputs[].default：语法坏了要说，而措辞不许说"运行期�
     assert.equal(hit!.stepId, undefined, `顶层字段的报错挂在了步骤 ${hit!.stepId} 上`);
   });
 
-  test('default 里的坏引用同样报，且不谎称运行期会抛', () => {
+  test('default 里的坏引用同样报 error', () => {
     const hit = withDefault(BAD_PATH)[0];
     assert.ok(hit);
     assert.equal(hit!.code, 'REF_PATH_SYNTAX');
-    assert.equal(hit!.level, 'warning');
+    assert.equal(hit!.level, 'error');
+    assert.doesNotMatch(hit!.message, /不被求值/);
   });
 
   test('default 是合法字面量时不报', () => {
     assert.deepEqual(withDefault('z'), []);
+  });
+
+  test('default 是合法值形态时也不报（语法好、也能求值）', () => {
+    /*
+     * 反方向的牙：别把"这里能写值形态"又当成"值形态本身可疑"。
+     * 修之前这一条恰好也是空的，而它当时**没有意义**（不求值，报不报都不影响行为）；
+     * 现在它有意义 —— 它保证这一查不会因为"是个对象"就误报。
+     */
+    assert.deepEqual(withDefault({ expr: '1 + 2' }), []);
+    assert.deepEqual(withDefault({ path: '$.run.inputs.other' }), []);
+    assert.deepEqual(withDefault({ gen: 'int', with: { min: 1, max: 9 } }), []);
   });
 });
 

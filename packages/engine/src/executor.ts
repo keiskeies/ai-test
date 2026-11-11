@@ -154,7 +154,14 @@ class FastState {
   readonly steps: ExecOutcome['steps'] = [];
   private readonly scope: ValueScope;
   constructor(private readonly ctx: PlanContext) {
-    this.vars = new VarSpace({ inputs: ctx.inputs, inputDefs: ctx.inputDefs, env: ctx.env });
+    this.vars = new VarSpace({
+      inputs: ctx.inputs, inputDefs: ctx.inputDefs ?? [], env: ctx.env,
+      // default 的求值器。**不写成 `this.resolve`**：那一行读的是 `this.scope`，
+      // 而 `this.scope` 在本构造器**下一行**才赋值 —— 求值发生在 VarSpace 构造期间，
+      // 那时它是 undefined。这里现造一个 scope（用回调给的那台 vars），
+      // 求值实现仍是 resolve.ts 那一份，与解释器逐字同语义。
+      resolveDefault: (def, vars) => resolveValue(def.default, { vars, clock: ctx.clock }),
+    });
     this.scope = { vars: this.vars, clock: ctx.clock };
   }
   aborted(): boolean {
@@ -435,9 +442,22 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
     get refs() { return [...refs]; },
     refused,
     run(ctx: PlanContext): ExecOutcome {
-      // default 在**编译期**从 scenario 闭包进来（见 PlanContext.inputDefs）
-      const st = new FastState({ ...ctx, inputDefs: ctx.inputDefs ?? scenario.inputs });
+      /*
+       * default 在**编译期**从 scenario 闭包进来（见 PlanContext.inputDefs）。
+       *
+       * ⚠ `new FastState` **必须放在 try 里面**。它以前在 try 外面是安全的，
+       * 因为构造器那时只是把 inputs 拷一份、不会抛；而现在它会**求值 inputs 的 default**
+       * （`{expr:'1 +'}` 这种就抛）。留在外面的话，异常从 `run()` 直接冒出去，
+       * 绕过下面那个把 `VarError` 收成 `status:'error' + error: 消息` 的分支 ——
+       * 而压测调用方是按 `ExecOutcome.status` 分支的，它拿到的是一个抛出的异常，
+       * 于是"用例里一条写坏的默认值"在压测形态里变成整个压测任务崩，
+       * 而不是这个计划的一条 error 结论。解释器那一侧同样的位置我做了同样的收口。
+       *
+       * `st` 因此可能是 undefined（构造中途就抛），catch 里两处取值都要兜。
+       */
+      let st: FastState | undefined;
       try {
+        st = new FastState({ ...ctx, inputDefs: ctx.inputDefs ?? scenario.inputs });
         const r = runSeq(body, st);
         for (const o of outputs) {
           const v = st.vars.resolveRef(o.from);
@@ -449,12 +469,14 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
         // 压测报告于是显示"全绿"，而里面藏着 N 条求值失败。
         return { status: reduceStatus(st.steps, r), steps: st.steps, outputs: st.vars.outputs };
       } catch (e) {
+        const steps = st?.steps ?? [];
+        const out = st?.vars.outputs ?? {};
         if (e instanceof ExecAborted) {
-          return { status: 'skipped', steps: st.steps, outputs: st.vars.outputs, error: '执行被中止（signal.aborted）' };
+          return { status: 'skipped', steps, outputs: out, error: '执行被中止（signal.aborted）' };
         }
         // 与解释器同一条分界：引用未定义/路径错误是 error（用例本身有问题），不是 fail
         if (e instanceof PathError || e instanceof VarError) {
-          return { status: 'error', steps: st.steps, outputs: st.vars.outputs, error: e.message };
+          return { status: 'error', steps, outputs: out, error: e.message };
         }
         throw e;
       }
