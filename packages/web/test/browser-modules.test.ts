@@ -17,81 +17,69 @@
  *
  * ## 为什么在这里手写 CDP，而不用 @atest/adapter-web
  *
- * `tooling/lint-layers.mjs` 给 packages/web 定的规则是"只许依赖 ir + engine"，
- * 而**测试目录只豁免 node 内置模块那一条，不豁免依赖方向**（那条例外的注释就写在那儿）。
+ * `tooling/lint-layers.mjs` 给 packages/web 定的规则是"只许依赖 ir + engine"，而
+ * **测试目录只豁免 node 内置模块那一条，不豁免依赖方向**（那条例外的注释就写在那儿）。
  * 所以这里 import 不了 adapter-web。这不是不便，是这条测试**更该在 web 这一侧**的理由：
  * 它验的是"web 这一侧的东西能不能在浏览器里跑"，夹具依赖一个上层包的话，
  * 上层包坏了会让这条测试红，而红的含义会被误读成"浏览器加载不了了"。
  *
- * 用到的 CDP 面就三个方法（`Page.enable` / `Page.navigate` / `Runtime.evaluate`，
- * 外加一个 `Runtime.enable` 让求值有上下文），加上 WebSocket 收发，
- * 比引入一层抽象更贵一点、比"没有这条测试"便宜很多。
- *
- * ## 跳过策略与 adapter-web 一致
- *
- * 找不到浏览器 => 大声跳过；`ATEST_REQUIRE_BROWSER=1` => 变成失败。
- * 静默跳过等于"前端在浏览器里坏了也没人知道"，而硬失败会让没装 Chrome 的机器
- * 上整个 `npm test` 不可用（docs/08 §3 那条"error 意味着没测成"的同一条口径）。
+ * 夹具本身（找浏览器、静态服务、CDP 客户端）在 `./browser-harness.ts`，
+ * 与 `browser-run-button.test.ts` 共用一份 —— 同一包里抄两份搜索顺序会漂，
+ * 漂了的症状是"一边能跑一边跳过"。用到的 CDP 面只有四个方法。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readdirSync, readFile, rmSync, mkdtempSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
-import { join, resolve, extname, normalize, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
+import { browserTest, evalWait, openPage, serveSite } from './browser-harness.js';
 
-/* ═══ 找浏览器。与 adapter-web/test/browser.ts 同一套搜索顺序 ═══
-   （刻意**复制**而不是 import：那边在 adapter-web 包里，本包的依赖规则不许碰它。
-     两处的搜索顺序如果哪天分叉，症状是"一边能跑一边跳过" —— 所以顺序只有四条、
-     而且都在下面的 wants 里，抄错的面积比抄一段带缓存逻辑的代码小。） */
-function findBrowser(): string | undefined {
-  const fromEnv = process.env.ATEST_BROWSER_BIN;
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
-  const roots = [join(homedir(), 'Library', 'Caches', 'ms-playwright'), '/Applications'];
-  const wants = [
-    'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    'Google Chrome.app/Contents/MacOS/Google Chrome',
-    'Chromium.app/Contents/MacOS/Chromium',
-  ];
-  for (const root of roots) {
-    let names: string[] = [];
-    try { names = readdirSync(root).sort().reverse(); } catch { continue; }
-    for (const n of names) {
-      for (const w of wants) for (const p of [join(root, n, 'chrome-mac-x64', w), join(root, w)]) {
-        if (existsSync(p)) return p;
-      }
-    }
-  }
-  return undefined;
-}
+test('夹具自己：serveSite 对没写桩的 /api 路由大声 404（不静默 403）', async () => {
+  /*
+   * 夹具也是代码，也要有自己的载体。这一格守的是夹具的一条口径：**没写桩的 api 路由
+   * 要回 404 并写上路由名**，而不是落到静态那侧的 403。403 会被读成"安全层拦了"，
+   * 而真相常常是"前端新加了一条路由，夹具还不知道" —— 那时正确的红是"404 里没有这条路由"，
+   * 不是一片被拒的 403。这条测试红了，意味着下一次夹具坏掉会被误诊。
+   */
+  const site = await serveSite({ index: { html: '<!doctype html><p>x</p>' } });
+  try {
+    const res = await fetch(`${site.url}api/never-stubbed`);
+    assert.equal(res.status, 404, '没写桩的 api 路由不该被当成静态资源处理');
+    assert.match(await res.text(), /no stub.*never-stubbed/s, '404 里要带上是哪条路由，否则排查靠猜');
+  } finally { await site.close(); }
+});
 
-const BROWSER = findBrowser();
-const REQUIRE = process.env.ATEST_REQUIRE_BROWSER === '1';
-if (!BROWSER && REQUIRE) {
-  test('ATEST_REQUIRE_BROWSER=1 但找不到浏览器', () => { throw new Error('流水线说必须有浏览器，那就不能跳过'); });
-} else if (!BROWSER) {
-  process.stderr.write('[web] 没找到 Chrome/Chromium：浏览器加载 ir/engine 的那条测试跳过。设 ATEST_BROWSER_BIN 可跑。\n');
-}
-const browserTest = BROWSER ? test : test.skip;
+test('夹具自己：被挂住的响应不会让 close() 吊死', async () => {
+  /*
+   * 测"跑动中"的夹具**必须**把 `/api/run` 挂着不回，而挂着的响应会让 `server.close()`
+   * 永远不 resolve（node 的 close 等在途连接上）。那时的表现是夹具的 finally 挂住、
+   * 整条测试超时 —— 失败归因从"这条判据红了"变成"超时"，而超时这种红谁都见过是机器慢。
+   * harness 自己记下 socket 并在 close 时拆掉；这条测的就是那一段真的生效，
+   * 并且给一个明确的时间上限（不是" eventually 会回"）。
+   */
+  let releaseLate: (() => void) | undefined;
+  const site = await serveSite({
+    index: { html: '<!doctype html><p>x</p>' },
+    api: (_req, res) => {
+      // 挂着：写个头、不 end，模拟一条还没跑完的 run
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"partial":true}');
+      releaseLate = () => res.end();
+      return true;
+    },
+  });
+  const inflight = fetch(`${site.url}api/run`, { method: 'POST' }).catch(() => undefined);
+  await new Promise((r) => setTimeout(r, 50));
+  const closedInTime = await Promise.race([
+    site.close().then(() => true),
+    new Promise<boolean>((r) => setTimeout(() => r(false), 3_000)),
+  ]);
+  releaseLate?.();
+  await inflight;
+  assert.ok(closedInTime, 'close() 被一条挂着的响应吊住了：harness 那一段拆 socket 的代码没生效');
+});
 
-/* ═══ 静态服务：只发这四棵子树，只发 .js/.json/.html ═══ */
-const MIME: Record<string, string> = { '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.html': 'text/html; charset=utf-8' };
-const ROOTS: Array<[string, string]> = [
-  ['/pkg/ir/', 'packages/ir/dist'],
-  ['/pkg/engine/', 'packages/engine/dist'],
-  ['/pkg/zod/', 'node_modules/zod'],
-  ['/app/', 'packages/web/dist'],
-];
-
-function serve(): Promise<{ url: string; close: () => Promise<void> }> {
-  const server = createServer((req, res) => {
-    const pathname = decodeURIComponent((req.url ?? '/').split('?')[0] ?? '/');
-    if (pathname === '/') {
-      const html = `<!doctype html><meta charset="utf-8"><script type="importmap">
+browserTest('浏览器里 import 真 ir/engine，并由引擎自己报出 issue', async () => {
+  const site = await serveSite({
+    index: { html: `<!doctype html><meta charset="utf-8"><script type="importmap">
 {"imports":{"zod":"/pkg/zod/index.js","@atest/ir":"/pkg/ir/index.js","@atest/engine":"/pkg/engine/index.js","@atest/web/":"/app/"}}
 </script><script type="module">
 // 判据用引擎自己的回答，不用"import 没抛"：后者连"模块加载了但没行为"都分不清
@@ -118,111 +106,12 @@ try {
 } catch (e) {
   globalThis.__probe = { ok: false, error: String((e && e.stack) || e) };
 }
-</script>`;
-      res.writeHead(200, { 'content-type': MIME['.html']! }).end(html);
-      return;
-    }
-    const hit = ROOTS.find(([pre]) => pathname.startsWith(pre));
-    if (!hit) { res.writeHead(403).end('forbidden'); return; }
-    const rel = normalize(pathname.slice(hit[0].length - 1)).split(sep).filter((s) => s !== '..' && s !== '.').join('/');
-    if (extname(rel) !== '.js' && extname(rel) !== '.json') { res.writeHead(403).end('ext forbidden'); return; }
-    readFile(join(ROOT, hit[1], rel), (e, buf) => {
-      if (e) { res.writeHead(404).end('not found'); return; }
-      res.writeHead(200, { 'content-type': MIME[extname(rel)] ?? 'application/octet-stream' }).end(buf);
-    });
+</script>`,
+    },
   });
-  return new Promise((r) => server.listen(0, '127.0.0.1', () => {
-    const port = (server.address() as { port: number }).port;
-    r({ url: `http://127.0.0.1:${port}/`, close: () => new Promise((res2) => server.close(() => res2())) });
-  }));
-}
-
-/* ═══ 最小 CDP 客户端 ═══
-   刻意**只**有 send/close：这个夹具要的是"发一个方法、拿一个返回值"，
-   事件流里 send 的应答之外的那一半（Page.loadEventFired 之类）在这里没用 ——
-   等页面里的 module 跑完靠的是轮询 evalWait（那段是 await import，本来也没有
-   对应的事件可等）。事件分发器一旦写出来，下一个用例就会开始依赖它，
-   而它今天没有任何东西在守。所以留一个明确的形状：无事件、无重连、单页面。 */
-interface Cdp { send<T>(method: string, params?: Record<string, unknown>): Promise<T>; close(): void }
-
-async function connect(wsUrl: string): Promise<Cdp> {
-  const ws = new WebSocket(wsUrl);
-  await new Promise<void>((r, j) => { ws.onopen = () => r(); ws.onerror = () => j(new Error('CDP 连接失败')); });
-  let seq = 0;
-  const waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  ws.onmessage = (m) => {
-    const msg = JSON.parse(String(m.data)) as { id?: number; result?: unknown; error?: { message: string } };
-    // 只有带 id 的才是对 send 的应答；事件帧直接丢掉（见上面那段）
-    if (msg.id === undefined) return;
-    const w = waiting.get(msg.id);
-    if (!w) return;
-    waiting.delete(msg.id);
-    if (msg.error) w.reject(new Error(msg.error.message)); else w.resolve(msg.result);
-  };
-  return {
-    send: <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
-      new Promise<T>((r, j) => {
-        const id = ++seq;
-        waiting.set(id, { resolve: r as (v: unknown) => void, reject: j });
-        ws.send(JSON.stringify({ id, method, params }));
-      }),
-    close: () => ws.close(),
-  };
-}
-
-/**
- * 等 Chrome 的调试端口起来，并返回**页面目标**自己的 ws 地址。轮询最多 ~15s。
- *
- * 必须是页面级端点而不是 `/json/version` 那个 browser 级端点：browser 端点上
- * 没有 `Runtime` / `Page` 域，发过去是 `'Runtime.enable' wasn't found`
- * （第一版就是这么炸的）。`--headless=new` 启动时会带一个 about:blank 页面，
- * 直接接上它再 navigate，比 `Target.createTarget` + `Target.attachToTarget`
- * 少一层 sessionId 路由 —— 这个客户端只需要"能驱动那一个页面"。
- */
-async function waitForDevtools(port: number): Promise<string> {
-  for (let i = 0; i < 150; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-      const list = await res.json() as Array<{ type?: string; webSocketDebuggerUrl?: string }>;
-      const page = list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
-      if (page?.webSocketDebuggerUrl) return page.webSocketDebuggerUrl;
-    } catch { /* 还没起 */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error('Chrome 调试端口 15s 内没起来（或没给出页面目标）');
-}
-
-/** 等 Runtime.evaluate 之前页面里的 module 跑完（那段是 await import，没有事件可等） */
-async function evalWait(cdp: Cdp, expression: string, timeoutMs = 20_000): Promise<unknown> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const r = await cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    const v = r.result?.value;
-    if (v !== undefined && v !== null) return v;
-    if (Date.now() > deadline) throw new Error(`等不到表达式给出值：${expression}`);
-    await new Promise((r) => setTimeout(r, 100));
-  }
-}
-
-browserTest('浏览器里 import 真 ir/engine，并由引擎自己报出 issue', async () => {
-  const site = await serve();
-  const profile = mkdtempSync(join(tmpdir(), 'atest-web-probe-profile-'));
-  // **自己的临时 profile**（docs/06 那条：Web adapter 必须用自己的 --user-data-dir，
-  // 不复用日常浏览器会话 —— 这里同理，别去碰用户那份 Chrome 配置）
-  const port = 9333 + (process.pid % 200);
-  let child: ChildProcess | undefined;
-  let cdp: Cdp | undefined;
+  // profile 由 openPage 自己开、自己收（临时 --user-data-dir，绝不碰用户那份 Chrome 配置）
+  const { cdp, kill } = await openPage(site);
   try {
-    child = spawn(BROWSER!, [
-      `--headless=new`, `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-      '--no-first-run', '--no-default-browser-check', '--disable-gpu', 'about:blank',
-    ], { stdio: 'ignore' });
-    const wsUrl = await waitForDevtools(port);
-    cdp = await connect(wsUrl);
-    await cdp.send('Runtime.enable');
-    await cdp.send('Page.enable');
-    await cdp.send('Page.navigate', { url: site.url });
-
     const got = await evalWait(cdp, 'globalThis.__probe') as {
       ok: boolean; error?: string; statusEnum?: string[]; lintCodes?: string[]; checkCodes?: string[]; canonicalHead?: string; irSha?: string;
     };
@@ -240,9 +129,7 @@ browserTest('浏览器里 import 真 ir/engine，并由引擎自己报出 issue'
     assert.ok(/^[0-9a-f]{64}$/.test(String(got.irSha)) || /Web Crypto/.test(String(got.irSha)),
       `irSha 那一格既不是 hash 也不是原因：${got.irSha}`);
   } finally {
-    cdp?.close();
-    child?.kill('SIGKILL');
+    kill();
     await site.close();
-    rmSync(profile, { recursive: true, force: true });
   }
 });

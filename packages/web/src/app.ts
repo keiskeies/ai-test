@@ -23,6 +23,7 @@
 import { CSS } from './styles.js';
 import { checkIr, GRAPH_NOT_AVAILABLE, type CheckResult } from './check.js';
 import { describeStatus, STATUS_ICON } from './status.js';
+import { newJobId, requestCancel, submitRun } from './run-job.js';
 import type { LintIssue } from '@atest/engine';
 import type { StepStatus } from '@atest/ir';
 
@@ -194,7 +195,15 @@ async function pageScenario(id: string): Promise<void> {
   area.rows = 24;
   area.spellcheck = false;
   const out = h('div', { class: 'stack' });
-  const statusLine = h('div', { class: 'row' });
+  const statusLine = h('div', { id: 'status-line', class: 'row' });
+  /*
+   * 跑动中的状态走**另一行**，不蹭 statusLine。这不是审美：runCheck 是用
+   * `statusLine.replaceChildren(...)` 画校验结论的，而它会被"改完文本顺手点一下校验"
+   * 这个动作触发 —— 那样做时一条 run 正在跑，于是那次 replaceChildren 会把**取消按钮
+   * 连同它那条 job 一起从屏幕上删掉**。载体被另一个功能的正常重绘抹掉，比没有载体更坏：
+   * 人看见的是"我点了校验，取消就不见了"。
+   */
+  const runLine = h('div', { id: 'run-line', class: 'row' });
 
   const runCheck = async (): Promise<void> => {
     statusLine.replaceChildren(h('span', { class: 'muted', text: '引擎校验中…' }));
@@ -210,29 +219,64 @@ async function pageScenario(id: string): Promise<void> {
     out.replaceChildren(...renderIssues(r));
   };
 
+  /*
+   * 运行 + 取消。判据全在 `run-job.ts`（纯 TS、node 里就能测），这一格只画与接线。
+   *
+   * **取消按钮在点"运行"的那一刻就挂出来**，而不是等某个"已受理"的信号 ——
+   * `POST /api/run` 是阻塞的，客户端拿不到"服务端已登记这条 job"这个时刻
+   * （整段理由写在 run-job.ts 的 submitRun 上，那里还钉着一条测试防止有人再加个假回调）。
+   * 代价是一条窄竞态：点完运行立刻点取消可能拿到 404，那句 404 的措辞负责说清
+   * "要么提交还在路上"。
+   *
+   * 每次点击各自一个 jobId、各自一个取消按钮 —— 顶部那个"运行"按钮不禁用（沿用第一版的
+   * 取舍：允许连着提交两条），所以按钮必须**只对得住自己那一条 job**，否则会以为
+   * 取消了新提交的那条、实际停掉的是旧的。
+   */
   const runIt = async (): Promise<void> => {
-    const btn = h('button', { class: 'btn primary', text: '运行中…', pressed: false }) as HTMLButtonElement;
-    btn.disabled = true;
-    statusLine.appendChild(btn);
-    const r = await api<{ exitCode?: number; output?: string; error?: string }>('/api/run', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scenario: id }),
-    });
-    btn.disabled = false;
-    btn.textContent = '运行';
-    const code = r.exitCode;
-    statusLine.appendChild(h('span', { class: 'mono', text: `退出码 ${code ?? '?'}${r.error ? ` · ${r.error}` : ''}` }));
+    const jobId = newJobId();
+    /*
+     * 两个节点都带 id，且 id 里带着 jobId。理由不是"测试方便"：这一格同时可能有
+     * 多条 run 在跑（顶部那个"运行"按钮不禁用，沿用第一版的取舍），而节点**没有身份**
+     * 的话，"哪个按钮属于哪条 job"就只能靠文字去猜 —— 那句"取消中…"变过一次之后
+     * 就再也认不出来了。id 由我们自己的 newJobId 生成，字符集收紧在 JOB_ID_SHAPE 里，
+     * 不含引号，而 `h()` 走的是 `el.id = …`（setAttribute 那条路本来也拼不进 HTML）。
+     */
+    const label = (s: string): string => `job ${jobId} · ${s}`;
+    const note = h('span', { id: `job-${jobId}`, class: 'muted mono', text: label('已提交') });
+    const cancelBtn = h('button', {
+      id: `cancel-${jobId}`, class: 'btn', text: '取消', pressed: false,
+      on: {
+        click: (e: Event) => {
+          const el = e.currentTarget as HTMLButtonElement;
+          el.disabled = true;
+          el.textContent = '取消中…';
+          void requestCancel({ jobId }).then((c) => {
+            // 措辞**只用 requestCancel 给的那一句**，不在这里覆盖成"已取消"：
+            // 排队中/跑动中/已结束三档里没有任何一档配得上那三个字
+            note.textContent = label(c.message);
+            el.textContent = c.ok ? '已请求取消' : '取消没生效';
+            if (!c.ok) el.disabled = false;           // 没生效就让人能再点一下，别逼人去刷新
+          });
+        },
+      },
+    }) as HTMLButtonElement;
+    runLine.append(cancelBtn, note);
+    const r = await submitRun({ scenario: id, jobId });
+    cancelBtn.remove();                               // 结束了，这一格再没有可取消的东西
+    note.textContent = label(r.exitCode === undefined ? r.message : `退出码 ${r.exitCode}`);
+    note.className = r.ok || r.exitCode !== undefined ? 'muted mono' : 'err-text mono';
     if (r.output) out.prepend(card('CLI 输出', h('pre', { class: 'code', text: r.output })));
   };
 
   shell(h('div', { class: 'stack', children: [
     card(id, h('div', { class: 'stack', children: [
       statusLine,
+      runLine,
       area,
       h('div', { class: 'row', children: [
-        h('button', { class: 'btn', text: '校验（本地引擎）', on: { click: () => void runCheck() } }),
-        h('button', { class: 'btn primary', text: '运行', on: { click: () => void runIt() } }),
-        h('span', { class: 'dim', text: '校验在浏览器里跑 @atest/engine 本体；运行走服务端 → CLI（信号、门禁、证据、租约归还那条已接线的路）' }),
+        h('button', { id: 'check-btn', class: 'btn', text: '校验（本地引擎）', on: { click: () => void runCheck() } }),
+        h('button', { id: 'run-btn', class: 'btn primary', text: '运行', on: { click: () => void runIt() } }),
+        h('span', { class: 'dim', text: '校验在浏览器里跑 @atest/engine 本体；运行走服务端 → CLI（信号、门禁、证据、租约归还那条已接线的路）。取消只是**请求**：正在跑的那条在下一步开头停下，已发出的请求不追回' }),
       ] }),
     ] }), h('a', { href: '#/scenarios', text: '← 场景库' })),
     out,
