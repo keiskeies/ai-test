@@ -30,9 +30,9 @@
       "_why": "原始失效本体。刻意不做成『不传求值器』—— 那种写法被 `VarSpaceInit` 的类型挡住了，变异会 BUILD_BROKEN，量不出任何东西。真实世界里的漏法是『签名齐全、行为没接上』，这一条就是那个形状。",
       "file": "packages/engine/src/vars.ts",
       "anchor": "  const pending = defs.filter((d) => d && typeof d.name === 'string' && !(d.name in target));",
-      "replace": "  const pending = defs.filter((d) => d && typeof d.name === 'string' && !(d.name in target));\n  if (resolve) { for (const d of pending) target[d.name] = d.default; return target; } // 变异：签名齐而不求值",
+      "replace": "  const pending = defs.filter((d) => d && typeof d.name === 'string' && !(d.name in target));\n  if (pending.length >= 0) { for (const d of pending) target[d.name] = d.default; return target; } // 变异：签名齐而不求值",
       "testFile": "packages/engine/test/input-defaults.test.ts",
-      "_measured": "红 16 条（三种形态各读一次值、嵌套、数组、env、顺序无关、环、密钥、步骤产出、不 echo 源码、预编译形态、子场景两条等）。这一条是本轮**唯一**跑过『改前行为』的验证：把 vars.ts 临时改回原样，input-defaults.test.ts 从 26 pass 掉到 10 pass —— 也就是说剩下那 16 条每一条都能证伪一次『没修』。"
+      "_measured": "红 16 条（三种形态各读一次值、嵌套、数组、env、顺序无关、环、密钥、步骤产出、不 echo 源码、预编译形态、子场景两条等）。这一条是本轮**唯一**跑过『改前行为』的验证：把 vars.ts 临时改回原样，input-defaults.test.ts 从全绿掉到 16 条红 —— 也就是那 16 条每一条都能证伪一次『没修』。<br>**写法换过一次，而换的原因是 BUILD_BROKEN（第一版压根没跑出结论）**：锚点后面那句早退条件写成 `if (resolve) {…return}` 时，TS 的控制流分析会把此后所有位置的 `resolve` 收窄成 `undefined`，于是函数末尾那句 `resolve(d)` 报 `TS2349: This expression is not callable. Type 'never' has no call signatures` —— 编译不过，于是这条变异**既不算抓到也不算没抓到**。改成 `if (pending.length >= 0)` 之后语义一模一样（依旧是原样赋值、不调用求值器），而 TS 无从收窄。对以后任何『让某个回调不再被调用』的变异都成立：**别让早退条件挂在那个参数上**，否则量到的是类型收窄而不是行为。"
     },
     {
       "label": "D2 拓扑排序的成环那一格被删：互引的 default 求不出值却说不出为什么",
@@ -71,8 +71,9 @@
       "_why": "`ScenarioSchema.inputs` 没有 `.max()`，所以『输入几千条』是一条走得通的路径。递归版会在求值侧（构造期）先炸，而那个异常又被 interpreter 包成『这一轮 inputs 坏了』—— 深度问题伪装成语义问题。溢出**用显式深度闸模拟**而不是真靠 V8 栈上限：真递归 20000 层到底炸不炸取决于帧大小与 `--stack-size`，而『这条变异抓不抓得到』不能建在一个 guesses 上（本仓那条老规矩：判断抓不抓得到要跑，不能靠推想）。测试侧那条夹具用的是 20000 条输入，所以阈值取 5000 一定命中。",
       "file": "packages/engine/src/vars.ts",
       "anchor": "  for (const n of names) visit(n);",
-      "replace": "  const seen = new Set<string>();\n  const rec = (n: string, d: number): void => { if (d > 5000) throw new Error('模拟栈溢出'); const nx = edges.get(n); if (nx) for (const m of nx) if (!seen.has(m)) { seen.add(m); rec(m, d + 1); } };\n  for (const n of names) { seen.add(n); rec(n, 0); } // 变异：改成递归 DFS",
-      "testFile": "packages/engine/test/input-defaults.test.ts"
+      "replace": "  { const seen = new Set<string>();\n    const rec = (n: string, d: number): void => { if (d > 5000) throw new Error('模拟栈溢出'); const nx = edges.get(n); if (nx) for (const mm of nx) if (!seen.has(mm)) { seen.add(mm); rec(mm, d + 1); } };\n    for (const n of names) { seen.add(n); rec(n, 0); } } // 变异：额外叠一次递归 DFS（迭代那一遍保留）\n  for (const n of names) visit(n);",
+      "testFile": "packages/engine/test/input-defaults.test.ts",
+      "_measured": "抓的是**实现选择**，而它一开始是假的一条：第一版的 replace 把 `for (const n of names) visit(n);` **整个换掉**，于是环检测同时消失，实测 fired 的是「自引用说的是…」那条 —— 抓到是真抓到了，而**抓的原因不是这条变异声称的那个原因**（本仓管这个叫夹具分不清两种实现，只不过这次分不清的是变异）。改成**保留原来那句迭代遍历、额外叠一次递归 DFS**之后，环检测的输出一个字节没变，于是唯一能红的只有那条 20000 条输入的深链测试 —— 这才是「不许用栈深上界 = 输入个数的递归」这句话的载体。给以后写这类『钉实现选择』的变异用：**先问这条改动除了我想测的那件事，还顺手改了什么**，如果它同时删掉了别的行为，fired 的那条测试说的就不是你的故事。"
     },
     {
       "label": "D7 default 求值失败时不带输入名：报错变成一句没有主语的话",
