@@ -11,7 +11,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classify, decideLock, detectResidue, mustBuild } from '../mutate.mjs';
+import { classify, decideLock, detectResidue, mustBuild, noTestsIn } from '../mutate.mjs';
 
 describe('classify：三种"没跑成"都不许被当成结论', () => {
   test('锚点匹配不到 -> ANCHOR_NOT_FOUND，且**不是**"未被抓到"', async () => {
@@ -42,6 +42,39 @@ describe('classify：三种"没跑成"都不许被当成结论', () => {
   test('测试变红 = 抓到；测试仍绿 = 未抓到', async () => {
     assert.equal(classify({ hits: 1, testRed: true }).verdict, 'caught');
     assert.equal(classify({ hits: 1, testRed: false }).verdict, 'survived');
+  });
+
+  test('测试一条都没跑 -> NO_TESTS_RAN，不许被读成"未抓到"', async () => {
+    /*
+     * 触发这个的是**真浏览器测试**：`adapter-web/test/browser.ts` 在找不到 Chrome 时
+     * 把每条都变成 `test.skip`，node:test 给的是 `pass 0 / fail 0 / 退出码 0`。
+     * 于是 testRed=false，旧判据会记下**「这条断言挡不住」**——
+     * 而真相是一条测试都没执行。
+     *
+     * 这是"看起来跑了、结论其实是假的"那一族的**第四个入口**
+     * （锚点没命中 / 编译不过 / 还原没干净 / **压根没跑测试**），
+     * 也是四个里最阴的：前三个都在输出里留下显式痕迹，这四个留下的是"全绿"。
+     */
+    const r = classify({ hits: 1, testRed: false, noTestsRan: true });
+    assert.equal(r.verdict, 'NO_TESTS_RAN');
+    assert.equal(r.conclusive, false, '进"没跑成"那一档，不进"未抓到"');
+    assert.equal(r.ok, false, '也不能算"符合预期"——它连预期都没被检验');
+    // 而**正常跑完全绿**时不能误判（否则一次真的抓到会被降级成没结论）
+    assert.equal(classify({ hits: 1, testRed: false, noTestsRan: false }).verdict, 'survived');
+  });
+
+  test('noTestsIn 只认 pass 0 + fail 0；解析不到就不动原判读', async () => {
+    // 全跳过（真浏览器测试在本机没 Chrome 时的真实输出）
+    assert.equal(noTestsIn('# tests 7\n# pass 0\n# fail 0\n# skipped 7\n'), true);
+    // 正常跑过：不能报"没跑"
+    assert.equal(noTestsIn('# tests 7\n# pass 7\n# fail 0\n'), false);
+    // **测试文件自身炸了**（import 失败）也是 fail 1，不是"没跑" ——
+    // 实测过 node:test 对这种形态给 `# tests 1 / # pass 0 / # fail 1`
+    assert.equal(noTestsIn('# tests 1\n# pass 0\n# fail 1\n'), false,
+      'import 失败是"跑失败了"，不是"没跑"。判成没跑会把一次真的防护降级成没结论');
+    // 换了 reporter / 输出被截断 => 承认判不出，**不动**原判读
+    assert.equal(noTestsIn('整体通过，无失败'), false);
+    assert.equal(noTestsIn('# pass 3'), false, '只有 pass 行时不动（宁可漏报这个形态）');
   });
 
   test('期望"不被抓到"的等价变异：绿了才算符合预期，红了要标出来', async () => {

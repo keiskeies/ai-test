@@ -56,6 +56,21 @@ export const WaitConditionSchema = z.discriminatedUnion('type', [
       status: z.array(z.int()).optional(),
     })
     .strict(),
+  /**
+   * 等页面**新开一个标签页/窗口**（docs/06 §3 的 `expectNewPage` 那一族的等待形态）。
+   *
+   * **起点是"这条等待开始的那一刻"**，与 `response` 那一支不同（那边的窗口起点是
+   * 上一步开始时消费到的位置，见 engine/src/responses.ts）。差异是有意的：
+   * 新窗口是**异步且滞后**于点击的，所以"点完再等"通常刚好来得及；
+   * 而接口响应可能就在两步之间落地，起点晚一点就会漏。
+   *
+   * **留下的那一点风险要说清**：如果窗口在"上一步点击"与"本步开始等待"之间
+   * 就已经建好了，这条会一直等到超时（假红，看得见）。
+   * 那种写法应当直接用动作步骤上的 `expectNewPage: true` —— 它的基线取在
+   * **perform 之前**，结构上不会漏。报错文案里会把这句说出来，
+   * 否则下一次红的是"我不知道该改哪里"。
+   */
+  z.object({ type: z.literal('newPage') }).strict(),
 ]);
 export type WaitCondition = z.infer<typeof WaitConditionSchema>;
 
@@ -94,9 +109,54 @@ export function describePredicate(p: WaitPredicate): string {
   if (t === 'uiIdle') return '界面空闲（动画结束）';
   if (t === 'template') return `图像模板${o.expect === 'miss' ? '未命中' : '命中'}`;
   if (t === 'response') return `等待接口 ${o.urlPattern}`;
+  if (t === 'newPage') return '等待页面新开一个标签页/窗口';
   if (t === 'httpStatus') return `接口状态 ∈ ${JSON.stringify(o.in)}`;
   if (t === 'expr') return `表达式为真：${String(o.expr).slice(0, 40)}`;
   return t ?? '条件';
+}
+
+/**
+ * 谓词树里**是否**出现了 `newPage` 条件。
+ *
+ * **为什么这里可以遍历谓词树，而 `wait.ts` 里那句"有没有需要网络的条件"
+ * 刻意不遍历**（见那边 `NoNetworkObserver` 的注释）：
+ * 那边遍历的结果决定**判据**（要不要抛错），漏一种条件类型就等于
+ * 把它退回"被吞成超时"，所以那条路只能在求值时判真实走到的分支。
+ * 这里遍历的结果只决定**一句提示文案**，漏了最坏是"这句话没说全"，
+ * 不会改变任何结论。**代价与收益不对称的地方，判据和文案就该用不同强度的实现。**
+ *
+ * 放在本文件而不是解释器里，是为了让"加一种等待条件"和"更新这个遍历"
+ * 变成**同一个文件里的两处编辑** —— 跨包的"忘了回来加一项"才是那族缺陷的成因。
+ */
+function mentionsNewPage(p: unknown): boolean {
+  if (!p || typeof p !== 'object') return false;
+  const o = p as Record<string, unknown>;
+  if (o.type === 'newPage') return true;
+  for (const k of ['allOf', 'anyOf', 'noneOf']) {
+    const kids = o[k];
+    if (Array.isArray(kids) && kids.some(mentionsNewPage)) return true;
+  }
+  return false;
+}
+
+/**
+ * 超时文案里要说的那句。**它是文案不是判据**（见 mentionsNewPage 的注释）。
+ *
+ * 为什么要有：`wait{newPage}` 的起点是"等待开始的那一刻"，所以窗口如果在
+ * "上一步点击"与"本步开始等待"之间就建好了，这条会等到超时（假红）。
+ * 那种情况该用的是动作步骤上的 `expectNewPage: true`（基线取在 perform 之前）。
+ * 少了这句话，超时报出来只有"等待页面新开一个标签页/窗口"，
+ * 人会去查产品为什么没弹窗，而真正要改的是**这个字段选错了**。
+ *
+ * **只有超时的时候加**（`hintOnTimeout` 由解释器在 `!r.satisfied` 那两支调），
+ * 不加进 `describePredicate`：那个函数同时进"等待满足"的成功摘要，
+ * 一条过了的等待后面挂一句"你可能用错字段了"是纯噪音，
+ * 而噪音会让人开始跳过摘要 —— 摘要的价值就在于它每一句都可能有用。
+ */
+export function hintOnTimeout(p: WaitPredicate): string {
+  return mentionsNewPage(p)
+    ? '。若窗口在上一步点击时就已建好，这条会一直等到超时 —— 那种写法应改用动作步骤上的 expectNewPage:true，它的基线取在动作之前'
+    : '';
 }
 
 /** 供 ValueSchema 之外的地方复用：断言里也可能要比较 Value */

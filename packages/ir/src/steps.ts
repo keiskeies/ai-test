@@ -268,6 +268,18 @@ const ActStepSchema = z
     value: ValueSchema.optional(),
     /** hover 才能出现的元素需原子组合，否则两步必然 flaky（docs/06 §2） */
     hoverThen: z.enum(['click', 'fill', 'none']).default('none'),
+    /**
+     * 断言这一步**新开了一个标签页/窗口**（不是"页面变了"，见 waits.ts 的 newPage）。
+     *
+     * 基线取在 **perform 之前**，所以"点击当场开窗"这种最快的情形不会漏。
+     *
+     * **什么时候别用它**：按钮做的是**下载**而不是开窗。实测（真 Chrome）
+     * `<a download>` 一个 target 都不产生 —— 于是这条会等满超时判 fail + product-bug，
+     * 而产品其实正常工作。"点导出按钮"看着像这个字段的典型场景，
+     * 恰恰**下载型**的导出要用 `expectResponse`（等那个导出接口）而不是它；
+     * 开窗型的（在线预览、报表新窗口）才是这里。
+     * 两种都可能出现时，先断接口、别断窗口。
+     */
     expectNewPage: z.boolean().default(false),
     expectResponse: ExpectResponseSchema,
     /** 点击前可交互性检查：被遮挡/disabled 直接进自愈而非干等 30s */

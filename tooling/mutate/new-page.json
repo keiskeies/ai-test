@@ -1,0 +1,92 @@
+{
+  "_comment": [
+    "expectNewPage / wait{newPage} 的变异集（tests: packages/engine/test/new-page.test.ts）。",
+    "",
+    "**这一族要守的东西：一条实测到的假绿。** 改动前 `expectNewPage` 在 IR 里存在、",
+    "有 .default(false)、被 zod 校验，而**全仓没有任何地方读它**。实测：",
+    "act{action:'click', expectNewPage:true} 配一个什么都没打开的点击 =>",
+    "**步骤 pass、cause 无、run pass、退出码 0**。而这条断言的价值恰恰是抓",
+    "\"点了导出但弹窗被拦截\"。静默通过不是\"少一个功能\"，是**反向保证**。",
+    "",
+    "所以第 1、2 条是成对的（恒 fail / 恒 pass 各被一条拦住）。",
+    "第 3、4 条守**基线的两个方向**，这是本文件唯一没有任何类型或 lint 能表达的东西：",
+    " - 基线写成常量 0 => 会话里早先开过的窗口算成本步开的（假绿）；",
+    " - 基线取在 perform **之后** => 点击当场开窗这种最快也最常见的情形被漏掉（假红，",
+    "   而人会去查一个其实正常工作的弹窗）。两个方向都是 `count()` 一次，",
+    "   写法上看不出区别，所以只能靠测试钉。",
+    "第 5 条守\"接线缺失不能被说成产品没弹窗\"（error vs fail 的方向盘）。",
+    "",
+    "**adapter 侧的判据在 tooling/mutate/new-page-web.json**，不在这里 ——",
+    "理由与 response-buffer.json 同理：`openerId === targetId` 那一句的失效",
+    "需要真 Chrome 的噪声才显形（别的 browserContext 的窗口、扩展的 service_worker、",
+    "chrome://newtab），假夹具里的噪声是我自己照着条件编的，等于自证。",
+    "",
+    "**没有给\"两个字段同时声明时其中一条被跳过\"写变异**（写过，删了）。",
+    "原因是具体的：那个破坏要把 expectResponse 块改回 early-return 形态，",
+    "而那是**一处以上的结构调整**，harness 一条 case 只有一个锚点 ——",
+    "硬凑的话要么编译不过（判读是\"没跑成\"，不是结论），要么改出来的东西",
+    "已经不等价于当初那个错。守它的是 new-page.test.ts 里那条",
+    "\"接口回来了但窗口没开 => 仍然 fail\"（我手工把结构改回旧形状验证过它确实会红）。",
+    "写不出变异不等于没守。",
+    "",
+    "**也没有给「基线取在 perform 之后」写变异**（假红那个方向，本轮最容易写错的一处）。",
+    "原因是具体的：那个破坏要把 const 那一行**搬到 perform 之后**，而「搬动一行」在",
+    "单锚点 harness 里没法表达（删一处 + 加一处 = 两处编辑；只删不加的话编译不过，",
+    "判读是「没跑成」而不是结论）。它是**手工验的**：把那行挪到 perform 之后，",
+    "new-page.test.ts 里 4 条变红（含「窗口在 perform 期间就建好 => 仍算命中」那条 ——",
+    "它就是为这个方向写的）。写不出变异不等于没守，但**也别把它记成「已被变异集守住」**。",
+    "H1/H2 守的是「文案也要能失效」这件事。提示不是装饰：这个形态是**假红**（产品正常、字段选错），摘要只说「没等到新窗口」的话，值班人会去查一个正常工作的弹窗。H2 那一半同样要紧 —— 提示挂到**成功**摘要与**别的**等待上，代价不是难看，是人开始跳过摘要，而摘要的价值恰恰在「每一句都可能正是要看的那句」。两条都是**跨包**变异（改 ir、测 engine），harness 会强制重建，不用在 spec 里声明。"
+  ],
+  "build": true,
+  "cases": [
+    {
+      "label": "回到本轮之前的形状：expectNewPage 没人读（实测原本就是恒 pass）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const wantsNewPage = s.kind === 'act' && s.expectNewPage;",
+      "replace": "        const wantsNewPage = false; // 变异：字段又没人读了",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    },
+    {
+      "label": "声明了也不判（恒 pass 的另一半实现：检查在但永不 push 失败）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          if (!r.satisfied || opened <= 0) {",
+      "replace": "          if (false) {",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    },
+    {
+      "label": "基线写成常量 0（会话里早先开过的窗口算成本步开的 -> 假绿）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        const newPageBaselineBefore = wantsNewPage ? (adapters.newPage?.count() ?? 0) : 0;",
+      "replace": "        const newPageBaselineBefore = 0; // 变异：不看当前计数",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    },
+    {
+      "label": "满足条件也照样判 fail（恒 fail 方向，防\"只要声明就红\"）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          if (!r.satisfied || opened <= 0) {",
+      "replace": "          if (true) {",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    },
+    {
+      "label": "没接观测口时不抛，静默当\"没开窗口\"（接线缺失伪装成产品 bug）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (!d.newPage) throw new NoNewPageObserver();",
+      "replace": "      if (!d.newPage) return false;",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    },
+    {
+      "label": "H1 超时提示恒为空（IR 注释写着「报错文案里会把这句说出来」而实际没有 —— 本轮实测过：摘要只有「等待超时：等待页面新开一个标签页/窗口」）",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "export function hintOnTimeout(p: WaitPredicate): string {",
+      "replace": "export function hintOnTimeout(p: WaitPredicate): string {\n  if (p) return ''; // 变异：声称有提示而永远不给",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    },
+    {
+      "label": "H2 提示无条件挂上（成功摘要与别的等待也会被塞一句「你可能该开弹窗」）",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "  return mentionsNewPage(p)",
+      "replace": "  return true",
+      "testFile": "packages/engine/test/new-page.test.ts"
+    }
+  ]
+}

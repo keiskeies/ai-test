@@ -1,0 +1,86 @@
+{
+  "_comment": [
+    "expectNewPage 在 **adapter 侧**的判据（tests: packages/adapter-web/test/new-page.test.ts）。",
+    "",
+    "为什么不与 new-page.json 合成一份：那边的夹具是我自己写的，噪声也是我照着过滤条件",
+    "编出来的。`openerId === targetId` 这一句在假夹具上**等于我自己写自己测** ——",
+    "夹具里根本没有'别的页面开的窗口'这种东西，除非我手工造一条，而造的时候我当然会照着条件写。",
+    "真浏览器的价值恰恰是**噪声不是我造的**（实测 setDiscoverTargets 一开就收到",
+    "别的 browserContext 的 chrome://newtab、两个扩展的 service_worker、本会话自己那个 about:blank）。",
+    "",
+    "**这一份必须在本机有 Chrome 时跑。**",
+    "没有 Chrome 时那七条全变 `test.skip`，node:test 给 `pass 0 / fail 0 / 退出码 0` ——",
+    "以前这会被判成**「未被抓到」= 这些断言挡不住**（本仓最坏的一类假结论：",
+    "它会让人给一条其实没被验证的断言补上'已验证'）。",
+    "现在 harness 会判 `NO_TESTS_RAN` 并归进'没跑成'那一档（见 tooling/mutate.mjs 的 noTestsIn）。",
+    "**这不是这里某条 case 的属性，是整份 spec 的前置条件**，所以写在最前面而不是逐条重复。",
+    "",
+    "## 本轮在这份 spec 上翻掉的两个结论（都记下来，因为它们都曾被我写成事实）",
+    "",
+    "其一：'created 与 changed 都算'（W2）我先前记成 equivalent（理由写的'method 名那道闸冗余'），错了。",
+    "依据是'手工放宽后七条一条都没红'，而那是**测试的问题不是代码的问题**：",
+    "七条问的全是 after > before —— 一个'有没有'的断言，**永远看不见'多算了几次'**。",
+    "探针实测**子页面**导航到真实 URL 时那条 targetInfoChanged **带着指回本页的 openerId**，",
+    "所以放宽之后一次开窗加 2。补了一条'一次开窗只加 1'的测试，W2 现在被抓住了。",
+    "（本页**自己**那条 infoChanged 确实不带 openerId —— 我先前那句话没错，",
+    "错的是从它推出'所以 method 名冗余'：那是把'第一道闸挡住了这一种噪声'",
+    "当成'第一道闸挡住了所有噪声'。)",
+    "",
+    "其二：W3（删掉 type==='page'）确实没红，而这次**是真冗余、不是测试的洞**。",
+    "为了不把'我没测到'记成'它没用'，专门跑探针去**找**一个'由本页打开的非 page target'：",
+    "三种 window.open 写法、window.open('about:blank')、以及**下载**",
+    "（<a download>，'点导出按钮'正是 expectNewPage 的主场景，最可能产 download target）。",
+    "结果：由本页打开的事件**只有 page 类型**（created + infoChanged 各一条），",
+    "下载**一个 target 都不产生**，扩展的 service_worker **不带 openerId**。",
+    "所以 type 过滤今天没有生产者 —— 它防的是'Chrome 以后让页面开出非 page target'。",
+    "留着（page 是 TargetInfo 上最便宜的不变量），但**记成 equivalent 而不是'已验证'**：",
+    "把一次'抓不到'记成'已验证挡住了'，是本仓定义里最坏的那类假结论。",
+    "",
+    "探针 1 的教训也记在这里（否则下一个人会重复用它）：",
+    "第一版探针用 Runtime.evaluate 点按钮，window.open **一律返回 NULL** ——",
+    "合成点击没有 user activation，Chrome 弹窗拦截器直接杀掉。于是'0 条 target 事件'",
+    "测的是**弹窗拦截器**，不是我要问的那个过滤器。改走 adapter 的真鼠标序列之后",
+    "才拿到真数据（window.open 返回 WINDOW）。判据：**在合成事件上做弹窗实验之前，",
+    "先把 window.open 的返回值打出来** —— 不然'什么都没发生'有两种成因，",
+    "而我当时把两种都读成了'过滤器冗余'。"
+  ],
+  "build": true,
+  "cases": [
+    {
+      "label": "W1 丢掉 openerId（数一切新开的 page target -> 别的用例的窗口算到我头上）",
+      "file": "packages/adapter-web/src/session.ts",
+      "anchor": "      if (info?.type === 'page' && info.openerId === targetId) newPages++;",
+      "replace": "      if (info?.type === 'page') newPages++;",
+      "testFile": "packages/adapter-web/test/new-page.test.ts"
+    },
+    {
+      "label": "W2 created 与 infoChanged 都算（一次开窗加 2；曾被我误记为 equivalent，见文件头其一）",
+      "file": "packages/adapter-web/src/session.ts",
+      "anchor": "    if (e.method === 'Target.targetCreated') {",
+      "replace": "    if (e.method === 'Target.targetCreated' || e.method === 'Target.targetInfoChanged') {",
+      "testFile": "packages/adapter-web/test/new-page.test.ts"
+    },
+    {
+      "label": "W3 丢掉 type==='page'（**今天无生产者**：探针找遍三种 window.open + 下载，由本页开的只有 page 类型）",
+      "file": "packages/adapter-web/src/session.ts",
+      "anchor": "      if (info?.type === 'page' && info.openerId === targetId) newPages++;",
+      "replace": "      if (info?.openerId === targetId) newPages++;",
+      "testFile": "packages/adapter-web/test/new-page.test.ts",
+      "expect": "equivalent"
+    },
+    {
+      "label": "W4 不开 target 发现（setDiscoverTargets 调了但 discover:false）",
+      "file": "packages/adapter-web/src/session.ts",
+      "anchor": "  const discovery = await browser.send('Target.setDiscoverTargets', { discover: true });",
+      "replace": "  const discovery = await browser.send('Target.setDiscoverTargets', { discover: false });",
+      "testFile": "packages/adapter-web/test/new-page.test.ts"
+    },
+    {
+      "label": "W5 target 事件挪到 sessionId 过滤**之后**（本仓实测：一条都收不到 -> 恒假红）",
+      "file": "packages/adapter-web/src/session.ts",
+      "anchor": "    if (e.method === 'Target.targetCreated') {",
+      "replace": "    if (e.sessionId !== sessionId) return;\n    if (e.method === 'Target.targetCreated') {",
+      "testFile": "packages/adapter-web/test/new-page.test.ts"
+    }
+  ]
+}

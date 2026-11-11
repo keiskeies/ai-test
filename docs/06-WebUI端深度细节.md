@@ -28,7 +28,7 @@ Run ──▶ Browser（或 connectOverCDP 到共享 browser 池）
 | 权限 | clipboard / notifications / camera / geolocation 显式授予并记录 | 复制类用例在 CI 里必挂 |
 | 下载 | `acceptDownloads: 'accept'` + 存进 run 证据目录 + 断言文件名/大小/内容 hash | 下载类场景完全没法测 |
 | 弹窗（`alert/confirm/prompt`） | **注册默认 handler 并记录**，IR 里可声明期望文案 | Playwright 默认自动 dismiss → 静默改变被测行为，用例假绿 |
-| 新窗口 / `target=_blank` | 用 `context.waitForEvent('page')` 包一层；IR 里 `act` 支持 `expectNewPage` | 点了"打开新窗口"之后步骤作用在已关闭的 page 上 |
+| 新窗口 / `target=_blank` | ✅ **`expectNewPage` 与 `wait{newPage}` 已实现**（判据在引擎、观测在 adapter：`Target.setDiscoverTargets` + `targetCreated` 且 `openerId === 本页 targetId` 且 `type === 'page'`）。**只有"有没有新开一个由本页打开的窗口"这一档**：观测口是一个**递增整数**，刻意不给 URL/列表（URL 会进 trace 与报告，而 `?token=` 查询串脱敏规则判不出来，同 §3 那一行）。**这一行的原始动机没有被解决**："点完之后步骤作用在已关闭的 page 上"要靠一个显式的 switch-target 动作，而它**不存在** —— 所以本字段只能证明"弹了"，不能接着断言新页面里有什么 | 点了"打开新窗口"之后步骤作用在已关闭的 page 上。**另外两条实测到的、会让人误判产品的方向**：① **下载不算开窗**（`<a download>` 一个 target 都不产生），所以"点导出"要断接口不断窗口；② 弹窗被拦截时确实算"没开窗"，那正是这条断言的价值，但**同页跳转**（`window.open(u,'_self')`）**不能**算，判据靠两道闸分开（写在 `session.ts`） |
 | iframe | 定位阶梯要能跨 frame；ARIA 快照必须**把 frame 边界显式呈现给模型**（否则模型以为是一个平面 DOM） | 第三方登录/支付/富文本框一律定位失败 |
 
 ---
@@ -52,6 +52,15 @@ Run ──▶ Browser（或 connectOverCDP 到共享 browser 池）
 - **可交互性检查**：`visible` 不等于 `可点`。被遮挡（`pointer-events`、遮罩层、sticky header 盖住）、`disabled`、`readonly`、被 virtual scroll 渲染但高度 0 —— 这些情况 Playwright 会重试到超时。定位器解析成功后要跑一次 `hitTarget` 校验，失败直接进自愈阶梯而不是干等 30s。
 - **陈旧命中校验**（比 miss 更危险）：用前验 exists + visible + 文本/嵌入相似度；`ariaSubtreeSha` 变了立即失效缓存。否则改版后"成功"点了错的元素（`docs/00` §8）。
 - **hover 才能出现的元素**（下拉菜单、tooltip）：`hover` 与被悬停元素的生命周期绑定，一旦触发 navigation 就丢失。IR 里需要 `hoverThen` 原子组合节点，否则用户会写出必然 flaky 的两步。
+  - **`hoverThen` 今天未实现，而且它的 schema 表达不了本条要的语义**（本轮读代码时发现，记下来免得下一个人照着实现一遍）：
+    `act` 只有**一个** `locator`，而本条的场景是「hover **A** 才出现 **B**，再点 **B**」——
+    两个元素。所以 `hoverThen:'click'` 最多只能做成「对**同一个**元素 hover 完再点它自己」，
+    那**恰好覆盖不了下拉菜单**（菜单不是被悬停的那个元素）。
+    实现之前要先定：给 `act` 加第二个 locator（schema 改动，牵动所有端），
+    还是把这一档**改名并收窄**成"同元素 hover+动作"、另外用别的形式表达跨元素那一种。
+    **当前状态是**：字段有 `.default('none')`、被 zod 校验、**全仓没有任何地方读它** ——
+    声明 `hoverThen:'click'` 与不声明**跑起来一模一样**（hover 完就停、步骤 pass）。
+    明细与两处登记在 `docs/08` §3 与 `docs/14` §5。
 
 ---
 

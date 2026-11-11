@@ -34,7 +34,13 @@ import { createWebAdapter } from '../src/ui.js';
 import { browserBin, browserTest, fixtureUrl, stubCtx } from './browser.js';
 
 type Adapter = Awaited<ReturnType<typeof createWebAdapter>>;
-type Row = { url: string; status: number };
+/**
+ * `idx` 曾经不在这里（只有 url + status），而"下标是绝对的"那条测试断的**就是它**。
+ * 类型上少一个字段而测试照样跑，是因为它当时压根没读 `idx` ——
+ * 于是那条测试用"条数"当游标，把一个**时序**性质当成了下标性质来断，满载时随机红。
+ * 补上字段是让"这个测试在断什么"这件事回到类型上。
+ */
+type Row = { url: string; status: number; idx: number };
 
 async function withPage<T>(html: string, fn: (a: Adapter) => Promise<T>): Promise<T> {
   const a = await createWebAdapter({ bin: browserBin() });
@@ -69,7 +75,7 @@ async function waitForUrl(a: Adapter, pattern: string, ms = 5_000): Promise<Row[
 const apiOnly = (rs: readonly Row[]): Row[] => rs.filter((r) => r.url.includes('/api/'));
 
 /**
- * 等到流**安静**（两次读数相同且间隔 250ms），返回那个总数。
+ * 等到流**安静**（两次读数相同且间隔 250ms），返回**当前最大下标**。
  *
  * 为什么需要它：**这条是被实测打出来的，不是想出来的。** 第一版在这里
  * 直接取"等到 /api/query 出现时的总条数"当游标，然后断"since=该游标 之后为空"。
@@ -79,13 +85,21 @@ const apiOnly = (rs: readonly Row[]): Row[] => rs.filter((r) => r.url.includes('
  * 那次红**不是产品的 bug，是我在断浏览器的时序而不是断我们的代码**。
  * 修法不是给 favicon 加白名单（那是为了让测试跑通而缩小被测面），
  * 而是先把流取到安静：**安静之后再取游标，"之后为空"才是对我们的判据**。
+ *
+ * **返回的是下标而不是条数**（本轮改的）。以前返回 `length`，而调用方拿它当
+ * `responsesSince()` 的参数 —— 那等于**假设"条数 == 最大下标"**，
+ * 而两者只在"从未淘汰过任何条目"时相等：缓冲有上限（`RESPONSE_CAP`），
+ * 淘汰之后条数就落后于下标。这个耦合今天碰不到（一个夹具只有几条响应，
+ * 离 5000 条远得很），但它是一颗要等很久才炸、且炸成"少给候选"的雷。
+ * 取最大下标在任何情况下都是对的游标，也更贵不了多少。
  */
 async function settle(a: Adapter, ms = 3_000): Promise<number> {
   const deadline = Date.now() + ms;
-  let prev = (await a.responsesSince(0)).length;
+  const maxIdx = async () => (await a.responsesSince(0)).reduce((m, r) => Math.max(m, r.idx), 0);
+  let prev = await maxIdx();
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 250));
-    const now = (await a.responsesSince(0)).length;
+    const now = await maxIdx();
     if (now === prev) return now;
     prev = now;
   }
@@ -114,23 +128,71 @@ browserTest('状态码是从真响应里来的（夹具回 500 就是 500，不�
   });
 });
 
-browserTest('下标是绝对的：since 之前的不再给出，且不因新数据到来而回退', async () => {
+browserTest('下标是绝对的：看过的不再给出，新的只会往后加（**这一条重写过一次，理由见注释**）', async () => {
+  /*
+   * **第一版是错的，而它在满载时随机红。** 它写的是
+   * "settle 之后取游标 => `responsesSince(游标)` 为空"，
+   * 全量套件里 1007 条并发跑时红了：那条多出来的是 **favicon**，
+   * 它在 settle 判定"安静"**之后**才落地，于是它确实是**新数据**（下标也确实更大）。
+   *
+   * 也就是说那条断言写的不是"下标是绝对的"，而是"**浏览器从此不再发任何请求**" ——
+   * 一个我根本不该主张的性质。而它的失效方式正是本仓最反对的那种：
+   * **在断被测对象的时序，而不是断我们的判据**（同 settle() 那次红的定性）。
+   *
+   * 真正要守的那条与时间无关，所以换成三条这样的：
+   *  1. **看过的绝不再给出**（按 idx 比对，不看条数）—— 这是引擎游标的全部依赖，
+   *     破了它，上一步消费过的响应会被下一步算成命中（假绿）；
+   *  2. **新读到的每一项下标都严格大于游标**，且新请求真的在里面；
+   *  3. **重复读同一游标是"只追加"的**：前缀逐条相同（同 idx、同 url），
+   *     长度只许变长。这既守"读取无副作用"，也守"下标不被重排"，
+   *     而它**允许**中间来了 favicon —— 上一条那种写法不允许，所以它是错的。
+   *
+   * 少了 `settle()`：安静本来就不是这些性质的前提，加了它反而说明当时没想清要断什么。
+   */
   await withPage('<script>fetch("/api/query");</script>', async (a) => {
     await waitForUrl(a, '/api/query');
-    const total = await settle(a);
-    // 取走全部之后，since = 当前总数 应当什么都拿不到
-    assert.deepEqual(await a.responsesSince(total), [],
-      'since 之后应当是空的。这里非空说明窗口起点形同虚设 —— 上一步消费过的响应会被下一步再算命中（假绿）');
-    // 再来一个请求，下标应当**继续往前走**而不是从 0 重来
+    const seen = await a.responsesSince(0);
+    assert.ok(seen.length > 0, '先确认流里有东西，否则下面三条都是空断言');
+    // 游标 = **看过的最大下标**，不是条数。两者只在没淘汰时相等，
+    // 而"用条数当下标"本身就是一个会随缓冲上限变化的耦合
+    const cursor = seen.reduce((m, r) => Math.max(m, r.idx), 0);
+    assert.ok(cursor > 0, `下标应当从 1 起，最大却是 ${cursor}`);
+    const seenIdx = new Set(seen.map((r) => r.idx));
+
     await a.eval('fetch("/api/third")');
-    await waitForUrl(a, '/api/third');
-    const only = apiOnly(await a.responsesSince(total));
-    assert.ok(only.length > 0, '新请求没有以"比旧游标更靠后"的下标出现');
-    assert.ok(only.every((r) => r.url.includes('/api/third')),
-      `since 之后应当只有新的：${only.map((r) => r.url).join(' ')}。`
-      + '旧响应被重新给出 = 下标被重排，引擎会把上一步的响应当成本次动作触发的（假绿）');
-    // 重复读同一个 since 要给出同样的结果（一次 poll 里 anyOf 的两个分支读同一份）
-    assert.deepEqual(await a.responsesSince(total), only, '同一个 since 两次读给出不同条目 —— 读取有副作用');
+    const after = await waitForUrl(a, '/api/third');
+    const fresh = after.filter((r) => r.idx > cursor);
+    assert.ok(fresh.length > 0, '新请求没有以"比旧游标更靠后"的下标出现');
+    /*
+     * 这里原本写的是 `fresh.every((r) => r.url.includes('/api/third'))`，
+     * 满载时它红了，而**它红的方向和被测代码无关**：多出来那条又是 favicon，
+     * 落地时间在游标之后，所以它是**合法的新条目**。
+     * 那句断言真正主张的是"游标之后浏览器只发我这一个请求"——
+     * 与本文件开头反对的是同一件事，而我一边在注释里写"别断浏览器的时序"、
+     * 一边在下一行写了个断浏览器时序的判据。这说明**光有纪律不够，
+     * 判据得写成"与时间无关的形状"**：只问"旧的会不会回来"，不问"会不会有别的"。
+     * 换成"新的那一条在不在里面"（要它必须在），旧条目回不回交给下面那条 idx 比对。
+     */
+    assert.ok(fresh.some((r) => r.url.includes('/api/third')),
+      '新请求没有出现在游标之后');
+
+    // 第 1 条：看过的绝不再给出
+    const overlap = fresh.filter((r) => seenIdx.has(r.idx));
+    assert.deepEqual(overlap, [],
+      '已消费过的响应被再次给出 = 窗口起点形同虚设，上一步的接口会被下一步算成命中（假绿）');
+
+    // 第 3 条：只追加。允许新的进来，**不允许前缀变**
+    const again = await a.responsesSince(cursor);
+    assert.ok(again.length >= fresh.length, '同一游标第二次读反而变短了 = 有东西被丢掉或读取有副作用');
+    for (let i = 0; i < fresh.length; i++) {
+      assert.equal(again[i]!.idx, fresh[i]!.idx, `第 ${i} 条的下标在两次读之间变了 = 下标被重排`);
+      assert.equal(again[i]!.url, fresh[i]!.url, `第 ${i} 条的内容在两次读之间变了 = 下标指向的东西会漂移`);
+    }
+    // 下标在整份流上严格递增（淘汰会留空洞，但不会倒退）
+    for (let i = 1; i < again.length; i++) {
+      assert.ok(again[i]!.idx > again[i - 1]!.idx,
+        `下标非递增：${again[i - 1]!.idx} -> ${again[i]!.idx}`);
+    }
   });
 });
 

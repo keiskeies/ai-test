@@ -340,6 +340,23 @@ export interface AdapterRegistry {
   device?: DeviceExec;
   /** 页面内请求观测（Web 端）。没有它，`wait{response}` 与 `expectResponse` 都报"环境缺失" */
   network?: NetworkObserver;
+  /**
+   * "由当前页面新打开的标签页/窗口"的**计数**观测（IR 的 `act{expectNewPage:true}` 靠它）。
+   *
+   * **为什么单独一个端口而不塞进 `NetworkObserver`**：那一族回答的是
+   * "页面发过哪些请求"，这一族回答的是"页面开过几个窗口"，两者生命周期完全不同
+   * （响应流要窗口化、要有淘汰；这个只是一个单调整数）。合成一个端口的话，
+   * 实现方被迫为"我只要数个数"这件事再维护一份响应缓冲。
+   *
+   * **只给计数、不给 URL，是刻意的**：URL 会进 keyContext/摘要/trace，
+   * 而 `?token=` 这种查询串 `redactForDisk` 判不出来（值形态规则只认
+   * JWT/AKIA/sk-/Bearer 形状）。计数足够判"有没有开新窗口"这个断言。
+   *
+   * 缺省（没这个端口）时 `expectNewPage: true` **报 error + env-unavailable**，
+   * 不判 fail：判 fail 会说成"被测产品没弹窗"，而真实原因是这个 adapter
+   * 没法观测窗口事件 —— 前者让人查产品，后者让人查平台。
+   */
+  newPage?: { count(): number };
   db?: { query(datasource: string, sql: string, vars: Record<string, unknown>, ctx: ExecContext): Promise<unknown[]> };
   llm?: { judge(req: unknown, ctx: ExecContext): Promise<{ passed: boolean; evidence?: unknown; costUsd: number }> };
   /**

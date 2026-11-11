@@ -190,7 +190,7 @@ export function decideLock({ existing, isAlive, selfPid }) {
  * @param expected    'caught' | 'equivalent'
  * @param residue     还原核对失败（磁盘上留着变异版）。为真时**不给任何结论**
  */
-export function classify({ hits, buildFailed = false, testRed = false, expected = 'caught', residue = false }) {
+export function classify({ hits, buildFailed = false, testRed = false, expected = 'caught', residue = false, noTestsRan = false }) {
   // 还原没还原成功这件事**优先于其它一切判读**：磁盘上的代码此刻是未知的，
   // 这一条（以及后面所有条）的红绿都不回答任何问题。放在 hits 之前是有意的 ——
   // 连"锚点匹配不到"都不该是这种状态下给出的信息，那会把人的注意力引去修锚点，
@@ -204,8 +204,44 @@ export function classify({ hits, buildFailed = false, testRed = false, expected 
   // 教训 2（的一部分）：编译不过时测试根本没运行。这**算一种防护**但不是"测试抓到了"，
   // 记成 caught 会高估测试质量，记成 survived 会去补一条本来就多余的测试
   if (buildFailed) return { verdict: 'BUILD_BROKEN', ok: false, conclusive: false };
+  /*
+   * **测试文件一条测试都没跑 => 没有任何结论可给。**
+   *
+   * 触发形态是真浏览器测试：`adapter-web/test/browser.ts` 在找不到 Chrome 时
+   * 把每条都变成 `test.skip`，而 node:test 对"全部跳过"给的是
+   * **pass 0 / fail 0 / 退出码 0**。于是 `testRed` 是 false，
+   * 于是下面那句会把这条变异记成 **「未被抓到」= 这条断言挡不住**。
+   * 真相是**一条测试都没执行**。这是教训 3 的第四个入口
+   * （锚点没命中 / 编译不过 / 还原没还原干净 / **压根没跑测试**），
+   * 而且是最阴的一个：前三种都会在输出里留下显式痕迹，这种留的是"全绿"。
+   *
+   * 只有**明确解析到 pass 0 且 fail 0** 才算。解析不到（换了 reporter、
+   * 输出被截断）时**不动**，沿用原有判读 —— 宁可漏报这个形态，
+   * 也不要把一次真的"抓到了"错记成没结论（那种错会让人去补一条本来就够的测试）。
+   */
+  if (noTestsRan) return { verdict: 'NO_TESTS_RAN', ok: false, conclusive: false };
   const verdict = testRed ? 'caught' : 'survived';
   return { verdict, ok: (expected === 'caught') === testRed, conclusive: true };
+}
+
+/**
+ * 这份测试输出里**一条测试都没跑**吗？
+ * 只认 TAP 汇总行 `# pass 0` + `# fail 0` 同时成立；解析不到就返回 false
+ * （见 classify 里 NO_TESTS_RAN 那条：漏报这个形态比误判一次"抓到了"便宜）。
+ *
+ * **正则刻意用 `^…$` + `m`，不用 `(^|\n)`** —— 第一版写的是后者，于是
+ * 捕获组 1 是那个换行边界、数字落在组 **2**，而代码读的是 `[1]`：
+ * `Number("\n") === 0`（空白串转数字是 0），所以**只要两行汇总都在就恒真**。
+ * 症状是"每条变异都判成没跑测试"，harness 直接废掉。
+ * 这是我给这条守卫补测试时才暴露的（`# pass 7 / # fail 0` 期望 false、实得 true），
+ * 属于本仓那一族缺陷的正字反写：**条件写得永远成立，看起来像在工作**。
+ * 用 `m` 之后没有边界捕获组，`[1]` 只能是数字，这类错位没有藏身处。
+ */
+export function noTestsIn(out) {
+  const pass = /^# pass (\d+)$/m.exec(out);
+  const fail = /^# fail (\d+)$/m.exec(out);
+  if (!pass || !fail) return false;
+  return Number(pass[1]) === 0 && Number(fail[1]) === 0;
 }
 
 /** 从测试输出里抓第一条失败。只用于打印，不参与判定 */
@@ -296,8 +332,11 @@ function runDriver(spec) {
       if (!buildFailed) {
         const t = c.test ?? ['--disable-warning=ExperimentalWarning', '--import', 'tsx', '--test', c.testFile];
         const r = runTest('node', t);
-        v = classify({ hits, testRed: r.red, expected });
-        if (r.red) note = firstFail(r.out);
+        const empty = noTestsIn(r.out);
+        v = classify({ hits, testRed: r.red, expected, noTestsRan: empty });
+        if (empty) note = '测试文件一条都没跑（多半是真浏览器的测试而本机没有 Chrome）。'
+          + '这**不是"未被抓到"** —— 什么都没执行。装 Chrome 或设 ATEST_BROWSER_BIN 再跑';
+        else if (r.red) note = firstFail(r.out);
       }
     } finally {
       // 还原 src **并且**把 dist 也恢复成干净版 —— 只还原 src 会留下变异的 dist，

@@ -121,21 +121,31 @@ browserTest('点击真的作用在**解析出来的那一个**元素上（点错
 });
 
 browserTest('被遮罩盖住的元素**立刻报错**，不是干等 30s', async () => {
-  const t0 = Date.now();
+  /*
+   * **计时位置是这条测试的一半，而它一开始就放错了**：t0 原先在 `withPage` 之前，
+   * 于是那个 10s 预算里装着**启动 Chrome + 导航 + 定位** —— 满载跑整套时
+   * 光这些就能吃掉 11s，断言必红，而可交互性检查本身是**瞬间**的。
+   *
+   * 这与我在 network.test.ts 里刚犯的是同一个错：**断言想管 A 的时长，
+   * 计时却从 A 之前开始**。修法也一样 —— 把计时挪到它真正关于的那一次调用上。
+   * 挪过来之后这条在任何负载下都成立，因为它测的是我们那一小段代码。
+   */
   await withPage(
     '<button data-testid="x">被盖住的</button>'
     + '<div style="position:fixed;inset:0;background:#fff"></div>',
     async (a, ctx) => {
       const h = await a.ui.resolve(spec({ primary: { by: 'testid', value: 'x', scope: 'page', nameMatch: 'exact' } }), ctx);
+      const t0 = Date.now();
       await assert.rejects(() => a.ui.perform({ op: 'click' }, h, ctx), (e: unknown) => {
         const m = (e as Error).message;
         assert.match(m, /不可交互/, `报错要说是可交互性问题：${m}`);
         assert.match(m, /遮住/, `要指认是被遮挡：${m}`);
         return true;
       });
+      const took = Date.now() - t0;
       // **这条时间断言是这条测试的一半**：docs/06 §2 要的就是"别干等 30s"。
       // 只断"报错"的话，一个"等满超时再报错"的实现也能过
-      assert.ok(Date.now() - t0 < 10_000, `可交互性检查不该等到超时：用了 ${Date.now() - t0}ms`);
+      assert.ok(took < 10_000, `可交互性检查不该等到超时：perform 用了 ${took}ms`);
     },
   );
 });

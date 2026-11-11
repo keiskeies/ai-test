@@ -56,6 +56,17 @@ export interface WebAdapter {
    */
   responsesSince(s: number): Promise<ObservedResponse[]>;
   /**
+   * 新窗口观测口（透传 Session 的计数）。**能不能观测由 Session 判**：
+   * `Target.setDiscoverTargets` 没开成功时这里是 `undefined`，
+   * 于是引擎那边报 env-unavailable（"去查平台"）而不是 fail + product-bug
+   * （"被测产品没弹窗"）。**宁可少一个能力，也不要一个装作能观测的探针。**
+   *
+   * 与 `responsesSince` 一样挂在 adapter 上而不是 UiExec 端口上（同 `eval` 的理由：
+   * 端口是引擎唯一能看见的东西，而"取计数"这件事不该被步骤层直接调 ——
+   * 引擎侧唯一的入口是 `wait{newPage}` 与 `expectNewPage` 那两处，共用同一个判据）。
+   */
+  readonly newPage?: { count(): number };
+  /**
    * 在被测页里求值。端口（UiExec）上**刻意没有**这一项：
    * IR 里唯一像"执行代码"的步骤是 `script`，而引擎直接拒掉它
    * （interpreter.ts:917「沙箱未实现；它会绕过静态闸」）。
@@ -371,6 +382,9 @@ export async function createWebAdapter(opts: WebAdapterOptions = {}): Promise<We
     meta: { viewport: s.viewport, ...(opts.locale ? { locale: opts.locale } : {}), ...(opts.timezoneId ? { timezoneId: opts.timezoneId } : {}) },
     eval: (expression) => s.evalPage<unknown>(expression),
     responsesSince: (n) => s.responsesSince(n),
+    // 观测不了就**整个不给**这个端口（而不是给一个恒 0 的）：
+    // 引擎按"有没有 adapters.newPage"决定报 env-unavailable 还是判产品没弹窗。
+    ...(s.newPageObserves ? { newPage: { count: () => s.newPageCount() } } : {}),
     close: () => s.close(),
   };
 }

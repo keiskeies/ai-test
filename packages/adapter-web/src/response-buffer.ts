@@ -23,13 +23,6 @@
  * 这两条不需要浏览器，也因此**必须**能在不起浏览器的情况下被证。
  */
 
-/** 一条观测到的响应。**下标 `idx` 从 1 起、绝对、只增不减** */
-export interface BufferedResponse {
-  readonly idx: number;
-  readonly url: string;
-  readonly status: number;
-}
-
 /**
  * 上限。一个 200 步、每步 20 个请求的页面会产上万条，每条两个字段；
  * 5000 条足够覆盖"最长的单个等待窗口"，再多就是纯粹的内存浪费。
@@ -48,9 +41,18 @@ export const RESPONSE_CAP = 5_000;
  * 于是最多**少给**候选（超时 = 红，看得见），不可能凭空多给（绿，看不见）。
  * 下一个想"优化内存"的人会考虑清空数组 —— 清空可以，
  * **顺手把序号也归零不行**，那正是第 1 条不变量。
+ *
+ * ## 为什么"新开的标签页"不共用这个类（我一开始写成了泛型，随后改回来）
+ *
+ * 因为那一侧要的量是**一个计数**：判据是"这一步期间有没有多出一个由本页打开的页面"，
+ * 不是"哪些页面、各自什么地址"。用不上淘汰（整数不会涨），也用不上 items。
+ * 而**刻意不存新页面的 URL**：它会进 keyContext/摘要/trace，
+ * 而 `?token=` 这种查询串 `redactForDisk` 判不出来（同 responses.ts 那条理由）。
+ * 为了"共用一个类"而给一个计数器装上 items + 上限 + 淘汰，是拿抽象当目标；
+ * 那个抽象一被写出来，下一个加字段的人会顺手把 url 塞进去 —— 而那正是要防的泄漏面。
  */
 export class ResponseBuffer {
-  private readonly rows: BufferedResponse[] = [];
+  private readonly rows: Array<{ idx: number; url: string; status: number }> = [];
   private seq = 0;
 
   /** @param cap 上限。**可注入**不是为了通用性：不注入的话，
@@ -68,7 +70,7 @@ export class ResponseBuffer {
   }
 
   /** 下标**严格大于** s 的条目。等号不取：s 是"已经消费到的那一条" */
-  since(s: number): BufferedResponse[] {
+  since(s: number): Array<{ idx: number; url: string; status: number }> {
     return this.rows.filter((r) => r.idx > s);
   }
 }

@@ -50,6 +50,56 @@ export interface Session {
    * 所以这里**绝不能**把下标重新从 0 排 —— 那会让引擎把旧响应当新的（假绿）。
    */
   responsesSince(s: number): Promise<ObservedResponse[]>;
+  /**
+   * "由**本页面**打开的新标签页"的计数（IR 的 `act{expectNewPage:true}` 靠它）。
+   *
+   * 只有一个递增整数，**刻意不返回页面列表**：判据是"这一步期间有没有多出一个"，
+   * 而列表里的 URL 会进 keyContext/摘要/trace —— `?token=` 这种查询串
+   * `redactForDisk` 判不出来（只认 JWT/AKIA/sk-/Bearer 形状）。
+   * 需要跳到那个新页面去断言属另一件事（要做就该有个显式的 switch-target 动作，
+   * 而不是让计数顺手带出地址）。
+   *
+   * **判据为什么必须带 openerId**（实测，不是推演）：`Target.setDiscoverTargets`
+   * 一开就会收到**整个浏览器**的 target 事件，本机实测包括别的 browserContext 的
+   * `chrome://newtab/`、两个 Chrome 扩展的 service_worker、以及本会话自己那个
+   * `about:blank`。所以"数一切新出现的 page target"会**恒真** ——
+   * `expectNewPage` 变成一条永远过的断言，比不实现更坏。
+   * 实测三种写法（`<a target=_blank>` / `window.open()` / `window.open(u,'_blank')`）
+   * 的 `targetCreated` 都带 `openerId === 本会话的 targetId`；
+   * 而 `window.open(u,'_self')`（同页跳转）**不发** `targetCreated`，只有 `targetInfoChanged`，
+   * 且**那条不带 openerId** —— 所以同页跳转在第一道闸就被挡掉。
+   *
+   * **但 method 名那道闸不是冗余的**（这里曾写着"冗余"，是错的，下面是实测）：
+   * 一次真开窗产生**两条**都带 `openerId === 本页` 的事件 ——
+   * `targetCreated`（url 还是空的）与随后子页面导航到真实 URL 的 `targetInfoChanged`。
+   * 所以"created 与 changed 都算"会让一次开窗**加 2**。
+   * 我先前是从"放宽后七条一条都没红"推出"冗余"的，那步推理不成立：
+   * 那七条问的全是 `after > before`，**"有没有"的断言看不见"多算了几次"**。
+   * 补了 new-page.test.ts 里"一次开窗只加 1"那条，这个破坏现在会被抓住。
+   *
+   * 两道闸挡的是**不同**的失效方向：openerId 挡"别人的窗口算到我头上"，
+   * 只认 created 挡"同一个窗口的后续状态变化被反复计数"，以及
+   * （本页自己那条 infoChanged 带上 openerId 的那天）"本页每次导航都算开窗"。
+   *
+   * `type === 'page'` 那一档**目前没有生产者**：探针找过三种 `window.open` 写法、
+   * `window.open('about:blank')` 和**下载**（`<a download>`，"点导出按钮"是本字段主场景），
+   * 由本页打开的事件全是 `page`，下载压根不产生 target，扩展的 service_worker 不带 openerId。
+   * 留着是因为它是 TargetInfo 上最便宜的不变量，但**别把它记成"已验证挡住了什么"** ——
+   * 见 tooling/mutate/new-page-web.json 的 W3（记的是 equivalent）。
+   *
+   * 判据里的"本页"用的是接口上已有的 `targetId`（导航不会换 targetId）。
+   */
+  newPageCount(): number;
+  /**
+   * 这个会话**能不能**观测到新开的页面（`Target.setDiscoverTargets` 开成功了没）。
+   *
+   * **为什么要把这种"我自己行不行"的事暴露出来**：不能的话，adapter 那边就
+   * **不挂** `adapters.newPage` 这个端口，引擎于是报 env-unavailable。
+   * 反过来如果照常挂上一个恒 0 的计数器，`expectNewPage` 会等满超时判
+   * fail + product-bug —— 把"平台看不见窗口事件"说成"被测产品没弹窗"。
+   * 一个装作能观测的探针，比没有探针危险：后者的报错是对的。
+   */
+  readonly newPageObserves: boolean;
   send<T>(method: string, params?: Record<string, unknown>): Promise<T>;
   /** 失败转异常的那一个（send 刻意不抛，阶梯要"这一级失败试下一级"） */
   call<T>(method: string, params?: Record<string, unknown>): Promise<T>;
@@ -198,7 +248,23 @@ export async function createSession(opts: SessionOptions = {}): Promise<Session>
    * "我明明在 DevTools 里看到这个请求回来了，为什么等不到"这种新失真。
    */
   const responses = new ResponseBuffer();
+  /** 由**本页**打开的新标签页计数（见 newPageCount 的注释：只有整数，不存 URL） */
+  let newPages = 0;
   const offEvent = browser.onEvent((e: CdpEvent) => {
+    /*
+     * **target 事件必须在下面那句 sessionId 过滤之前处理。**
+     * 不是风格问题：`Target.*` 是浏览器级的，实测 `e.sessionId` 是 **undefined**，
+     * 所以放到过滤之后的话这里**一条都收不到** —— 而"收不到"的表现是
+     * `expectNewPage` 永远判"没开新窗口"（假红），看起来像被测产品没弹窗。
+     * "该在过滤前"这件事本身没有编译器管，所以写在这。
+     */
+    if (e.method === 'Target.targetCreated') {
+      const info = (e.params as { targetInfo?: Record<string, unknown> } | undefined)?.targetInfo;
+      // 三个条件缺一不可（每条都对应实测到的一种噪声，见 newPageCount 注释）：
+      // 是新 target（不是 infoChanged）、是 page（不是 service_worker/扩展）、
+      // 且**是本页打开的**（openerId 指向我们）。
+      if (info?.type === 'page' && info.openerId === targetId) newPages++;
+    }
     if (e.sessionId !== sessionId) return;
     if (e.method === 'Page.javascriptDialogOpening') {
       // 默认接受**并记录**。不注册 handler 的话 Chrome 会一直等一个不会来的响应，
@@ -237,6 +303,20 @@ export async function createSession(opts: SessionOptions = {}): Promise<Session>
 
   await send('Page.enable'); await send('Runtime.enable');
   await send('DOM.enable'); await send('Network.enable');
+  /*
+   * 开 target 发现，否则**一个 target 事件都收不到**（实测：不开时点
+   * `<a target=_blank>`、`window.open()`、`window.open(u,'_blank')` 三种写法，
+   * 新增事件数都是 **0**）。这是浏览器级的调用，所以走 `browser.send` 而不是
+   * 本会话的 `send`（后者会带上 sessionId，而 discovery 是全局开关）。
+   *
+   * **失败时把能力关掉而不是留个恒 0 的计数器**：
+   * `newPageObserves` 为 false 的话 adapter 不挂 `newPage` 端口，
+   * 引擎于是报 env-unavailable（"去查平台"）。
+   * 如果反过来让它恒 0，`expectNewPage` 会等满超时然后判 fail + product-bug
+   * —— 把"我们看不见窗口事件"说成"被测产品没弹窗"，正是本仓反复在防的那种错归因。
+   */
+  const discovery = await browser.send('Target.setDiscoverTargets', { discover: true });
+  const newPageObserves = !discovery.error;
   await send('Emulation.setDeviceMetricsOverride', { width: vp.width, height: vp.height, deviceScaleFactor: vp.deviceScaleFactor, mobile: false });
   // locale / tz 覆盖失败只记不抛：值不被 Chrome 认时让整个 adapter 起不来，
   // 比"这一项没生效"更糟，而且报错里根本看不出是它
@@ -354,6 +434,8 @@ export async function createSession(opts: SessionOptions = {}): Promise<Session>
     url: async () => evalValue<string>(await send<EvalOut<string>>('Runtime.evaluate', { expression: 'location.href', returnByValue: true })) ?? '',
     screenshot, waitLoaded,
     responsesSince: async (s) => responses.since(s),
+    newPageCount: () => newPages,
+    newPageObserves,
     onNavigate: (fn) => { navigateHandlers.add(fn); },
     close: async () => {
       offEvent();

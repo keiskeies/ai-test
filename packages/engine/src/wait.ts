@@ -40,6 +40,46 @@ export interface WaitDeps {
    * 内部造 = 每次都从 0 开始 = 那个假绿照旧存在，且这次连"没人传起点"的痕迹都没有。
    */
   window: ResponseWindow;
+  /**
+   * 新窗口观测口（透传自 `adapters.newPage`）。**必填**，与 `network` 同理：
+   * 可选的话"忘了接"编译得过，而漏接的症状是 `expectNewPage` 恒判"没开新窗口"。
+   * 没接时传 `undefined` 是合法的 —— 但谓词里有 newPage 条件就会抛
+   * {@link NoNewPageObserver}（归因到接线，而不是"被测产品没弹窗"）。
+   */
+  newPage: NewPageObserver | undefined;
+  /**
+   * 计数基线：`newPage.count()` **大于**这个值才算"这一步开了新窗口"。
+   *
+   * **由调用方算并传进来**，不在 waitUntil 内部取，理由是两条路的起点不一样：
+   *  - `wait{newPage}` 步骤：起点 = 等待开始的那一刻。
+   *  - 动作步骤上的 `expectNewPage`：起点必须 = **perform 之前**，
+   *    否则"点击当场就把窗口开好了"这种最快的情形会被漏掉（等满超时 = 假红），
+   *    而那正是这条断言最常碰到的形态 —— 同步 `window.open()` 就是这么工作的。
+   * 如果这里给个默认 0，等价于"会话里开过任何窗口都算过"，
+   * 也就是这个字段要防的那个假绿。所以**必填**，且解释器里只有一处计算它。
+   */
+  newPageBaseline: number;
+}
+
+/**
+ * "页面新开了一个标签页/窗口"的观测口（只有浏览器看得见，引擎不碰窗口生命周期）。
+ *
+ * 只有一个 `count()`，返回**自会话开始以来由本页打开的新页面数**。
+ * 刻意不是"给我页面列表"：列表里的 URL 会进 keyContext/摘要/trace，
+ * 而 `?token=` 这种查询串 `redactForDisk` 判不出来（同 responses.ts 那条理由）。
+ */
+export interface NewPageObserver {
+  count(): number;
+}
+
+/** 缺新窗口观测口。抛的时机与理由同 `NoNetworkObserver`（见 responses.ts）。 */
+export class NoNewPageObserver extends Error {
+  constructor() {
+    super('等待条件里有 newPage（等页面新开标签页/窗口），但没配 adapters.newPage —— '
+      + '新窗口只有浏览器看得见，引擎不碰窗口生命周期，所以没有任何东西能提供这个数据。'
+      + '（Web 端由 adapter-web 提供；没起浏览器时这条等待无法工作）');
+    this.name = 'NoNewPageObserver';
+  }
 }
 
 export interface WaitResult {
@@ -90,6 +130,12 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
        * 漏加的那一种就又回到"被吞成超时"。求值时判一次，覆盖的是**真实走到的**分支。
        */
       if (e instanceof NoNetworkObserver) throw e;
+      /*
+       * 同 NoNetworkObserver：**"这个 adapter 看不见窗口事件"不是"条件还没成立"**。
+       * 让它被吞成"再等一轮"的话，最后是一次普通超时 + fail + product-bug，
+       * 也就是把"平台没接线"说成"被测产品没弹窗"。
+       */
+      if (e instanceof NoNewPageObserver) throw e;
       // 条件求值本身报错（变量未定义/adapter 缺失）不能当成「还没满足」干等到超时 ——
       // 那会把一个配置错误伪装成一次超时，是最难查的一类 flake
       return { satisfied: false, waitedMs: d.clock.mono() - t0, polls, describe: `${describe}（求值报错：${(e as Error).message}）` };
@@ -199,6 +245,16 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
       if (!d.network) throw new NoNetworkObserver();
       await d.window.poll(d.network);
       return d.window.any(c.urlPattern, c.status);
+    }
+    case 'newPage': {
+      /*
+       * 与 response 那一支同构：**判据在引擎，观测在 adapter**。
+       * 但**不需要窗口对象**：新窗口是"一个自会话开始起的单调整数"，
+       * 起点由 `newPageBaseline` 一次给清，没有"消费到哪一条"这件事要记。
+       * （少了 ResponseLedger 那样的第二本账，也就少了它对不齐的方式。）
+       */
+      if (!d.newPage) throw new NoNewPageObserver();
+      return d.newPage.count() > d.newPageBaseline;
     }
     default:
       throw new Error(`未知等待条件类型 ${(c as { type: string }).type}`);

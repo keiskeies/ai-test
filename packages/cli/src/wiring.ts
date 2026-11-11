@@ -556,6 +556,18 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
        * （以前这里的症状是"永远超时 + 摘要说接口没回来"，把接线缺失说成产品问题。）
        */
       adapters.network = { responsesSince: (s) => web.responsesSince(s) };
+      /*
+       * 新窗口观测口（`expectNewPage` / `wait{newPage}` 的数据源）。
+       *
+       * **条件挂上**：`web.newPage` 在 `Target.setDiscoverTargets` 失败时是
+       * undefined，那时这里必须让 `adapters.newPage` 保持缺失 ——
+       * 引擎据此报 env-unavailable（"去查平台"）。
+       * 如果这里图省事写成恒等于一个 `{count: () => 0}`，`expectNewPage`
+       * 会等满超时判 **fail + product-bug**，也就是把"我们看不见窗口事件"
+       * 说成"被测产品没弹窗" —— 一个装作能观测的探针比没有探针危险，
+       * 因为它的报错是**错的**而没有线索指向真因。
+       */
+      if (web.newPage) adapters.newPage = web.newPage;
       builtWeb = web;
     } catch (e) {
       // 浏览器路径写错/起不来同样是**装配期**的配置问题（见上）。

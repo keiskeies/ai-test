@@ -10,7 +10,7 @@
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
 import type { Step, Scenario, Lease, ForEachStep, WhileStep, Retry, FlakyAttempt } from '@atest/ir';
-import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, parallelHazards, walk, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, parallelHazards, walk, hintOnTimeout, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
@@ -941,15 +941,40 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           // 响应观测：数据只有浏览器看得见，引擎只判"哪个算命中"。
           // 传 undefined 是合法的（没起浏览器），但谓词里有 response 条件就会报错。
           network: adapters.network, window,
+          // 新窗口观测。**基线取在等待开始这一刻**（与动作步骤那侧不同，
+          // 那边必须取 perform 之前，见 expectNewPage 那段）。
+          /*
+           * 基线 = 取数这一刻的计数（= 这条等待开始的时候）。
+           *
+           * **这里无条件取，而动作步骤那侧是声明了才取**（见 wantsNewPage）。
+           * 不对称的原因是**条件化在这一侧要付的代价完全不同**，不是因为
+           * "读一次很贵"也不是因为"读一次免费"（count() 在 Web 端只是一个
+           * 本地整数读，两边都几乎不要钱）：
+           *  - 动作侧的条件就是 `s.expectNewPage` 本身，我本来要读它来决定
+           *    要不要做这项检查，所以顺带省掉一次取数是**零额外判据**；
+           *  - 这一侧要条件化，就得**遍历谓词树**判断"里面有没有 newPage 条件"，
+           *    而那正是 `NoNetworkObserver` 那条注释里已经否决过的做法 ——
+           *    新增一种需要窗口/网络的条件时没人会回来加一项，漏加的那一种
+           *    恰好退回"被吞成超时"。多一份判据的代价远大于省一次本地读。
+           */
+          newPage: adapters.newPage, newPageBaseline: adapters.newPage?.count() ?? 0,
         });
         if (!r.satisfied) {
-          if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}` };
+          /*
+           * `hintOnTimeout` 只在这两支里加（不是加进 describePredicate）。
+           * 见 waits.ts 那个函数的注释：describePredicate 同时进"等待满足"的成功摘要，
+           * 过了的等待后面挂一句"你可能选错了字段"是纯噪音。
+           * 对 newPage 条件以外的谓词，它返回空串，所以这里对所有 wait 步骤统一调
+           * 而不需要"先判断这是不是 newPage 等待"—— 又一次少一个判据。
+           */
+          const hint = hintOnTimeout(s.condition);
+          if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}${hint}` };
           // IR 的 onTimeout 有三个合法取值（waits.ts:79 fail/continue/error），
           // 早先这里只分 'continue' 与"其余"，于是 **error 是个永远走不到的 schema 取值**：
           // 用户显式要求"等不到就算环境问题"，却拿到一个 fail ——
           // fail 的含义是"产品有 bug"，值班人会去查一个不存在的功能问题。
-          if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
-          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
+          if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
+          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
         }
         return { status: 'pass', summary: `等待满足（${r.waitedMs}ms）：${r.describe}`, keyContext: { waitedMs: r.waitedMs } };
       }
@@ -1241,33 +1266,68 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          * 归属不该由"adapter 有没有自己 emit 过一条事件"决定，
          * 那是兜底路径；正常路径是**谁产的谁带回来**。
          */
+        /*
+         * 新窗口的**基线必须取在 perform 之前**。这是这条断言唯一容易写错的地方：
+         * 取在 perform 之后的话，`window.open()` 这种"点击当场把窗口建好"的
+         * 最快、也最常见的情形会被算成"基线之前就有了，不算"，于是等满超时 ——
+         * 一条**假红**，而人会去查一个其实正常工作的弹窗。
+         * （`expectResponse` 那边不需要这一行：它用的是 window 对象，
+         *  起点在本步开始时就已经定好了，见 newResponseWindow。）
+         *
+         * **只在真的声明了时才取数**。以前是无条件取，于是每个 act 步骤
+         * （绝大多数根本不声明这个字段）都多一次跨进程观测：
+         * 白做的功还是小事，要紧的是"一个没声明的字段悄悄改变了执行路径"
+         * 正是本仓反复在防的那个形状。测试里那条 `calls === 0` 就是它的闸。
+         */
+        const wantsNewPage = s.kind === 'act' && s.expectNewPage;
+        const newPageBaselineBefore = wantsNewPage ? (adapters.newPage?.count() ?? 0) : 0;
         const performed = 'perform' in uiOrDev
           ? await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<{ artifactIds?: string[] } | void> })
             .perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id))
           : undefined;
         /*
-         * **`expectResponse`：这一步的动作必须真的触发那个接口**（docs/06 §3）。
+         * **动作步骤上的两个"声明了就必须发生"的检查：`expectResponse`（docs/06 §3）
+         * 与 `expectNewPage`。** 两个字段以前都是"IR 有、执行侧没人读"：
+         * `expectResponse` 被 `opOf` 丢掉所以 adapter 压根拿不到，
+         * `expectNewPage` 连读的人都没有 —— 实测 `expectNewPage: true` 的步骤
+         * **在什么都没打开时也判 pass、退出码 0**。而这两条断言的价值恰恰是抓
+         * "点了查询但接口没发"与"点了导出但弹窗被拦截"，静默通过等于反向保证。
          *
-         * 这个字段以前也是"IR 有、没人读"（`navigate` 与 `act` 两处都有它，
-         * `opOf` 压根不搬，adapter 也就拿不到），所以"点了查询，等那个接口回来"
-         * 这条 Web 侧最有价值的断言从未生效。
+         * 两条都走 `waitUntil` + 与 wait 步骤**同一个条件判据**，不是各写一份：
+         * 动作步骤自己判一次的话就有两处决定"什么算满足"，
+         * 迟早出现"同一个声明在等待里算过、在动作步骤里不算"。
          *
-         * **走的是 `waitUntil` + 同一个 `response` 条件，不是另写一份判据。**
-         * 这不是省代码：如果动作步骤自己 `window.any(...)` 判一次，
-         * 就有两处决定"什么算命中"，迟早出现"同一个 pattern 在等待里算命中、
-         * 在动作步骤里不算"。复用条件之后两条路共用 `responseMatches` 与同一个窗口对象。
+         * **两条都必须能单独让这一步失败，且不能互相跳过。**
+         * 这里原先只有一条 `if (expectPattern !== undefined) { …; return … }`。
+         * 那个 return 会让"在它后面再加一条检查"的写法**在两个字段同时声明时静默失效**
+         * —— 我这次差点就这么加，而测试会因为"只声明 expectNewPage"的用例全绿，
+         * 看不出来两个一起声明时那条检查根本没跑。
+         * 所以下面是**各自把结论收进 notes/failed，最后一次性判**。
          *
-         * 起点是**本步开始时**的窗口（不是 perform 之后）：我们要抓的正是"点击触发、
-         * 在 perform 期间落地"的那条响应；而本步之前的同类接口不算命中。
-         *
-         * **没等到判 fail + product-bug**，与定位超预算那一条相反：
-         * 这里没有"已经花掉的钱要再花一遍"的风险，而"点了按钮但那个接口没发出来"
-         * 就是被测产品的行为与用例声明不符 —— 报 env-unavailable 会让人去查接线，
-         * 报 case-stale 会让人去改一条其实写对了的用例。
-         * （接线缺失是另一件事：没配 `adapters.network` 时 `NoNetworkObserver`
-         *  会从这里抛出去，落到 error + env-unavailable，方向正确。）
+         * 归因：没等到都是 **fail + product-bug**，不是 error。
+         * 与定位超预算那条相反，这里没有"已经花掉的钱再花一遍"的风险
+         * （error 走退出码 5，而 CI_HINT 教 CI 重试一次），
+         * 而"点了按钮但那个接口没发/那个窗口没开"就是被测产品与用例声明不符。
+         * **接线缺失是另一件事**：没配 `adapters.network` / `adapters.newPage` 时
+         * `NoNetworkObserver` / `NoNewPageObserver` 会从 waitUntil 抛出来，
+         * 落到 error + env-unavailable（"去查平台"），不背产品 bug 这个名。
          */
         const expectPattern = s.kind === 'navigate' || s.kind === 'act' ? s.expectResponse : undefined;
+        const notes: string[] = [];
+        const ctxExtra: Record<string, unknown> = {};
+        /*
+         * 是**数组**而不是一个 `let failed`（我第一版写的是后者配 `??=`）：
+         * 两个字段可以同时声明、也可以同时不满足，那种时候只留第一条摘要
+         * 就是把第二条的诊断信息扔掉 —— 人会修好接口那一条、再跑一次，
+         * 然后才看见"哦窗口也没开"。一次报全比省一行代码值钱。
+         *
+         * cause 取**第一条**：今天两条都判 product-bug，所以根本没有排序问题。
+         * 将来若有第二条的 cause 不同（比如 case-stale），**别沿用这个位置顺序** ——
+         * 那时要先定"哪个归因更该出现在门禁/JUnit 的 cause 列"，
+         * 而那是一次口径决定，不该由数组顺序代劳。
+         */
+        const notMet: Array<{ cause: NonNullable<StepResult['cause']>; summary: string }> = [];
+
         if (expectPattern !== undefined) {
           const pattern = expectPattern;
           const r = await waitUntil({
@@ -1277,15 +1337,15 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             clock, evalExpr: () => { throw new Error('response 条件不该走表达式求值'); },
             resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
             addCost, network: adapters.network, window,
+            newPage: adapters.newPage, newPageBaseline: newPageBaselineBefore,
           });
           const hits = window.matchCount(pattern);
           if (!r.satisfied || hits === 0) {
-            return {
-              status: 'fail', cause: 'product-bug',
+            notMet.push({
+              cause: 'product-bug',
               summary: `${s.kind} 声明了 expectResponse "${pattern}"，但窗口内 ${window.seenCount} 条响应里没有它`
                 + `（等了 ${r.waitedMs}ms / ${r.polls} 次轮询）`,
-              keyContext: { expectResponse: pattern, seenResponses: window.seenCount, waitedMs: r.waitedMs },
-            };
+            });
           }
           // 命中数与状态进 keyContext（会进 JUnit 的 context= 与 HTML 报告）。
           // **不走 emit 一条 lint.reported 事件**：门禁不读 events（这条纪律见
@@ -1295,12 +1355,43 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           // 另外这里**不给 URL**：URL 可能带 token/手机号，而 redactForDisk 的
           // 值形态规则判不出查询串里的密钥（只认 JWT/AKIA/sk-/Bearer 形状）。
           // 状态码不是敏感值，够定位问题了。
+          notes.push(`expectResponse "${pattern}" 命中 ${hits} 条（状态 ${window.matchedStatuses(pattern).join('/')}）`);
+          ctxExtra.expectResponse = pattern;
+          ctxExtra.expectResponseHits = hits;
+          ctxExtra.expectResponseStatuses = window.matchedStatuses(pattern);
+        }
+
+        if (wantsNewPage) {
+          const r = await waitUntil({
+            predicate: { type: 'newPage' },
+            timeoutMs: s.timeoutMs ?? 10_000,
+            clock, evalExpr: () => { throw new Error('newPage 条件不该走表达式求值'); },
+            resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
+            addCost, network: adapters.network, window,
+            newPage: adapters.newPage, newPageBaseline: newPageBaselineBefore,
+          });
+          const opened = (adapters.newPage?.count() ?? 0) - newPageBaselineBefore;
+          if (!r.satisfied || opened <= 0) {
+            notMet.push({
+              cause: 'product-bug',
+              summary: `${s.kind} 声明了 expectNewPage，但等 ${r.waitedMs}ms / ${r.polls} 次轮询后`
+                + '页面没有新开任何标签页或窗口（弹窗被拦截？按钮压根没绑 window.open？'
+                + '还是这个动作本来就不该开新窗口 —— 那就把这个字段去掉）',
+            });
+          }
+          notes.push(`expectNewPage 新开 ${opened} 个窗口`);
+          ctxExtra.expectNewPage = true;
+          ctxExtra.newPagesOpened = opened;
+        }
+
+        if (notMet.length) {
           return {
-            status: 'pass',
-            summary: `${s.kind} 的 expectResponse "${pattern}" 命中 ${hits} 条（状态 ${window.matchedStatuses(pattern).join('/')}）`,
-            keyContext: { expectResponse: pattern, expectResponseHits: hits, expectResponseStatuses: window.matchedStatuses(pattern) },
+            status: 'fail', cause: notMet[0]!.cause,
+            summary: notMet.map((f) => f.summary).join('；'),
+            keyContext: ctxExtra,
           };
         }
+        if (notes.length) return { status: 'pass', summary: `${s.kind} ${notes.join('；')}`, keyContext: ctxExtra };
         /*
          * **置信度门取人在 IR 里写的那个值**（`LocatorSpec.confidenceGate`，schema 默认 0.85）。
          *
