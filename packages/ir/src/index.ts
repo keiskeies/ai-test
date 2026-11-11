@@ -15,10 +15,14 @@ export * from './steps.js';
 export * from './scenario.js';
 export * from './trace.js';
 export * from './baseline.js';
+export * from './humanize.js';
 
 import { ScenarioSchema, deriveTargets, type Scenario } from './scenario.js';
 import type { Step } from './steps.js';
-import type { ZodError } from 'zod';
+// humanize 既要对外的消费方 re-export（上面那行 export *），
+// 也要**本文件的 parseScenario 能用** —— `export *` 只转发、不把名字带进作用域，
+// 少了这一行 parseScenario 会报 humanize 未定义。
+import { humanize } from './humanize.js';
 
 /**
  * 步骤与场景的**书写形态**：省略所有有默认值的字段。
@@ -92,9 +96,4 @@ export function defineScenario(draft: ScenarioDraft): Scenario {
   return r.scenario;
 }
 
-export function humanize(err: ZodError): { path: string; message: string }[] {
-  return err.issues.map((i) => ({
-    path: i.path.length ? i.path.join('.') : '(root)',
-    message: i.message,
-  }));
-}
+

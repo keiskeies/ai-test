@@ -286,21 +286,32 @@ describe('retryOn 的取值范围（写了做不了的值会被 schema 拒，而
    */
   test('写 status5xx 直接被拒（而不是静默当一个空配置）', () => {
     /*
-     * 只断言"被拒"，**不断言错误文案**。
+     * **本轮之前**这里只断言"被拒"，不断言文案。原因记得很清楚：
+     * 我第一版加了 `assert.match(错误, /network|timeout/)`，测试当场红 ——
+     * 作者实际看到的是 `body.0 → Invalid input`，字段名与合法值都在 zod 的 error 里
+     * （`path: retry.retryOn.0` + `values:["network","timeout"]`），
+     * 被 ir/index.ts 的 humanize() 丢了。那条断言**证伪的是我的注释，不是 schema 的行为**，
+     * 所以当时决定"不把弱文案钉进断言：钉了就得在修好的那天回来改测试"。
      *
-     * 我第一版在这里加了 `assert.match(错误, /network|timeout/)`，理由是注释里写着
-     * "拒并列出合法值" —— 结果**测试当场红**：作者实际看到的是
-     * `场景不合法…（首个问题：body.0 → Invalid input）`，字段名与合法值都在
-     * zod 的 error 里（`path: retry.retryOn.0` + `values:["network","timeout"]`），
-     * 被 ir/index.ts 的 humanize() 丢了（它不下钻 discriminatedUnion 的嵌套 issues）。
-     * 所以那条断言**证伪的是我的注释，不是 schema 的行为**。
+     * **现在就是那天**：humanize 会下钻 union 的每分支 issue（ir/src/humanize.ts），
+     * 所以那句文案断言补回来了。判据细节在 ir/test/humanize.test.ts，
+     * 这里只守"从 defineScenario 抛出来的那句话里能读到字段名与合法值"——
+     * 那是**作者真正看到的那一层**，ir 包自己绿了不代表这层接上了。
      *
-     * 修法是先修 humanize（要处理"28 个分支各报一遍同一个错"的去重，
-     * 实测：直接下钻会产生 173 条近似重复的 issue），登记在 docs/08 单开一步。
-     * 在那之前不把弱文案钉进断言：钉了就得在修好的那天回来改测试，
-     * 而"修好了反而要让测试红"会让人倾向于不修。
+     * 顺带更正这段注释原先记的两个数（写的"28 个分支各报一遍、173 条 issue"，
+     * 实测是 39 个分支、162 条分支级 issue）—— 数字错了不影响当时的结论，
+     * 但一条"劝人别重测"的注释把数记错，比没数更坏。
      */
-    assert.throws(() => scen([retried('h', 2, { retryOn: ['status5xx'] })]), IrValidationError);
+    assert.throws(
+      () => scen([retried('h', 2, { retryOn: ['status5xx'] })]),
+      (e: unknown) => {
+        assert.ok(e instanceof IrValidationError, `应是 IrValidationError，实际 ${(e as Error).name}`);
+        const msg = (e as IrValidationError).errors.map((x) => `${x.path} ${x.message}`).join(' | ');
+        assert.match(msg, /retryOn/, `报错要点出出错字段：${msg}`);
+        assert.match(msg, /network/, `要列出合法值，否则作者还是不知道能填什么：${msg}`);
+        return true;
+      },
+    );
   });
 
   test('写 assert-fail / locator-stale 同样被拒', () => {

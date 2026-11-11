@@ -115,16 +115,20 @@ export const RetrySchema = z
      *
      * 删值而不是留值加注释，是因为**被拒的写法会响**：IR 里写 `retryOn:["status5xx"]`
      * 现在会被 schema 拒掉，而不是静默当一个空配置。
-     * （**但要如实说清拒到什么程度**：作者看到的是
-     *  `场景不合法…（首个问题：body.0 → Invalid input）`，
-     *  **不含字段名也不含合法值列表** —— zod 的 error 里有
-     *  `path: retry.retryOn.0` 与 `values:["network","timeout"]`，
-     *  是 ir/index.ts 的 humanize() 没下钻 discriminatedUnion 的嵌套 issues 把它们丢了。
-     *  我最初在这行写的是"得到一条列出合法值的 schema 错误"，那是**错的**，
-     *  被自己新写的测试当场证伪（断言"错误里列出合法值"，红的）。
-     *  为什么不在本轮顺手修 humanize：直接下钻实测得到 **173 条 issue**（同一个 retryOn
-     *   错被 28 个分支各报一遍，其中 39 条提到 retryOn，其余是各分支自己的缺字段噪音），
-     *  去重与"报第几支"是真设计问题 —— 登记在 docs/08，单开一步做。）
+     * （**拒到什么程度，本轮重新测过一遍**，因为这段注释原先记的三个数有两个是错的：
+     *  写的是"173 条 issue、28 个分支各报一遍、其中 39 条提到 retryOn"，
+     *  实测是 **39 个分支（= 步骤 union 的全部成员）、162 条分支级 issue、
+     *  39 条提到 retryOn（即每个分支都提）**。
+     *  当时把 28 与 39 记反了方向，还顺手把一个"递归下钻后的总数"当成"分支级总数"——
+     *  两个数都真，但说的不是同一件事，而这段注释的作用恰恰是让人不去重测。
+     *
+     * 现在作者看到的是
+     *  `body.0.retry.retryOn.0 "retryOn" 的第 1 项 不是合法值。可取："network" | "timeout"`
+     * —— 字段名与合法值都在了。旧实现给的是 `body.0 → Invalid input`
+     *  （它把 union 的每分支 issue 整个丢了）。**这条以前写的是"得到一条列出合法值的
+     *  schema 错误"，那是错的**，被 engine/test/retry.test.ts:293 那条测试当场证伪；
+     *  本轮把 humanize 修好，让那句话变成真的（经过与判据见 ir/test/humanize.test.ts
+     *  与 docs/14 §4.13）。）
      *
      * **POST/PATCH 不受这里控制**：非幂等方法一律不自动重发
      * （engine 的 resendsSafely，docs/05 §4），配了也白配。
