@@ -354,10 +354,22 @@ test('容器步骤不出行、子场景另起一段且明说不计数', async ()
     junitNames.filter((n) => n !== report.runId).sort(),
     `HTML 与 JUnit 的行不一致。HTML=${htmlNames.join(',')} JUnit=${junitNames.join(',')}`);
 
-  const child = scen([{ ...b('c_inner'), kind: 'set', assign: { z: 1 } } as StepDraft]);
+  const child = scen([{ ...b('c_inner'), kind: 'set', assign: { z: 1 } } as StepDraft], { id: 'sub.child' });
   const childReport = toHtmlReport({
     ...report,
-    childRuns: [{ callStepId: 'k1', ref: 'sub@1', scenario: child, results: [res(report, 'inner')] }],
+    /*
+     * status/tally/costUsd/durMs 是本轮 ChildRun 新加的字段（证据清单的 children 要用，
+     * 见 interpreter.ts 那条注释：从 results 反推会丢 resultBoundary 与 setupBroke）。
+     * 这里如实照子场景的实况填。calledById 用**父**场景 id —— scen() 造的父场景
+     * 恒为 'scn.test'，所以这个夹具里父子 id 会撞；这条测试判的是
+     * "子场景那一段自证不双算"，与作用域查找无关，撞了也不影响它。
+     * （真正管作用域的夹具在 call.test.ts，那里父子 id 是分开的。）
+     */
+    childRuns: [{
+      callStepId: 'k1', ref: 'sub@1', scenario: child, results: [res(report, 'inner')],
+      status: 'pass', tally: { pass: 1, fail: 0, error: 0, healed: 0, skipped: 0, triaged: 0 },
+      costUsd: 0, durMs: 0, calledById: 'scn.test',
+    }],
   }, {});
   assert.match(childReport, /不计入上面的用例数/, '子场景那一段必须自证不双算，否则页面用例数与 CI 对不上');
 });

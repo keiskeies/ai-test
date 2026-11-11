@@ -284,3 +284,44 @@ function parseCounts(xml: string): { tests: number; failures: number; errors: nu
   assert.ok(m, `没有 testsuite 行：\n${xml}`);
   return { tests: Number(m![1]), failures: Number(m![2]), errors: Number(m![3]) };
 }
+
+test('父子两层用**同名** call 步骤：根因要钻到最里层，不能停在中层的 call 上', async () => {
+  /*
+   * 步骤 id 只在**自己的场景里**唯一 —— 父用 `k1` 调 B、B 再用 `k1` 调 D
+   * 是完全合法的 IR（与上面那条"跨场景同名步骤"是同一件事，只不过发生在 call 上）。
+   *
+   * 而 childRuns 是**扁平**的，于是 `chain.find(c => c.callStepId === stepId)`
+   * 会永远命中第一个（父→B 那条）。更糟的是防环用的是**裸 stepId**：
+   * 第二轮拿到同一个 'k1' 时 visited 已经把它记下了，于是循环**提前停**，
+   * 报出来的是中层那个 call 步骤自己（`sub.mid/k1=fail`）——
+   * 那正是这个文件上面一条测试专门写注释警告过的症状：
+   * "只报一层会停在'下单流程这个子场景挂了'"。
+   * 区别在于那次是设计意图未达成，这次是**同名把作用域搅了**：
+   * 单看父侧那条测试（父子用不同 id）永远发现不了。
+   *
+   * 判据是最里层那一步的 id（`la`），不是中层的 call id（`k1`）。
+   */
+  const leaf = sub('sub.leaf', [
+    getStep('la1'),
+    { ...b('la'), kind: 'assert', against: '$.step.la1', status: 418 } as StepDraft, // 实际 200 => fail
+  ]);
+  // 中层的 call 步骤刻意也叫 k1，与父侧那个同名
+  const mid = sub('sub.mid', [{ ...b('k1'), kind: 'call', scenarioRef: 'sub.leaf@1' } as StepDraft]);
+  const report = await run(
+    scen([{ ...b('k1'), kind: 'call', scenarioRef: 'sub.mid@1' } as StepDraft]),
+    {
+      adapters: {
+        http: httpOk(),
+        callScenario: async (ref: string) => (ref.startsWith('sub.mid') ? mid : leaf),
+      },
+    },
+  );
+  // 前提：扁平列表里确实有**两条 callStepId='k1'** 的记录，否则这条测的是空气
+  const k1s = (report.childRuns ?? []).filter((c) => c.callStepId === 'k1');
+  assert.equal(k1s.length, 2, `夹具前提：两条同名 call 记录。实际 ${(report.childRuns ?? []).map((c) => `${c.calledById}/${c.callStepId}`).join(', ')}`);
+  assert.equal(new Set(k1s.map((c) => c.calledById)).size, 2, '两条的**发起方**必须不同（否则作用域信息本身就没记对）');
+
+  const xml = toJUnitXml(report);
+  assert.match(xml, /根因在子场景步骤：sub\.leaf\/la=fail/,
+    `必须钻到最里层那一步。停在 sub.mid/k1 就是拿错了作用域。实际：\n${xml}`);
+});

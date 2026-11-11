@@ -73,6 +73,32 @@ export interface ChildRun {
   scenario: Scenario;
   /** 子场景**自己**那份报告里的 results（stepId 是子场景内的原始 id，不加前缀） */
   results: StepResult[];
+  /*
+   * 下面四项来自**子场景自己的 RunReport**（call 分支手里正好握着 `rep`，
+   * 存的是它当时的原值，不是父侧从 results 反推的第二手数据）。
+   *
+   * **为什么要把这些抄进 ChildRun**：证据清单（EvidenceManifest.children）要给
+   * 机器消费者"这次 run 跑了哪几个子场景、各自几个 pass/fail"。
+   * 反推有两条死路：tally 能从 results 数出来，但**数不出 resultBoundary** ——
+   * teardown 的步骤会被算进子场景的通过率分母，而子场景自己明确不把 teardown
+   * 计入整体状态（interpreter 里 gate 那段）；两个"看起来等价"的算法迟早分叉。
+   * status 更是反推不出来：`setupBroke`（前置崩了升级成 error）这件事
+   * 只存在于子 run 的过程里，光看 results 只能得到"有一步 error"。
+   */
+  status: StepStatus;
+  tally: RunReport['tally'];
+  costUsd: number;
+  durMs: number;
+  /**
+   * **在哪个场景的 body 里**被调起的（父场景 id，不是 ref）。
+   *
+   * childRuns 是扁平的（A→B→C 时 B、C 都在 A 的列表里），没有这根链就
+   * **重建不出调用树** —— 而扁平与树形各有所需：门禁要扁平（不递归就能看全
+   * "整棵树有没有真断言"），证据消费者要能回答"C 是谁叫起来的"。
+   * 存 id 而不是存整个父 IR：children 列表里每个场景自己就带着 IR，
+   * 一根引用就够拼回去了。
+   */
+  calledById: string;
 }
 
 export interface RunReport {
@@ -813,7 +839,17 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          * 顺序上放在 assignTo 之前之后都一样，但**必须在这个 case 的每个 return 之前**：
          * 少记一条，门禁就会把一个真的跑过断言的场景当成空场景拦下。
          */
-        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });
+        childRuns.push({
+          callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results,
+          status: rep.status, tally: rep.tally, costUsd: rep.costUsd, durMs: rep.durMs,
+          calledById: scenario.id,
+        });
+        /*
+         * 孙子层**原样搬上来**，一个字段都不重写。
+         * 它们的 calledById/status/tally 是**它自己那一层**push 时填的
+         * （B 调 C 时，B 填的就是 calledById:'B' + C 自己的 tally），
+         * 到这里改写就等于拿父的口径去覆盖子的实况。
+         */
         childRuns.push(...(rep.childRuns ?? []));
         if (s.assignTo) vars.set(s.assignTo, rep.outputs);
         if (rep.status === 'fail' || rep.status === 'error') return { status: rep.status, summary: `子场景 ${child.name}: ${rep.summary}`, cause: rep.results.find((r) => r.cause)?.cause };

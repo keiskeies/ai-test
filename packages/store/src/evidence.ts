@@ -21,7 +21,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   EVIDENCE_FILES, toJUnitXml, toTraceJsonl, manifestJson, summaryText, toHtmlReport,
-  type EvidenceManifest, type JUnitOptions,
+  evidenceChildrenOf, type EvidenceManifest, type JUnitOptions,
 } from '@atest/engine';
 import type { RunReport } from '@atest/engine';
 import type { EnvFingerprint, Scenario } from '@atest/ir';
@@ -188,6 +188,19 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
     // 只在调用方给了的时候写。写一个 undefined 字段与不写，在 JSON 里等价，
     // 但**写一个空对象不等价于不写** —— 那会被读成"没有环境差异"
     ...(o.envFingerprint ? { envFingerprint: o.envFingerprint } : {}),
+    /*
+     * 子场景（call 链）。这一栏的存在理由是"包是给连不上数据库的人看的"：
+     * 以前"跑了哪几个子场景、各自几个 pass/fail"只在 JUnit 的 failure **正文文本**
+     * 和 report.html 的人读段落里，机器消费者只能 grep 文本。
+     *
+     * `evidenceChildrenOf` 返回 undefined 时**整栏不写**（不是写 []）：
+     * undefined = "这份报告压根没记子运行"，[] = "记了、确实没跑 call"，
+     * 门禁与看板对这两件事的动作不同（gate.ts 的 declaresButUnmeasured 就靠它）。
+     */
+    ...(() => {
+      const kids = evidenceChildrenOf(report, irShaOf);
+      return kids ? { children: kids } : {};
+    })(),
   };
 
   const junit = toJUnitXml(report, o.junit);

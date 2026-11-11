@@ -9,7 +9,7 @@
  * 真 IO 在 packages/store。这样 CI、本地 CLI、服务端 worker 三条路径
  * 产出的报告**必然逐字节一致**，不会出现"本地能打开、CI 打不开"。
  */
-import type {EnvFingerprint, StepResult, TraceEvent} from '@atest/ir';
+import type { EnvFingerprint, Scenario, StepResult, StepStatus, TraceEvent } from '@atest/ir';
 import type { RunReport } from './interpreter.js';
 import { StepResultSchema, TraceEventSchema, CONTAINER_KINDS, flakyAttempts, isFlakyPass } from '@atest/ir';
 
@@ -157,41 +157,143 @@ export interface JUnitOptions {
 }
 
 /**
- * call 步骤失败时，把**子场景里真正出问题的那一步**找出来。
+ * 顺着 call 链往下钻，找出**真正坏掉的那一步**（结构化结果）。
  *
- * 为什么需要：call 步骤的摘要长这样
- * `子场景 下单：fail · 3 步计入通过率 · 67% 通过` —— 它说的是"子里有东西坏了"，
- * 而值班人要的是"哪一步坏了"。以前只能去 trace.jsonl 里按 path 翻。
+ * 为什么抽成一个函数而不是两处各写一遍：JUnit 正文那句"根因在子场景步骤：…"
+ * 与证据清单里 `children[].failing` 必须**同源**。两处各写一遍的话，
+ * 一旦其中一处加了新条件（比如"只认确定性断言"），另一处会安静地给出不同答案，
+ * 而"页面上指的坏步骤"与"清单里指的坏步骤"不一致时，没人能判断哪个是真的。
  *
- * 只**报**、不**数**：子场景的结论仍然不进 tests 计数（一次子场景失败在父侧
- * 由 call 步骤带上来，见 CONTAINER_KINDS 与 gate.ts 的同一条理由），
- * 这里只是把父侧那一条 failure 的正文写清楚。
- * "什么算一条用例"全仓只有一个答案，这个函数不新增第二个。
- *
- * 往下钻而不是只报直接子层：A→B→C 而断言在 C 时，B 里 failing 的那行是它自己的
+ * **往下钻而不是只报直接子层**：A→B→C 而断言在 C 时，B 里 failing 的那行是它自己的
  * call 步骤，只报一层会停在"下单流程这个子场景挂了"。钻到最深那一层才是根因所在。
+ *
+ * **作用域化的查找**（这是本轮改的一处缺陷）：`childRuns` 是**扁平**的，
+ * 而 `callStepId` 只在**它所在的那个场景内唯一** —— IR 里两个不同场景各自有一个
+ * 叫 `c1` 的 call 步骤完全合法（A→B 用 c1、B→D 也叫 c1）。
+ * 早先的 `chain.find(c => c.callStepId === stepId)` 会永远命中**第一个**，
+ * 于是从 B 往下钻时拿到的是 A→B 那一条，钻不动了：
+ * 症状恰好是这段注释上面说的那句"停在子场景这个 call 上"，
+ * 而写代码的人以为作用域化已经做了。所以现在按 `(calledById, callStepId)` 配对。
+ *
  * visited 防环（IR 的自引用在 lint 里有 CALL_SELF_REFERENCE 规则，但报告器不能
  * 靠"lint 一定跑过"来保证自己不死循环）。
  */
-function childFailureOf(report: RunReport, callStepId: string): string | undefined {
-  const chain = report.childRuns ?? [];
+function drillBadStep(
+  chain: NonNullable<RunReport['childRuns']>,
+  start: { ownerScenarioId: string; callStepId: string },
+): { ownerScenarioId: string; step: StepResult } | undefined {
   const visited = new Set<string>();
-  let stepId: string | undefined = callStepId;
-  let out: string | undefined;
-  while (stepId && !visited.has(stepId)) {
-    visited.add(stepId);
-    const entry = chain.find((c) => c.callStepId === stepId);
+  let scope = start.ownerScenarioId;
+  let stepId: string | undefined = start.callStepId;
+  let found: { ownerScenarioId: string; step: StepResult } | undefined;
+  while (stepId) {
+    const key = `${scope}\u0000${stepId}`; // 用 \u0000 分隔：id 里不会出现这个字符，而裸拼接会让 (a,bc) 与 (ab,c) 撞成同一个键
+    if (visited.has(key)) break; // 自引用/环：停在这里，别把同一层数第二遍
+    visited.add(key);
+    const entry = chain.find((c) => c.callStepId === stepId && c.calledById === scope);
     if (!entry) break;
     // 只认 fail/error。不写 `find((r) => r.cause)`：
     // 那样一个**已通过的**步骤只要带着 cause（例如带归因的 fail→重试后 pass 的残留）
     // 就会被当成根因，把人说向一个没坏的地方。
     const bad = entry.results.find((r) => r.status === 'fail' || r.status === 'error');
     if (!bad) break;
-    out = `${entry.scenario.id}/${bad.stepId}=${bad.status}${bad.cause ? `(${bad.cause})` : ''}${bad.assertionSummary ? ` ${bad.assertionSummary}` : ''}`;
+    found = { ownerScenarioId: entry.scenario.id, step: bad };
     // 这一行自己就是 call => 根因还在下面一层
+    scope = entry.scenario.id;
     stepId = bad.kind === 'call' ? bad.stepId : undefined;
   }
-  return out;
+  return found;
+}
+
+/**
+ * 从**父 run 的根**发起的下钻（JUnit 用）。
+ *
+ * 第一跳需要"根场景 id"当作用域，而 `RunReport` 上没有 scenario 字段。
+ * 取 `run.started` 事件里那份（解释器开跑第一条就写了 `data.scenario`）——
+ * 那是**这次 run 的实况**，比让调用方再传一遍更不容易与实况分叉。
+ * 事件缺失（手写 fixture、别的引擎实现）时退回"只按 callStepId 找"，
+ * 也就是旧的宽容：那种报告本来就没有可信的作用域信息。
+ */
+function childFailureOf(report: RunReport, callStepId: string): string | undefined {
+  const chain = report.childRuns ?? [];
+  const started = report.events.find((e) => e.kind === 'run.started');
+  const rootId = (started?.data as { scenario?: unknown } | undefined)?.scenario;
+  const scope = typeof rootId === 'string' ? rootId : '';
+  const bad = scope
+    ? drillBadStep(chain, { ownerScenarioId: scope, callStepId })
+    : drillUnscoped(chain, callStepId);
+  if (!bad) return undefined;
+  const { step } = bad;
+  return `${bad.ownerScenarioId}/${step.stepId}=${step.status}${step.cause ? `(${step.cause})` : ''}${step.assertionSummary ? ` ${step.assertionSummary}` : ''}`;
+}
+
+/**
+ * `RunReport.childRuns` → 证据清单的 `children`。
+ *
+ * **放在引擎侧而不是 store 侧**：这份形状是"这次 run 的对外契约"的一部分，
+ * 与 manifestJson/summaryText 同级。放到 store 里就会出现"CLI 直接写 manifest 时
+ * 少一栏、走 store 时有一栏"的分裂 —— 而那正是 `report.html` 当初漏进包的成因
+ * （手抄第二份清单的地方，一定会漏）。
+ *
+ * `irShaOf` 是**注入**的：算 sha 要用 sha256，而引擎禁止 import node 内置模块
+ * （docs/01 §8.2），所以内容寻址由 store 侧算、引擎只负责摆位置。
+ * 这个形状与 ArtifactStore 是同一类决定：**id 由真正落地那一方给**。
+ *
+ * **`undefined` 与 `[]` 的区分在这里保住**：childRuns 没记（undefined）时
+ * 返回 undefined，让 store 那边**不写这一栏**。序列化成 `[]` 会把
+ * "这份报告没记子运行"说成"这个场景没调任何子场景"，两种排查动作完全不同。
+ */
+export function evidenceChildrenOf(
+  report: RunReport,
+  irShaOf: (s: Scenario) => string,
+): EvidenceChild[] | undefined {
+  const chain = report.childRuns;
+  if (!chain) return undefined;
+  return chain.map((c) => {
+    const bad = drillBadStep(chain, { ownerScenarioId: c.calledById, callStepId: c.callStepId });
+    return {
+      ref: c.ref,
+      scenario: { id: c.scenario.id, name: c.scenario.name, frozen: c.scenario.frozen, irSha: irShaOf(c.scenario) },
+      calledById: c.calledById,
+      callStepId: c.callStepId,
+      status: c.status,
+      tally: c.tally,
+      costUsd: c.costUsd,
+      durMs: c.durMs,
+      // 没坏就不写这一栏（写 null 会被读成"坏成了 null"）
+      ...(bad
+        ? {
+            failing: {
+              stepId: bad.step.stepId,
+              kind: bad.step.kind,
+              status: bad.step.status,
+              inScenario: bad.ownerScenarioId,
+              ...(bad.step.assertionSummary ? { summary: bad.step.assertionSummary } : {}),
+            },
+          }
+        : {}),
+    };
+  });
+}
+
+/** 无作用域信息时的退路：只按 callStepId 找第一个。见 {@link childFailureOf} */
+function drillUnscoped(
+  chain: NonNullable<RunReport['childRuns']>,
+  callStepId: string,
+): { ownerScenarioId: string; step: StepResult } | undefined {
+  const visited = new Set<string>();
+  let stepId: string | undefined = callStepId;
+  let found: { ownerScenarioId: string; step: StepResult } | undefined;
+  while (stepId && !visited.has(stepId)) {
+    visited.add(stepId);
+    const entry = chain.find((c) => c.callStepId === stepId);
+    if (!entry) break;
+    const bad = entry.results.find((r) => r.status === 'fail' || r.status === 'error');
+    if (!bad) break;
+    found = { ownerScenarioId: entry.scenario.id, step: bad };
+    stepId = bad.kind === 'call' ? bad.stepId : undefined;
+  }
+  return found;
 }
 
 /**
@@ -364,6 +466,63 @@ export interface EvidenceManifest {
    * 空对象会被读成"这次运行没有环境差异"，与"没记环境"是两个结论。
    */
   envFingerprint?: EnvFingerprint;
+  /**
+   * 这次 run 通过 `call` 跑过的**每个子场景**（含任意深度，扁平）。
+   *
+   * **为什么要在清单里**：evidence.zip 是给**连不上数据库的人**下载的东西。
+   * 在这之前，"这次 run 跑了哪几个子场景、各自几个 pass/fail"只存在于
+   * JUnit 那条 failure 的**正文文本**和 report.html 的人读段落里 ——
+   * 机器消费者（服务端 run 表、看板）只能去 grep 文本或解析 HTML。
+   * 让机器读散文是这个仓记过的老毛病（`未归属:` 那个前缀也是同族）。
+   *
+   * **不写子场景的完整 IR**，只写 `irSha`，与父场景那一栏同一口径：
+   *  1. 父侧本来就没嵌 IR（嵌了会让"改个缩进就算换版"的错觉跟着进包）；
+   *  2. 一份 call 链动辄十几层，整棵 IR 树进包会让清单从几 KB 变成几百 KB，
+   *     而清单是**每次都要读**的那一个成员；
+   *  3. 要 IR 的人可以拿 irSha 去寻址（同一份 IR 同 sha，这是 M7 判据的地基）。
+   *
+   * **可选而不是空数组**：`undefined` = "这份报告压根没记子运行"
+   * （手写 fixture、别的引擎实现），`[]` = "记了，且确实一个 call 都没跑"。
+   * 门禁对这两件事的处置不同（gate.ts 的 `declaresButUnmeasured` 就靠这个区分），
+   * 清单侧必须保住同样的可区分性 —— 把 undefined 序列化成 [] 会让
+   * "数据缺失"看起来像"这个场景没调任何东西"，那是两种完全不同的排查动作。
+   */
+  children?: EvidenceChild[];
+}
+
+/** 清单里的一个子场景。字段选取原则见 {@link EvidenceManifest.children} */
+export interface EvidenceChild {
+  /** 父侧 call 步骤写的引用（`sub.login@3` 这种）。**@version 今天被忽略**，见 §5 */
+  ref: string;
+  /** 子场景自己的 id/name。ref 可能带版本后缀，id 才是稳定的那个 */
+  scenario: { id: string; name: string; frozen: boolean; irSha: string };
+  /** **谁叫起来的它**（父场景 id）。扁平列表靠这根链重建调用树 */
+  calledById: string;
+  /** 在父侧是哪个 call 步骤发起的。**只在 calledById 那个场景内唯一**，不能当全局键 */
+  callStepId: string;
+  status: StepStatus;
+  tally: RunReport['tally'];
+  costUsd: number;
+  durMs: number;
+  /**
+   * 子场景里**真正坏掉的那一步**（往下钻到最深的那一层，与 JUnit 正文同一算法）。
+   * 没有失败时不写这一栏。
+   *
+   * 为什么在清单里也放一份：人读 HTML 时能顺着摘要找到坏步骤，
+   * 而读 manifest.json 的是机器与脚本 —— 它拿不到"摘要文本"里的信息。
+   */
+  /**
+   * 这个子场景**子树里**真正坏掉的那一步（钻到最深层，与 JUnit 正文同一算法）。
+   * 没坏就不写这一栏。
+   *
+   * `inScenario` 不能省：drill 钻到最深层，所以父场景那条的 stepId
+   * 可能属于**孙子**场景 —— 只给 stepId 会得到"父的子场景里有一步叫 la"
+   * 这种看着自洽其实错位的坐标（步骤 id 只在自己的场景里唯一）。
+   * 名字不叫 scenarioId：那个词是 BaselineSampleSchema 的字段名，
+   * 撞上会让 tooling/unread-fields.mjs 把这里的局部使用当成"读过那个字段"
+   * （本轮真撞上过一次，html.ts:40 记的是同一件事）。
+   */
+  failing?: { stepId: string; kind: string; status: StepStatus; inScenario: string; summary?: string };
 }
 
 /** 清单序列化。脱敏在这里做（而不是在上游），因为清单**就是要落盘** */

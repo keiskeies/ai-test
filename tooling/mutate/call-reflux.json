@@ -25,7 +25,7 @@
     {
       "label": "不记子运行：call 跑完什么都不留（门禁只能退回「声明即放行」= 洞 3 从 call 重开）",
       "file": "packages/engine/src/interpreter.ts",
-      "anchor": "        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });",
+      "anchor": "        childRuns.push({\n          callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results,\n          status: rep.status, tally: rep.tally, costUsd: rep.costUsd, durMs: rep.durMs,\n          calledById: scenario.id,\n        });",
       "replace": "        void childRuns; // 变异：不记这次 call 跑了什么",
       "testFile": "packages/cli/test/gate-real.test.ts"
     },
@@ -53,8 +53,8 @@
     {
       "label": "等价变异：先并孙子层再记自己（childRuns 的**顺序**换了，成员一个不少）",
       "file": "packages/engine/src/interpreter.ts",
-      "anchor": "        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });\n        childRuns.push(...(rep.childRuns ?? []));",
-      "replace": "        childRuns.push(...(rep.childRuns ?? []));\n        childRuns.push({ callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results });",
+      "anchor": "        childRuns.push({\n          callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results,\n          status: rep.status, tally: rep.tally, costUsd: rep.costUsd, durMs: rep.durMs,\n          calledById: scenario.id,\n        });\n        /*\n         * 孙子层**原样搬上来**，一个字段都不重写。\n         * 它们的 calledById/status/tally 是**它自己那一层**push 时填的\n         * （B 调 C 时，B 填的就是 calledById:'B' + C 自己的 tally），\n         * 到这里改写就等于拿父的口径去覆盖子的实况。\n         */\n        childRuns.push(...(rep.childRuns ?? []));",
+      "replace": "        /*\n         * 孙子层**原样搬上来**，一个字段都不重写。\n         * 它们的 calledById/status/tally 是**它自己那一层**push 时填的\n         * （B 调 C 时，B 填的就是 calledById:'B' + C 自己的 tally），\n         * 到这里改写就等于拿父的口径去覆盖子的实况。\n         */\n        childRuns.push(...(rep.childRuns ?? []));\n        childRuns.push({\n          callStepId: s.id, ref: s.scenarioRef, scenario: child, results: rep.results,\n          status: rep.status, tally: rep.tally, costUsd: rep.costUsd, durMs: rep.durMs,\n          calledById: scenario.id,\n        });",
       "expect": "equivalent",
       "testFile": "packages/cli/test/gate-real.test.ts"
     }
