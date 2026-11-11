@@ -9,14 +9,17 @@
       "anchor": "  return safe === '.' || safe === '..' || /^\\.+$/.test(safe) ? `_${safe}` : safe;",
       "replace": "  return safe;",
       "testFile": "packages/cli/test/e2e.test.ts",
-      "_measured": "跑完补"
+      "_measured": "抓到（`packages/cli/test/e2e.test.ts` 的「--run-id 不能把产物写到证据目录之外」）—— 摘掉保留段那支之后，清洗语句照旧放行 `..`，产物落回项目根，正是原始缺陷复现",
+      "_抓到": "caught"
     },
     {
       "label": "D2 读侧不再拒整段点：runId='..' 能指到证据目录外",
       "file": "packages/server/src/files.ts",
       "anchor": "  if (!RUN_ID.test(runId) || ALL_DOTS.test(runId)) return undefined;",
       "replace": "  if (!RUN_ID.test(runId)) return undefined;",
-      "testFile": "packages/server/test/files.test.ts"
+      "testFile": "packages/server/test/files.test.ts",
+      "_measured": "抓到（`files.test.ts` 的「runId：整段点与分隔符一律不给，但\"以点开头\"不是罪名」）—— 同一条测试同时钉住不拒 `.hidden`，所以它红不是因为收紧过头",
+      "_抓到": "caught"
     },
     {
       "label": "D3 静态根恢复 fallthrough：短前缀能跨根借文件",
@@ -24,14 +27,18 @@
       "file": "packages/server/src/files.ts",
       "anchor": "    if (!root.extensions.has(ext)) return undefined;",
       "replace": "    if (!root.extensions.has(ext)) continue;",
-      "testFile": "packages/server/test/files.test.ts"
+      "testFile": "packages/server/test/files.test.ts",
+      "_measured": "抓到（`files.test.ts` 的「短前缀只在长前缀那格判不出时才兜底」）",
+      "_抓到": "caught"
     },
     {
       "label": "D4 lint 的导出清单少一种 kind（set 那次原始缺陷）",
       "file": "packages/engine/src/lint.ts",
       "anchor": "  'set', 'table', 'extract', 'dataSource', 'http', 'openapiCall',",
       "replace": "  'table', 'extract', 'dataSource', 'http', 'openapiCall',",
-      "testFile": "packages/engine/test/lint.test.ts"
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_measured": "抓到（`lint.test.ts` 的「引用 set 步骤的输出不算错」）—— 少登记一种 kind，那条正向用例立刻红，正是 set 那次的原始失效",
+      "_抓到": "caught"
     },
     {
       "label": "D5 存在性与导出内容重新并成一个 Map（说'不存在'的假话）",
@@ -39,7 +46,9 @@
       "file": "packages/engine/src/lint.ts",
       "anchor": "          if (!stepExportOrder.has(info.stepId)) {",
       "replace": "          if (!stepExports.has(info.stepId)) {",
-      "testFile": "packages/engine/test/lint.test.ts"
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_measured": "抓到（`lint.test.ts` 的「步骤存在但不产出输出时报的是另一句」）—— 它断的是措辞而不是 code，所以并回一个 Map 时才会红",
+      "_抓到": "caught"
     },
     {
       "label": "C1 等价对照：清单内部顺序换一下（行为完全等价，**不该红**）",
@@ -48,7 +57,9 @@
       "anchor": "  'set', 'table', 'extract', 'dataSource', 'http', 'openapiCall',",
       "replace": "  'table', 'set', 'extract', 'http', 'dataSource', 'openapiCall',",
       "expect": "equivalent",
-      "testFile": "packages/engine/test/lint.test.ts"
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_measured": "等价对照组如预期**没红**（换顺序不影响任何判定）。它红了才可怕：那说明测试在钉字面量顺序",
+      "_抓到": "equivalent"
     }
   ]
 }
