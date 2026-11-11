@@ -155,6 +155,15 @@
       "replace": "      return json(res, 200, { jobId, state: job.state, actedOn: job.state === 'running', alreadyCancelled });",
       "testFile": "packages/server/test/cancel-http.test.ts",
       "_measured": "抓到（排队那条断 `actedOn===true`）。这条与 C5 是同一格的两头：C5 把 false 写成 true，C14 把「还没结束」写成「正在跑」。"
+    },
+    {
+      "label": "C15 已结束 job 的淘汰按 id 而不是按对象身份（复用 id 时删掉的是**新**那一条）",
+      "_why": "CI 拿构建号当 jobId 是正常用法，于是同一个 id 会「结束 → 再提交 → 再结束」。第一版 `finished` 记的是 id 队列，同一个 id 被 push 两次，而表里那个键此时指向后来那一条 —— 淘汰老记录时删掉的是新 job。症状是「我刚提交的那条按取消是 404」，看起来像取消功能坏了，不像淘汰逻辑坏了。",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      if (this.jobs.get(old.id) === old) this.jobs.delete(old.id);",
+      "replace": "      this.jobs.delete(old.id);",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「jobId 被复用后，淘汰不会把新那条从表里删掉」）。**这一条量了两次，第一次的负控本身是错的**：我先把变异写成「把字段类型退回 `string[]`」——而 `this.finished.push(job)` 配 `string[]` **编译不过**，那是 BUILD_BROKEN（无结论），不是「未被抓到」；中途还试过只把 shift 出来的变量当 id 用（`jobs.get(jobObject)` 恒 undefined），那变成**什么都不删的死代码**，测试照样绿 —— 那不是退回旧实现，是造了第三个实现。最终这条改的是**淘汰那一行**（去掉同一性比对 = 旧行为的语义，且能编译）。记这一则的理由：跨多处的修复，负控不能只退一处，也不能退成一个编译不过/走不到的形状 —— BUILD_BROKEN 与「等价」之外还有第三种错法：**退出一个看起来像旧版的假货**。"
     }
   ]
 }

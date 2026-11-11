@@ -52,7 +52,7 @@ import { test } from 'node:test';
 import { EXIT, HANDLED_SIGNALS } from '@atest/cli';
 import { readZipEntries } from '@atest/store';
 
-import { startServer, type RunningServer } from '../src/index.js';
+import { FINISHED_KEEP, startServer, type RunningServer } from '../src/index.js';
 
 /* ── 夹具 ───────────────────────────────────────────────────────────────── */
 
@@ -413,6 +413,44 @@ test('不给 jobId 就照常跑，但明说不可取消（而不是回一个拿�
     assert.equal(num(r.body, 'exitCode'), 0, r.text);
     assert.equal(r.body.cancellable, false, r.text);
     assert.equal('jobId' in r.body, false, '不可取消时不许回一个假的 jobId');
+  } finally { await h.close(); }
+});
+
+test('jobId 被复用后，淘汰不会把**新那条**从表里删掉（否则它 404、取消不掉）', async () => {
+  /*
+   * 形状：CI 拿构建号当 jobId 是正常用法，于是同一个 id 会"结束 → 再提交 → 再结束"。
+   * 我第一版的淘汰记的是 **id 队列**：同一个 id 被 push 两次，而表里那个键
+   * 此时指向的是**后来那一条**，于是淘汰老记录时删掉的是新 job。
+   * 症状离被测功能很近、离真因很远："我刚提交的那条按取消是 404"，
+   * 而看起来像取消功能坏了，不像淘汰逻辑坏了。
+   *
+   * 判据用 FINISHED_KEEP 现算而不是写死 50：那个上限改了之后，写死的测试会
+   * 安静地不再越过边界（本仓对会漂的数的规矩是现算，不重述）。
+   */
+  const h = await harness();
+  try {
+    // 先攒满 FINISHED_KEEP 条已结束的（都发一次真 run，走真收尾）
+    for (let i = 0; i < FINISHED_KEEP; i++) {
+      const r = await h.post('/api/run', { scenario: 'short', jobId: `b${i}` });
+      assert.equal(r.body.exitCode, 0, `第 ${i} 条没跑成：${r.text}`);
+    }
+    // 复用一个已经结束的 id（`add` 允许 —— 只有**还没结束**的同名 job 才 409）
+    const again = await h.post('/api/run', { scenario: 'short', jobId: 'b0' });
+    assert.equal(again.body.exitCode, 0, `复用 id 被拒了：${again.text}`);
+
+    // 此刻淘汰刚发生。被淘汰的该是**最老那条记录**，而不是被复用的那一条
+    const jobs = await h.get('/api/jobs');
+    const items = jobs.body.items as Array<{ jobId: string; state: string }>;
+    const mine = items.find((j) => j.jobId === 'b0');
+    assert.ok(mine, '复用了 id 的那条 job 必须还在表里（它刚结束，正是"我刚那个 job 怎么样了"要答的那条）');
+    assert.equal(mine!.state, 'done');
+
+    // 而它必须**仍然点得动取消**：表里没有 → 404 → 人只能 kill 进程
+    const c = await h.post('/api/cancel?jobId=b0');
+    assert.equal(c.status, 200, `刚复用过的 job 按取消却是 ${c.status}：${c.text}`);
+    assert.equal(c.body.actedOn, false, '它已经结束了，这一下没有作用对象');
+    // 表不会无界长（淘汰确实还在工作，只是不再删错人）
+    assert.ok(items.length <= FINISHED_KEEP, `表里留了 ${items.length} 条，上限应是 ${FINISHED_KEEP}`);
   } finally { await h.close(); }
 });
 

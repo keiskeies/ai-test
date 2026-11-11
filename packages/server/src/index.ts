@@ -166,12 +166,18 @@ interface Job {
   state: 'queued' | 'running' | 'done';
 }
 
-/** 已结束那条只留最近这么多条，够回答"我刚那个 job 怎么样了"，又不会无界长 */
-const FINISHED_KEEP = 50;
+/**
+ * 已结束那条只留最近这么多条，够回答"我刚那个 job 怎么样了"，又不会无界长。
+ *
+ * **导出的唯一理由是测试要按它循环**（`cancel-http.test.ts` 那条淘汰用例）。
+ * 不导出的话测试只能写死 50，而这个数一改测试就悄悄失效 —— 本仓对"会漂的数"
+ * 的规矩是现算，不重述。
+ */
+export const FINISHED_KEEP = 50;
 
 class JobBoard {
   private readonly jobs = new Map<string, Job>();
-  private readonly finished: string[] = [];
+  private readonly finished: Job[] = [];
 
   /** 登记。id 撞上一个**还没结束**的 job 时返回 undefined（调用方报 409） */
   add(id: string): Job | undefined {
@@ -218,18 +224,36 @@ class JobBoard {
    * 写一个"防重复调用"的判断，等于承认有两个调用点，而那时该修的是调用点。
    * 表里那条**已结束**的 job 留在 map 里一小会儿（够回答"我刚那个 job 怎么样了"），
    * 超过 {@link FINISHED_KEEP} 条才淘汰；还活着的永不被淘汰。
+   *
+   * 淘汰按**对象身份**而不是按 id。第一版记的是 id 队列，而 `add` 允许 id 复用
+   * （CI 拿构建号当 jobId 是正常用法），于是同一个 id 会被 push 两次：
+   * 淘汰第一条时 `jobs.get(id)` 拿到的是**后来那一条**，于是被删掉的是新 job，
+   * 留下的是老的僵尸 —— 症状恰好是"我刚提交的那条取消不掉（404）"，
+   * 而它离"取消"这个功能越近，越难被怀疑是淘汰逻辑干的。
+   * `finished` 因此存 Job 本身，删之前比对同一性。
    */
   finish(job: Job): void {
     job.state = 'done';
-    this.finished.push(job.id);
+    this.finished.push(job);
     while (this.finished.length > FINISHED_KEEP) {
       const old = this.finished.shift()!;
-      if (this.jobs.get(old)?.state === 'done') this.jobs.delete(old);
+      // 只在表里那条**就是它**时删。不是的话说明这个 id 已经被后来的 job 接走，
+      // 那条老的已经不在表里了，什么都不该做
+      if (this.jobs.get(old.id) === old) this.jobs.delete(old.id);
     }
   }
 }
 
-/** job id 的形状。刻意收紧：它会进日志、也可能进文件名，不接受路径分隔符与点段 */
+/**
+ * job id 的形状。刻意收紧：它会进日志、进 `/api/jobs` 的响应、进取消的 query。
+ *
+ * **它不进文件名** —— 证据目录名来自引擎算的 runId，与 jobId 无关
+ * （这一点在 `cancel-http.test.ts` 里有一条断言钉着）。把这句话写死在这里，
+ * 是因为我先前那句注释写的是"也可能进文件名"，那是**假的**，而假在这格的危害是：
+ * 读的人会把 `JOB_ID` 当成 `/evidence/` 那道路径闸，于是哪天有人"顺手放宽一点"
+ * 就以为后面还有兜底。它买的是两件别的事：日志与响应里不出现控制字符/换行，
+ * 以及取消那一侧用的是**同一张**正则（两侧不一致会让坏 id 登记进表却永远取消不掉）。
+ */
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
