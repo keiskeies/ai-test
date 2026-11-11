@@ -1,0 +1,54 @@
+{
+  "_about": "本轮三处判据改动（safeRunId 保留段 / resolveEvidence 整段点 / resolveStatic 不 fallthrough / lint 存在性与导出分离）的变异集。",
+  "_口径": "每条只改一个判据，不删功能。expect=equivalent 那条是对照组：它改的是集合字面量里的**顺序**，行为完全等价，所以它**不该**红 —— 它红了说明测试在钉实现细节而不是钉行为。",
+  "cases": [
+    {
+      "label": "D1 保留段判定摘掉：`..` 又能原样当 runId（原始缺陷）",
+      "_why": "原始失效本体。清洗语句保留不动，只去掉后面那句按整个名字判的分支 —— 这才是真实漏法（清洗写了、保留段没想到），而删掉整个函数会 BUILD_BROKEN 或改太多、量不到这一格。",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "  return safe === '.' || safe === '..' || /^\\.+$/.test(safe) ? `_${safe}` : safe;",
+      "replace": "  return safe;",
+      "testFile": "packages/cli/test/e2e.test.ts",
+      "_measured": "跑完补"
+    },
+    {
+      "label": "D2 读侧不再拒整段点：runId='..' 能指到证据目录外",
+      "file": "packages/server/src/files.ts",
+      "anchor": "  if (!RUN_ID.test(runId) || ALL_DOTS.test(runId)) return undefined;",
+      "replace": "  if (!RUN_ID.test(runId)) return undefined;",
+      "testFile": "packages/server/test/files.test.ts"
+    },
+    {
+      "label": "D3 静态根恢复 fallthrough：短前缀能跨根借文件",
+      "_why": "改前的真实行为就是 continue（换下一格）。这一条测的是那条**没写在这轮需求里、由测试逼出来**的判据，所以它必须在变异集里 —— 否则下一个人'顺手改成 continue'没有任何东西会红。",
+      "file": "packages/server/src/files.ts",
+      "anchor": "    if (!root.extensions.has(ext)) return undefined;",
+      "replace": "    if (!root.extensions.has(ext)) continue;",
+      "testFile": "packages/server/test/files.test.ts"
+    },
+    {
+      "label": "D4 lint 的导出清单少一种 kind（set 那次原始缺陷）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  'set', 'table', 'extract', 'dataSource', 'http', 'openapiCall',",
+      "replace": "  'table', 'extract', 'dataSource', 'http', 'openapiCall',",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "D5 存在性与导出内容重新并成一个 Map（说'不存在'的假话）",
+      "_why": "这一条不是为了测报错文本，是测**判据拆分本身**：并回去之后，'步骤存在但不产出输出'会退化成'步骤不存在'，而人会照着假话去查 id 拼写。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "          if (!stepExportOrder.has(info.stepId)) {",
+      "replace": "          if (!stepExports.has(info.stepId)) {",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "C1 等价对照：清单内部顺序换一下（行为完全等价，**不该红**）",
+      "_why": "钉的是'这条测试测集合不测顺序'。它红了说明测试在钉实现细节 —— 那比 survived 更难查，因为它长得像'测试很敏感'。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  'set', 'table', 'extract', 'dataSource', 'http', 'openapiCall',",
+      "replace": "  'table', 'set', 'extract', 'http', 'dataSource', 'openapiCall',",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/lint.test.ts"
+    }
+  ]
+}
