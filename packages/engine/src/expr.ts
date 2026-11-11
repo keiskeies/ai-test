@@ -11,7 +11,7 @@
  *  数组字面量 [1,2,3]、成员判断 `x in arr`。
  * 不支持：赋值、函数定义、闭包、正则字面量（用 matches()）、三元（用 if() 代替）。
  */
-import { queryOne, PathError } from './jsonpath.js';
+import { queryOne, parsePath, PathError } from './jsonpath.js';
 
 export class ExprError extends Error {
   constructor(message: string, public readonly source: string) {
@@ -287,17 +287,45 @@ function evalNode(n: Node, ctx: EvalCtx): unknown {
     case 'lit':
       return n.v;
     case 'ref': {
-      // 裸名优先查变量空间，再落到 root
+      /*
+       * 裸名优先查变量空间，再落到 root。
+       *
+       * **这里原先两处都是 `try { queryOne(…) } catch { return undefined }`**，
+       * 而那对 catch 是本轮删掉的**假绿的运行期那一半**
+       * （另一半在 `validateExpr`，静态闸那一半，见下面那个函数）：
+       * `when: '$.n['`（下标没闭合）从这儿拿到 undefined => `!truthy(undefined)`
+       * => 步骤记 `skipped`、**整场 pass**、lint 一句没响。明细与实测在 `docs/14` §5
+       * 那一行，永久落点是 `packages/engine/test/expr-strict.test.ts`。
+       *
+       * **删 catch 不会动到"值还不存在"这一族** —— 这一点是量出来的，不是推的
+       * （改前实测 `.scratch/probe-poll-preserved.mts` / `probe-legit-shapes.mts`；
+     * 改后由 `packages/engine/test/expr-strict.test.ts` 里「取不到值必须还是
+     * undefined」那三条钉着，含逐步喂值那条"等待还在轮"的形状）：
+       * `queryOne` 对"路径合法但没这个值"本来就是 `r.values.length === 0 → return undefined`，
+       * **压根不走 catch**。所以下面这些形态改前改后完全一样：
+       *   `{}` 上取 `$.order.id`（异步落库还没落 => 等待继续轮，这是本轮最守不住不得的性质）
+       *   `$.a[0]` 而 a 是标量/对象、`$.a.b` 而 a 是 null 或不存在、下标越界、步骤尚无输出
+       * 于是走到 catch 的**只剩一件事**：路径本身写坏了。而"写坏了静默当成没这个值"
+       * 是本仓反复那类失效（把用例的错误说成被测系统的事实）。
+       *
+       * **为什么不会误伤"路径合法但命中多个值"**（那种情形该不该抛是另一件事）：
+       * 到不了。expr 自己的词法只认 `$.a` / `$a.b` / `$.a[0]` 三种形态 ——
+       * `$.a[*]`、`$.a["b"]` 在**词法层**就是 `意外记号 "]"` / `意外字符 "\""`，
+       * 压根到不了这里（实测 `probe-expr-ambig.mts`），而 `queryOne` 只在
+       * `values.length > 1` 时才抛第二个 PathError。
+       */
       const bare = n.path.startsWith('$.') ? n.path.slice(2) : n.path.slice(1);
       if (ctx.vars && Object.prototype.hasOwnProperty.call(ctx.vars, bare)) return ctx.vars[bare];
       if (ctx.vars && bare.includes('.')) {
         const head = bare.split('.')[0]!;
         if (Object.prototype.hasOwnProperty.call(ctx.vars, head)) {
-          const sub = ctx.vars[head];
-          try { return queryOne(sub, `$.${bare.slice(head.length + 1)}`); } catch { return undefined; }
+          // 子路径是从变量名**拼**出来的（`user.name` -> 在 user 上取 `$.name`），
+          // 所以它的正确性只取决于"拼进去的那一段是不是合法路径段" —— 上面那个
+          // hasOwnProperty 已经保证 head 是个真变量，剩下的 rest 写坏就是用例写坏了。
+          return queryOne(ctx.vars[head]!, `$.${bare.slice(head.length + 1)}`);
         }
       }
-      try { return queryOne(ctx.root, n.path); } catch { return undefined; }
+      return queryOne(ctx.root, n.path);
     }
     case 'arr':
       return n.items.map((i) => evalNode(i, ctx));
@@ -396,11 +424,50 @@ export function evalBool(src: string, ctx: EvalCtx): boolean {
  * 求值时才抛，等于把一个纯拼写问题推到执行阶段 —— 而表达式语法是
  * 「生成期就该被抓完」的那类错误（docs/02 §2 生成器三闸）。
  * 报错必须列出可用函数，否则用户只能猜。
+ *
+ * ## 本轮补上的第二查：**路径本体**
+ *
+ * 改动前这里只走 AST 查函数名，**`ref` 节点一个都不问** —— 于是
+ * `when: '$.n['`（下标没闭合）静态闸**一句不响**，运行时又被（本轮删掉的）
+ * 那对 `catch { return undefined }` 吞成"条件不成立"，最后
+ * **步骤 skipped、整场 pass**。而函数名那一查的形状早就摆在这儿了：
+ * 同一个"纯拼写问题别推到执行阶段"的理由，函数名查了、路径没查，
+ * 没有理由，只是没写。catch 里那句 `e instanceof PathError`
+ * 更是**永远为假**的一支（`parse` 不解析路径内部，抛不出 PathError）——
+ * 它看着像在防这件事，实际一行代码都不到（§4.7 同族）。
+ *
+ * **判据用 `parsePath`，不新写一份"什么算合法路径"**：那是运行时
+ * `queryOne` 底下同一个函数，于是静态闸与运行时**结构上不可能分叉**
+ * （本仓那条反复出现的缺陷类）。这也意味着这一查**不会比运行时更严**：
+ * 只有运行时真会抛 PathError 的写法才会被报。
+ *
+ * **误报面是量过的**（改前实测 `.scratch/probe-corpus-refs.mts`，扫本仓
+ * sources + docs 里的 expr / when / items / against 字符串，过 `parsePath`
+ * 全部通过；改后由同那个测试文件里「活护栏」那一组接着扫，判据换成
+ * `validateExpr` 本身，所以它跟着这条判据一起演进）。
+ * 而且这不是"语料恰好干净"：`$a`、`$.a-b`、`$1` 这些**看着不规整**的写法
+ * `parsePath` 也都收（实测 `probe-parsepath-shapes.mts`），
+ * 被拒的只有 `$.` / `$..` / `$.n[]` / `$.n[1` 这一族**运行时本来就会炸**的。
+ *
+ * ⚠ **这句话的覆盖面要说清**：真实用户场景**不在本仓**（IR 是平台上的数据，
+ * 仓里没有 IR 的 json 场景文件 —— `find` 扫完确认过）。所以"扫过全部语料"
+ * 这种话不说。真正让误报**与语料无关**地不成立的是上面那句：判据就是
+ * 运行时那一个 `parsePath`，静态闸比运行时严的情况在结构上不存在。
+ * 这条等价关系由 `packages/engine/test/expr-strict.test.ts` 里
+ * 「validateExpr 报的路径 == 运行时会抛的路径」那条钉着（另有同文件那条
+ * 扫本仓语料的活护栏，覆盖的是"本仓写法"这一层）。
+ *
+ * 顺带记一条量出来的词法事实（`probe-bare-rest.mts`）：**裸名**那一族的
+ * 词法只吃 `[\\w.$\\u4e00-\\u9fa5]`，**不含 `[`**。所以 `user.name[` 压根到不了
+ * 路径判据（在记号层就是 `尾部有多余内容 "["`，静态与运行时同判 ExprError），
+ * 而 `user.` 会走到这里、也会走到运行时那个**拼出来的**子路径上抛 PathError。
+ * 两支都有测试钉，因为它们的报错类型不同 —— 只盯 `$.` 那一族会漏掉拼路径那一处。
  */
 export function validateExpr(src: string): string | null {
   try {
     const ast = parse(src);
     const bad: string[] = [];
+    const badPaths: string[] = [];
     (function walk(n: Node) {
       if (n.t === 'call') {
         if (!(n.name in FUNCS)) bad.push(n.name);
@@ -408,9 +475,16 @@ export function validateExpr(src: string): string | null {
       } else if (n.t === 'bin') { walk(n.l); walk(n.r); }
       else if (n.t === 'un') walk(n.e);
       else if (n.t === 'arr') n.items.forEach(walk);
+      else if (n.t === 'ref') {
+        try { parsePath(n.path); } catch (e) { badPaths.push(`${n.path}（${e instanceof PathError ? e.message : '?'}）`); }
+      }
     })(ast);
     if (bad.length) {
       return `未知函数 ${[...new Set(bad)].map((b) => `${b}()`).join('、')}。可用：${Object.keys(FUNCS).sort().join(', ')}`;
+    }
+    if (badPaths.length) {
+      // 与上面那一查同一条纪律：**说清是哪个 ref**，否则用户面对 `$.n[` 只能猜哪一句。
+      return `引用路径写坏：${[...new Set(badPaths)].join('；')}`;
     }
     return null;
   } catch (e) {

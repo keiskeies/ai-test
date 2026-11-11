@@ -1,0 +1,101 @@
+{
+  "_comment": [
+    "「表达式里的引用写坏了必须响」这一轮的变异集。原始失效与明细见 docs/14 §5，",
+    "永久落点是 packages/engine/test/expr-strict.test.ts。",
+    "",
+    "**这一族的原始失效**：`when: '$.n['`（下标没闭合）=> 该步 skipped、整场 pass、",
+    "lint 一句没响。它**有两层**，两层都得有人守，所以这个集子里两层各有条目：",
+    "  运行期 —— expr.ts 里那对 `catch { return undefined }` 把 PathError 吞成\"没这个值\"；",
+    "  静态闸 —— validateExpr 只走 AST 查函数名，`ref` 节点从不校验路径本体。",
+    "只修运行期的话运行时会红而 lint 照旧静默，所以第 4 条（静态闸那一半）与",
+    "第 1 条（运行期那一半）**必须都在**：任一单独被改坏，集子里都有条目变红。",
+    "",
+    "**第 2 条是这份集子里最值得跑的一条**：它把 catch 只补回**第二处** queryOne",
+    "（在变量上取拼出来的子路径那一处）。第 1 条改坏第一处时测试大面积红，很容易让人",
+    "以为\"这一族修完了\"；而只修第一处才是这类修复最可能的落地形态 —— 两处 queryOne",
+    "挨着写在一个 case 分支里，改的时候看漏第二处毫无难度。",
+    "",
+    "**第 5 条守的是反方向（过度修 = 误报）**。前几条问\"写坏了没响\"，这一条问",
+    "\"合法的写法被拦了\"。它不是凑数：`when: '$a'` 是本仓测试与 docs 里都在写的合法写法，",
+    "而静态闸一旦比运行时严，症状是**大家的 lint 里多出一条拦不掉的真错误** ——",
+    "误报的代价从来不是多一条黄字，是大家把 lint 关掉，于是 lint 里其余二十几条规则一起失效。",
+    "所以判据必须与运行时同一个（parsePath），expr-strict 里那条等价测试钉的就是这件事；",
+    "第 5 条钉的是\"那条等价测试真的能抓到判据被换掉\"。",
+    "",
+    "**第 7 条改 packages/engine/src/executor.ts**，而 testFile 在同一个包内",
+    "（走 src 不走 dist，所以驱动不重建 —— 见 mustBuild）。它是\"两种执行形态结论一致\"",
+    "那条测试的存在理由：只修解释器、让预编译形态照旧吞，功能形态与压测形态就会给出",
+    "两个结论，而 CI 用的是后者。",
+    "",
+    "第 8 条是**故意等价**的：括号里那句原始 PathError 的措辞没有任何测试钉，",
+    "改它应当不被抓到。写出来是为了让\"这一族的措辞可以随便改\"这件事有记录 ——",
+    "而\"丢了是哪个 ref\"（第 6 条）不一样，那条**必须**红。"
+  ],
+  "cases": [
+    {
+      "label": "运行期那一半回来了：root 上取路径时把 PathError 吞成 undefined",
+      "_why": "改前就是这个形状。吞掉之后 when 拿到 falsy => 步骤 skipped + 整场 pass，也就是那个假绿本身。",
+      "file": "packages/engine/src/expr.ts",
+      "anchor": "      return queryOne(ctx.root, n.path);",
+      "replace": "      try { return queryOne(ctx.root, n.path); } catch { return undefined; } // 变异：把 PathError 吞成\"没这个值\"",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "只修一半：变量上那条**拼出来的**子路径重新吞（root 那一处仍是好的）",
+      "_why": "两处 queryOne 挨在同一个 case 分支里，看漏第二处毫无难度，而漏掉的这一处照样产假绿。",
+      "file": "packages/engine/src/expr.ts",
+      "anchor": "          return queryOne(ctx.vars[head]!, `$.${bare.slice(head.length + 1)}`);",
+      "replace": "          try { return queryOne(ctx.vars[head]!, `$.${bare.slice(head.length + 1)}`); } catch { return undefined; } // 变异：只修了第一处",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "when 守卫把抛出来的异常再吞一次成\"条件不成立\"（假绿在调用点复活）",
+      "_why": "运行期那一半修好之后，最自然的回归路径是有人为了\"让某个用例别红\"在这里包 try。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "      try { ok = evalBool(s.when, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }); }\n      catch (e) { return finish(s, path, 'error', stepStart, errSummary(e), { cause: causeOfError(e) }); }",
+      "replace": "      try { ok = evalBool(s.when, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }); } catch { ok = false; } // 变异：写坏了当成\"这步不该跑\"",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "静态闸那一半回来了：validateExpr 不再看 ref 节点的路径本体",
+      "_why": "只修运行期的落地形态就是这样：运行时会红，而 lint/dry-run 照旧静默，\"生成期该抓完\"那道闸仍然漏。",
+      "file": "packages/engine/src/expr.ts",
+      "anchor": "      else if (n.t === 'ref') {\n        try { parsePath(n.path); } catch (e) { badPaths.push(`${n.path}（${e instanceof PathError ? e.message : '?'}）`); }\n      }",
+      "replace": "      // 变异：ref 节点不校验（从前就是这样 —— parse 不解析路径内部）",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "**反方向**：静态闸的判据从 parsePath 换成一句词法判断 => 合法写法被误报",
+      "_why": "误报比漏报更容易被当成\"闸变严了是好事\"，而它的代价是整道闸被人关掉。判据故意写成一条词法正则：`$.a[0]` 合法且运行时不抛，却被它判成写坏。（注意别写成\"路径里不含点就算坏\"—— parse 之后所有 ref 都是 `$.` 开头，那种变异**恒不命中**，是一条假变异，会把\"抓不到\"读成\"这条判据没人守\"。）",
+      "file": "packages/engine/src/expr.ts",
+      "anchor": "        try { parsePath(n.path); } catch (e) { badPaths.push(`${n.path}（${e instanceof PathError ? e.message : '?'}）`); }",
+      "replace": "        if (!/^\\$\\.[\\w$]+$/.test(n.path)) badPaths.push(`${n.path}（不像个路径）`); // 变异：另写一份判据，比运行时严",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "报了但**不说哪个 ref**（只剩一句\"引用路径写坏\"）",
+      "_why": "与\"未知函数要列出来\"同一条纪律：不说是哪一句，用户面对整段表达式只能猜。",
+      "file": "packages/engine/src/expr.ts",
+      "anchor": "      return `引用路径写坏：${[...new Set(badPaths)].join('；')}`;",
+      "replace": "      return '引用路径写坏（场景里某处引用）'; // 变异：把是哪个 ref 丢了",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "预编译形态自己把守卫异常吞成 skipped（两种形态分叉）",
+      "_why": "CI 跑的是预编译形态。只修解释器 = 修给人在编辑器里看，CI 结论照旧是假的。",
+      "file": "packages/engine/src/executor.ts",
+      "anchor": "        if (!truthyEval(st, cond)) { st.steps.push({ stepId: s.id, status: 'skipped', healed: false }); return 'skipped'; }",
+      "replace": "        let t = false; try { t = truthyEval(st, cond); } catch { t = false; } if (!t) { st.steps.push({ stepId: s.id, status: 'skipped', healed: false }); return 'skipped'; } // 变异：预编译形态继续吞",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "等价变异：括号里那句原始 PathError 措辞换掉（ref 还在、前缀还在）",
+      "_why": "没有测试钉措辞，本就不该有。写出来是让\"这一族里哪些字可以随便改\"有明确记录。",
+      "file": "packages/engine/src/expr.ts",
+      "anchor": "        try { parsePath(n.path); } catch (e) { badPaths.push(`${n.path}（${e instanceof PathError ? e.message : '?'}）`); }",
+      "replace": "        try { parsePath(n.path); } catch { badPaths.push(`${n.path}（路径不合法）`); }",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    }
+  ]
+}

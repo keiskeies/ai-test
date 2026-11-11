@@ -214,13 +214,20 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
     if (s.when) {
       const cond = s.when;
       const node = compileCore(s);
-      // 守卫：条件不成立 → skipped。**不是 pass 也不是 fail**（docs/02 §6 状态机）。
-      // 求值报错时解释器记 error，这里让它抛出 —— run() 顶层统一收敛成 error，
-      // 但注意**不能吞成 skipped**：拼错的守卫条件伪装成"这步没跑"是最难查的假绿。
       // 守卫：条件不成立 -> skipped。**不是 pass 也不是 fail**（docs/02 §6 状态机）。
       // 求值报错**不在这里抓**：runSeq 的统一 catch 会记成"这一步 error"，
       // 与解释器 runStep 的外层 try/catch 完全同构。这里自己抓一遍会有两个坑：
       // 一是漏掉某种异常类型（我就是先漏了 ExprError），二是与外层重复记账。
+      //
+      // ⚠ **"让它抛出"这句话从前是假的**（这里原先还留着一份说法重复的注释，
+      // 内容与上面这段几乎逐字相同 —— 本仓那条反复出现的缺陷类，已删）。
+      // 改动前 `when: '$.n['`（下标没闭合）**两种形态都是 skipped + 整场 pass**：
+      // 异常压根抛不到这里，在 `expr.ts` 的 `catch { return undefined }` 里就被
+      // 吞成 undefined 了，于是"下面不抓、交给外层"这套设计一次也没被触发。
+      // 本轮删掉那一处吞之后，这句注释**才第一次成立** —— 而"注释说它有防护"
+      // 从来不是防护：永久落点是
+      // `packages/engine/test/expr-strict.test.ts` 里「两种执行形态结论一致」那条
+      //（它逐个比对两种形态的状态，所以只修一边的话它会红）。
       return mk(s.id, s.onError, (st) => {
         if (!truthyEval(st, cond)) { st.steps.push({ stepId: s.id, status: 'skipped', healed: false }); return 'skipped'; }
         return node(st);

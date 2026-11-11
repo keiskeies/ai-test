@@ -504,26 +504,28 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
      * **求值报错绝不能落到"条件不成立"那一格**。改动前这句 catch 是
      * `catch (e) { … cause: 'env-unavailable' }` —— 归因写死了，但更糟的是
      * 它上面那句 `let ok = false`：`evalBool` 里**不抛异常、只返回 undefined**
-     * 的写法照样把 `ok` 留在 false，于是步骤记成 `skipped`。实测（`.scratch/probe-guard-green.mts`，
-     * 永久落点是 `docs/14` §5「`when` 守卫里的假绿」那一行 —— 这件事**至今没修**，
-     * 所以没有测试钉它，钉了就等于宣称它修好了）：
-     *  `when: '$.n['`（下标没闭合）=> 这步 **skipped**、整场 **pass**、退出码相关
-     *  的 tally 是 `{pass:1, skipped:1}`、**lint 一句没响**。
+     * 的写法照样把 `ok` 留在 false，于是步骤记成 `skipped`。改前实测
+     * （`.scratch/probe-guard-green.mts`）：
+     *  `when: '$.n['`（下标没闭合）=> 这步 **skipped**、整场 **pass**、tally 是
+     *  `{pass:1, skipped:1}`、**lint 一句没响**。
      * 一句写坏的路径读起来像"条件不成立、这步不该跑"，而 `executor.ts` 里
      * 那句注释恰恰写着"拼错的守卫条件伪装成'这步没跑'是最难查的假绿" ——
-     * 它说预编译形态刻意不在这里抓、让外层记 error，**实测两种形态都是 skipped**，
-     * 那个防护并不存在（两种形态都从 `expr.ts` 的 `catch { return undefined }` 拿到 undefined）。
+     * 它说预编译形态让外层记 error，**实测改前两种形态都是 skipped**，
+     * 那个防护当时并不存在（两种形态都从 `expr.ts` 的 `catch { return undefined }` 拿到 undefined）。
      *
-     * ⚠ **"lint 没响"只对 `$.` 路径这一族成立，别读成"lint 不查表达式"**：
+     * ⚠ **"lint 没响"当时只对 `$.` 路径这一族成立，别读成"lint 不查表达式"**：
      * 同一位子上 `when: '1 +'` 是**有** lint 的（`EXPR_SYNTAX` 实测报"意外记号 末尾"）。
-     * 差别在 `validateExpr` 只遍历 AST 查未知函数名，**`$.` 引用节点从不校验路径本体**，
+     * 差别在 `validateExpr` 当时只遍历 AST 查未知函数名，**`$.` 引用节点从不校验路径本体**，
      * 而它 catch 里那句 `e instanceof PathError` 是永远为假的一支（parse 不解析路径内部）。
      * 所以那条假绿**有两层**（运行期那个吞 + 静态闸这一层），只修运行期的话
-     * 运行时会红而 lint 照旧静默 —— 两层都要修，明细与实测在 docs/14 §5 那一行。
+     * 运行时会红而 lint 照旧静默 —— 两层都得修，明细在 docs/14 §5 那一行。
      *
-     * 那条假绿本轮**没修**（要改的是表达式引擎那个吞异常的地方，另记 docs/14 §5），
-     * 这里只把"真抛出来的那部分"归对因：`when: '1 +'` 与 `when: 'nopefn(1)'`
-     * 报 case-stale，落点是 `packages/engine/test/error-cause.test.ts`。
+     * **本轮两层都修了**（运行期在 `expr.ts` 的 `case 'ref'`，静态闸在 `validateExpr`
+     * 里新加的那一查 `ref` 节点），于是这里**不需要**加任何"分辨 undefined"的代码：
+     * `evalBool` 抛异常 => 下面那个 catch 收到 => error + case-stale。
+     * 这件事不该只靠注释记着 —— 落点是 `packages/engine/test/expr-strict.test.ts`：
+     * 「when 守卫：写坏了 => error + case-stale」「两种执行形态结论一致」
+     * 「静态闸那一整组」。把 `expr.ts` 那两处任意一处改回吞掉，那些测试就红。
      */
     if (s.when) {
       let ok = false;
