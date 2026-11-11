@@ -772,6 +772,10 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
    * 而它的语法是好的），所以这里对它**单独措辞**：不说"运行期会抛"，
    * 只说"这一处的 default 今天不被求值"，级别降到 warning（error 会让人以为
    * 修好语法就能用，而那恰恰不成立）。真正的修法在求值侧，登记在 docs/14 §5。
+   *
+   * `NOT_EVALUATED` 这一条例外是**临时的**：求值侧接上那天就要把它**整条删掉**
+   * （连同上面那段 ⚠ 和两处 `unevaluated ?` 分支），否则它会被后来人读成永久约定、
+   * 而"这一格不该报 error"这件事就从事实变成了习俗。与上面 `files` 那条同理。
    */
   {
     /** 值形态里那个不被求值的例外位置（判据见上面那段 ⚠） */

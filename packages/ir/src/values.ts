@@ -343,6 +343,16 @@ function memberDiscrim(m: unknown, key: string): string | undefined {
  * （值形态最深处是 `request.body`，而 body 以下是 `record(string, Literal)`，
  * schema 不再往下给结构）。数据侧的递归走的是下面另一条路，
  * 那里数据是有限树，不受这个上限影响 —— 这点要说清，**截断数据侧就是静默漏报**。
+ *
+ * ⚠ **它曾经还有一个对外面** `export const schemaHoldsValueSchema = holdsValue;`，
+ * 注释写着"只给完整性自检用"，而**全仓零消费方**（`grep` 过 src / test / tooling / docs）。
+ * 那句注释是**过期设计留下的**：自检第一版确实要"独立走一遍 schema 图"，而落地的那版
+ * 改成了"从 schema 现生成样例数据"（理由写在 `engine/test/value-form-syntax.test.ts`
+ * 文件头：路径名单是笛卡尔积，会跑到超时），于是这个导出没人要了。
+ * 删掉而不是留着，是因为它正是本文件上面那一族缺陷的形状 ——
+ * **一个导出的字段/函数配一句"有人会用"的注释，而读的人没法从代码里分辨有没有**。
+ * 以后若真需要独立的 schema 走法，重新导出一次的成本是一行；
+ * 而留一个没人读的导出，代价是下一个人得先 grep 一遍才知道它没人读。
  */
 function holdsValue(schema: unknown, depth = 0): boolean {
   if (depth > 24) return false;
@@ -481,12 +491,6 @@ export function eachValuePosition(
   };
   walk(rootSchema, rootData, rootPath, undefined, 0);
 }
-
-/**
- * `holdsValue` 的对外面。**只给完整性自检用**（它要拿独立的 schema 走法对撞本模块），
- * 生产侧一律走 `eachValuePosition`，不要拿它自己拼一套遍历 —— 那就是清单分叉的开始。
- */
-export const schemaHoldsValueSchema = holdsValue;
 
 export const RetrySchema = z
   .object({
