@@ -18,4 +18,5 @@ export * from './gate.js';
 export * from './gen.js';
 export * from './main.js';
 export * from './paths.js';
+export * from './signals.js';
 export * from './wiring.js';

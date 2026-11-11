@@ -1,0 +1,160 @@
+{
+  "_comment": [
+    "取消这条路的两道闸：服务端「开工前」那道，与引擎「每步开头」那道。",
+    "tests: packages/server/test/cancel-http.test.ts（走真 HTTP + 真 CLI + 真引擎 + 一个握住响应不放的靶服务）。",
+    "",
+    "**为什么这一族要存在，而 signal.json / interruption.json 那些已经绿着**：",
+    "那两族测的是「信号 → 标志 → checkAbort → 码 10 → 产物落齐」这条**已有**的链，",
+    "而本轮新加的是**第二个入口**（`POST /api/cancel?jobId=` 注入一个非信号的标志）与",
+    "**第二道闸**（排队中的 job 开工前直接出队，`main` 一次都不调）。",
+    "老测试全绿也证明不了新的那一半有人接 —— 而那正是 docs/14 §3 这一族的定义。",
+    "",
+    "**C1 与 C2/C3 各测一道闸，两侧互不知情**（本仓反复出现的「只测一侧会留一半」）：",
+    " · C1 坏的是服务端那道（job 排队期间被取消 => 压根不开工）；",
+    " · C2/C3 坏的是 cmdRun 里两条来源的**合成**（信号 OR 注入）。",
+    "C2 只有服务端这一格能测到：CLI 自己的测试**永远不注入** `io.abortSignal`，",
+    "所以「合成退化成只认注入的那个」在 cli 那侧**一条都不红**，症状却是常驻服务上 Ctrl-C 静默失效。",
+    "",
+    "**C1 的判据不是「请求数为 0」**，这是本轮实测出来的，也是这份 spec 最贵的一条：",
+    "我先写的测试断言是 `match(output, /一个请求都没发/)` + 请求数 0 + 码 10 + 无 run 目录，",
+    "然后把取消判定从 `claimStart` 里删掉 —— **测试照样绿**。因为 `cmdRun` 循环开头自己",
+    "还有一道 `if (abortSignal.aborted) skip`，而它会打「本次运行被取消：N 个场景**一个请求都没发**」。",
+    "也就是说那四件事**两道闸各自都能独立做到**，拿它们当判据 = 夹具分不出两种实现",
+    "（docs/08 §3 的第二亚种）。两者唯一分得开的地方是**这句话谁说的**：闸门生效时 `main`",
+    "一次都不调，输出里只有服务端自己那句「开工前已被取消」；闸门坏了才有 cmdRun 的「已跳过」",
+    "与收尾那句 CI 码表。所以测试正向验前者、反向验后者**不出现**（C1 因此能抓到）。",
+    "",
+    "**C9 是被这份 spec 的负控逼出来的，最初一条都不红**：我原先只在 `/api/cancel` 上探坏 jobId，",
+    "于是删掉提交侧那句形状检查后**全绿**。后果不是理论的：坏 id 一旦登记进表，",
+    "取消那一侧同一张 `JOB_ID` 正则就永远拒绝它 —— 那条 job 变成「跑起来了但谁也取消不了」，",
+    "而人手里的按钮按下去是 400。（它**不是**路径穿越那道闸：证据目录名来自引擎算的 runId，",
+    "不来自 jobId。别把 C9 当防穿越写，它买的是「取消的落点必须可达」。）",
+    "",
+    "**刻意没有的 case**：把 `job.source.cancel()` 换成 `process.kill(process.pid, 'SIGINT')`。",
+    "它看起来「也能取消」，而 C11（端点只查不置位）抓不到它 —— 抓到它的是 C2/C3 那一族",
+    "与 `signals.ts` 的 `createAbortFlag` 那段注释讲的常驻进程论证（第二次同名按键的语义是",
+    "「放弃清理 + 自我终止」，在宿主里等于顺手砍掉别人的请求与没还的租约）。",
+    "记在这里而不补变异：要钉住它得让测试能观察「进程没死」，那是 e2e 起子进程的活。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "C1 开工前那道闸不再读取消位（排队中被取消的 job 照样装配、照样发第一步请求）",
+      "_why": "docs/02 §5 的不可逆动作纪律：人以为「取消了就是没跑」。只靠引擎的 checkAbort 的话，job 轮到时仍会装配（连库、起浏览器）并跑到第一步开头，而第一步可能就是下单。",
+      "file": "packages/server/src/index.ts",
+      "anchor": "    if (job.state !== 'queued' || job.source.flag.aborted) return false;",
+      "replace": "    if (job.state !== 'queued') return false;",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「排队中的 job 被取消：一个请求都不发…」）。**第一次写的版本抓不到**：那时断的是请求数 0 + 码 10 + 无 run 目录，而 cmdRun 循环开头那道闸也能独立造出同样四件事，于是删掉这里它全绿 —— 见 _comment 里那段。改成「反向验 cmdRun 的声音不出现」之后才咬住。"
+    },
+    {
+      "label": "C2 两条取消来源的合成退化成「只认注入的那个」（常驻服务上 Ctrl-C 静默失效）",
+      "_why": "cli/src/commands.ts 把信号与 io.abortSignal 合成一个标志。写成只认注入的那份，症状是服务端宿主里按 Ctrl-C 没反应，而 CLI 自己的测试永远不注入那个字段 —— 一条都不红。",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "      get aborted() { return signals.signal.aborted || injected.aborted; },",
+      "replace": "      get aborted() { return injected.aborted; },",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "build": true,
+      "_measured": "抓到（「宿主注入了取消位时，Ctrl-C 仍然砍得动」）。跨包变异，所以要 build（cli 的 src 改坏后 server 的测试吃的是 dist）。"
+    },
+    {
+      "label": "C3 合成退化成「只认信号」（/api/cancel 置的标志下游看不见，端点成为纯装饰）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "      get aborted() { return signals.signal.aborted || injected.aborted; },",
+      "replace": "      get aborted() { return signals.signal.aborted; },",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "build": true,
+      "_measured": "抓到，而且一次红掉四条：排队那条与在跑那条都变成「跑完了」，409 那条也红（它等的是被取消的码 10）。**这就是为什么这一格值得单独一条测试**：C2 只红一条、C3 红四条，两个方向的坏法不对称。"
+    },
+    {
+      "label": "C4 同名 job 静默覆盖（前一个人点取消，砍掉的是后一个人的 run）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "        if (!job) return json(res, 409, { error: `jobId ${jobId} 正在被另一个 run 占用` });",
+      "replace": "",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「jobId 撞上还没结束的 job：409…」）。注意夹具用的是**会发请求**的 quick 场景：这样「409 拒绝了却照跑」能被靶服务的 hits 抓到，而不只测状态码。"
+    },
+    {
+      "label": "C5 actedOn 写死 true（取消一条刚跑完的 run 被报成「砍到了东西」）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      return json(res, 200, { jobId, state: job.state, actedOn: job.state !== 'done', alreadyCancelled });",
+      "replace": "      return json(res, 200, { jobId, state: job.state, actedOn: true, alreadyCancelled });",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「取消一个刚跑完的 job：200 + actedOn:false…」）。这一格是本轮改出来的：最初字段叫 `accepted: first`（first = 是否第一次取消），于是「取消一条刚跑完的 run」拿到 `accepted:true` —— 字面是「受理了」，真相是「没东西可取消」。一个词同时表达「第一次收到」与「真砍到了」，而这两半在 state=done 时恰好相反。"
+    },
+    {
+      "label": "C6 重复取消看不见（第二下与「取消没生效」同形，人会一直按）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      const alreadyCancelled = job.source.flag.aborted;",
+      "replace": "      const alreadyCancelled = false;",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「重复取消同一个 job：第二次看得见…」）。"
+    },
+    {
+      "label": "C7 alreadyCancelled 在置位之后才读（形状、字段名、类型全对，值恒真）",
+      "_why": "把两行换个顺序而已。这是「读了但用错」这一族里最容易被 code review 放过的形状：diff 看上去像整理顺序。",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      const alreadyCancelled = job.source.flag.aborted;\n      job.source.cancel();",
+      "replace": "      job.source.cancel();\n      const alreadyCancelled = job.source.flag.aborted;",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到，红两条：「取消一个刚跑完的 job」（它断 alreadyCancelled 为 false，而换序后第一次点也报 true）与「重复取消…第二次看得见」。夹具不需要额外形状 —— 顺序本身就能被这两个方向分开。"
+    },
+    {
+      "label": "C8 「从未提交过」与「已结束」共用一句 404（假归因：人会以为自己提交过）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      if (!job) return json(res, 404, { error: `没有登记过 jobId ${jobId}（从未提交，或结束后被后续 job 挤出了表）` });",
+      "replace": "      if (!job) return json(res, 404, { error: `没有这个 job（或它已经结束了）：${jobId}` });",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「取消一个从未提交过的 jobId：404，而且不说它『已经结束』」）。这条测的是**文案**，而文案在这个仓里是承载物：那句「或它已经结束了」是我先前写的，它会把「我那个请求压根没提交成功」误导成「它跑完了」。"
+    },
+    {
+      "label": "C9 提交侧不再校验 jobId 形状（坏 id 登记进表后永远取消不掉）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      if (jobId !== undefined && !JOB_ID.test(jobId)) {",
+      "replace": "      if (false) {",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「提交侧也拦坏 jobId…」）。**最初一条都不红**，是这份 spec 的负控逼出来的：我只在 /api/cancel 上探坏 id，而那一侧的正则把坏 id 挡在门外，于是提交侧那道检查删掉无人知晓。补了提交侧 + 「被拒的 id 不该出现在 /api/jobs 里」之后才咬住。注意这一格买的是「取消的落点必须可达」，**不是**路径穿越那道闸（runId 与 jobId 无关）。"
+    },
+    {
+      "label": "C10 取消侧不再校验 jobId 形状（同一张正则两侧各判一次，少一侧就漏一侧）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      if (!JOB_ID.test(jobId)) return json(res, 400, { error: 'jobId 缺失或形状不合法' });",
+      "replace": "",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「取消一个从未提交过的 jobId…」里那圈坏 id 的 400 断言）。与 C9 成对：同一个判据住在两个入口，所以两个方向各要一条变异，否则只改一侧不会被发现。"
+    },
+    {
+      "label": "C11 取消端点只查表不置位（回了 200，什么都没发生）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      job.source.cancel();",
+      "replace": "",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到，红四条。夹具的 cancelThenRelease 会先断 `actedOn===true`，所以红的是「run 没被砍断」而不是断言细节。"
+    },
+    {
+      "label": "C12 不给 jobId 也回 cancellable:true + 一个假 id（前端按一个不存在的落点取消）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "        ...(jobId !== undefined ? { jobId, cancelRequested: job!.source.flag.aborted } : { cancellable: false }),",
+      "replace": "        ...(jobId !== undefined ? { jobId, cancelRequested: job!.source.flag.aborted } : { cancellable: true, jobId: 'x' }),",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「不给 jobId 就照常跑，但明说不可取消」）。`cancellable:false` 这个载体的存在理由：`POST /api/run` 阻塞到结束才回，服务端自己造的 id 送不出去，于是「我忘了传 jobId」与「取消没生效」在前端同形。"
+    },
+    {
+      "label": "C13 finish 不在 finally 里（命令抛异常时 job 永远挂在 running，此后同名 id 全被 409）",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      }).finally(() => { if (job) jobs.finish(job); });",
+      "replace": "      });",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（「取消一个刚跑完的 job…」）：收尾没跑，表里那条一直是 running，于是 `state:'done'` / `actedOn:false` 都拿不到。顺带说明**为什么「表里的状态」需要一条独立测试**：它同时是取消的落点判据与 409 的判据，挂在 running 会串坏两件事。"
+    },
+    {
+      "label": "C14 actedOn 的判据写成「是不是正在跑」（排队中的 job 被报成「取消没作用」）",
+      "_why": "看起来同样合理：「有没有砍到一个在跑的 run」。但排队中的 job 的取消**确实有作用**（它因此压根不开工），报成 false 会让人以为排队的那条取消不掉，转去 kill 整个进程。",
+      "file": "packages/server/src/index.ts",
+      "anchor": "      return json(res, 200, { jobId, state: job.state, actedOn: job.state !== 'done', alreadyCancelled });",
+      "replace": "      return json(res, 200, { jobId, state: job.state, actedOn: job.state === 'running', alreadyCancelled });",
+      "testFile": "packages/server/test/cancel-http.test.ts",
+      "_measured": "抓到（排队那条断 `actedOn===true`）。这条与 C5 是同一格的两头：C5 把 false 写成 true，C14 把「还没结束」写成「正在跑」。"
+    }
+  ]
+}

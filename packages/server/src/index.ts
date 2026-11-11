@@ -31,20 +31,31 @@
  * 而那表现为"用例自己漂了"。平台侧的并发执行是 P4 设备租约那一轮的活，
  * 不是这一层能顺手给的能力。
  *
- * ## 为什么"取消"这一栏在这里是空的
+ * ## 取消：这一格给的是**入口**，判据全在 CLI/引擎那一侧
  *
- * 用户侧的取消走的是**进程信号**：Ctrl-C → `installSignalHandlers` 置标志 →
- * 引擎 `checkAbort` → run 目录里那几份产物照写、teardown 照跑、租约照还（signals.ts 整段讲的是这条链）。
- * 一个 `POST /api/run/:id/cancel` **现在不给**，因为那需要 `AbortFlag` 能从外部注入，
- * 而 `installSignalHandlers` 只认信号 —— 造那条路要改 CLI 内部，
- * 而"改了之后中断到底会不会落齐那几份产物"是 docs/15 §3.7 那一轮的事。
- * **宁可这一栏空着并写清楚，也不要给一个装作能取消的端点。**
+ * `POST /api/cancel?jobId=…` 置一个标志（{@link createAbortFlag}），剩下的路与
+ * Ctrl-C **同一条**：标志 → 引擎 `checkAbort` 每步开头读 → `RunAborted('cancelled')`
+ * → 退出码 10 + 产物照写 + teardown 照跑 + 租约照还。这一层**不新增任何中断判定**
+ * （文件头那条禁令在这里同样成立）：它只把"外面来的一句取消"翻译成 `Io.abortSignal`，
+ * 由 `cmdRun` 与信号那个标志做 OR 合成后交给引擎。
+ *
+ * 曾经这一栏是**刻意空着**的，理由是"取消需要 `AbortFlag` 能从外部注入，而那时只能由信号驱动"。
+ * 那个前提本轮被拆掉了（signals.ts 的 `createAbortFlag`），于是那段注释变成了一行
+ * 承诺不存在功能的假话 —— 正是 docs/14 §3 那一族（schema/注释里有、执行侧没人做）
+ * 在**注释**这一面上的形状：代码改对了，没人回头改那段说"这里做不到"的话。
+ *
+ * 仍然做不到的是**取消排队中的 job 时把它的排队位次让出来**：串行队列里它仍占着
+ * 一格，只是开工前发现被取消就**一个请求都不发**地结束（见下面 JobBoard 那段）。
+ * 让位要重排队列结构，而那是并发执行那一轮（P4 设备租约）的活。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readdir, readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import { DEFAULT_CONFIG, findConfig, loadScenarioFile, main, type Io } from '@atest/cli';
+import {
+  createAbortFlag, DEFAULT_CONFIG, EXIT, findConfig, loadScenarioFile, main,
+  type AbortFlag, type AbortSource, type Io,
+} from '@atest/cli';
 import { EVIDENCE_FILES } from '@atest/engine';
 import { readRunMember } from '@atest/store';
 import { readIfFile, resolveEvidence, resolveStatic, type StaticRoot } from './files.js';
@@ -115,7 +126,7 @@ const MIME: Record<string, string> = {
  * 这里再兜一层会把"我们的 bug"降级成"一个 500"。异常照直冒到请求处理器最外层，
  * 那里统一记一条带栈的日志（而**不**把栈发给浏览器 —— 它会带内部路径）。
  */
-async function runCommand(argv: string[], cwd: string, collect: string[]): Promise<number> {
+async function runCommand(argv: string[], cwd: string, collect: string[], abortSignal?: AbortFlag): Promise<number> {
   const io: Io = {
     out: (s) => collect.push(s),
     err: (s) => collect.push(s),
@@ -123,9 +134,103 @@ async function runCommand(argv: string[], cwd: string, collect: string[]): Promi
     // 环境**原样透传**。这里有一个必须守住的点：密钥只从 ATEST_SECRET_* 环境变量来，
     // 所以浏览器不需要、也拿不到任何密钥值 —— 它连"有哪些 ref"都不必知道。
     env: process.env as Record<string, string | undefined>,
+    ...(abortSignal ? { abortSignal } : {}),
   };
   return main(argv, io);
 }
+
+/* ═══ 正在跑的 job：取消用的那张表 ═══════════════════════════════════════
+ *
+ * ## 为什么取消走"注入一个标志"，而不是给这个进程发 SIGINT
+ *
+ * 信号是**进程级**的，而这一格想取消的是"某一个 job"。发 SIGINT 的话：
+ *  · 正在清理（teardown / 归还租约）的那条会被第二次同名信号直接打死 ——
+ *    `installSignalHandlers` 的第二次按键语义是"放弃清理 + 自我终止"，
+ *    那正好是**最不该在常驻服务里发生**的事（进程一死，别人的请求也一起没了）；
+ *  · 而且它挡不住**排队中**的那条（见下），那是更重要的一半。
+ *
+ * ## 排队中的 job 被取消 => 一个请求都不许发
+ *
+ * 串行队列意味着"提交"与"开始"之间可以隔很久。那时取消如果只是置个标志，
+ * 引擎那侧 `checkAbort` 会在**第一步开头**抛，于是场景仍会被装配、
+ * 而装配里包含连库、起浏览器这类动作。更坏的是它已经排到了队里、
+ * 人以为"取消了就是没跑"。所以 {@link JobBoard.claimStart} 在**开工前**读一次标志：
+ * 取消掉的 job 直接出队，`main` 一次都不调。
+ * 理由是 docs/02 §5 那条不可逆动作纪律 —— 一次取消绝不该产生第二遍副作用，
+ * 而"根本没开始"是唯一干净的答案。
+ */
+interface Job {
+  readonly id: string;
+  readonly source: AbortSource;
+  /** 排队中 / 正在跑 / 已结束。取消只对前两者有意义，而三者要分得开 */
+  state: 'queued' | 'running' | 'done';
+}
+
+/** 已结束那条只留最近这么多条，够回答"我刚那个 job 怎么样了"，又不会无界长 */
+const FINISHED_KEEP = 50;
+
+class JobBoard {
+  private readonly jobs = new Map<string, Job>();
+  private readonly finished: string[] = [];
+
+  /** 登记。id 撞上一个**还没结束**的 job 时返回 undefined（调用方报 409） */
+  add(id: string): Job | undefined {
+    const prev = this.jobs.get(id);
+    if (prev && prev.state !== 'done') return undefined;
+    const job: Job = { id, source: createAbortFlag(), state: 'queued' };
+    this.jobs.set(id, job);
+    return job;
+  }
+
+  get(id: string): Job | undefined { return this.jobs.get(id); }
+
+  /**
+   * 表里**当前还留着**的所有 job，含最近结束的那批（{@link FINISHED_KEEP} 条以内）。
+   *
+   * 刻意不过滤掉 `done`：这一格的读者是"我刚那个 job 怎么样了"，而那个 job
+   * 恰恰常常**已经结束**。过滤的话它就从列表里消失，看起来像"没有这个 job"，
+   * 与"取消没生效"是同一种读感。每条都带 `state`，要只看活着的由调用方筛。
+   */
+  all(): readonly Job[] { return [...this.jobs.values()]; }
+
+  /**
+   * **占下开工权**：没被取消且还在排队 => 置为 running 并返回 true；否则 false。
+   *
+   * 名字刻意是动词而不是 `startable(job)` 那种形容词 —— 它**会改 state**。
+   * 一个叫"能不能开工"的函数偷偷把状态改成"在跑"，读调用点的人看不出来，
+   * 于是"多调一次""顺手删掉一处"这类改动不会引起警觉。
+   * 我给这一段写负控时正是被它咬了一口：一个变异同时删掉了"取消闸"与
+   * "queued→running"两件事，报出来的失败指向 `/api/jobs`，看着像测试写错了，
+   * 其实是我把两个行为绑在了一次调用里（docs/08 §3 说的"变异删得比被测行为多"）。
+   *
+   * 顺带把状态机写死在这里：只允许 `queued → running`。`done` 也返回 false，
+   * 于是"一个已结束的 job 被再次开工"（等于把同一个场景**跑第二遍**，
+   * docs/02 §5 的不可逆动作纪律）在这张表的层面就不成立，而不靠调用点自觉。
+   */
+  claimStart(job: Job): boolean {
+    if (job.state !== 'queued' || job.source.flag.aborted) return false;
+    job.state = 'running';
+    return true;
+  }
+
+  /**
+   * 收尾。**调用方在 finally 里调一次**，所以这里不需要幂等守卫 ——
+   * 写一个"防重复调用"的判断，等于承认有两个调用点，而那时该修的是调用点。
+   * 表里那条**已结束**的 job 留在 map 里一小会儿（够回答"我刚那个 job 怎么样了"），
+   * 超过 {@link FINISHED_KEEP} 条才淘汰；还活着的永不被淘汰。
+   */
+  finish(job: Job): void {
+    job.state = 'done';
+    this.finished.push(job.id);
+    while (this.finished.length > FINISHED_KEEP) {
+      const old = this.finished.shift()!;
+      if (this.jobs.get(old)?.state === 'done') this.jobs.delete(old);
+    }
+  }
+}
+
+/** job id 的形状。刻意收紧：它会进日志、也可能进文件名，不接受路径分隔符与点段 */
+const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
  * 列出证据目录。**读 manifest.json，不重算任何东西**。
@@ -178,6 +283,8 @@ export async function startServer(o: ServeOptions = {}): Promise<RunningServer> 
    * 用 promise 链而不是队列结构：并发请求一多，自己写队列会多出一堆要测的状态。
    */
   let queue: Promise<unknown> = Promise.resolve();
+  /** 正在跑/排队中的 job。取消按这里的 id 找落点（见 JobBoard 那段） */
+  const jobs = new JobBoard();
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -220,7 +327,7 @@ export async function startServer(o: ServeOptions = {}): Promise<RunningServer> 
     if (p === '/api/run' && req.method === 'POST') {
       const raw = await readBody(req);
       if (raw === undefined) return json(res, 413, { error: `请求体超过 ${MAX_BODY} 字节` });
-      let body: { scenario?: string; env?: string; inputs?: Record<string, unknown> };
+      let body: { scenario?: string; env?: string; inputs?: Record<string, unknown>; jobId?: string };
       try {
         body = raw === '' ? {} : JSON.parse(raw) as typeof body;
       } catch {
@@ -228,6 +335,28 @@ export async function startServer(o: ServeOptions = {}): Promise<RunningServer> 
       }
       if (!body.scenario) return json(res, 400, { error: '缺少 scenario（场景 id 或 IR 文件路径）' });
       if (!/^[A-Za-z0-9._/@-]+$/.test(body.scenario)) return json(res, 400, { error: 'scenario 含不允许的字符' });
+      /*
+       * jobId **由调用方给**，这不是省事，是被这条 API 的形状逼的：`POST /api/run`
+       * 要等 run 跑完才回，服务端自己造的 id **在 run 结束前没有任何途径送到调用方手里**。
+       * 而取消恰恰是"run 还没结束时"才需要的动作。
+       * （要让它变成服务端造 id + 立刻回 202、结果另取，那是把这条改成异步任务队列，
+       *  连带前端的"运行中…"状态、输出回传、以及 evidenceDir 的归属都要重排 —— 不是
+       *  这一格能顺手给的能力，且改了要写进 docs/15，不能在这里偷偷换契约。）
+       *
+       * 不给 jobId 就**照常跑，但不可取消**。响应里那个 `cancellable` 是这件事的载体：
+       * 少了它，"我发了 jobId 吗/我拼错了吗"在前端看起来与"取消没生效"一模一样。
+       */
+      const jobId = body.jobId;
+      if (jobId !== undefined && !JOB_ID.test(jobId)) {
+        return json(res, 400, { error: 'jobId 只允许字母数字与 . _ -，且不能以分隔符开头' });
+      }
+      let job: Job | undefined;
+      if (jobId !== undefined) {
+        job = jobs.add(jobId);
+        // 撞上**还没结束**的 job：不能静默覆盖。覆盖了会让先那个人按同一个 id
+        // 取消掉后一个人的 run —— 取消错了对象比不能取消坏得多。
+        if (!job) return json(res, 409, { error: `jobId ${jobId} 正在被另一个 run 占用` });
+      }
       const argv = ['run', body.scenario, ...(body.env ? ['--env', body.env] : [])];
       for (const [k, v] of Object.entries(body.inputs ?? {})) {
         if (!/^[A-Za-z0-9_-]+$/.test(k)) return json(res, 400, { error: `input 名不合法：${k}` });
@@ -241,14 +370,87 @@ export async function startServer(o: ServeOptions = {}): Promise<RunningServer> 
        * 被测环境，还会把 SIGINT 处理器装两遍）。写成 `queue = next` 之后，
        * 第 n 条排的是第 n-1 条的尾巴，串行性由赋值顺序本身保证。
        */
-      const next = queue.then(() => runCommand(argv, cwd, collected)).catch((e: Error) => {
+      const next = queue.then(() => {
+        // **开工前**再读一次取消位：排队期间被取消的 job 一个请求都不该发。
+        // 只靠引擎里那个 `checkAbort` 的话，装配（连库、起浏览器）照做、
+        // 场景照进队列的"已开始"状态，而人以为"取消了就是没跑"。
+        if (job && !jobs.claimStart(job)) {
+          collected.push('该 job 在开工前已被取消：一个请求都没发。');
+          return EXIT.ABORTED;
+        }
+        return runCommand(argv, cwd, collected, job?.source.flag);
+      }).catch((e: Error) => {
         collected.push(`内部错误：${e.stack ?? e.message}`);
         return 9;
-      });
+      }).finally(() => { if (job) jobs.finish(job); });
       queue = next;
       const code = await next;
       // 输出原样回传。这里**不解析摘要去算结论** —— report.html 与 manifest 里有权威的那一份。
-      return json(res, code === 0 ? 200 : 201, { exitCode: code, output: collected.join('\n') });
+      /*
+       * 回的是 `cancelRequested`（"有没有人对这条 job 点过取消"），**不是** `cancelled`。
+       * 我先前写的是 `cancelled: flag.aborted`，那个词在这里是假的，两种假法都出得来：
+       *  · 取消来在最后一步之后 => 标志为真、run 其实**跑完了**，于是"被取消了"；
+       *  · run 被**超时/成本熔断**砍断而没人点取消 => 用同一个词得报 false，
+       *    而人看退出码 10 会以为矛盾。
+       * 这一格只知道"有没有人点过"。**结论在 manifest.aborted.kind 里**（那里才分
+       * cancelled / timeout / cost），这一层不去重算 —— 文件头那条禁令在这里同样成立。
+       */
+      return json(res, code === 0 ? 200 : 201, {
+        exitCode: code, output: collected.join('\n'),
+        ...(jobId !== undefined ? { jobId, cancelRequested: job!.source.flag.aborted } : { cancellable: false }),
+      });
+    }
+
+    /*
+     * ── 取消一条正在跑（或还在排队）的 run ────────────────────────────────
+     *
+     * 为什么不是 `POST /api/run/:id/cancel`：这里的路径段是**调用方给的字符串**，
+     * 而这一格的存在理由之一就是不接受调用方给的路径片段（见 `/evidence/` 那一格
+     * 与 `/api/scenario` 各自的注释）。取消要的是同一格判据 —— 走 query 参数并
+     * 按 JOB_ID 收紧，与 `jobId` 的入口同一处、同一张表。
+     *
+     * 语义是**请求取消**，不是"已取消"：置位之后，正在跑的那条会在**下一步开头**
+     * 停下（引擎 `checkAbort` 每步读一次），已经发出去的请求不会被追回 ——
+     * 追回就等于"半个 POST"，而那正是不可逆动作纪律不要的东西。
+     * 所以这里回的是"收到了"，最终结论在 run 自己的响应与证据包里（`aborted.kind`）。
+     */
+    if (p === '/api/cancel' && req.method === 'POST') {
+      const jobId = url.searchParams.get('jobId') ?? '';
+      if (!JOB_ID.test(jobId)) return json(res, 400, { error: 'jobId 缺失或形状不合法' });
+      const job = jobs.get(jobId);
+      if (!job) return json(res, 404, { error: `没有登记过 jobId ${jobId}（从未提交，或结束后被后续 job 挤出了表）` });
+      /*
+       * 已经结束的 job 也回 200，不回 409："取消一个刚跑完的 run"在人手点按钮的
+       * 节奏里是**常态**（按钮慢了一拍），把它报成错误会让人以为自己的取消失败了，
+       * 转而去按第二下。
+       *
+       * 回的两个事实刻意**不合成一个 `accepted`**。我先前写的是
+       * `accepted: first`（first = 这是第一次取消），于是"取消一条刚跑完的 run"
+       * 会拿到 `accepted: true` —— 字面意思是"你的取消被受理了"，而真相是"没东西可取消"。
+       * 一个字段同时想表达"第一次收到"和"真的砍到了东西"，两个读者各读一半，
+       * 而这两半在**这一格**（state=done）恰好相反，所以拆成两格各说一件事：
+       *  · `wasRunning` —— 有没有一个 run 因为这一下而停下；
+       *  · `alreadyCancelled` —— 之前是否已经取消过（重复点按钮要看得见，
+       *    否则第二下与"取消没生效"长得一模一样）。
+       * 位的读取在 `cancel()` **之前**：置位之后再读就恒为 true，那个字段就废了。
+       */
+      const alreadyCancelled = job.source.flag.aborted;
+      job.source.cancel();
+      /*
+       * `actedOn`（而不是 `wasRunning`）：这个名字说的是"这一下砍到了东西吗"，
+       * 而 `wasRunning` 说的是"当时有东西在跑吗" —— 排队中的 job 后者为假，
+       * 但它的取消**确实有作用**（它因此压根不会开工），报成 false 会让人以为
+       * "排队的那条取消不掉"，转而去按第二下 / 去 kill 进程。
+       * 所以判据是"取消有没有对象"= 它还没结束，而不是"它是不是正在跑"。
+       */
+      return json(res, 200, { jobId, state: job.state, actedOn: job.state !== 'done', alreadyCancelled });
+    }
+
+    /** 排队/在跑的那几条。给前端显示"有几条在跑"，也让"取消错了 id"看得见 */
+    if (p === '/api/jobs' && req.method === 'GET') {
+      return json(res, 200, {
+        items: [...jobs.all()].map((j) => ({ jobId: j.id, state: j.state, cancelled: j.source.flag.aborted })),
+      });
     }
 
     // ── run 列表与产物（回**相对**路径：绝对路径会把这台机器的目录结构发进浏览器） ──

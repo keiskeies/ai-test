@@ -33,6 +33,19 @@ export interface Io {
   err(s: string): void;
   cwd: string;
   env: Record<string, string | undefined>;
+  /**
+   * **宿主侧的取消标志**（可选）。有它时，`cmdRun` 除了接信号之外还要看它。
+   *
+   * 存在的理由是常驻宿主没有信号可用：服务端 `POST /api/cancel?jobId=…` 要取消的
+   * 是"某个正在跑的 job"，而不是"这个进程"（那个进程同时只有这一条 run，但**打死它
+   * 会连带丢掉正在清理的 teardown 与没还的租约**，而且会把别人的请求一起杀掉）。
+   * CLI 自己**永远不给**这个字段 —— 那条路只有信号，判据写在 signals.ts 文件头。
+   *
+   * 两条来源是**或**的关系而不是二选一：装了信号处理器又丢掉它，会让 Ctrl-C 在
+   * 服务端宿主里失效（比不能取消更坏）；只认注入的那个，则 CLI 那条已接线的路（见
+   * `signal.test.ts` 与 `mutate/signal.json`）会整条断掉。
+   */
+  abortSignal?: AbortFlag;
 }
 
 /**
@@ -360,6 +373,28 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
     },
   });
 
+  /**
+   * 取消的**两条来源合成一个**再交给下游。
+   *
+   * 合成而不是二选一：宿主注入了 `io.abortSignal` 时仍然装信号处理器，
+   * 否则 Ctrl-C 在服务端那种宿主里就失效了（比不能取消更坏）；反过来只认信号，
+   * 那注入的那个字段就是"有字段、没人读"这一族缺陷的新实例。
+   *
+   * `sig()` 只可能来自信号那一份（注入的那个恒 undefined，见 createAbortFlag），
+   * 所以归因这句话要自己拼 —— 直接读 `signal.sig()` 会把 HTTP 取消说成"被信号取消"，
+   * 那是把人引向"谁 kill 了进程"的假归因。
+   */
+  const injected = io.abortSignal;
+  const abortedBy = (): string =>
+    signals.signal.sig() ?? (injected?.aborted ? '外部请求' : '信号');
+  const abortSignal: AbortFlag = injected
+    ? {
+      get aborted() { return signals.signal.aborted || injected.aborted; },
+      sig: () => signals.signal.sig(),
+      count: () => signals.signal.count() + injected.count(),
+    }
+    : signals.signal;
+
   const results: CommandResult[] = [];
   // 显式类型：EXIT.OK 是字面量 0，不标注的话 worst 被推成 0，后面赋别的码就报
   // "number 不能赋给 0" —— 那个报错会让人以为 worseExit 写错了，其实是推断问题
@@ -368,14 +403,14 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
   let skippedByCancel = 0;
   try {
     for (const f of files) {
-      if (signals.signal.aborted) {
+      if (abortSignal.aborted) {
         skippedByCancel++;
         // 明说"没跑"，而不是静默 break：静默的话输出里只有前几个场景的结论，
         // 而人以为这批跑完了（docs/14 §4.3 那一族"少跑了的东西不留一行"）
-        io.err(`已跳过 ${f}：本次运行已被 ${signals.signal.sig() ?? '信号'}取消，它**一步都没跑**。`);
+        io.err(`已跳过 ${f}：本次运行已被 ${abortedBy()}取消，它**一步都没跑**。`);
         continue;
       }
-      const one = await runOne({ file: f, a, io, ci, cfg, clock, env, registry, evidenceDir, signal: signals.signal });
+      const one = await runOne({ file: f, a, io, ci, cfg, clock, env, registry, evidenceDir, signal: abortSignal });
       results.push(one);
       // 取"更坏"的那个码。顺序按语义严重程度而不是数值大小：
       // USAGE/INVALID 比 TEST_FAILED 更要紧（先修配置再谈测试结果），

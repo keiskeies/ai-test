@@ -82,6 +82,60 @@ export interface AbortFlag {
   count(): number;
 }
 
+/** {@link createAbortFlag} 的返回值 */
+export interface AbortSource {
+  /** 交给引擎/命令侧读的那一份 */
+  readonly flag: AbortFlag;
+  /**
+   * 从**进程外**触发取消。返回 `true` = 这是第一次（调用方据此决定要不要打"正在收尾"）。
+   *
+   * 不叫 `abort` 而叫 `cancel`：`abort` 在这个仓里已经有含义了 —— 引擎那边的
+   * `RunAborted`、报告里的 `aborted` 字段，而那些**包含**超时与成本熔断砍断。
+   * 这一格只会由"人主动要求停下"触发，名字要分得开。
+   */
+  cancel(): boolean;
+}
+
+/**
+ * 一个**不由信号驱动**的取消标志。给常驻宿主用（服务端 `POST /api/cancel?jobId=…` 取消某一条 run）。
+ *
+ * ## 为什么要单独有一个，而不是给 installSignalHandlers 加个入参
+ *
+ * 那条路的自我终止语义（第二次同名按键 => 摘处理器 + `process.kill(self)`）**在
+ * 常驻进程里是错的**：服务端上"再点一次取消"绝不能把整个服务打死，那会同时砍掉
+ * 正在清理的 teardown、没还的设备租约，以及别人的那条 run。所以这里刻意
+ * **没有** count 的同名判定、没有 selfKill、没有 restore —— 少写的这三样都是
+ * 有意不带，不是没写完。
+ *
+ * ## 为什么 `flag` 与 `cancel` 分两个东西，而不是直接返回一个带 setter 的对象
+ *
+ * 引擎与命令侧**只该读**，写它的能力只该在宿主手里。合成一个对象的话，
+ * 任何拿到 `signal` 的代码都能取消别人的 run —— 而这个对象会一路传进
+ * `runOne`、wiring、以及将来所有装配点。
+ * （`AbortFlag` 本身是结构性的，手写 `{ aborted: true }` 仍然过类型 ——
+ * 那条立场不变，见上面那段；这一格挡的是"顺手能写到活的那个对象上"，
+ * 不是"有人伪造一份新的"。）
+ *
+ * `sig()` 恒为 undefined：它不是信号。命令侧那句提示因此走 fallback，
+ * 而不是把 HTTP 取消说成"被信号取消" —— 那是把人引向"是不是有人 kill 了进程"的假归因。
+ */
+export function createAbortFlag(): AbortSource {
+  const state = { aborted: false, count: 0 };
+  return {
+    flag: {
+      get aborted() { return state.aborted; },
+      sig: () => undefined,
+      count: () => state.count,
+    },
+    cancel() {
+      state.count++;
+      if (state.aborted) return false;
+      state.aborted = true;
+      return true;
+    },
+  };
+}
+
 export interface SignalOptions {
   /**
    * 每次信号都调（第一次、第二次…）。只许做**同步的字符串输出** —— 在信号栈里。

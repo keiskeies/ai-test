@@ -91,9 +91,10 @@
     {
       "label": "P7 已取消之后不跳过后面的场景（人被取消的那一批继续往下发请求，其中有 POST/下单/删除）",
       "file": "packages/cli/src/commands.ts",
-      "anchor": "      if (signals.signal.aborted) {",
+      "anchor": "      if (abortSignal.aborted) {",
       "replace": "      if (false) {",
-      "testFile": "packages/cli/test/signal.test.ts"
+      "testFile": "packages/cli/test/signal.test.ts",
+      "_锚点换过名字": "原先锚的是 `if (signals.signal.aborted)`。后来 cmdRun 把两条取消来源（进程信号 / 宿主注入的 io.abortSignal）**合成一个**再往下传，这一格读的是合成后的那个，于是锚点跟着改成 `abortSignal.aborted`。**被测行为一字未变**：删掉它 = 人已取消而后面的场景照样发请求。单独记这一行是因为锚点静默失配 = ANCHOR_NOT_FOUND = 「没跑成」，而那种结论最容易被当成一条等价的实测读掉。"
     },
     {
       "label": "P8 被跳过的场景不进退出码（一次「取消」在流水线里是绿灯，而且是**最安静的那种假绿**：连一个红步骤都没有）",
