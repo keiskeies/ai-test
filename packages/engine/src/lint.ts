@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, parallelHazards, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern } from '@atest/ir';
@@ -278,17 +278,53 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
   };
   walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => checkRefs(s));
 
+  /*
+   * **租约规则单开一次遍历，走三层**（缺陷与取证见 `docs/15` §3.3 末尾那张探针表）。
+   *
+   * 它原先在下面的"逐步骤规则"里，而那一块走的是 `walk(scenario.body, …)` ——
+   * 于是两个方向都坏，且都已实测：
+   *  - `device` 在 `setup`、`tap` 在 `body` → **误报**，而该场景运行时真跑通
+   *    （`tap` = pass、`lease → release` 各一次）。error 级 → `atest lint` 退 3 /
+   *    `run --strict` 拒绝执行，也就是**能跑的合法写法被静态闸拒了**；
+   *  - `tap` 只在 `setup`（那一刻真的没有租约）→ **漏报**，错误挪到运行时才以
+   *    `env-unavailable` 现形，归因指向"没配 device adapter"而不是"IR 少一步租约"。
+   *
+   * **为什么只把这一条挪出来，而不是把整块改成三层**：那块里还有 10 条规则，
+   * 其中 `orderIdx` 参与的判据要跟着重定义顺序，而"teardown 里一个裸 sleep 该不该
+   * 和 body 里一个同罪"是**产品问题不是 bug**（`docs/15` §3.3 那条 ⚠ 写的就是这个）。
+   * 把未决的产品问题夹在一个缺陷修复里一起做，做完就没人再来分开判了。
+   */
+  {
+    let leaseAcquiredAt = -1;
+    let idx = 0;
+    // 顺序按**运行顺序**拼：setup → body → teardown。
+    // 判据用 deriveTargets(三层) 而不是 scenario.targets —— 后者是从 body 推的
+    // （`ir/index.ts` 里 `targets: deriveTargets(draft.body)`），
+    // 于是"body 里没有移动端步骤、只有 setup 里有"这种场景那个 .some() 根本不成立，
+    // 上面的遍历修好了也仍然漏（手工验过：只改遍历时，只有这种场景会红）。
+    const needsDevice = deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown])
+      .some((t) => ['android', 'ios', 'harmony'].includes(t));
+    walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
+      idx++;
+      if (s.kind === 'device') leaseAcquiredAt = idx;
+      if (LEASE_REQUIRED.includes(s.kind) && leaseAcquiredAt < 0 && needsDevice) {
+        push({ code: 'RESOURCE_LEASE_MISSING', level: 'error', stepId: s.id, message: `设备步骤 ${s.kind} 之前没有 device 租约`, fix: '在场景开头加 { kind:"device", require:{…} } 申请租约' });
+      }
+    });
+  }
+
   // ── 逐步骤规则 ──────────────────────────────────────────────────
-  let leaseAcquiredAt = -1;
+  // 租约规则搬走了，连着 `leaseAcquiredAt` 与它唯一的使用者 `orderIdx` 一起
+  // （新那一遍里用 `idx`，它只需在本规则自己的遍历里单调）。
+  // 这里**不留**一个没人读的计数器：留着一个与判据脱钩的 orderIdx，
+  // 下一个人要么以为还有规则用它，要么照着它再加一条顺序相关的判据而不自知。
   let hasSleep = false;
   let llmAsserts = 0;
   let totalAsserts = 0;
   let mutating = false;
-  let orderIdx = 0;
   const mutatingSteps: Step[] = [];
 
   walk(scenario.body, (s, path) => {
-    orderIdx++;
     void path;
     // 无断言步骤：零断言且无任何下游消费者 → no-op（docs/00 §4.4，20 行检查打头号为失败模式）
     if (['http', 'openapiCall'].includes(s.kind)) {
@@ -309,10 +345,8 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     }
     if (s.kind === 'sleep') { hasSleep = true; push({ code: 'SLEEP_USED', level: 'warning', stepId: s.id, message: `使用裸 sleep(${s.ms}ms)：每个固定延时都是一颗未来的 flake + 一次套件变慢`, fix: '改用 wait{condition,timeoutMs,pollMs}；IR 里 wait 没有 duration 字段是有意的', doc: 'docs/02 §3' }); }
     if (s.kind === 'while' && s.maxIterations > 500) push({ code: 'LOOP_UNBOUNDED', level: 'warning', stepId: s.id, message: `while 上限 ${s.maxIterations} 偏大`, fix: '有界循环是可回放的前提；上限应来自业务语义而非随手写个大数' });
-    if (s.kind === 'device') leaseAcquiredAt = orderIdx;
-    if (LEASE_REQUIRED.includes(s.kind) && leaseAcquiredAt < 0 && scenario.targets.some((t) => ['android', 'ios', 'harmony'].includes(t))) {
-      push({ code: 'RESOURCE_LEASE_MISSING', level: 'error', stepId: s.id, message: `设备步骤 ${s.kind} 之前没有 device 租约`, fix: '在场景开头加 { kind:"device", require:{…} } 申请租约' });
-    }
+    // 租约规则**不在这里**：它在上面那个走三层的独立遍历里。
+    // 留在这里的话会与新那一遍各报一次（body 里的设备步），且 setup 里的租约仍然看不见。
     if (s.kind === 'app' && s.action === 'clearData') {
       // 与 preserveSession 互斥（docs/07 §5）
       const keeps = allSteps.some((a) => a.kind === 'useIdentity' && a.preserveSession);

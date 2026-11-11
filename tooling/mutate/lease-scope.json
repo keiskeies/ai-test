@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "RESOURCE_LEASE_MISSING 改走三层（tests: packages/engine/test/lease-scope.test.ts）。",
+    "",
+    "**这一族守的是本轮实测到的两个方向**（探针表在 docs/15 §3.3 末尾）：",
+    " - `device` 在 setup、`tap` 在 body => **误报**，而那个场景运行时真跑通（tap=pass、",
+    "   lease→release 各一次）。它是 error 级，所以后果是 `atest lint` 退 3 /",
+    "   `run --strict` 拒绝执行 —— **能跑的合法写法被静态闸拒了**；",
+    " - `tap` 只在 setup（那一刻真的没租约）=> **漏报**，错误挪到运行时才以",
+    "   env-unavailable 现形，归因指向\"没配 device adapter\"而不是\"IR 少一步租约\"。",
+    "",
+    "**修法有两处，本文件按处各给变异**（S1 遍历、S2 前置判据）。这不是拆数字好看：",
+    "本轮手工验过 **只做 S1 那一半时，5 条测试里只有 B 那一条会红**，",
+    "其余 4 条全绿 —— 因为 A/C 的场景 body 里有 device，`scenario.targets` 因此含 android，",
+    "那个被换掉的 `.some()` 前置**本来就成立**。所以 B 那条测试的唯一存在理由就是把",
+    "\"顺手只改遍历\"这件事变贵。S2 就是那条顺手会被删掉的东西。",
+    "",
+    "**刻意没有做的事**：没把下面那块\"逐步骤规则\"整体改成三层。那块里还有 10 条规则，",
+    "其中 orderIdx 参与的判据要重定义顺序，而\"teardown 里一个裸 sleep 该不该和 body 里",
+    "一个同罪\"是**产品问题不是 bug**（docs/15 §3.3 那条 ⚠ 写的就是这个）。",
+    "把未决的产品问题夹进缺陷修复，做完就没人再来分开判了。",
+    "所以 S3 给的是\"把整块改成三层\"这个**越界动作**的变异：它会让 setup/teardown 里的",
+    "裸 sleep 等规则开始命中，而**现有测试不会红** —— 记在这里是因为\"测试没红\"在这种",
+    "情况下**不 licensed 到\"这么做是对的\"**，只说明没人写过 sleep 在 setup 的期望。",
+    "**这条是刻意留白（survived）还是将来补测试，得先有人把那个产品问题答了。**"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "S1 遍历退回只看 body（本轮那个缺陷的原样：setup 里的租约不可见）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {\n      idx++;",
+      "replace": "    walk(scenario.body, (s) => {\n      idx++;",
+      "testFile": "packages/engine/test/lease-scope.test.ts"
+    },
+    {
+      "label": "S2 前置判据退回 scenario.targets（它只从 body 推 => setup-only 的移动端步骤仍漏）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    const needsDevice = deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown])\n      .some((t) => ['android', 'ios', 'harmony'].includes(t));",
+      "replace": "    const needsDevice = scenario.targets\n      .some((t) => ['android', 'ios', 'harmony'].includes(t));",
+      "testFile": "packages/engine/test/lease-scope.test.ts"
+    },
+    {
+      "label": "S3 判据只看租约存不存在、不管顺序（device 在 tap 之后也放行）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      if (s.kind === 'device') leaseAcquiredAt = idx;",
+      "replace": "      if (s.kind === 'device') leaseAcquiredAt = idx;\n      if (LEASE_REQUIRED.includes(s.kind)) leaseAcquiredAt = Math.max(leaseAcquiredAt, 1);",
+      "testFile": "packages/engine/test/lease-scope.test.ts"
+    },
+    {
+      "label": "S4 整块\"逐步骤规则\"改成三层（越界：顺手改掉 10 条未决规则的语义）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  walk(scenario.body, (s, path) => {\n    void path;",
+      "replace": "  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s, path) => {\n    void path;",
+      "testFile": "packages/engine/test/lease-scope.test.ts",
+      "expect": "equivalent",
+      "_note": "刻意等价（预期不被抓）。它改的是那 10 条规则的作用域，而那条边界是**未决的产品问题**，现有测试对它没有期望。判读必须是「等价/无结论」而不是「抓不到」，也别顺手补测试把它钉住 —— 先答 sleep 在 teardown 算不算 flake，再决定钉哪一边。"
+    }
+  ]
+}
