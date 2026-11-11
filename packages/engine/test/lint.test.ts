@@ -63,6 +63,56 @@ describe('变量与引用', () => {
   });
   test('VAR_UNDEFINED：引用不存在的步骤', () =>
     assert.ok(codes([{ ...b('b'), kind: 'assert', against: '$.step.ghost.resp', jsonPath: { '$.x': { notNull: true } } }]).includes('VAR_UNDEFINED')));
+
+  /*
+   * 「步骤存在」与「步骤有输出」是**两件事**，改之前用同一个 Map 判，
+   * 于是引用 `set` 步骤的输出一条假报错：`该步骤不存在` —— 那句话是假的，
+   * 人会照着它去检查 id 拼写，而拼写没错。实测过的原样场景：
+   * `atest run` 全绿、`atest run --strict` 退出码 3（同一个文件、相反结论）。
+   * 判据拆成两个 Map（存在性 stepExportOrder / 导出内容 stepExports）之后，
+   * 这三条各钉一格：真不存在的照报、有输出的不误报、存在但无输出的报**另一句**。
+   */
+  test('引用 set 步骤的输出**不算错**（它运行时真的导出）', () => {
+    const c = codes([
+      { ...b('mk'), kind: 'set', assign: { resp: { status: 200 } } },
+      { ...b('a'), kind: 'assert', against: '$.step.mk.resp', status: 200 },
+    ]);
+    assert.ok(!c.includes('VAR_UNDEFINED'), `set 步骤被引用不该报 VAR_UNDEFINED：${JSON.stringify(c)}`);
+  });
+  test('引用 table / dataSource 步骤的输出同样不算错', () => {
+    const c = codes([
+      { ...b('t'), kind: 'table', rows: [{ n: 1 }], as: 'rowsT' },
+      { ...b('a'), kind: 'assert', against: '$.step.t.rows', jsonPath: { '$.count': { eq: 1 } } },
+    ]);
+    assert.ok(!c.includes('VAR_UNDEFINED'), `table 导出 rows/count，引用它不该报：${JSON.stringify(c)}`);
+  });
+  test('步骤存在但**不产出输出**时报的是另一句（不说"不存在"这种假话）', () => {
+    // 运行时这形状是 error(cause=case-stale)：`步骤 "a" 尚无输出`。
+    // 所以静态侧报 error 是与执行器同向，不是新增严格度；
+    // 但**措辞必须说"不产出输出"** —— 说"不存在"会把人支去做一件没用的事。
+    const i = find([
+      { ...b('a'), kind: 'noop' },
+      { ...b('chk'), kind: 'assert', against: '$.step.a.status', expr: '1 == 1' },
+    ], 'VAR_UNDEFINED');
+    assert.ok(i, '引用 noop 步骤的输出必须报（运行时是 error，不是 pass）');
+    assert.match(i!.message, /不产出可引用的输出/, `措辞要说出真实原因：${i!.message}`);
+    assert.ok(!/不存在/.test(i!.message), `步骤明明存在，不能说它不存在：${i!.message}`);
+    assert.equal(i!.level, 'error', '运行时是 error，静态侧不该只给 warning');
+    assert.match(i!.fix ?? '', /set|extract/, '修法要给出**能用的**步骤类型，而不是只说"改一下"');
+  });
+  test('前向引用一个 set 步骤仍报，且报的是"顺序"而不是"无输出"', () => {
+    // 上面那两条 fix/stepExports 的改动把三个判据排成一条 else-if 链，
+    // 这条**只断言 code 出现的话分辨不出走了哪一支**（改前改后都绿，等于没测）。
+    // 所以要断措辞：顺序那一支。用的夹具是 set（http 那一支已有用例覆盖），
+    // 因为 set 正是这次改动新进入 stepExports 的那一类。
+    const i = find([
+      { ...b('use'), kind: 'assert', against: '$.step.later.resp', jsonPath: { '$.x': { notNull: true } } },
+      { ...b('later'), kind: 'set', assign: { resp: 1 } },
+    ], 'VAR_UNDEFINED');
+    assert.ok(i, '前向引用要照报');
+    assert.match(i!.message, /早于该步骤的执行顺序/, `要说清是顺序问题：${i!.message}`);
+    assert.ok(!/不产出/.test(i!.message), `set 是产出输出的，不能报成"无输出"：${i!.message}`);
+  });
   test('VAR_UNDEFINED：引用后面才执行的步骤（前向引用）', () => {
     const i = find([
       { ...b('early'), kind: 'assert', against: '$.step.later.resp', jsonPath: { '$.x': { notNull: true } } },

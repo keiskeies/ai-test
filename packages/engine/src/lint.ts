@@ -528,6 +528,39 @@ function walkLease(s: Step, has: boolean, report: (bad: { id: string; kind: stri
   return cur;
 }
 
+/**
+ * 运行时会 `exportStep(...)` 的步骤类型 —— **`$.step.<id>.*` 引用能不能成立，就看这一份**。
+ *
+ * ## 为什么这一份必须显式，且必须被测试钉住
+ *
+ * lint 原先只登记 `extract` / `http` / `openapiCall` 三种，于是**`set` 步骤被引用的
+ * 时报「该步骤不存在」**，而它明明在那儿。实测的夹具：
+ * `[{kind:'set',id:'login',assign:{resp:…}}, {kind:'assert',against:'$.step.login.resp'}]`
+ * —— `atest run` 全绿（退出码 0），同一条 `atest run --strict` 退出码 3 拒绝执行。
+ * 静态闸与执行器对同一份 IR 给出**相反**的结论，而错的是静态闸那一侧：
+ * `set` 在 `interpreter.ts` 里确实 `vars.exportStep(s.id, vars.visible())`。
+ *
+ * 漏掉的后果不只是"多一条假报错"。`--strict` 是 CI 常用档，被假报错挡住的场景
+ * 有两种下场：作者改不掉就**去掉 --strict**（那条闸从此在 CI 里消失），
+ * 或者为了绕报把 `set` 换成一个打真请求的 `http` —— 两种都比没有 lint 更糟。
+ *
+ * ## 这份清单的来源
+ *
+ * 逐条对着 `interpreter.ts` 的 `case` 分支数出来的，不是从"我觉得哪些步骤有输出"推的。
+ * **`packages/engine/test/lint-step-exports.test.ts` 会从解释器源码里把 `exportStep(`
+ * 的调用点重新推一遍并比对** —— 手抄清单与实现分叉是这个仓反复记过的那一族
+ * （`values.ts` 的 `GEN_KINDS` 那段讲的就是同一件事：两份手抄清单，改一处漏一处，
+ * 症状是"schema 收下、运行时返回 undefined、步骤判 pass 而变量是空的"）。
+ * 新增一个会 `exportStep` 的步骤类型而没同步这里，那条测试红。
+ */
+export const STEP_KINDS_THAT_EXPORT = [
+  'set', 'table', 'extract', 'dataSource', 'http', 'openapiCall',
+  'assert', 'assertPage', 'assertUi', 'assertLlm', 'assertPerf', 'db',
+] as const satisfies readonly Step['kind'][];
+
+/** 查表用的那份（成员判定是 O(1)，且判据只有这一份） */
+const EXPORTS_STEP = new Set<string>(STEP_KINDS_THAT_EXPORT);
+
 export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIssue[] {
   const issues: LintIssue[] = [];
   // doc 缺省时从 LINT_DOCS 兜上，保证「每条报错都有出处」是无条件的性质，
@@ -551,17 +584,31 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
   const refsAt: { ref: string; stepId: string; definedAtOrder: number; useOrder: number }[] = [];
   const stepExportOrder = new Map<string, number>();
   const stepExports = new Map<string, Set<string>>();
+  /** 步骤 id → 它的 kind。只为了报错时能说出"是哪一类步骤不产出输出"。 */
+  const stepKind = new Map<string, string>();
   let order = 0;
 
   const collectDefs = (s: Step): void => {
     order++;
     stepExportOrder.set(s.id, order);
+    stepKind.set(s.id, s.kind);
+    // **存在性**（这个 id 能不能被 `$.step.<id>` 引用）对所有会导出的种类都登记，
+    // 名字集合只在**运行时的导出形状是闭合且已知的**那几种里填。
+    // 填不出来时留空集：下面那条按名检查写的是 `if (exports.size && …)`，
+    // 空集 = "存在但不按名判"，正是我们要的保守档。
+    //
+    // `set` 为什么不填 assign 的键名：运行时导出的是 `vars.visible()`
+    // （那一刻看得见的**全部**变量），不只是它自己赋的那几个。
+    // 只登记 assign 键名的话，`$.step.<set 步骤>.<前面某步算出的变量>`
+    // 运行时成立、静态侧报 warning —— 那是**假阳性**，而假阳性的代价
+    // 这一格自己就写过：「误报会让人关 lint」。
+    if (EXPORTS_STEP.has(s.kind)) stepExports.set(s.id, stepExports.get(s.id) ?? new Set());
     if (s.kind === 'set') for (const k of Object.keys(s.assign)) { defined.add(k.split('.')[0]!); }
-    if (s.kind === 'extract') { const set = stepExports.get(s.id) ?? new Set(); for (const r of s.rules) { defined.add(r.var); set.add(r.var); } stepExports.set(s.id, set); }
+    if (s.kind === 'extract') { const set = stepExports.get(s.id)!; for (const r of s.rules) { defined.add(r.var); set.add(r.var); } }
     if (s.kind === 'http' || s.kind === 'openapiCall') {
-      const set = stepExports.get(s.id) ?? new Set<string>(['resp', 'status', 'body']);
+      const set = stepExports.get(s.id)!;
+      for (const k of ['resp', 'status', 'body']) set.add(k);
       if (s.kind === 'http' && s.saveAs) defined.add(s.saveAs);
-      stepExports.set(s.id, set);
     }
     if (s.kind === 'db' && s.assignTo) defined.add(s.assignTo);
     if (s.kind === 'call' && s.assignTo) defined.add(s.assignTo);
@@ -598,8 +645,22 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
         let info;
         try { info = parseRef(ref); } catch { continue; }
         if (info.scope === 'step' && info.stepId) {
-          if (!stepExports.has(info.stepId)) {
+          if (!stepExportOrder.has(info.stepId)) {
+            // 这一支现在**只在步骤 id 真的不存在时**进（存在性由上面 stepExportOrder 判，
+            // 它对所有步骤都登记）。改之前用的是 stepExports，那是"有没有导出"，
+            // 于是"存在但不导出的步骤"（noop/log/fail…）会被报成「该步骤不存在」——
+            // 那句话是假的，而人会照着假话去改 id 拼写，改不动。
             push({ code: 'VAR_UNDEFINED', level: 'error', stepId: s.id, message: `引用了步骤 "${info.stepId}" 的输出，但该步骤不存在`, fix: `确认 id 拼写，或在 ${s.id} 之前加入该步骤`, doc: 'docs/02 §5' });
+          } else if (!stepExports.has(info.stepId)) {
+            // 步骤在，但它**不产出可引用的输出**（noop / log / fail / sleep / tap…）。
+            // 运行时的表现是 `步骤 "x" 尚无输出`（error，cause=case-stale），
+            // 所以静态侧报 error 是与执行器同向，不是新增严格度。
+            push({
+              code: 'VAR_UNDEFINED', level: 'error', stepId: s.id,
+              message: `引用了步骤 "${info.stepId}" 的输出，但步骤类型 ${stepKind.get(info.stepId)} 不产出可引用的输出`,
+              fix: `改用有输出的步骤（${STEP_KINDS_THAT_EXPORT.join(' / ')}），或引用变量本身而不是 $.step 引用`,
+              doc: 'docs/02 §5',
+            });
           } else if ((stepExportOrder.get(info.stepId) ?? 0) > (stepExportOrder.get(s.id) ?? 0)) {
             push({ code: 'VAR_UNDEFINED', level: 'error', stepId: s.id, message: `引用 ${ref} 早于该步骤的执行顺序`, fix: '把引用它的步骤移到被引用步骤之后（或改用 call 子场景返回值）', doc: 'docs/02 §5' });
           } else if (info.rest) {
