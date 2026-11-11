@@ -4,6 +4,10 @@
  */
 import type { Match, Step } from '@atest/ir';
 import type { StepResult, TraceEvent } from '@atest/ir';
+// STEP_TARGET 是**值**导入（不是 type）：它是"kind → 端"那张表的唯一权威，
+// 这里要真的读它。lint 侧读的是同一份（lint.ts 的 deriveTargets/STEP_TARGET），
+// 所以"这条断言属于哪一端"这件事全仓只有一个答案。
+import { STEP_TARGET } from '@atest/ir';
 import { query, queryOne, PathError } from './jsonpath.js';
 import { compileExpr } from './expr.js';
 import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
@@ -186,12 +190,45 @@ export async function evalLlmAssert(payload: { question: string; evidenceFrom: s
   return { status: 'triaged', summary: `语义判定：否（report-only，不计入通过率）`, keyContext: { evidence: r.evidence }, costUsd: r.costUsd };
 }
 
-/** 界面断言（依赖 ui/device adapter 的 assertUi） */
+/**
+ * 界面断言（依赖 ui/device adapter 的 assertUi）。
+ *
+ * **选哪个 adapter 由步骤 kind 定，不再 `ui ?? device`**（docs/15 §3.6）。
+ * 那行回退合起来看是容错，拆开看是"静默换执行对象"：
+ * `assertPage`（web 档）在没有 ui 时会被 **device** 顶上，
+ * 于是同一条断言在 Chrome 里查 ARIA、和在安卓上查 uiautomator 树，
+ * **语义完全不是一回事，而结论都叫 pass**（实测：两侧 adapter 齐时打 UI、
+ * 只给 device 时打 DEVICE，两次都是 `pass`）。
+ * `assertUi`（mobile 档）方向相反且**更常踩**：混合场景两个 adapter 都在时，
+ * 原先永远打 **UI** —— 移动端的断言被浏览器执行了。
+ *
+ * 判据取 `STEP_TARGET`（IR 里那张 kind → 端 的唯一权威表，lint 也用它），
+ * 不在这里重抄一份清单 —— 抄一份就是本仓记过多次的"两处各一份，迟早只更新其中一处"。
+ *
+ * **刻意没有顺手改 `wait.ts` 那三处同形状的 `??`**：
+ * `uiPredicate` / `template` / `uiIdle` 这三种等待条件在 schema 里**不带端**
+ * （`STEP_TARGET.wait === 'any'`，条件对象里也没有 world/snapshotKind 字段），
+ * 所以那里"该用哪一个"今天**在 IR 里根本没有答案** —— 硬选一个等于替 schema 做决定，
+ * 而那个决定（要不要给 wait 条件加端字段、默认哪一档）是设计问题不是缺陷修复。
+ * 已登记为待决，见 docs/15 §3.6 末段。
+ */
 export async function evalUiAssert(s: Step, deps: Deps): Promise<AssertOutcome> {
   const p = s as unknown as { assertKind: string; target?: string; contains?: unknown; expected?: unknown; ariaYaml?: string };
-  const adapter = deps.adapters.ui ?? deps.adapters.device;
+  const world = STEP_TARGET[s.kind];
+  const wantUi = world === 'web';
+  const adapter = wantUi ? deps.adapters.ui : deps.adapters.device;
+  const portName = wantUi ? 'ui' : 'device';
   if (!adapter || !('assertUi' in adapter)) {
-    return { status: 'error', summary: `${s.kind} 需要 ui/device adapter 提供 assertUi`, cause: 'env-unavailable' };
+    /*
+     * 报错点名"缺的是哪一个 adapter"，并且**不再提另一个**。
+     * 旧文案写的是 `ui/device`，那等于告诉排查人"另一个也行" ——
+     * 而这条修复的全部内容就是"另一个不行"。
+     */
+    return {
+      status: 'error',
+      summary: `${s.kind} 属于 ${wantUi ? 'Web' : '移动端'}，需要 ${portName} adapter 提供 assertUi（本场景没有它；另一个 adapter 顶不上 —— 两者查的是不同的树）`,
+      cause: 'env-unavailable',
+    };
   }
   const r = await (adapter as unknown as { assertUi: (p: unknown, c: ExecContext) => Promise<{ passed: boolean; actual: unknown; expected: unknown }> }).assertUi(p, deps.ctx);
   if (!r.passed) {

@@ -628,9 +628,27 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
  *  - 自己写递归会漏 switch 的 cases（CHILD_KEYS 之外），漏了的表现与清单漂移一样；
  *  - STEP_TARGET 与 CHILD_KEYS 都在 IR，本层重抄一份就是本仓记过多次的
  *    "两处各一份，迟早只更新其中一处"。
+ *
+ * **走三层（setup + body + teardown），不只是 body**（docs/15 §3.6）。
+ * 原先只看 body，于是同一条 `navigate` 写在 body 里能跑、写在 setup 里就报
+ * "ui adapter 未注册" —— 装配判据的覆盖范围与步骤能出现的范围不一致。
+ * 而且它坏的方向很难看：**配置缺失以 env-unavailable 的身份进步骤结论**，
+ * 而本文件上面那段装 Chrome 的注释刚说过"配置缺失不该进退出码，
+ * 因为流水线会照 CI_HINT 重试一次，而配置缺失重试一万次也不会好"。
+ * 三层之后，缺浏览器这件事在**装配期**就报 ENV，与 body-only 的写法同一个口径。
+ *
+ * 与 `assertions.ts` 里那次 adapter 选择修法是**一条缺陷的两半**：
+ * 这里管"要不要建"，那里管"建了之后打给谁"。只改这里的话，
+ * `assertPage` 那类仍然会被另一个 adapter 顶掉（少一个 adapter 时不再顶、
+ * 但两个都在时照旧打错），必须两处一起改。
+ *
+ * 注意这里读的是**入参场景的三个数组**，不是 `scenario.targets` 那个字段 ——
+ * `targets` 是 parse 时按 body 推出来并**写进冻结 IR** 的，改它等于改所有
+ * 已冻结场景的 canonical 哈希（`canonicalScenario` 连 targets 一起序列化），
+ * 那是一次迁移而不是一个修复。
  */
 export function needsWeb(scenario: Scenario): boolean {
-  return deriveTargets(scenario.body).includes('web');
+  return deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown]).includes('web');
 }
 
 /** 环境里的 `viewport: "1440x900@2"` -> adapter 的参数。写错就报错，不猜默认值 */

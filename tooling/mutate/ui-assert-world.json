@@ -1,0 +1,77 @@
+{
+  "_comment": [
+    "界面断言**打到哪个 adapter**（tests: packages/engine/test/ui-assert-world.test.ts、",
+    "packages/cli/test/wiring-web.test.ts 的 setup/teardown 那两条）。缺陷在 docs/15 §3.6。",
+    "",
+    "缺陷的形状不是\"选错了\"，是**选错了而两边都 pass**（这句是本文件存在的全部理由）：",
+    "evalUiAssert 原先写 `adapters.ui ?? adapters.device`，于是",
+    " - assertPage（web 档）在没有 ui 时被 **device** 顶上：同一条断言，一次在 Chrome 里",
+    "   查 ARIA、一次在安卓上查 uiautomator 树，**两次都 pass**；",
+    " - assertUi（mobile 档）在两个 adapter 都在时**永远打 UI**。这一半更常踩 ——",
+    "   混合场景（web + app）两个 adapter 本来都在，而移动端的断言一直由浏览器执行、一直绿。",
+    "实测四行输出在 .scratch/probe-uiassert.mts（改前 3 行错、改后 3 行对）。",
+    "",
+    "**为什么单看任何一层都会得出\"这里没问题\"**：`??` 是容错、按需装配是省资源，",
+    "两条各自都合理；合起来才静默。装配判据（needsWeb 只看 body）与执行对象选择",
+    "（evalUiAssert 的 ??）隔着 AdapterRegistry 这个接口，W1–W4 守后一半、W5–W6 守前一半。",
+    "",
+    "**W1/W2 都破坏\"按 kind 选世界\"，但破坏点不同**：W1 是不看 world（回退顶上），",
+    "W2 是把映射反过来（web 档打 device、mobile 档打 ui，两个方向同时错）。",
+    "只测一个的话另一个可以悄悄写回去 —— 与 lease-slot.json 里 T2/T6 同一条理由。",
+    "",
+    "**W4 是刻意等价**（`s.kind === 'assertPage'` 与查 STEP_TARGET 今天同解）：",
+    "它记的是\"重抄一份表\"这个动作。别补测试把它钉住 —— 让它变红的正确时机是",
+    "IR 新增一个 web 档断言 kind 的那一刻，那时补的是那条新 kind 的用例而不是这条变异。",
+    "",
+    "**W3 看着像文案变异，其实不是**：旧文案 `ui/device adapter` 里那一个斜杠等于告诉",
+    "排查人\"另一个也行\"。它是行为的一部分（决定人下一步查哪里），所以值得一条断言。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "W1 选择器不看 world，退回 `ui ?? device`（缺陷原样：另一个 adapter 静默顶上）",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "  const adapter = wantUi ? deps.adapters.ui : deps.adapters.device;",
+      "replace": "  const adapter = deps.adapters.ui ?? deps.adapters.device;",
+      "testFile": "packages/engine/test/ui-assert-world.test.ts"
+    },
+    {
+      "label": "W2 端映射反了（web 档打 device、mobile 档打 ui）",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "  const wantUi = world === 'web';",
+      "replace": "  const wantUi = world === 'mobile';",
+      "testFile": "packages/engine/test/ui-assert-world.test.ts"
+    },
+    {
+      "label": "W3 报错又把另一个 adapter 列成备选（`ui/device`），等于宣布\"另一个也行\"",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "      summary: `${s.kind} 属于 ${wantUi ? 'Web' : '移动端'}，需要 ${portName} adapter 提供 assertUi（本场景没有它；另一个 adapter 顶不上 —— 两者查的是不同的树）`,",
+      "replace": "      summary: `${s.kind} 需要 ui/device adapter 提供 assertUi`,",
+      "testFile": "packages/engine/test/ui-assert-world.test.ts"
+    },
+    {
+      "label": "W4 不查 STEP_TARGET，重抄一份 kind 清单（**刻意等价**：今天同解）",
+      "file": "packages/engine/src/assertions.ts",
+      "anchor": "  const world = STEP_TARGET[s.kind];",
+      "replace": "  const world = s.kind === 'assertPage' ? 'web' : 'mobile';",
+      "testFile": "packages/engine/test/ui-assert-world.test.ts",
+      "expect": "equivalent",
+      "_note": "实测 survived，而且该 survived：今天走到这个函数的只有 assertPage / assertUi 两个 kind，两种写法逐字节同解。留这一条是记\"重抄一份表\"这个动作本身 —— 它的代价要到 IR 新增一个 web 档断言 kind 那天才现形（症状是那条新 kind 的断言被静默判成移动端，仍然 pass）。那时该补的是新 kind 的用例，不是把这条变异钉红。判读停在「等价/无结论」。"
+    },
+    {
+      "label": "W5 needsWeb 退回只看 body（缺陷原样：setup/teardown 里的 Web 步骤看不见）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "  return deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown]).includes('web');",
+      "replace": "  return deriveTargets(scenario.body).includes('web');",
+      "testFile": "packages/cli/test/wiring-web.test.ts"
+    },
+    {
+      "label": "W6 只补 setup 不补 teardown（半吊子改法：收尾截图仍漏）",
+      "file": "packages/cli/src/wiring.ts",
+      "anchor": "  return deriveTargets([...scenario.setup, ...scenario.body, ...scenario.teardown]).includes('web');",
+      "replace": "  return deriveTargets([...scenario.setup, ...scenario.body]).includes('web');",
+      "testFile": "packages/cli/test/wiring-web.test.ts",
+      "_note": "W5 的另一半年份。这条**只有** teardown 那一句断言会红，所以 setup/teardown 两句必须分开写 —— 合成一句 `assert(setup || teardown)` 的话这条就能混过去。"
+    }
+  ]
+}
