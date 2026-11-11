@@ -16,8 +16,8 @@ import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
 import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ExecTarget, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
-import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
-import { waitUntil } from './wait.js';
+import { resolveValue as resolveValueShared, strMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
+import { waitUntil, NoConditionAdapter } from './wait.js';
 import { ResponseLedger, ResponseWindow } from './responses.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
@@ -606,6 +606,19 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
            * 不是归因口径。所以：归因照旧，种类另带一个字段。
            */
           ...(e instanceof TransportError ? { [TRANSPORT_KEY]: e.kind } : {}),
+          /*
+           * 等待条件缺的是哪个槽位，进 keyContext 而不是只活在摘要里。
+           *
+           * 两个字段在 wait.ts 的错对象上，这里只是搬到结构化那一份里 ——
+           * **摘要给人读，keyContext 给看板分组**：CI 那一侧要能一句
+           * `jq '.results[] | select(.keyContext.missingAdapters) | .stepId'`
+           * 把"这一场里有几步是压根没接线"列出来，而按摘要正则匹配中文
+           * 是本仓最脆的那种依赖（文案本仓改过很多次，见 mutate 集 I3 那条等价记录）。
+           * 没有敏感值：槽位名与条件类型都是 IR 里的字面词，不是被测系统的数据。
+           */
+          ...(e instanceof NoConditionAdapter
+            ? { missingAdapters: e.triedAdapters, waitCondition: e.conditionType }
+            : {}),
         },
       });
     }
@@ -1211,18 +1224,75 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
            *    恰好退回"被吞成超时"。多一份判据的代价远大于省一次本地读。
            */
           newPage: adapters.newPage, newPageBaseline: adapters.newPage?.count() ?? 0,
+          /*
+           * `wait{dbRow}.vars` 的绑定。**用与 `db` 步完全同一个 strMap +
+           * 同一个 resolveValue**，不是"另写一份看着一样的"：
+           * 一条 SQL 写在 `db` 步里与写在 `wait{dbRow}` 里，占位必须同语义
+           *（同一套 {path}/{expr}/{gen}/字面量、同样跳过 null、同样 stringify 数组）。
+           * 两处各写一份，就会有一个时刻两条路对同一个 IR 给出不同绑定 ——
+           * 那是本仓最贵的那类缺陷（"两边数不一样"）。
+           *
+           * 传的是**这一层的 `vars`**（parallel 分支作用域），不是 rootVars。
+           * 用 rootVars 的话分支里 set 的变量在等待里查不到，
+           * 症状又是一次"引用未定义" —— §3.3 那族"少继承一层"的又一个入口。
+           */
+          resolveSqlVars: (v) => strMap(v, (x) => resolveValue(x, vars)),
         });
         if (!r.satisfied) {
           /*
-           * `hintOnTimeout` 只在这两支里加（不是加进 describePredicate）。
+           * **求值报错不是一条超时**，所以这一支必须在下面三支持续走之前分掉。
+           *
+           * 改前这里只分"满足/不满足"两态，于是 `waitedMs=0 / polls=1` 的那一次
+           * 求值中止与等满 2000ms 的真超时给出**逐字节相同**的摘要
+           * 「等待超时（2000ms）」（实测 `.scratch/probe-dbrow2.mts`）。
+           * 值班人拿到"等满了 2 秒"就会去查"2 秒内为什么没出现"（查产品、查异步落库），
+           * 而真相是那条 SQL 压根没被数据库接受 —— 两条路指向完全不同的下一步。
+           *
+           * **`onTimeout: 'continue'` 在这一支里不再产出 pass**（改前是 pass，
+           * 且整场结论 `pass`，实测 `.scratch/probe-dbrow4.mts`）：
+           * continue 的语义是"**等不到**也继续"，那是作者对**产品事实**的容忍；
+           * 而"这条条件一次都没跑成"是**平台/用例事实**，作者从没容忍过它 ——
+           * 他连"跑不跑得起来"都没被问过。让它 pass 就是
+           * "一次查询都没发出去，报告说这一步过了"。与 NoConditionAdapter 同一个界线。
+           *
+           * cause 仍是 env-unavailable，**不改成 case-stale**：报错文本分不清
+           * "IR 里那条 SQL 写错了"与"数据库当时连不上"，而这两者的下一步动作不同。
+           * 分得清的四种（`dbRow`/`uiPredicate`/`template`/`uiIdle` 缺 adapter）
+           * 已经在 wait.ts 里升级成 `NoConditionAdapter` 直接外抛，走不到这里；
+           * 剩下的靠摘要里原样带出的那句原始报错定位。
+           * 在这里现猜一个 cause，就又是一次"给一个自己分不清的事编个像样的答案"。
+           */
+          if (r.evalError) {
+            const why = `等待条件一次都没求成（第 ${r.polls} 轮、等了 ${r.waitedMs}ms 就中止）：${r.evalError}`;
+            const kctx = { waitedMs: r.waitedMs, polls: r.polls, evalError: r.evalError, condition: r.describe };
+            if (s.onTimeout === 'continue') return { status: 'error', cause: 'env-unavailable', summary: `onTimeout=continue 用不上：${why}（continue 说的是"等不到也继续"，不是"没条件也继续"）`, keyContext: kctx };
+            return { status: 'error', cause: 'env-unavailable', summary: why, keyContext: kctx };
+          }
+          /*
+           * `hintOnTimeout` 只在这三支里加（不是加进 describePredicate）。
            * 见 waits.ts 那个函数的注释：describePredicate 同时进"等待满足"的成功摘要，
            * 过了的等待后面挂一句"你可能选错了字段"是纯噪音。
-           * 对 newPage 条件以外的谓词，它返回空串，所以这里对所有 wait 步骤统一调
-           * 而不需要"先判断这是不是 newPage 等待"—— 又一次少一个判据。
+           * 对 newPage 条件以外的谓词，它返回空串，所以这里对所有真超时的 wait 步骤
+           * 统一调，而不需要"先判断这是不是 newPage 等待"—— 又一次少一个判据。
+           * （上面那一支不调它：那一支连"等什么"都没走到。）
            */
           const hint = hintOnTimeout(s.condition);
-          if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}${hint}` };
-          // IR 的 onTimeout 有三个合法取值（waits.ts:79 fail/continue/error），
+          /*
+           * `continue` 那一支也要带 keyContext，**与下面两支同一个形状**。
+           * 从前它是三支里唯一不带的一份，而"这轮 pass"不等于"没什么可记的"：
+           * 看板要问"这一场有多少条等待其实是等满超时后被放过的"，
+           * 靠的是 `jq '.results[] | select(.keyContext.waitedMs)'`，
+           * 而 continue 那几行压根没有这个键 —— 于是那个数**恰好漏掉全部被容忍的超时**，
+           * 报出来的数字看着像"几乎没有超时"，是最舒服也最害人的一种低估
+           *（docs/08 §3 那一族：少一件东西看起来像什么都没少）。
+           * 只补这两个键、不补 evalError/polls：那一支走不到 evalError，
+           * 而 polls 在三支里都没进过磁盘格式，别为一条测试方便加字段。
+           */
+          if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}${hint}`, keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
+          // IR 的 onTimeout 有三个合法取值（waits.ts 的 WaitOptionsSchema.onTimeout：fail/continue/error）。
+          // **这里刻意不写行号**：这一句从前写的是 `waits.ts:79`，而它指的那一行在
+          // 本轮之前就已经漂了（79 行是 WaitPredicateSchema 的 z.union）。行号是注释里
+          // 最容易烂掉的一种引用，改一个名字不会有人回来同步。
           // 早先这里只分 'continue' 与"其余"，于是 **error 是个永远走不到的 schema 取值**：
           // 用户显式要求"等不到就算环境问题"，却拿到一个 fail ——
           // fail 的含义是"产品有 bug"，值班人会去查一个不存在的功能问题。
@@ -1292,7 +1362,14 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       case 'dataSource': {
         if (!adapters.db) return { status: 'error', summary: 'dataSource 需要 db adapter', cause: 'env-unavailable' };
         if (s.source.type !== 'mysql') return { status: 'error', summary: `P0 仅支持 mysql 数据源（收到 ${s.source.type}）`, cause: 'env-unavailable' };
-        const rows = await adapters.db.query(s.source.datasource, s.source.sql, {}, execCtx('api', s.id));
+        /*
+         * 第三个参数从前是写死的 `{}` —— 与 `wait{dbRow}` 那个洞同源同修法。
+         * 这一处的害法略有不同：dataSource 是**数据驱动的入口**，它的 SQL
+         * 十有八九要带条件（"只取这一批要跑的行"），而拿到 `{}` 之后
+         * 作者只有两条路：查全表再在 forEach 里筛（慢，且把过滤逻辑挪进用例），
+         * 或者自己拼字符串 —— 后者会把一条只读查询变成任意读取。
+         */
+        const rows = await adapters.db.query(s.source.datasource, s.source.sql, strMap(s.source.vars, (v) => resolveValue(v, vars)), execCtx('api', s.id));
         /*
          * `leaseRows` 默认 true，而**行租约一行代码都没有** —— 那比"没这个字段"更坏：
          * 写用例的人以为两个并发 run 不会抢到同一行，实际会。字段保留（P1 实现时接线），
@@ -1629,6 +1706,10 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, slot), s.id),
             addCost, network: adapters.network, window,
             newPage: adapters.newPage, newPageBaseline: newPageBaselineBefore,
+            // 这里的谓词是本函数内部造的 `{type:'response'}`，永远到不了 dbRow 那一支。
+            // 给一个**会抛**的实现而不是 `() => ({})`：字段是必填的，而"返回空表"
+            // 会让将来有人在这里塞进 dbRow 条件时静默拿到未绑定的 SQL（= §3.2 那个洞复活）。
+            resolveSqlVars: () => { throw new Error('expectResponse 的内部谓词不该走到 SQL 绑定'); },
           });
           const hits = window.matchCount(pattern);
           if (!r.satisfied || hits === 0) {
@@ -1660,6 +1741,8 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
             resolveRef: () => undefined, adapters, ctx: execCtx(targetOf(s, slot), s.id),
             addCost, network: adapters.network, window,
             newPage: adapters.newPage, newPageBaseline: newPageBaselineBefore,
+            // 同 expectResponse 那处：内部谓词是 `{type:'newPage'}`，到不了 SQL 绑定
+            resolveSqlVars: () => { throw new Error('expectNewPage 的内部谓词不该走到 SQL 绑定'); },
           });
           const opened = (adapters.newPage?.count() ?? 0) - newPageBaselineBefore;
           if (!r.satisfied || opened <= 0) {
@@ -2146,14 +2229,6 @@ export function fmtMs(ms: number): string {
   return `${v.toFixed(1)}ms`;
 }
 
-function strMap(o: Record<string, unknown> | undefined, resolve: (v: unknown) => unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(o ?? {})) {
-    const r = resolve(v);
-    if (r !== undefined && r !== null) out[k] = typeof r === 'string' ? r : JSON.stringify(r);
-  }
-  return out;
-}
 function buildUrl(base: string, qs: Record<string, string>): string {
   const entries = Object.entries(qs);
   if (!entries.length) return base;

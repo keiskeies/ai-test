@@ -23,10 +23,37 @@ export const WaitConditionSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('dbRow'),
-      /** 只读 SQL；$var 占位由引擎绑定（禁止字符串拼接） */
+      /**
+       * 只读 SQL。变量**不写在 SQL 里**，写在下面的 `vars` 里，由 adapter 绑定
+       * （禁止字符串拼接：拼进 SQL 的值会改变语句本身，一个 `' OR 1=1 --`
+       * 就把一条只读查询变成任意读取）。
+       *
+       * **这一句从前写的是「$var 占位由引擎绑定」** —— 那句话描述了一件
+       * 没有任何实现做过的事（`wait.ts` 那两处 `db.query` 传的都是 `{}`），
+       * 而它比"没这个功能"更害人：人会照着它写 `WHERE id = $oid`，
+       * 数据库拒绝那条 SQL，那个错被等待循环收成"这一轮还没满足"，
+       * 最后端出一句「等待超时」。详见 docs/15 §3.2。
+       */
       sql: z.string().min(1),
       datasource: z.string().default('default'),
       expect: z.enum(['row', 'noRow', 'scalarTruth']).default('row'),
+      /**
+       * SQL 里具名占位的绑定值，形状与判据**与 `db` 步的 `vars` 完全一致**
+       * （同一个 `strMap` + 同一个 `resolveValue`，见 engine 的 resolve.ts）。
+       *
+       * **为什么这里不新造一套**：`db` 步早就有这个名字一样的字段，
+       * 语义也已经定在那儿（值可以是 `{path}`/`{expr}`/`{gen}`/字面量，
+       * 求值成字符串后交给 adapter 绑）。两处各定一份，就是"同一个 IR 概念
+       * 在两个位置有两种含义" —— 而那正是本仓反复记账的那个形状。
+       *
+       * **`.optional()` 而不是 `.default({})`，是量出来的不是选出来的**：
+       * `canonicalScenario` 会把 zod 补出来的默认值**物化**进规范串
+       *（`.default({})` 让每一个已有 `dbRow` 场景的 `irSha` 都变，
+       *  等于把全部历史版本的指纹作废），而 `stable()` 会丢掉 `undefined`，
+       * 所以 `.optional()` 在**不写这个字段时逐字节不变**（探针实测）。
+       * 这一字之差把"修一个 bug"与"一次磁盘格式迁移"分开了。
+       */
+      vars: z.record(z.string(), ValueSchema).optional(),
     })
     .strict(),
   /** 界面谓词（要求目标是 aria/hierarchy 世界） */
@@ -137,6 +164,28 @@ function mentionsNewPage(p: unknown): boolean {
     if (Array.isArray(kids) && kids.some(mentionsNewPage)) return true;
   }
   return false;
+}
+
+/**
+ * 摊平谓词树，逐个条件交出来。**放在本文件**（与 mentionsNewPage 同一处理由）：
+ * 加一种等待条件与更新这个遍历应当在**同一个文件里**，跨包的"忘了回来加一项"
+ * 才是那族缺陷的成因。
+ *
+ * 与 mentionsNewPage 一样，**它的结果只用于文案与 lint 提示，不用于判据** ——
+ * 需要判据的那类"谓词里有没有 X 条件"仍然在求值时判真实走到的分支
+ *（见 engine 的 wait.ts 里 NoNetworkObserver 那段）。
+ * 强度不同是因为代价不对称：这里漏一种条件类型，最坏是"少提醒一句"。
+ */
+export function iterConditions(p: WaitPredicate): WaitCondition[] {
+  if (!p || typeof p !== 'object') return [];
+  const o = p as Record<string, unknown>;
+  // 三种复合键互斥（WaitPredicateSchema 是 discriminatedUnion 式的三选一），
+  // 所以命中任一个就可以直接返回，不需要"再往下看看有没有别的键"。
+  for (const k of ['allOf', 'anyOf', 'noneOf']) {
+    const kids = o[k];
+    if (Array.isArray(kids)) return kids.flatMap((kid) => iterConditions(kid as WaitPredicate));
+  }
+  return [p as WaitCondition];
 }
 
 /**

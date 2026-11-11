@@ -1,0 +1,229 @@
+{
+  "_comment": [
+    "等待跑不起来时，报告说什么（docs/15 §3.2）。",
+    "",
+    "这一族坏掉的形状**不是报错，是报错的框选错了**：改前四种条件缺 adapter 时",
+    "抛裸 Error，被 waitUntil 那句『求值报错就当成还没满足』吞掉，最后一条",
+    "「等待超时（Nms）」+ fail，而 `onTimeout: 'continue'` 直接产出 **pass**、",
+    "整场 pass、退出码 0（实测 `.scratch/probe-dbrow4.mts`）。",
+    "一次数据库都没查过，报告说这一步过了。",
+    "",
+    "**W2/W3/W4/W5 是四处判定点，逐个变异，不抽代表**：它们在 wait.ts 里是四个",
+    "不相邻的 `if`，`??` 选择器还各不相同（`ui ?? device` / `device ?? ui` / `ui ?? device`）。",
+    "只测一种的话，另外三行可以悄悄写回 `throw new Error(...)` —— 这正是本仓",
+    "『同一件事抄三遍然后其中一遍不一样』那个老形状的第二次立项（第一次见 lease-slot T1/T8/T9）。",
+    "",
+    "**W1 与 W2–W5 是两个层次**：W2–W5 是『抛什么错』，W1 是『这个错能不能出去』。",
+    "只留 W1 的话，四处可以全写回裸 Error（那时 W1 那句 instanceof 恒假，测试照样绿）；",
+    "只留 W2–W5 的话，有人可以在 catch 里删掉那一行 instanceof 让它们重新被吞掉。",
+    "",
+    "**W6 / I1 / I2 守的是另一半**：求值真的报错了（SQL 被数据库拒绝、表达式不合法）。",
+    "W6 = WaitResult 上那个 evalError 字段没被赋值；I1 = 解释器不看它；",
+    "I2 = 看了但仍按 fail 报（= 把平台问题记成产品 bug，且 CI 会当\"测出失败\"放行）。",
+    "这三条各自单独红，是因为**三者坏掉时另外两个都还是好的** —— 字段在、但没人读，",
+    "读的人又把它送回 fail 那条老路，症状与从前逐字节相同。",
+    "",
+    "**I3 刻意等价**：continue 那一支的专门文案删掉后，status/cause/整场结论一字不变。",
+    "它记的是这件决定本身：onTimeout 在『跑不起来』这件事上**无权置喙**，",
+    "三种取值汇成同一个 error。差别只剩一句给人看的话 —— 那句要变成判据的话，",
+    "**去测试里加断言**，别指望文案本身承重（本仓文案改过很多次）。",
+    "",
+    "**B 族（绑定）**是 §3.2 的另一半：错报修好之后，SQL 绑定本身接上了",
+    "（wait{dbRow}.vars 与 dataSource.source.vars，三处 db.query 共用 strMap）。",
+    "B3/B4 守的是 onceSqlVars 那层缓存 —— 看着像优化，其实是判据：",
+    "{gen} 每轮换值 = 一条等待查了 20 个订单号而摘要说它查过那一个。",
+    "B6/B7 守的是 .optional() 这个**量出来的**选择（default 会物化进 canonical、",
+    "作废全部历史 irSha）—— 以后有人嫌 undefined 麻烦想改成 default，这两条会红。",
+    "",
+    "**L 族（迁移提示那半边）**：L5 是第一版判据写窄之后补的 ——",
+    "它当时 survived，而 survived 的真相不是『测试不够好』，是**规则本身就漏了最主流的错法**。",
+    "所以 L5 留下的记录比它抓到东西更值钱：判据太窄时测试全绿只说明测试与规则一样窄。"
+  ],
+  "cases": [
+    {
+      "label": "W1 不再往外抛 NoConditionAdapter（让它重新被『求值报错也继续等』吞掉）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (e instanceof NoConditionAdapter) throw e;",
+      "replace": "      // 删掉这一行：让它落到下面那句『当成还没满足』",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "W2 dbRow 缺 db 时写回裸 Error（缺陷原样的第一处）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (!d.adapters.db) throw new NoConditionAdapter('dbRow', ['db']);",
+      "replace": "      if (!d.adapters.db) throw new Error('dbRow 条件需要 db adapter');",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "W3 uiPredicate 缺 ui/device 时写回裸 Error（第二处，选择器是 ui ?? device）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (!a || !('resolve' in a)) throw new NoConditionAdapter('uiPredicate', ['ui', 'device']);",
+      "replace": "      if (!a || !('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "W4 template 缺 device/ui 时写回裸 Error（第三处。选择器与 W3 相反：device ?? ui）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (!a || !('resolve' in a)) throw new NoConditionAdapter('template', ['device', 'ui']);",
+      "replace": "      if (!a || !('resolve' in a)) throw new Error('template 条件需要 device/ui adapter');",
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "这一处是四处里唯一 `??` 顺序反过来的（device 在前）。它今天测不出额外东西，但这一行是抄出来的证据 —— 留这条是为了下次有人『统一一下顺序』时能发现两处的意图本来就不一样。"
+    },
+    {
+      "label": "W5 uiIdle 缺 ui/device 时写回裸 Error（第四处，判的是 snapshot 口不是 resolve 口）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (!a || !('snapshot' in a)) throw new NoConditionAdapter('uiIdle', ['ui', 'device']);",
+      "replace": "      if (!a || !('snapshot' in a)) throw new Error('uiIdle 条件需要 ui/device adapter');",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "W6 求值报错时不给 evalError 赋值（字段在、没人写）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "        evalError: (e as Error).message,",
+      "replace": "        // 删掉：describe 里已经带了那句报错",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "W7 槽位清单不进 keyContext（错照样抛、摘要照样对，只是结构化那一份没了）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          ...(e instanceof NoConditionAdapter\n            ? { missingAdapters: e.triedAdapters, waitCondition: e.conditionType }\n            : {}),",
+      "replace": "          // 删掉：摘要里已经有 adapters.xxx 了",
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "W2–W5 坏掉时摘要也退化成'求值报错'那一框，所以它们抓的是**错名选错**；这一条抓的是**只有文案、没有结构化那一份**。分开的理由是消费方不同：摘要给人读，missingAdapters 给看板/jq 分组。只测前一组的话，有人会把这两个字段当成'文案里已经有了，冗余'删掉 —— 而按中文摘要正则分组正是本仓最脆的那种依赖。"
+    },
+    {
+      "label": "I1 解释器不看 evalError（回到『不满足就是超时』那一支）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          if (r.evalError) {",
+      "replace": "          if (r.evalError && r.polls < 0) {",
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "不能写成 `if (false && r.evalError)`：TS 会对『恒假的条件』把块内所有量收窄成 never，于是 s.onTimeout 直接编译不过（实测 TS2339 on type 'never'），本轮就变成一个没结论的 BUILD_BROKEN。换成一个恒假但类型正常的判据。"
+    },
+    {
+      "label": "I1b continue 那一支写回 pass（缺陷里最贵的那一档：整场 pass）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            if (s.onTimeout === 'continue') return { status: 'error', cause: 'env-unavailable', summary: `onTimeout=continue 用不上：${why}（continue 说的是\"等不到也继续\"，不是\"没条件也继续\"）`, keyContext: kctx };",
+      "replace": "            if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}`, keyContext: kctx };",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "I2 看了 evalError 但仍按 fail 报（平台问题记成产品 bug，CI 当『测出失败』放行）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            return { status: 'error', cause: 'env-unavailable', summary: why, keyContext: kctx };",
+      "replace": "            return { status: 'fail', cause: 'env-unavailable', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}`, keyContext: kctx };",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "I3 删掉 continue 那一支的专门文案（**刻意等价**：决定在 status 上，不在文案上）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            if (s.onTimeout === 'continue') return { status: 'error', cause: 'env-unavailable', summary: `onTimeout=continue 用不上：${why}（continue 说的是\"等不到也继续\"，不是\"没条件也继续\"）`, keyContext: kctx };",
+      "replace": "            if (s.onTimeout === 'continue') return { status: 'error', cause: 'env-unavailable', summary: why, keyContext: kctx };",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "三种 onTimeout 在『条件压根跑不起来』这件事实上汇成同一个 error + env-unavailable，这是本轮的决定（onTimeout 管的是『等不到』，不是『没法等』）。continue 那一支只多一句解释，删掉之后 status / cause / keyContext / 整场结论一字不变，所以它必然 survived。留着这一条是记『等价是有意的』：那句文案是给人的，不是判据；要它承重就得在 lang.test.ts 里加断言，而不是让下一个人重新怀疑这段分支是不是漏了。"
+    },
+    {
+      "label": "B1 dbRow 的绑定写回 `{}`（缺陷原样：注释承诺绑定、实现不绑）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      const vars = d.sqlVars(c);",
+      "replace": "      const vars: Record<string, string> = {};",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "B2 dataSource 的绑定写回 `{}`（三个 db.query 调用点里的第二个漏网）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "strMap(s.source.vars, (v) => resolveValue(v, vars))",
+      "replace": "{}",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "B3 onceSqlVars 的缓存旁路（每轮 poll 重算 => {gen} 每轮换一个值）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "    const hit = seen.get(c);\n    if (hit) return hit;",
+      "replace": "    // 旁路缓存：每轮重算",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "B4 缓存键从条件对象改成类型名（一棵树里两个 dbRow 共用一份绑定）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "  const seen = new WeakMap<object, Record<string, string>>();\n  return (c) => {\n    const cond = c as { vars?: Record<string, unknown> };\n    if (!cond.vars || Object.keys(cond.vars).length === 0) return {};\n    const hit = seen.get(c);\n    if (hit) return hit;\n    const v = resolve(cond.vars);\n    seen.set(c, v);\n    return v;\n  };",
+      "replace": "  const seen = new Map<string, Record<string, string>>();\n  const keyOf = (x: object) => String((x as { type?: string }).type);\n  return (c) => {\n    const cond = c as { vars?: Record<string, unknown> };\n    if (!cond.vars || Object.keys(cond.vars).length === 0) return {};\n    const hit = seen.get(keyOf(c));\n    if (hit) return hit;\n    const v = resolve(cond.vars);\n    seen.set(keyOf(c), v);\n    return v;\n  };",
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "第一版这个变异写错了：它把键换成一个**每轮新建的对象字面量**，于是缓存永不命中 —— 行为与 B3（旁路缓存）逐字节相同，测的是同一件事。真正的『按类型名缓存』要连 seen 的声明一起换（WeakMap 存不了字符串键），锚点因此扩到整个函数体。改对之后两个变异各红各的测试：B3（不缓存）红『{gen} 每轮换值』那条，B4（按类型名缓存）红『allOf 树里两个 dbRow 各用各的绑定』那条 —— 缓存的**存在**与缓存的**键**是两条性质，各由一条测试守着。"
+    },
+    {
+      "label": "B5 null/undefined 落键成字符串 'null'（WHERE x = 'null' 永远查不到行）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "    if (r !== undefined && r !== null) out[k] = typeof r === 'string' ? r : JSON.stringify(r);",
+      "replace": "    out[k] = r === undefined || r === null ? String(r) : typeof r === 'string' ? r : JSON.stringify(r);",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "B6 vars 字段从 .optional() 改成 .default({})（每个已有 dbRow 场景的 irSha 都变）",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "      vars: z.record(z.string(), ValueSchema).optional(),",
+      "replace": "      vars: z.record(z.string(), ValueSchema).default({}),",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "B7 dataSource.vars 同样改 .default({})（第二个哈希现场）",
+      "file": "packages/ir/src/steps.ts",
+      "anchor": "          vars: z.record(z.string(), ValueSchema).optional(),",
+      "replace": "          vars: z.record(z.string(), ValueSchema).default({}),",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "B8 VarError 不再外抛（引用写错重新被吞成超时 + env-unavailable）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (e instanceof VarError) throw e;",
+      "replace": "      // 删掉：让它落到『当成还没满足』",
+      "testFile": "packages/engine/test/lang.test.ts"
+    },
+    {
+      "label": "L1 lint 规则整块旁路（新增字段没有静态那半边）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      if (hits.length === 0) continue;",
+      "replace": "      if (hits.length >= 0) continue; // 永远跳过 => 规则永不触发",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "规则整块旁路。与 L3（不下钻复合谓词）不同：L3 只漏 allOf 里那些，这一条连顶层都不报。"
+    },
+    {
+      "label": "L2 只查 wait，漏掉 dataSource 与 db（三处 SQL 只提醒一处）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      sqls.push({ where: 'dataSource(mysql)', sql: s.source.sql, vars: s.source.vars });",
+      "replace": "      // 删掉：三处 SQL 只提醒 wait 与 db 两处",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "只关掉 dataSource 那一支就同时会让 db 那支也测不到？不会 —— db 那支是独立的一行 `if (s.kind === 'db')`。**这一条的第一版锚不了**：它写的是把判别式改成 `s.source.type === 'qdrant'`，看着很自然（qdrant 那一支没有 SQL，正好测『漏了一处』），但那样 `s.source.sql` / `.vars` 在类型上压根不存在 -> TS2339 -> BUILD_BROKEN -> **没结论**。（与 I1 的 `if (false && …)` 同一族：恒假或改判别式都可能让 TS 把类型收窄成没有这些成员，『编译不过』是一种防护，但它不是『测试能抓到』的证据。）改成**类型安全地删掉那一行**，才真的问到那个问题：红的是『三处 SQL 各自都查』里 dataSource 那一条断言。"
+    },
+    {
+      "label": "L3 iterConditions 不下钻复合谓词（allOf 里的 dbRow 永不提醒）",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "    if (Array.isArray(kids)) return kids.flatMap((kid) => iterConditions(kid as WaitPredicate));",
+      "replace": "    if (Array.isArray(kids)) return [];",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "L4 级别从 warning 升成 error（一条迁移提示获得停掉别人 CI 的权力）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "        code: 'SQL_PLACEHOLDER_UNBOUND', level: 'warning', stepId: s.id,",
+      "replace": "        code: 'SQL_PLACEHOLDER_UNBOUND', level: 'error', stepId: s.id,",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "L5 判据改成『vars 里没有同名键』（把没规定的 $ 语法当成规定）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      const hits = [...one.sql.matchAll(/\\$([A-Za-z_]\\w*)/g)].map((m) => m[1]);",
+      "replace": "      const keys0 = one.vars && typeof one.vars === 'object' ? Object.keys(one.vars as object) : [];\n      const hits = [...one.sql.matchAll(/\\$([A-Za-z_]\\w*)/g)].map((m) => m[1]).filter((h) => !keys0.includes(h ?? ''));",
+      "testFile": "packages/engine/test/lint.test.ts",
+      "_note": "**判据写窄**：把 `$x` 与 vars 的键名对上，只对『没有同名键』的报。这正是第一版的形状，而它 survived —— 那时我以为是自己测试写得不够好，真相是**规则本身漏了最主流的错法**（`WHERE id = $oid` + `vars:{oid:…}` 看着什么都没缺，MySQL 照样拒）。判据改成『SQL 里有 $x 就提醒』之后，同一个变异终于能红，红的是『$oid + vars 也绑了 oid 仍然要报』那条。**这条记录比它抓到东西更值钱：判据太窄时测试全绿，只说明测试与规则一样窄。**"
+    },
+    {
+      "label": "C1 真超时的 continue 那一支不再带 keyContext（那一行 pass 了，就以为没什么可记的）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}${hint}`, keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
+      "replace": "          if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}${hint}` };",
+      "testFile": "packages/engine/test/lang.test.ts",
+      "_note": "这一条测的不是判据（status 仍是 pass，那是对的），是**聚合口径**：看板数『被容忍的超时』靠 select(.keyContext.waitedMs)，而这一支从前是唯一不带它的，于是那个数恒为 0。这类缺陷只往好看的方向偏，所以没人怀疑 —— docs/08 §3 那族在统计侧的形状。"
+    }
+  ]
+}

@@ -481,6 +481,95 @@ describe('RETRY_ON_CONTAINER（容器上的 retry 现在什么都不做，所以
   });
 });
 
+describe('SQL_PLACEHOLDER_UNBOUND（SQL 里有 $ 而这一步压根没绑任何值）', () => {
+  /*
+   * docs/15 §3.2 的**静态那一半**。运行时那一半本轮已经修好（如实报错，
+   * 不再伪装成超时），所以这条定 **warning** 而不是 error ——
+   * 与 HOVER_THEN_NOT_IMPLEMENTED 相反，区别就在运行时的形状：
+   * hoverThen 不实现会**判 pass**（假绿，必须拦在跑之前），
+   * 而这一条运行时会自己报 error。把已有场景全部照旧注释写出来的那种写法
+   * 定成 error，等于用一次 lint 变更把别人的 CI 全停掉，
+   * 去换一个运行时本来就会说的错。**静态闸该拦运行时看不见的错。**
+   *
+   * 判据是「vars 是空的」而不是「$x 在 vars 里没有同名键」——
+   * 后者要先规定"$x 指 vars.x"，而**全仓从没有地方规定过 SQL 里的 $ 是什么语法**
+   *（MySQL 的具名占位是 ? / %(x)s，$ 连标准都不是）。
+   * 定那个约定就是"引擎现猜"那一族，只是猜的人换成了 lint。
+   */
+  const waitRow = (cond: Record<string, unknown>): StepDraft =>
+    ({ ...b('w'), kind: 'wait', timeoutMs: 1000, pollMs: 100, onTimeout: 'fail', condition: cond } as StepDraft);
+
+  test('wait{dbRow}.sql 带 $ 而没写 vars => 提醒', () => {
+    const i = find([waitRow({ type: 'dbRow', sql: 'SELECT 1 WHERE id = $oid', datasource: 'main' })], 'SQL_PLACEHOLDER_UNBOUND');
+    assert.ok(i, '不提醒的话，作者会照着旧注释以为 $oid 会自动绑');
+    assert.equal(i!.level, 'warning', '运行时已如实报错，这条只是提前说 —— 不该有能力停掉别人的 CI');
+    assert.equal(i!.stepId, 'w');
+    assert.match(i!.fix ?? '', /vars/, '修法要指向那个新字段，否则人只会去删掉 $');
+    assert.match(i!.fix ?? '', /拼接/, '要顺手挡住那条看起来更简单的路（字符串拼 SQL）');
+  });
+
+  test('三处 SQL 各自都查（wait / dataSource / db），不只 wait', () => {
+    /*
+     * 三处的字段同名、错法同源，所以三处都要响。只查 wait 的话
+     * 症状是"等待里的 SQL 会被提醒、db 步里的不会"，而那两处写错的方式一模一样。
+     */
+    assert.ok(codes([
+      { ...b('d'), kind: 'dataSource', source: { type: 'mysql', sql: 'SELECT * FROM t WHERE a = $a', datasource: 'main' } },
+    ] as StepDraft[]).includes('SQL_PLACEHOLDER_UNBOUND'), 'dataSource 没查');
+    assert.ok(codes([
+      { ...b('d'), kind: 'db', datasource: 'main', sql: 'SELECT * FROM t WHERE a = $a' },
+    ] as StepDraft[]).includes('SQL_PLACEHOLDER_UNBOUND'), 'db 步没查');
+  });
+
+  test('复合谓词里的 dbRow 也查（不能只查顶层条件）', () => {
+    const c = codes([waitRow({ allOf: [
+      { type: 'expr', expr: '1 == 1' },
+      { type: 'dbRow', sql: 'SELECT 1 WHERE id = $oid', datasource: 'main' },
+    ] })]);
+    assert.ok(c.includes('SQL_PLACEHOLDER_UNBOUND'), '只查顶层的话 allOf 里那条永远没人提醒');
+  });
+
+  test('SQL 用 ? 占位 + 绑了 vars = 正确写法，不报', () => {
+    const c = codes([waitRow({ type: 'dbRow', sql: 'SELECT 1 WHERE id = ?', datasource: 'main', vars: { oid: { path: '$oid' } } })]);
+    assert.ok(!c.includes('SQL_PLACEHOLDER_UNBOUND'), '正确写法被拦 => 人会把 lint 关掉，那是一条规则换全部规则');
+  });
+
+  test('SQL 里写 $oid 而 vars 也绑了 oid —— 仍然要报', () => {
+    /*
+     * 这一条是**被自己的变异集问出来的**（tooling/mutate/wait-not-wired.json 的 L5）。
+     * 我第一版的判据是"vars 是空的"，于是这个形状**恰好漏掉**：
+     * 作者既写了 `$oid` 也写了 `vars:{oid:…}`，看着什么都没缺，
+     * 而 MySQL 收到的还是那句带 `$oid` 的 SQL —— 这是最主流的那个错法，
+     * 因为 IR 的旧注释说的正是"`$var` 占位由引擎绑定"。
+     *
+     * 所以判据只剩一条：**`$x` 不是本 IR 规定过的占位写法，引擎也不做 `$` 替换**。
+     * 而**不能**反过来判"`$oid` 在 vars 里有没有同名键"（那等于我替 MySQL
+     * 规定了 `$` 是占位语法 —— 它的具名占位其实是 `?` / `%(x)s`）。
+     */
+    const i = find([waitRow({ type: 'dbRow', sql: 'SELECT 1 WHERE id = $oid', datasource: 'main', vars: { oid: { path: '$oid' } } })], 'SQL_PLACEHOLDER_UNBOUND');
+    assert.ok(i, '绑了 vars 就闭嘴，等于把最主流的错法放行');
+    assert.ok(!/一个 vars 都没绑/.test(i!.message ?? ''),
+      `vars 已绑时不该再说"一个都没绑"：${i!.message}`);
+  });
+
+  test('vars 一个都没绑时，摘要里要补那一句（同一条错里更常见的一种）', () => {
+    const i = find([waitRow({ type: 'dbRow', sql: 'SELECT 1 WHERE id = $oid', datasource: 'main' })], 'SQL_PLACEHOLDER_UNBOUND');
+    assert.match(i!.message ?? '', /一个 vars 都没绑/);
+  });
+
+  test('对照：SQL 里没有 $ 的普通查询不报', () => {
+    const c = codes([waitRow({ type: 'dbRow', sql: 'SELECT count(*) FROM orders', datasource: 'main' })]);
+    assert.ok(!c.includes('SQL_PLACEHOLDER_UNBOUND'), '每条 dbRow 都报 => 与 SLEEP_USED 那种精准提醒混在一起，没人再看');
+  });
+
+  test('对照：qdrant 那种没有 SQL 的数据源不参与', () => {
+    const c = codes([
+      { ...b('d'), kind: 'dataSource', source: { type: 'qdrant', collection: 'c', query: '向量 $q', limit: 5 } },
+    ] as StepDraft[]);
+    assert.ok(!c.includes('SQL_PLACEHOLDER_UNBOUND'), 'query 是检索词不是 SQL，那里的 $ 没有任何绑定语义');
+  });
+});
+
 describe('HOVER_THEN_NOT_IMPLEMENTED（声明了第二件事而平台一件都不做，所以要响）', () => {
   /*
    * 这条守的是**本轮新登记的一条假绿**（docs/08 §3 有整行明细）。

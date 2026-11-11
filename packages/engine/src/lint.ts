@@ -7,8 +7,8 @@
  * 因为 IR 是结构化数据而非不透明脚本，这些检查才写得出来 ——
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
-import type { ParallelHazard, Scenario, Step, StepResult } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, parallelHazards, walk } from '@atest/ir';
+import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, iterConditions, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern } from '@atest/ir';
@@ -33,7 +33,7 @@ export type LintCode =
   | 'PIXEL_ASSERT_ON_NONHIERARCHY' | 'NEGATIVE_ASSERT_VISION_BASED' | 'TEMPLATE_NOT_UNIQUE'
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
-  | 'HOVER_THEN_NOT_IMPLEMENTED';
+  | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND';
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
@@ -118,6 +118,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   LOOP_UNBOUNDED: 'docs/02 §2',
   RETRY_ON_CONTAINER: 'docs/05 §4',
   HOVER_THEN_NOT_IMPLEMENTED: 'docs/06 §2',
+  SQL_PLACEHOLDER_UNBOUND: 'docs/15 §3.2',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
   LITERAL_OVERFIT: 'docs/02 §4、docs/00 §6.3',
@@ -682,6 +683,68 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
         + '而该字段的动机场景（hover A 才出现 B、再点 B）需要两个元素',
       doc: 'docs/06 §2',
     });
+  });
+
+  /**
+   * SQL 里出现 `$` + 标识符 => 提醒。（docs/15 §3.2。运行时那一半已经如实报错，
+   * 这条是**迁移提示**。）
+   *
+   * **判据只有一条：`$x` 不是本 IR 规定过的任何占位写法，而引擎不做任何 `$` 替换。**
+   * 这是当下为真的一件事，不需要我发明约定。反面做法是去判
+   * "`$x` 在 vars 里有没有同名键" —— 那要先规定"`$x` 指 vars.x"，
+   * 而 MySQL 的具名占位是 `?` / `%(x)s`，`$` 连标准都不是（Postgres 还有 `$$引用$$`）。
+   * 定那个约定就是"引擎现猜"那一族，只不过这次猜的人换成了 lint。
+   *
+   * **判据刻意不看 `vars` 空不空**（第一版看，被自己的变异集问出来的）：
+   * 只看"vars 空"的话，最主流的那个错法恰好漏掉 ——
+   * `WHERE id = $oid` 配上 `vars:{oid:…}` **不报**，而 MySQL 照样拒这条 SQL。
+   * 现在只要 SQL 里有 `$x` 就提醒，"vars 一个都没绑"降级成摘要里的一句补充，
+   * 因为那确实是同一条错里更常见的一种，但它不是判据。
+   *
+   * **warning 而不是 error**，与 HOVER_THEN_NOT_IMPLEMENTED 相反，区别在运行时形状：
+   * hoverThen 不实现会**判 pass**（假绿，所以必须拦在跑之前），
+   * 而这一条运行时会**如实报 error**。已有场景全部照旧注释「$var 占位由引擎绑定」写的，
+   * 定成 error 等于用一次 lint 变更把别人的 CI 全停掉，去换一个运行时本来就会说的错。
+   * **静态闸该拦的是运行时看不见的错。**
+   *
+   * 误报面：SQL 字符串字面量里真出现 `$字母`（`'$foo'`）、Postgres 的 `$$引用$$`。
+   * 这一类由摘要里那句"若是字面量请忽略"承担，代价是 warning 被无视一次；
+   * 反过来收紧判据（要求 vars 为空）漏掉的是主流错法，两害取其轻。
+   */
+  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
+    const sqls: Array<{ where: string; sql: unknown; vars: unknown }> = [];
+    if (s.kind === 'wait') {
+      for (const c of iterConditions(s.condition as WaitPredicate)) {
+        const cc = c as { type?: string; sql?: unknown; vars?: unknown };
+        if (cc.type === 'dbRow') sqls.push({ where: 'wait{dbRow}', sql: cc.sql, vars: cc.vars });
+      }
+    }
+    if (s.kind === 'dataSource' && s.source.type === 'mysql') {
+      sqls.push({ where: 'dataSource(mysql)', sql: s.source.sql, vars: s.source.vars });
+    }
+    /*
+     * `db` 步也在内。它的 vars 一直存在（`.default({})`），所以"能不能绑"
+     * 从来没坏过 —— 坏的是**作者以为 SQL 里的 `$x` 会自动绑**这件事，
+     * 而三处 SQL 给人的直觉一样（字段同名、注释同源）。
+     * 漏掉这一处的话，症状变成"等待里的 SQL 会被提醒、db 步里的不会"。
+     */
+    if (s.kind === 'db') sqls.push({ where: 'db', sql: s.sql, vars: s.vars });
+    for (const one of sqls) {
+      if (typeof one.sql !== 'string') continue;
+      const hits = [...one.sql.matchAll(/\$([A-Za-z_]\w*)/g)].map((m) => m[1]);
+      if (hits.length === 0) continue;
+      const bound = one.vars && typeof one.vars === 'object' ? Object.keys(one.vars as object).length : 0;
+      push({
+        code: 'SQL_PLACEHOLDER_UNBOUND', level: 'warning', stepId: s.id,
+        message: `${one.where}.sql 里出现了 ${hits.map((h) => `$${h}`).slice(0, 3).join('、')} —— `
+          + '引擎**不做任何 `$` 替换**，这句会原样发给数据库'
+          + (bound === 0 ? '，而且这一步一个 vars 都没绑' : '')
+          + '。多半直接被拒（表现为一次报错或超时）；少数数据库把 $ 当合法字符，那就是查了个不是你想要的东西',
+        fix: '值写进同级的 vars（如 vars:{oid:{path:"$oid"}}），SQL 里用数据库自己的占位（MySQL 是 ? 或 %(oid)s）。'
+          + '不要改成字符串拼接：拼进 SQL 的值会改变语句本身。'
+          + '若这个 $ 本来就是字面量里的字符（如 \'$100\'、$$引用$$），请忽略本条',
+      });
+    }
   });
 
   // ── 场景级规则 ──────────────────────────────────────────────────

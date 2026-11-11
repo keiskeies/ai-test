@@ -340,7 +340,10 @@ export function compilePlan(scenario: Scenario): PrecompiledPlan {
         // 测的是我们自己的调度（上面拒绝外部等待条件的同一条理由）。
         // 前提：压测用的表达式谓词在负载下结果稳定（数据已预置），否则等价性不成立。
         //
-        // onTimeout='error' 是 IR 的第三个合法取值（waits.ts:79）。早期版本只写了
+        // onTimeout='error' 是 IR 的第三个合法取值（ir 的 WaitOptionsSchema.onTimeout；
+        // 这里从前写的是 `waits.ts:79`，而那一行如今是 WaitPredicateSchema 的 z.union ——
+        // 注释里的行号是引用里最容易烂掉的一种，改个名字不会有人回来同步）。
+        // 早期版本只写了
         // fail/continue，于是"环境没就绪"会被判成"产品有 bug" ——
         // 值班人会被叫去查一个不存在的问题。三态都在这儿显式落地。
         return (st) => {

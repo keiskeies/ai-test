@@ -3,15 +3,18 @@
  *
  * **要解决的问题**：作者写错一个字段，看到的是 `body.0 → Invalid input`
  * —— 没有字段名、没有合法值。步骤 schema 是 `z.union`（39 个成员，
- * 见 steps.ts:423），zod 对 union 失败只给**一条** `invalid_union`，
+ * 见本包 steps.ts 里导出的 `StepSchema` 那一行；**这里刻意不写行号** ——
+ * 它从前写的是 `steps.ts:423`，而那一行如今讲的是别的事，
+ * 行号是注释里最容易烂掉的一种引用，改一个名字不会有人回来同步），
+ * zod 对 union 失败只给**一条** `invalid_union`，
  * 真信息全在 `issue.errors`（每个分支一组 issue）里，而旧实现直接丢了它。
  * 后果实测过：`retryOn: ['status5xx']` 的报错里
  * **既没有 retryOn 也没有 network/timeout**（engine/test/retry.test.ts:293 记着
  * 这条测试当年怎么把我的注释证伪的）。
  *
  * **为什么在 humanize 里反推判别键，而不是把 StepSchema 换成 discriminatedUnion**：
- * 那是正解但做不到 —— steps.ts:419 说"用 union 是为了避开 zod v4 对递归成员的
- * 类型不变性限制"，本轮**重验了这句，它是真的**：
+ * 那是正解但做不到 —— steps.ts 里 `StepSchema` 上面那段注释说"用 union 是为了避开
+ * zod v4 对递归成员的类型不变性限制"，本轮**重验了这句，它是真的**：
  *  `z.discriminatedUnion('kind', [..., z.lazy(...)])` **运行时能跑**（能报出
  *  "Invalid discriminator value. Expected 'leaf' | 'seq'"），但**编译期**报
  *  `_zod.propValues` 是 `PropValues | undefined`（`z.lazy` 把判别值信息擦了），

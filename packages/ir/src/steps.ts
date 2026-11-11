@@ -174,7 +174,28 @@ const DataSourceStepSchema = z
     ...Base,
     source: z.discriminatedUnion('type', [
       z.object({ type: z.literal('file'), path: z.string() }).strict(),
-      z.object({ type: z.literal('mysql'), sql: z.string(), datasource: z.string().default('default') }).strict(),
+      z
+        .object({
+          type: z.literal('mysql'),
+          sql: z.string(),
+          datasource: z.string().default('default'),
+          /**
+           * 具名占位的绑定值，形状与判据同 `db` 步与 `wait{dbRow}` 的 `vars`
+           * （三处共用引擎里同一个 `strMap` + 同一个 `resolveValue`）。
+           *
+           * **为什么数据源的 SQL 也要能绑**：这个节点的存在理由就是"数据驱动"，
+           * 而数据驱动最常见的形状是"先按条件把这一批要跑的行查出来"。
+           * 不绑的话它只能查全表再靠 forEach 筛，那既慢又把筛选逻辑挪到用例里。
+           *
+           * `.optional()` 而**不是** `.default({})`：后者会把 zod 补的默认值
+           * 物化进 `canonicalScenario`，让**每一个已有 dataSource 场景的 irSha 都变**
+           *（历史版本的指纹全部作废）。`.optional()` 在不写时逐字节不变，
+           * 理由是 `stable()` 丢 `undefined`。同 waits.ts 里 dbRow.vars 那条，
+           * 那里附了探针读数 —— 这一字之差决定这是"修 bug"还是"一次磁盘迁移"。
+           */
+          vars: z.record(z.string(), ValueSchema).optional(),
+        })
+        .strict(),
       z.object({ type: z.literal('qdrant'), collection: z.string(), query: z.string(), limit: z.int().min(1).max(500).default(50) }).strict(),
     ]),
     /** 同 table.as：写进哪个变量。默认 `'rows'` 与既有行为一致（省略时照旧写 $rows） */

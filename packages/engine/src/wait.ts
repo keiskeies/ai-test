@@ -7,6 +7,7 @@ import { describePredicate } from '@atest/ir';
 import { queryOne } from './jsonpath.js';
 import { locatorGate, chargeResolve, LocatorBudgetError } from './resolve.js';
 import { NoNetworkObserver, ResponseWindow } from './responses.js';
+import { VarError } from './vars.js';
 import type { AdapterRegistry, Clock, ExecContext, NetworkObserver, ResolveResult } from './adapters.js';
 
 export interface WaitDeps {
@@ -59,6 +60,15 @@ export interface WaitDeps {
    * 也就是这个字段要防的那个假绿。所以**必填**，且解释器里只有一处计算它。
    */
   newPageBaseline: number;
+  /**
+   * SQL 具名占位的绑定值求值（`wait{dbRow}.vars`）。**必填**，理由同 `addCost`：
+   * 给个默认值（`() => ({})`）就编译得过，而漏接的症状恰好是本轮修的那个洞复活 ——
+   * SQL 带着没绑定的占位发给数据库，被拒之后看起来像"条件还没满足"。
+   *
+   * 由调用方实现而不是本文件里自己求值，是因为**引擎不许碰变量表之外的东西**，
+   * 而作用域（parallel 分支那一层）只有解释器知道。这里透传的是求值**能力**。
+   */
+  resolveSqlVars: (vars: Record<string, unknown> | undefined) => Record<string, string>;
 }
 
 /**
@@ -82,11 +92,103 @@ export class NoNewPageObserver extends Error {
   }
 }
 
+/**
+ * **等待条件需要的那个 adapter 压根不在场**（`dbRow` 缺 db、`uiPredicate`/`template`/
+ * `uiIdle` 缺 ui 与 device）。与 `NoNetworkObserver` / `NoNewPageObserver` 同族同理由。
+ *
+ * 前三处原先抛的是**裸 `Error`**，于是被 `waitUntil` 那句"求值报错就当成还没满足"
+ * 吞掉。而那句话**本身是对的**（docs/02 §3：等待是条件不是时长，一次数据抖动
+ * 不该让整步红），坏在它对"这条条件今天压根跑不起来"也照用。实测四种 `onTimeout`：
+ *
+ * | onTimeout | 改前 | 应该 |
+ * |---|---|---|
+ * | `fail` | fail + env-unavailable，摘要**「等待超时（1000ms）」** | 说"没接线"，且别说超时 |
+ * | `continue` | **pass**（整场 `pass`） | error |
+ * | `error` | error + env-unavailable（**这一档反而是对的**，因为它不看原因） | —— |
+ *
+ * `continue` 那一档是本文件里目前最贵的一个假绿：**一个没有任何 db adapter 的
+ * `wait{dbRow}`，整场报 pass**，而它一次数据库查询都没发出去过。
+ * `onTimeout` 的语义是"**等不到**怎么办"，不是"**没法等**怎么办" ——
+ * 前者是产品事实（可以继续往下走），后者是平台事实（往下走只会拿到更多假的结论）。
+ *
+ * **为什么用异常而不是"求值前预检谓词树"**：`NoNetworkObserver` 那条注释已经否决过
+ * 预检 —— 新增一种需要 adapter 的条件时没人会记得回来加一项，漏加的那种恰好退回
+ * "被吞成超时"。求值时判一次，覆盖的是**真实走到的**分支。
+ */
+export class NoConditionAdapter extends Error {
+  /** 哪一种等待条件要不到东西（`dbRow` / `uiPredicate` / `template` / `uiIdle`）。 */
+  readonly conditionType: string;
+  /** 试过哪些 adapter 槽位都没有。给 CI 摘要与测试用，不让它只活在文案里。 */
+  readonly triedAdapters: readonly string[];
+  constructor(conditionType: string, triedAdapters: string[]) {
+    super(`等待条件 ${conditionType} 需要 adapters.${triedAdapters.join(' 或 adapters.')}，`
+      + '而本场景一个都没有 —— 这是平台没接线，不是「条件没满足」，'
+      + '也不是超时（一次都没查成，等满超时是假的）。');
+    this.name = 'NoConditionAdapter';
+    this.conditionType = conditionType;
+    this.triedAdapters = triedAdapters;
+  }
+}
+
 export interface WaitResult {
   satisfied: boolean;
   waitedMs: number;
   polls: number;
   describe: string;
+  /**
+   * **有值 = 这条等待是被一次求值异常中止的，不是等满超时的。**
+   * 值是那句原始报错。
+   *
+   * 为什么单独立一个字段而不是"看 describe 里有没有『求值报错』"：
+   * describe 是**给人看的摘要**，把它当判据就是给摘要文本编程 ——
+   * 改一句文案（本仓常做）会让调用点的分支静默换边。
+   * 而调用点要它，是因为它自己**分不清**这两件事：`satisfied: false` +
+   * 一个 waitedMs，既可能是"等满了确实没满足"，也可能是"第一轮就炸了、
+   * 一次都没等"。改前解释器统一说成后者，实测（`.scratch/probe-dbrow2.mts`）：
+   *   真·超时   → 摘要「等待超时（2000ms）」，waitedMs=2000，轮询多次
+   *   求值报错  → 摘要**同样**「等待超时（2000ms）」，waitedMs=0，polls=1
+   * 值班人拿到"等满了 2 秒"这句，会去查"为什么 2 秒内没出现"（查产品、查异步落库），
+   * 而真相是那条 SQL 压根没被数据库接受 —— **两条路指向完全不同的下一步**。
+   * 这也是 docs/08 §3 那一族（"少一件东西看起来像什么都没少"）在报告侧的形状。
+   */
+  evalError?: string;
+}
+
+/**
+ * 求值时用的依赖 = 作者的依赖 + **一份"每条条件的绑定值只算一次"的记忆**。
+ *
+ * 分成两个类型而不是往 WaitDeps 里塞一个可选字段，理由是这个仓一直在用的那条：
+ * 可选字段让"忘了接"编译得过，而这里忘了接的症状是本轮刚修的那个洞复活。
+ * 所以 `sqlVars` 在 EvalDeps 上是**必填**的，只能由 {@link onceSqlVars} 造
+ *（或由调用方自己实现同样的"一次性的"语义）。
+ */
+export type EvalDeps = WaitDeps & {
+  /** 同步是有意的：绑定值只是一个字符串表，IO 在 adapter 那侧（下一行的 query）。 */
+  sqlVars(c: WaitCondition): Record<string, string>;
+};
+
+/**
+ * 把"求值绑定值"包成"**每条条件在这次等待里只求值一次**"。
+ *
+ * 生命周期是**一次 waitUntil**：缓存建在那个函数顶部、随它一起回收。
+ * 两个方向都会坏，所以两头都写清楚：
+ *  - 每轮 poll 重算 = 一次 20 轮的等待拿 20 个不同的 `{gen}` 值去查，
+ *    而摘要说"数据库出现匹配行"，它从没查过那一个；
+ *  - 跨 run 复用（模块级缓存）= 第二场跑起 `{gen}` 永远是第一场那个值，
+ *    "这次用新生成的订单号"只在第一场成立。
+ * 所以键是条件对象、生命周期是这次调用，两头各挡一种。
+ */
+export function onceSqlVars(resolve: WaitDeps['resolveSqlVars']): EvalDeps['sqlVars'] {
+  const seen = new WeakMap<object, Record<string, string>>();
+  return (c) => {
+    const cond = c as { vars?: Record<string, unknown> };
+    if (!cond.vars || Object.keys(cond.vars).length === 0) return {};
+    const hit = seen.get(c);
+    if (hit) return hit;
+    const v = resolve(cond.vars);
+    seen.set(c, v);
+    return v;
+  };
 }
 
 export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
@@ -94,6 +196,14 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
   const basePoll = d.pollMs ?? 500;
   const t0 = d.clock.mono();
   const describe = describePredicate(d.predicate);
+  /*
+   * 绑定值的记忆**建在这里**（一次等待一份），所以 `onceSqlVars` 只调这一次。
+   * 建在循环里 = 每轮一个空缓存 = 与"每轮重算"完全等价，那正是这一层要防的事。
+   *
+   * 名字刻意不叫 `e`：下面 catch 的参数就叫 `e`，同名会让"这里到底拿的谁"
+   * 变成一次人工确认。变量遮蔽在 TS 里不报错，而本文件那个 catch 很长。
+   */
+  const edeps: EvalDeps = { ...d, sqlVars: onceSqlVars(d.resolveSqlVars) };
   let polls = 0;
   let interval = basePoll;
 
@@ -101,7 +211,7 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
     polls++;
     let ok = false;
     try {
-      ok = await evalPredicate(d.predicate, d);
+      ok = await evalPredicate(d.predicate, edeps);
     } catch (e) {
       /*
        * **定位超预算必须掀翻整个等待循环**，不能被下面那句"当成还没满足"吞掉。
@@ -136,9 +246,41 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
        * 也就是把"平台没接线"说成"被测产品没弹窗"。
        */
       if (e instanceof NoNewPageObserver) throw e;
-      // 条件求值本身报错（变量未定义/adapter 缺失）不能当成「还没满足」干等到超时 ——
+      /*
+       * 同 NoNetworkObserver / NoNewPageObserver，但这一族**数量最多**（四种条件、
+       * 四处判定点），而且它是本文件里唯一会**造出假绿**的一族：
+       * 被吞掉之后 `onTimeout: 'continue'` 会把"一次数据库都没查过"报成 pass。
+       * 四条 `if` 而不是一个共同基类，是因为三个错名分属两个文件（NoNetworkObserver
+       * 在 responses.ts），基类要跨文件放；等出现第四个错名时再合并不迟。
+       */
+      if (e instanceof NoConditionAdapter) throw e;
+      /*
+       * **用例自己写错了引用，要让 runStep 那一份 cause 判据去定归因**，
+       * 不能在这里带 evalError 回来。
+       *
+       * 解释器的 catch 里那句 `VarError -> case-stale，其它 -> env-unavailable`
+       * 是全仓唯一一处"按异常类型定归因"的判据（resolve.ts 顶部特意写了这条契约，
+       * 就是为了让抛 VarError 成为"这是用例写错"的唯一表达方式）。
+       * 我在下面那个 return 里再写一遍 `r.evalErrorName === 'VarError' ? …`，
+       * 就等于同一件事两处各写一份 —— 本仓为这类漂移记过不止一次账。
+       *
+       * 为什么这件事值得单独一条：实测（`.scratch/probe-varref.mts`）改前
+       * `wait{httpStatus, ref:'$.step.nope.resp'}` 报 **env-unavailable**，
+       * 而**同一个未定义引用**写在 `db` 步的 vars 里、或 `extract` 的 from 里，
+       * 报的都是 **case-stale**。一个"引用了没有输出的步骤"的用例错误，
+       * 换一种写法就变成"环境不可用"，CI 会照 CI_HINT 重试一次（而引用不会因为重试而存在）。
+       */
+      if (e instanceof VarError) throw e;
+      // 条件求值本身报错（变量未定义等）不能当成「还没满足」干等到超时 ——
       // 那会把一个配置错误伪装成一次超时，是最难查的一类 flake
-      return { satisfied: false, waitedMs: d.clock.mono() - t0, polls, describe: `${describe}（求值报错：${(e as Error).message}）` };
+      return {
+        satisfied: false,
+        waitedMs: d.clock.mono() - t0,
+        polls,
+        describe: `${describe}（求值报错：${(e as Error).message}）`,
+        // 原始报错单独给一份，别让调用点去解析 describe（理由见 WaitResult.evalError）
+        evalError: (e as Error).message,
+      };
     }
     if (ok) return { satisfied: true, waitedMs: d.clock.mono() - t0, polls, describe };
 
@@ -151,7 +293,7 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
   }
 }
 
-async function evalPredicate(p: WaitPredicate, d: WaitDeps): Promise<boolean> {
+async function evalPredicate(p: WaitPredicate, d: EvalDeps): Promise<boolean> {
   const o = p as Record<string, unknown>;
   if ('allOf' in o) for (const c of o.allOf as WaitPredicate[]) if (!(await evalPredicate(c, d))) return false;
   if ('allOf' in o) return true;
@@ -160,7 +302,7 @@ async function evalPredicate(p: WaitPredicate, d: WaitDeps): Promise<boolean> {
   return evalCondition(p as WaitCondition, d);
 }
 
-async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
+export async function evalCondition(c: WaitCondition, d: EvalDeps): Promise<boolean> {
   switch (c.type) {
     case 'expr':
       return d.evalExpr(c.expr);
@@ -170,8 +312,24 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
       return typeof status === 'number' && c.in.includes(status);
     }
     case 'dbRow': {
-      if (!d.adapters.db) throw new Error('dbRow 条件需要 db adapter');
-      const rows = await d.adapters.db.query(c.datasource, c.sql, {}, d.ctx);
+      if (!d.adapters.db) throw new NoConditionAdapter('dbRow', ['db']);
+      /*
+       * 绑定值**每条条件只算一次**（不是每轮 poll 都算），缓存见 onceSqlVars
+       *（那份记忆建在 waitUntil 顶部，一份等待一份）。
+       *
+       * 这件事看起来是优化，其实是**判据**：`vars` 里可以有 `{gen}`，
+       * 而生成器的定义就是"每次求值给一个新值"。每轮重算的话，
+       * 一次 10s / pollMs=500 的等待会拿**二十个不同的 id** 去查数据库，
+       * 最后摘要说"数据库出现匹配行（default）"—— 它从没查过那一个。
+       * 与 `describePredicate` 只在等待开始时算一次是同一件事：
+       * **一条等待从头到尾问的必须是同一个问题**。
+       *
+       * 缓存的键用**条件对象本身**而不是类型名：一棵 `allOf` 树里可以有多个
+       * dbRow 条件，各有各的 SQL 与 vars，按类型名缓存会让它们共用一份绑定，
+       * 症状是"两个条件各查各的、结果互相看着不对"。
+       */
+      const vars = d.sqlVars(c);
+      const rows = await d.adapters.db.query(c.datasource, c.sql, vars, d.ctx);
       if (c.expect === 'noRow') return rows.length === 0;
       if (c.expect === 'scalarTruth') {
         const first = rows[0] ? Object.values(rows[0] as Record<string, unknown>)[0] : undefined;
@@ -181,7 +339,13 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
     }
     case 'uiPredicate': {
       const a = d.adapters.ui ?? d.adapters.device;
-      if (!a || !('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');
+      /*
+       * `!('resolve' in a)` 也走同一个错，而那时消息会说"没有 ui adapter"——
+       * 措辞不准（槽位在场，只是这一个口没有）。**刻意不把它拆成第二个错名**：
+       * 两条路的下一步是同一句话（去看接线），拆开后新增一种缺口的条件时
+       * 就多一处"记得区分"，而漏分的那一处恰好退回"被吞成超时"（NoNetworkObserver 那条理由）。
+       */
+      if (!a || !('resolve' in a)) throw new NoConditionAdapter('uiPredicate', ['ui', 'device']);
       const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(c.target, d.ctx);
       /*
        * **每轮都记一次账、每轮都审一次预算**。
@@ -214,7 +378,7 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
     }
     case 'template': {
       const a = d.adapters.device ?? d.adapters.ui;
-      if (!a || !('resolve' in a)) throw new Error('template 条件需要 device/ui adapter');
+      if (!a || !('resolve' in a)) throw new NoConditionAdapter('template', ['device', 'ui']);
       const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(c.target, d.ctx);
       /*
        * 模板匹配同样按次计费（图像比对/视觉模型都在这一档），
@@ -226,7 +390,7 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
     case 'uiIdle': {
       // 「空闲」判定要连续两次快照一致 —— 单次相同可能只是恰好落在两帧之间
       const a = d.adapters.ui ?? d.adapters.device;
-      if (!a || !('snapshot' in a)) throw new Error('uiIdle 条件需要 ui/device adapter');
+      if (!a || !('snapshot' in a)) throw new NoConditionAdapter('uiIdle', ['ui', 'device']);
       const first = await (a as unknown as { snapshot: (c: ExecContext) => Promise<{ sha: string }> }).snapshot(d.ctx);
       await d.clock.sleep(c.quietMs);
       const second = await (a as unknown as { snapshot: (c: ExecContext) => Promise<{ sha: string }> }).snapshot(d.ctx);
@@ -261,6 +425,10 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
   }
 }
 
-/** 让 IR 作者能在断言里复用同一套求值 */
-export { evalCondition };
+/*
+ * `evalCondition` 现在直接 export 在定义处（上面）。
+ * 从前它是"定义成私有、文件末尾再 export 一次"，那种写法下
+ * 类型改签名时容易只改到定义处而漏掉导出，而这里要的正是"签名与 EvalDeps 一起改"
+ *（复用这套求值的外部调用方必须自己接上 onceSqlVars，否则本轮那个洞会在使用方复活）。
+ */
 export const _unusedQueryOne = queryOne;

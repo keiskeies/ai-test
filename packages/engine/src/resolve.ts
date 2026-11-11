@@ -120,6 +120,25 @@ export function iterItems(v: unknown): unknown[] {
   return toIterable(v);
 }
 
+/**
+ * 把一张 IR 值表求值成 `Record<string, string>`。**全仓一份**（原先长在
+ * interpreter 的闭包里，与本文件的 resolveValue 隔一层闭包，`wait.ts` 用不到，
+ * 于是三处 `db.query` 里有一处自己传了 `{}` —— 就是 docs/15 §3.2 那个洞）。
+ *
+ * **null/undefined 直接不落键**，而不是落成字符串 "null"/"undefined"：
+ * 那两个字面量进 SQL 是 `WHERE x = 'null'`，一个查不到任何行的合法查询，
+ * 症状是"条件永远不满足"，与本轮修掉的那个假超时只差一句话。
+ * 非字符串值 JSON.stringify 是为了数组/对象参数在 JSON 列上还能比（`IN` 那类）。
+ */
+export function strMap(o: Record<string, unknown> | undefined, resolve: (v: unknown) => unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(o ?? {})) {
+    const r = resolve(v);
+    if (r !== undefined && r !== null) out[k] = typeof r === 'string' ? r : JSON.stringify(r);
+  }
+  return out;
+}
+
 /** repeat 的展开。id 加 `#i` 后缀，让 extract/引用能区分是第几轮。 */
 export function flattenTimes(times: number, steps: Step[]): Step[] {
   const out: Step[] = [];
