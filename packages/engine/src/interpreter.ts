@@ -14,9 +14,9 @@ import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, parallelHazards, wa
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
-import { TransportError, type AdapterRegistry, type Clock, type ExecContext } from './adapters.js';
+import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
-import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, type ValueScope } from './resolve.js';
+import { resolveValue as resolveValueShared, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, type ValueScope } from './resolve.js';
 import { waitUntil } from './wait.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
 
@@ -353,12 +353,30 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       });
     } catch (e) {
       if (e instanceof RunAborted) throw e;
-      const status: StepStatus = e instanceof AssertionFailure ? 'fail' : 'error';
+      /*
+       * **定位超预算要走 fail 而不是 error**，而且这条必须在 `AssertionFailure`
+       * 那一行**之前**判掉：两个都是"这一步的结论"，但 cause 完全不同 ——
+       * 让 LocatorBudgetError 落到默认的 error/env-unavailable 分支的话，
+       * 退出码变成 5，而 CI_HINT 教 CI"5 → 标 error 重试一次"。
+       * 那一次重试会**把同一笔开销再花一遍**：一个"防止 LLM 定位把预算烧穿"的闸门，
+       * 反过来变成烧穿预算的加速器。这是本文件里唯一一处"状态选错会放大它本该拦住的损失"。
+       *
+       * cause 用 case-stale 而不是 product-bug：这一步用了一个比声明更贵的定位法，
+       * 是用例/定位器选型的问题。报 product-bug 会让值班人去查一个不存在的功能 bug。
+       */
+      const overBudget = e instanceof LocatorBudgetError;
+      const status: StepStatus = overBudget || e instanceof AssertionFailure ? 'fail' : 'error';
       return finish(s, path, status, stepStart, errSummary(e), {
-        cause: e instanceof AssertionFailure ? 'product-bug' : e instanceof VarError ? 'case-stale' : 'env-unavailable',
+        cause: overBudget ? 'case-stale' : e instanceof AssertionFailure ? 'product-bug' : e instanceof VarError ? 'case-stale' : 'env-unavailable',
         keyContext: {
           errorName: (e as Error).name,
           stack: firstFrames(e),
+          /*
+           * 超预算的两个数原样带进 keyContext：人和看板都要靠它们决定下一步动作
+           * （"是定位器选贵了，还是价格表涨了"）。这里没有敏感值 —— 两个数都是
+           * 人自己在 IR 里写的 / adapter 自己报的成本，不是被测系统的数据。
+           */
+          ...(overBudget ? { spentUsd: e.spentUsd, budgetUsd: e.budgetUsd, ...(e.resolvedBy ? { resolvedBy: e.resolvedBy } : {}), ...(e.rung ? { rung: e.rung } : {}) } : {}),
           /*
            * 传输层失败的**种类**走 keyContext，不扩 FAILURE_CAUSE。
            *
@@ -864,6 +882,10 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           evalExpr: (e) => evalBool(e, { root: vars.asExprRoot(), vars: vars.visible(), now: clock.now }),
           resolveRef: (ref) => vars.resolveRef(ref).value,
           adapters, ctx: execCtx(targetOf(s, stepCtx), s.id),
+          // 等待循环里的每次付费定位都往上汇。不传的话编译不过（WaitDeps 里
+          // 这是必填字段），因为"忘接成本"的症状是**总账不动、熔断永不触发**，
+          // 而那正是这条预算存在的理由。
+          addCost,
         });
         if (!r.satisfied) {
           if (s.onTimeout === 'continue') return { status: 'pass', summary: `等待超时但按 onTimeout=continue 继续：${r.describe}` };
@@ -1124,11 +1146,38 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         const uiOrDev = s.kind === 'navigate' || s.kind === 'act' || s.kind === 'capture' ? adapters.ui : adapters.device;
         if (!uiOrDev) return { status: 'error', summary: `${s.kind} 需要 ${s.kind === 'navigate' || s.kind === 'act' || s.kind === 'capture' ? 'ui' : 'device'} adapter`, cause: 'env-unavailable' };
         const locator = 'locator' in s ? s.locator : 'target' in s ? s.target : undefined;
-        let resolved = { resolvedBy: 'n/a', rung: 0, confidence: 1, nonReplayable: false, handle: '' };
+        let resolved: ResolveResult = { resolvedBy: 'n/a', rung: 0, confidence: 1, nonReplayable: false, handle: '' };
         if (locator && 'resolve' in uiOrDev) {
-          resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<typeof resolved> }).resolve(locator, execCtx(targetOf(s, stepCtx), s.id));
+          resolved = await (uiOrDev as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(locator, execCtx(targetOf(s, stepCtx), s.id));
           emit({ kind: 'locator.resolved', stepId: s.id, data: { ...resolved } });
         }
+        /*
+         * **单次定位的预算由引擎审**（`LocatorSpec.maxCostUsdPerResolve`，schema 默认 $0.02）。
+         *
+         * 这个字段以前**全仓没有任何地方读它**（grep 只命中 schema 那一行），
+         * 而执行侧连一个顶替的常数都没有 —— 比 `confidenceGate` 那条更彻底：
+         * 那条至少有个写死的 0.99 顶着、行为"看起来像按门限判"，这条是
+         * **人在 IR 里配了预算，花多少都不管**。docs/03 §2 把 step 级预算写成
+         * 引擎的"一等运行时能力"（超 step 就该降级到便宜档位），实现上那一层没接过。
+         *
+         * 判据与记账都在 `chargeResolve`（resolve.ts，等待循环也调那一份）。
+         * 超预算抛 `LocatorBudgetError`，由 `runStep` 的 catch 收成
+         * `fail` + `case-stale` —— 为什么不是 `error` 写在那一族的注释里
+         * （一句话：`error` 走退出码 5，而 CI_HINT 教 CI"5 → 重试一次"，
+         *  那会把同一笔已经花掉的钱再花一遍）。
+         *
+         * 这里**只审不降**：真正"降到便宜档位"是 adapter 阶梯内部的事
+         * （它有便宜档位可用时压根走不到贵的那一档）。引擎这层的价值是
+         * **兜住 adapter 没兜住的情况**，并把超支变成看得见的红灯，
+         * 而不是静默接受一份超出声明的账单。
+         *
+         * 超支那一步的钱已经 `addCost` 进总账了（先记账再判，见 chargeResolve），
+         * 异常路径下这一步自己的 `results` 行 costUsd 会是 0 —— 这是**故意的**：
+         * 那一步没验成任何东西，把整笔花费记在它名下会让"这一步值多少钱"
+         * 与"这次定位失败花了多少"两件事混成一个数。总账才是真数，
+         * 明细在 keyContext.spentUsd（异常里带的），JUnit/HTML 都读得到。
+         */
+        chargeResolve(resolved.costUsd ?? 0, locator, addCost, { resolvedBy: resolved.resolvedBy, rung: resolved.rung });
         /*
          * **接住 perform 的返回值**。原先是 `await ....perform(...)` 直接丢掉，
          * 于是 adapter 在动作里落的证据（capture 的截图、tap 后的 hierarchy）

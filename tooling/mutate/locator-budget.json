@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "单次定位预算（maxCostUsdPerResolve）这一轮的变异集（tests: packages/engine/test/locator.test.ts）。",
+    "",
+    "**先把这轮的产出物说清它守什么、不守什么**：引擎侧的审计接上了（resolve.ts 的 chargeResolve，",
+    "解释器 tap/act/navigate 那一支 + wait.ts 的两个 resolve 点），但**没有任何 adapter 报",
+    "ResolveResult.costUsd**。所以这一族测试验的全是「**如果**有人报数，闸门会不会响」——",
+    "**它们全绿不代表闸门在生产里触发过**（一次都没触发过）。",
+    "这正是缺陷类 (a) 的第三个子类：读了、判了、没有生产者。",
+    "**扫描器答不出它**（成员访问 + 名字唯一 => 算「读过」，还要求删豁免），",
+    "**变异检查也答不出它**（桩 adapter 供数）。只有「读一遍真 adapter 的返回值」能答。",
+    "明细 docs/14 §4.3。",
+    "",
+    "为什么每条都要配一半：这一族最容易写出「恒 fail」的实现来骗过「超了会红」。",
+    "所以「超预算拦」与「预算内不拦」两条各在，`>` 与 `>=` 那条也在（预算 0 是 schema 允许的合法值）。",
+    "",
+    "第 3 条是本轮**最值钱**的一条：等待循环里超预算必须停止轮询。",
+    "超支在语义上长得像「条件还没满足」，一旦让它被当成 false 继续轮，",
+    "10s/500ms 的等待 = 20 次付费定位，**而最终状态可能照样是 fail（超时也是 fail）** ——",
+    "只看状态的测试对这种实现是绿的。所以那条测试的判据是 **resolve 次数 == 1**。",
+    "",
+    "第 5 条专门盯「为什么判 fail 不判 error」：error 走退出码 5，而 CI_HINT 教 CI",
+    "「5 → 标 error 重试一次」—— 那会把一笔**已经花掉**的钱再花一遍，",
+    "于是这个闸门反过来变成烧穿预算的加速器。这是本仓唯一一处「状态选错会放大它本该拦住的损失」。",
+    "",
+    "第 6、7 条盯「记账」。只审不记 => 状态对但总账空，场景级 maxCostUsd 熔断永不触发；",
+    "只记不审 => 账对但闸门空。两条各自能红，才说明它们是两件事。",
+    "",
+    "最后一条是**故意等价**的：locatorBudget 的兜底 Infinity 改成 0.02 测不出来，",
+    "因为只有 app/logcat 这类**根本没有 locator** 的步骤会走兜底，而那种 adapter 压根不报成本",
+    "（`costUsd ?? 0` => 0 > 0.02 为假）。它不是在为兜底值背书，只是如实记下「目前没有可观测差异」。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "步骤那一支整段不审预算（回到本轮之前：字段全仓无人读）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        chargeResolve(resolved.costUsd ?? 0, locator, addCost, { resolvedBy: resolved.resolvedBy, rung: resolved.rung });\n",
+      "replace": "",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "等待循环的两个 resolve 点都不审（最容易烧钱的那条路径上闸门恰好不存在）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      chargeResolve(r.costUsd ?? 0, c.target, d.addCost, { resolvedBy: r.resolvedBy, rung: r.rung });\n",
+      "replace": "",
+      "all": true,
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "超预算不往外抛，被当成「条件还没满足」继续轮（单次超支变成 20 次）",
+      "file": "packages/engine/src/wait.ts",
+      "anchor": "      if (e instanceof LocatorBudgetError) throw e;\n",
+      "replace": "",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "上限退回写死的 0.02（人写的 maxCostUsdPerResolve 一路传到这里被丢掉）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  const budget = locatorBudget(locator);\n  if (spent > budget) throw new LocatorBudgetError(spent, budget, meta.resolvedBy, meta.rung);",
+      "replace": "  const budget = 0.02; // 变异：不读 locator 自己声明的上限\n  if (spent > budget) throw new LocatorBudgetError(spent, budget, meta.resolvedBy, meta.rung);",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "超预算判 error（进退出码 5 -> CI 按 CI_HINT 重试一次 -> 同一笔钱再花一遍）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "      const overBudget = e instanceof LocatorBudgetError;",
+      "replace": "      const overBudget = false; // 变异：让它落进默认的 error/env-unavailable 分支",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "只审不记（超支那笔钱不进总账 -> 场景级 maxCostUsd 熔断读到一本偏小的账）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  if (spent > 0) addCost(spent);",
+      "replace": "  // 变异：不记账，只判上限",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "`>` 改成 `>=`（恰好等于人自己声明的预算被报成红灯）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  if (spent > budget) throw new LocatorBudgetError(spent, budget, meta.resolvedBy, meta.rung);",
+      "replace": "  if (spent >= budget) throw new LocatorBudgetError(spent, budget, meta.resolvedBy, meta.rung);",
+      "testFile": "packages/engine/test/locator.test.ts"
+    },
+    {
+      "label": "等价变异：locatorBudget 的兜底 Infinity 改成 0.02（没有形状能观测到它）",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  return typeof v === 'number' ? v : Number.POSITIVE_INFINITY;",
+      "replace": "  return typeof v === 'number' ? v : 0.02;",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/locator.test.ts"
+    }
+  ]
+}

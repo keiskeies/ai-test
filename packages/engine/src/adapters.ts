@@ -169,6 +169,25 @@ export interface PerformResult {
 }
 
 /**
+ * resolve 的返回形状（UiExec 与 DeviceExec 共用，**刻意不各写一份**：
+ * 两份字段一样的匿名类型会各自漂移，而 costUsd 这种"只在其中一边被读"的字段
+ * 恰好就是本仓那个缺陷类的形态）。
+ */
+export interface ResolveResult {
+  resolvedBy: string;
+  rung: number;
+  confidence: number;
+  nonReplayable: boolean;
+  handle: string;
+  /**
+   * 这次定位的**实际**成本（美元）。见 {@link UiExec.resolve} 那段：
+   * 由 adapter 报（它才知道价格表），由引擎审（它才知道人写的上限）。
+   * 免费档位返回 0 或省略；**不要返回一个假装非零的小数来"看起来更真"**。
+   */
+  costUsd?: number;
+}
+
+/**
  * Web 端的执行端口。
  *
  * **这里原先还声明着 `navigate(url, waitUntil, ctx)`，本轮删掉了**。
@@ -186,8 +205,27 @@ export interface PerformResult {
 export interface UiExec {
   perform(op: unknown, target: unknown, ctx: ExecContext): Promise<PerformResult | void>;
   snapshot(ctx: ExecContext): Promise<{ kind: string; data: string; sha: string }>;
-  /** 返回实际使用的定位策略与级别，供 flaky 治理统计（docs/00 §5.11） */
-  resolve(locator: unknown, ctx: ExecContext): Promise<{ resolvedBy: string; rung: number; confidence: number; nonReplayable: boolean; handle: string }>;
+  /**
+   * 返回实际使用的定位策略与级别，供 flaky 治理统计（docs/00 §5.11）。
+   *
+   * `costUsd`（本轮加）：这一次定位**实际**花了多少钱（美元）。
+   * 只有调模型的档位（视觉兜底、模板分类）会有值；
+   * testid/role/label 这些查询档位要么返回 0 要么不返回 ——
+   * **不要为了"字段齐"编一个小数**，那会让预算审计变成一个装饰。
+   *
+   * 为什么由 adapter 报而不是引擎自己算：阶梯是 adapter 的（哪些档位存在、
+   * 各自用什么模型都在它那边），引擎重算一遍价格表就是第二份会漂的真相。
+   * 但**判定仍在引擎**：`maxCostUsdPerResolve` 由引擎读并审（resolve.ts 的 `chargeResolve`，
+   * 步骤与等待循环两条路共用它）。
+   * 反过来的写法（adapter 自己判"我超预算了所以降级"并只回一个布尔）
+   * 会把价格表与上限的**对账**也一起藏进 adapter ——
+   * 那正是本仓那个缺陷类（人在 IR 里写了个值，执行侧没人拿它判过）。
+   *
+   * **⚠️ 今天还没有实现报这个数**（`adapter-web/src/ui.ts` 的 `resolve()` 返回里没有它）。
+   * 于是引擎侧那套审计**一次都不会触发**。补的时候请照实报，
+   * 别为了让闸门"看起来在工作"而填一个小数 —— 见 docs/14 §4.3 的第三个子类。
+   */
+  resolve(locator: unknown, ctx: ExecContext): Promise<ResolveResult>;
   assertUi(payload: unknown, ctx: ExecContext): Promise<{ passed: boolean; actual: unknown; expected: unknown }>;
 }
 
@@ -200,7 +238,8 @@ export interface DeviceExec {
   /** 同 UiExec.perform：设备端 tap/app 也会自己产证据（截图、hierarchy），
    *  没有这个返回值就只能让证据归属落到 `未归属:` 兜底上 */
   perform(op: unknown, target: unknown, ctx: ExecContext): Promise<PerformResult | void>;
-  resolve(locator: unknown, ctx: ExecContext): Promise<{ resolvedBy: string; rung: number; confidence: number; nonReplayable: boolean; handle: string }>;
+  /** 同 UiExec.resolve（含 costUsd 的语义） */
+  resolve(locator: unknown, ctx: ExecContext): Promise<ResolveResult>;
   /** DB 行等待条件也归到 adapter 侧（引擎不碰网络） */
   query?(sql: string, vars: Record<string, unknown>, ctx: ExecContext): Promise<unknown[]>;
 }

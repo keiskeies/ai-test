@@ -80,6 +80,7 @@ Binding = { scope: "org"|"project"|"scenario"|"run", scopeId, overrides: {taskGr
 调研认定的头号放弃原因：视觉密集 agent 5k–15k token/步 × 30 步 = $0.5–2/次，× 2000 夜间套件 = **$1–4k/晚**。所以预算是引擎的**一等运行时能力**，不是事后台账：
 
 - **`maxCostUsd` 在三层存在**：step（`maxCostUsdPerResolve`，见 `docs/02` §6）、scenario（`config.maxCostUsd`）、project（月预算）。超 step → 该步降级到更便宜档位；超 scenario → **中断 run 并落盘证据**（不是静默跳过）；超 project → 熔断 + 告警。
+  > **实现现状（与本文的分工差一处，别按本文读）**：step 级那一层，引擎侧的**审计**已接上（`engine/src/resolve.ts` 的 `chargeResolve`：先入账再按上限判，超了判 `fail` + `case-stale`；步骤与等待循环两条路都走它）。**「降级到更便宜档位」不在引擎里做** —— 阶梯是 adapter 的，引擎只审不降。而今天**没有 adapter 报 `ResolveResult.costUsd`**，所以这道闸门实际不触发（明细 `08` §3「定位成本控制」）。scenario 级的中断是真的（`addCost` 里抛 `RunAborted`）。project 月预算属 P1。
 - **图片一律降采样到 ≤1024px / JPEG q70 再进模型**。近零精度损失换 3–5× token 削减，是性价比最高的一招。
 - **语义缓存**：`hash(model + systemPromptVer + prompt + schema)` → 响应，TTL 可配。定位器编译/分类/摘要这类高度重复的调用命中率应 >90%。
 - **缓存优先的执行策略**：定位器命中缓存 = 0 LLM 成本（`docs/02` §6 阶梯 1–5 级全免费）。设计目标是**稳态夜间套件里 90% 以上步骤不产生任何 LLM 调用**。

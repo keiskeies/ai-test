@@ -147,6 +147,86 @@ export function locatorGate(locator: unknown): number {
   return typeof g === 'number' ? g : 1;
 }
 
+/**
+ * 取定位器**自己声明的**单次定位成本上限（`LocatorSpec.maxCostUsdPerResolve`）。
+ *
+ * 与 {@link locatorGate} 同一条理由：这个字段以前**全仓没有任何地方读它**
+ * （grep 只命中 schema 定义），而执行侧连一个顶替的常数都没有 ——
+ * 那比 `confidenceGate` 的情形更彻底：那条至少有个 0.99 顶着、行为"看起来像按门限判"，
+ * 这条是"配了预算，花多少都不管"。docs/03 §2 把 step 级预算列为
+ * 引擎的**一等运行时能力**（"超 step → 该步降级到更便宜档位"），
+ * 而实现上那一层从来没接通过。
+ *
+ * 读不到时返回 **Infinity 而不是 schema 默认的 0.02**（同 locatorGate 的取向）：
+ * 只有 `app`/`logcat` 这类**根本没有 locator** 的步骤会走到这里，
+ * 那种步骤压根不产定位成本，任何上限都是无中生有。
+ * 真带 locator 的步骤永远读得到数（schema 有 `.default(0.02)`，
+ * `defineScenario` 时就补上了），所以这个兜底不会把某个严格上限放宽。
+ */
+export function locatorBudget(locator: unknown): number {
+  const v = (locator as { maxCostUsdPerResolve?: unknown } | null | undefined)?.maxCostUsdPerResolve;
+  return typeof v === 'number' ? v : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * 一次定位的实际花费**超过**了那一步声明的预算。
+ *
+ * 为什么要做成异常而不是返回值：超预算这件事有两个完全不同的地方要知道，
+ * 而它们的处置方式不一样（见下面 chargeResolve 那条长注释）——
+ *  1. **等待循环里**：`waitUntil` 必须**立刻停止轮询**。返回 false 会被当成
+ *     "还没满足"，于是它接着轮询、每轮再花一次同样的钱 —— 一个 10s/500ms 的等待
+ *     会把单次超支变成 20 次超支。**用异常跳出轮询，正是"返回值会被误读成条件不成立"
+ *     这个形状逼出来的**，不是为了好看。
+ *  2. **解释器里**：要变成 `fail` + `case-stale`，不能变成 `error`
+ *     （`error` 走退出码 5，而 CI_HINT 教 CI"5 → 重试一次" —— 那会把这笔钱再花一遍，
+ *     正是这个上限要防的事）。
+ *
+ * 与 `TransportError` 同一条纪律：**消息里不许带任何可能敏感的值**。
+ * 这里只带两个美元数与档位名 —— 都是人自己在 IR 里写的数或 adapter 自己报的数。
+ */
+export class LocatorBudgetError extends Error {
+  constructor(
+    readonly spentUsd: number,
+    readonly budgetUsd: number,
+    readonly resolvedBy?: string,
+    readonly rung?: number,
+  ) {
+    super(`单次定位花了 $${spentUsd.toFixed(4)}，超过步骤声明的 maxCostUsdPerResolve $${budgetUsd.toFixed(4)}`);
+    this.name = 'LocatorBudgetError';
+  }
+}
+
+/**
+ * 定位成本**记账 + 审预算**的唯一一份实现（解释器与等待循环都调它）。
+ *
+ * 顺序很要紧：**先 addCost 再判超限**。钱在 resolve 返回的那一刻已经花掉了，
+ * 所以"超预算"绝不能变成"这笔不算了" —— 不算会让场景总账 `costUsd` 比真实花费少，
+ * 而总账少的表现是"场景级 maxCostUsd 永远不触发"，也就是**熔断跟着失效**。
+ *
+ * 判的是 `spent > budget` 而不是 `spent >= budget`：
+ * 预算 0 是 schema 允许的合法取值（意思是"这一步一分钱都不许花在定位上"），
+ * 而"恰好等于上限"是人自己声明可以接受的价，不该报红灯。
+ *
+ * 为什么审在引擎而不在 adapter（`ResolveResult.costUsd` 的注释里也记了这条）：
+ * 价格表只有 adapter 知道，**人写的上限只有引擎知道**。让 adapter 自己判超限就顺手降级，
+ * 等于把"这张价格表与那份 IR 对不对得上"也藏进 adapter ——
+ * 那就是本仓反复出现的那个缺陷类（有字段、有比较逻辑、没有生产者 / 有生产者、没人判）。
+ * 引擎这一层的价值是**兜住 adapter 没兜住的情况**，并把超支变成看得见的红灯，
+ * 而不是静默接受一份超出声明的账单。
+ */
+export function chargeResolve(
+  spent: number,
+  locator: unknown,
+  addCost: (n: number) => void,
+  meta: { resolvedBy?: string; rung?: number } = {},
+): void {
+  // 只加正数：adapter 报个负数（漏了取绝对值、或把退款记成成本）会把总账往下扣，
+  // 表现同样是"熔断永不触发"。这里不报错，因为**报什么**都不如让它加不进去显眼。
+  if (spent > 0) addCost(spent);
+  const budget = locatorBudget(locator);
+  if (spent > budget) throw new LocatorBudgetError(spent, budget, meta.resolvedBy, meta.rung);
+}
+
 /** switch 的比较。数字与数字字符串视为相等（spec 里 status 有时是 "200" 有时是 200）。 */
 export function looseEq(a: unknown, b: unknown): boolean {
   if (a === b) return true;

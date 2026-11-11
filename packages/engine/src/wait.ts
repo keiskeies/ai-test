@@ -5,8 +5,8 @@
 import type { WaitPredicate, WaitCondition } from '@atest/ir';
 import { describePredicate } from '@atest/ir';
 import { queryOne } from './jsonpath.js';
-import { locatorGate } from './resolve.js';
-import type { AdapterRegistry, Clock, ExecContext } from './adapters.js';
+import { locatorGate, chargeResolve, LocatorBudgetError } from './resolve.js';
+import type { AdapterRegistry, Clock, ExecContext, ResolveResult } from './adapters.js';
 
 export interface WaitDeps {
   predicate: WaitPredicate;
@@ -18,6 +18,14 @@ export interface WaitDeps {
   resolveRef: (ref: string) => unknown;
   adapters: AdapterRegistry;
   ctx: ExecContext;
+  /**
+   * 成本入账口（解释器的 addCost）。**必填**：给了默认值（` () => {}`），
+   * "忘了接"就编译得过，于是一次 10s/500ms 的 uiPredicate 等待把
+   * `maxCostUsdPerResolve` 那次 resolve 的钱重复花 20 次而**总账上一个数都不变** ——
+   * 场景级 `maxCostUsd` 熔断读的就是这本账，账不动熔断就永不触发，
+   * 而报告照样写"成本 $0.0000"。缺失时宁可编译不过。
+   */
+  addCost: (n: number) => void;
 }
 
 export interface WaitResult {
@@ -41,6 +49,19 @@ export async function waitUntil(d: WaitDeps): Promise<WaitResult> {
     try {
       ok = await evalPredicate(d.predicate, d);
     } catch (e) {
+      /*
+       * **定位超预算必须掀翻整个等待循环**，不能被下面那句"当成还没满足"吞掉。
+       *
+       * 这是本文件里唯一一处"异常类型选错就放大损失"的地方：超支在语义上长得像
+       * "条件没成立"（都是"这一步还没成"），所以用一个普通 Error 会让它
+       * 被当成普通求值错误 -> 继续轮询 -> **每轮再花一次同样的钱**。
+       * 一个 10s / pollMs=500 的 uiPredicate 等待 = 20 次付费定位。
+       * 一个本来只超预算 $0.001 的等待，变成超 $0.02。
+       *
+       * 抛出后由 runStep 的 catch 收成 fail + case-stale（不是 error，
+       * 因为 error 走退出码 5、而 CI_HINT 教 CI 重试一次 = 再花一遍）。
+       */
+      if (e instanceof LocatorBudgetError) throw e;
       // 条件求值本身报错（变量未定义/adapter 缺失）不能当成「还没满足」干等到超时 ——
       // 那会把一个配置错误伪装成一次超时，是最难查的一类 flake
       return { satisfied: false, waitedMs: d.clock.mono() - t0, polls, describe: `${describe}（求值报错：${(e as Error).message}）` };
@@ -87,7 +108,18 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
     case 'uiPredicate': {
       const a = d.adapters.ui ?? d.adapters.device;
       if (!a || !('resolve' in a)) throw new Error('uiPredicate 条件需要 ui/device adapter');
-      const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<{ confidence: number; handle: string }> }).resolve(c.target, d.ctx);
+      const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(c.target, d.ctx);
+      /*
+       * **每轮都记一次账、每轮都审一次预算**。
+       *
+       * 这两句是本轮真正要接的那条线：等待循环是 `maxCostUsdPerResolve`
+       * 唯一能被**重复触发**的地方 —— 一个走视觉档的 uiPredicate，
+       * 每次 poll 都是一次完整定位。以前这里既不记账也不审，
+       * 于是"单次定位上限"这个闸门在最容易烧钱的路径上恰好不存在。
+       * （判据本身在 resolve.ts 的 chargeResolve，与解释器同一个函数 ——
+       *  两条路径各自实现一份判断，就是本仓反复出现的"两边数不一样"。）
+       */
+      chargeResolve(r.costUsd ?? 0, c.target, d.addCost, { resolvedBy: r.resolvedBy, rung: r.rung });
       /*
        * **「在不在」有两个方向，阈值不能共用一个数**（这里原先两边都用写死的 0.5）。
        *
@@ -109,7 +141,12 @@ async function evalCondition(c: WaitCondition, d: WaitDeps): Promise<boolean> {
     case 'template': {
       const a = d.adapters.device ?? d.adapters.ui;
       if (!a || !('resolve' in a)) throw new Error('template 条件需要 device/ui adapter');
-      const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<{ confidence: number }> }).resolve(c.target, d.ctx);
+      const r = await (a as unknown as { resolve: (l: unknown, c: ExecContext) => Promise<ResolveResult> }).resolve(c.target, d.ctx);
+      /*
+       * 模板匹配同样按次计费（图像比对/视觉模型都在这一档），
+       * 所以同样记账 + 审预算，理由同 uiPredicate 那一处。
+       */
+      chargeResolve(r.costUsd ?? 0, c.target, d.addCost, { resolvedBy: r.resolvedBy, rung: r.rung });
       return c.expect === 'hit' ? r.confidence >= c.minConfidence : r.confidence < c.minConfidence;
     }
     case 'uiIdle': {
