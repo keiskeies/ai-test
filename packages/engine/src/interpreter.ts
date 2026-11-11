@@ -42,11 +42,20 @@ export interface RunOptions {
    * 每一层都在 `await` 下一层，所以既不会栈溢出、也不会超时，进程只是永远转下去
    * —— CI 表现为"这条用例卡住一小时后被 kill"，本地表现为"run 不返回"。
    *
-   * lint 里的 `DEPENDENCY_CYCLE` 挡不住它：那条规则要 `ctx.scenarioGraph`，
-   * 而**没有任何调用方填过这个字段**（只有 lint 自己的测试在用）。
-   * 也就是说它是"看着有一道闸、实际闸没接线"的又一个实例。运行期这道闸不依赖
-   * 谁先跑过 lint，也不依赖文件系统里有没有整张依赖图（resolver 只解析得到
-   * 它被问到的那几个 ref）。
+   * 静态侧确实有一道 `DEPENDENCY_CYCLE`，而它**在今天是有接线的**（这话以前是反的：
+   * 写那句时 `ctx.scenarioGraph` 只有 lint 自己的测试填过，接线在其后才发生）。
+   * 实测过真环 A↔B 的 fixture 走 `atest lint`：`✗ [DEPENDENCY_CYCLE]：call 依赖成环：
+   * scn.a → scn.b → scn.a` 并且退出码非 0 —— 载体是
+   * `packages/cli/test/lint-call-graph.test.ts`（`cmdLint` 与 `run --strict`
+   * 都经 `lintCtxFor` 填那张图）。
+   *
+   * **运行期这道闸仍然要在**，静态那道替不了它，三个理由各自独立：
+   * ① `run` 不带 `--strict` 压根不跑 lint，而那是本地最常用的那一档；
+   * ② 子场景是运行时由 `adapters.callScenario` 解析的，lint 看到的是**当时**
+   *    文件系统里的那份闭包，运行时解析到的可以是另一份（或压根另一套注册表）；
+   * ③ 引擎被浏览器包与 Agent 侧直接调用，那条路径上没人强制跑 lint。
+   * 所以这道闸不依赖谁先跑过 lint，也不依赖文件系统里有没有整张依赖图
+   * （resolver 只解析得到它被问到的那几个 ref）。
    *
    * 按**场景 id** 判而不是按 ref 判：`A@1 → B@1 → A@2` 也是环
    * （版本不同不代表不再互相调用），按 ref 判会漏这一条。
@@ -1322,8 +1331,11 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          * A→B→A 时每一层都在 await 下一层，既不栈溢出也不报错，进程永远转 ——
          * CI 里表现为这条用例卡死到被 kill，日志里连一行异常都没有。
          *
-         * lint 的 DEPENDENCY_CYCLE 靠 `ctx.scenarioGraph`，而那个字段
-         * 除了 lint 自己的测试**没有任何调用方填过**，所以它今天挡不住任何东西。
+         * 静态侧那道 DEPENDENCY_CYCLE（`ctx.scenarioGraph`）今天**确实接上线了**
+         * —— `cmdLint` 与 `run --strict` 都会填它，见上面 `callStack` 那段与
+         * `packages/cli/test/lint-call-graph.test.ts`。但普通的 `atest run` 不跑 lint，
+         * 所以"一个请求都不发就拒绝执行"只在带静态闸的那两档成立；这里的运行时闸
+         * 是其余路径上唯一的一道，两者都要在。
          * 判据按场景 id 而不是 ref：`A@1 → B@1 → A@2` 也是环。
          */
         if (callStack.includes(child.id)) {
