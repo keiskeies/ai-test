@@ -97,6 +97,25 @@
       "anchor": "    base: LocatorBudgetError,\n    cause: 'case-stale',\n    why: '这一步用了比 IR 声明的 maxCostUsdPerResolve 更贵的定位法，是用例/定位器选型问题。报 product-bug 会让人去查一个不存在的功能 bug。',\n  },\n  {\n",
       "replace": "",
       "testFile": "packages/engine/test/error-cause.test.ts"
+    },
+    {
+      "label": "C9 真超时的归因退回 env-unavailable（fail 说\"产品有 bug\"、归因说\"去查环境\"，两栏互相打脸）",
+      "_why": "本轮做掉的那个设计决定的反向。`onTimeout` 三态就是作者对\"等不到算什么\"的表态：想要\"算环境问题\"的取值叫 'error'（下一格 C10 钉着它），所以选 'fail' 的人说的不是环境。平台替他改口，就是本仓那一族缺陷的反方向写法 —— 作者写了一个值，执行侧给出另一个值的结论。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'product-bug', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
+      "replace": "          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
+      "testFile": "packages/engine/test/error-cause.test.ts",
+      "_measured": "待实测（本轮写完后统一跑）"
+    },
+    {
+      "label": "C10 把 onTimeout='error' 那一支也一起改成 product-bug（\"三态统一\"这种顺手改）",
+      "_why": "本轮改 fail 那一支时最容易越界的地方：两处都在 wait 分支里、都返回归因、字面只差一个词。而 error 那一支是**作者显式要求**\"等不到算环境问题\"，状态与归因本来自洽，跟着一起改就是把一个对的决定做成一刀切。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "          if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
+      "replace": "          if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}${hint}`, cause: 'product-bug', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };",
+      "testFile": "packages/engine/test/error-cause.test.ts",
+      "_measured": "待实测（本轮写完后统一跑）",
+      "_锚点": "只取这一整行，不连下面那段注释：注释一改锚点就断，报出来是「没跑成」而不是结论。"
     }
   ]
 }

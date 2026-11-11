@@ -1510,7 +1510,40 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           // 用户显式要求"等不到就算环境问题"，却拿到一个 fail ——
           // fail 的含义是"产品有 bug"，值班人会去查一个不存在的功能问题。
           if (s.onTimeout === 'error') return { status: 'error', summary: `等待超时（${s.timeoutMs}ms），按 onTimeout=error 判为环境问题：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
-          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'env-unavailable', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
+          /*
+           * **真超时 + `onTimeout:'fail'`（默认那一档）：`fail` + `product-bug`。**
+           *
+           * 这一格本仓登记了很久"两栏互相打脸"：状态是 fail（本仓的意思是"产品有 bug"），
+           * 归因却写着 `env-unavailable`（"去查环境"）。登记时的说法是"这是一个新设计决定，
+           * 要先回答作者写 `onTimeout:'fail'` 时到底在声明什么"。答案在 IR 自己手里：
+           *
+           * **`onTimeout` 那三个取值就是作者对"等不到算什么"的显式表态**（waits.ts 的
+           * `WaitOptionsSchema.onTimeout`：fail / continue / error）。想要"等不到算环境问题"
+           * 的人是**有的**，而那个取值就叫 `'error'` —— 上面那一支就是给它用的，
+           * 状态与归因一致（error + 环境不可用），没得说。所以他选 `'fail'` 时说的不是环境，
+           * 是"这件事没发生，产品就不对"。**平台不该在他明确选了 fail 之后，
+           * 替他改口说这是环境问题** —— 那正是本仓那个缺陷类的反方向写法：
+           * 作者写了一个值，执行侧拿它给出另一个值的结论。
+           *
+           * 而且这里根本不需要新判据：`finish()` 对 `fail` 的**默认归因就是 `product-bug`**
+           * （全仓其他 fail 都走那条）。这一格从前是显式写了 `cause:'env-unavailable'` 顶掉它，
+           * 而那份覆盖是"从前只分 continue / 其余"那版代码的残留 —— 三态里第三态补上之后，
+           * 它就变成了一个孤立的、与自己的状态栏矛盾的覆盖。**修法因此是删掉那份覆盖**，
+           * 不是新增一条判据：这条改完，engine 里"fail 却没有成因"与"fail 却归因环境"
+           * 都不在了，`fail` 这一档全场一个口径。
+           *
+           * ⚠ 三个不影响这一格的东西，逐个查过才敢这么写：
+           *  · **缺 adapter / 一次都没问成**是**另一支**：它早返回，状态是 error +
+           *    `env-unavailable`，而且摘要里刻意**没有**"等待超时"（免得把"一次都没问"
+           *    说成"问了没等到"）。本轮改动碰不到它，那几组钉子仍在全绿。
+           *  · **退出码不看 cause**（`gate.ts` 里明写"刻意不按 cause 细分退出码"，
+           *    理由是 env-unavailable 同时覆盖"没配 adapter"与"环境连不上"）。
+           *    所以这一改**不动任何退出码**，改的是报告上那行归因。
+           *  · **登记里那条"会破坏历史抖动可比性"的顾虑今天不成立**：
+           *    `failure_signatures` 只在 docs/01 的表设计里，`packages/store` 里没有实现，
+           *    也就是说**没有任何一份落盘的归因历史可比**。等有了一份之后再来考虑它。
+           */
+          return { status: 'fail', summary: `等待超时（${s.timeoutMs}ms）：${r.describe}${hint}`, cause: 'product-bug', keyContext: { waitedMs: r.waitedMs, condition: r.describe } };
         }
         return { status: 'pass', summary: `等待满足（${r.waitedMs}ms）：${r.describe}`, keyContext: { waitedMs: r.waitedMs } };
       }

@@ -91,37 +91,77 @@ describe('不许过度修：真·环境问题必须还是 env-unavailable', () =
     // 它走 keyContext，重试判据读的是那个键而不是 cause。
     assert.equal(x.keyContext.transportKind, 'network');
   });
-  test('真·等满超时的归因本轮一个字节都没动（登记成"两个方向不一致"，不在本轮改）', async () => {
+  test('真·等满超时的归因：`fail` + `product-bug`（这一格登记过"两栏打脸"，本轮做了决定）', async () => {
     /*
-     * 实测（`.scratch/probe-cause-pos.mts`，本轮跑）：
-     *   onTimeout='fail'  -> status='fail'  + cause='env-unavailable'
-     *   onTimeout='error' -> status='error' + cause='env-unavailable'
-     * 后者是**作者显式要求的**（`docs/04` §`wait.onTimeout:'error'` 那一行：
-     * "用户显式要求等不到算环境问题"），归因与状态一致，没得说。
+     * 这一格从前是一条**钉子**，钉的是"不许被顺手改掉"，而它自己写着：
+     * "哪天有人改了它，这条会红，那时他去看上面那段话，就知道要连带改哪三处测试与哪个登记"。
+     * 本轮就是那个"哪天"。改前的实测读数（本轮重跑了一次，与登记一致）：
+     *   onTimeout='fail'  -> status='fail'  + cause='env-unavailable'   ← 两栏互相打脸
+     *   onTimeout='error' -> status='error' + cause='env-unavailable'   ← 作者要的，自洽
      *
-     * 前者不一致：`fail` 在本仓的意思是"产品有 bug"，而归因说"去查环境"。
-     * 这是本轮**发现但没有改**的一格，理由有两条，都不是"太麻烦"：
-     *  1. 它被三个文件里的等待测试钉着（lang / new-page / responses），
-     *     改归因等于改看板分组这个磁盘格式，得连历史抖动的可比性一起考虑；
-     *  2. 改之前要先回答"作者写 onTimeout:'fail' 时到底在声明什么"——
-     *     他声明的是"等不到就是产品的问题"，那归因该是 product-bug，
-     *     可"异步落库慢"这类超时又不该记成产品缺陷。这是一个**新设计决定**，
-     *     不是一个笔误。已登记在 `docs/14` §5。
+     * **决定与它的依据**：`onTimeout` 那三个取值本身就是作者对"等不到算什么"的表态。
+     * 想要"算环境问题"的取值就叫 `'error'`（上面那一支），所以选 `'fail'` 的人说的不是环境，
+     * 是"这件事没发生，产品就不对"。平台在他明确选了 fail 之后替他改口成环境问题，
+     * 正是本仓那一族缺陷的反方向写法：**作者写了一个值，执行侧给出另一个值的结论**。
      *
-     * 所以这一条测试的作用是**钉子**：本轮把五个位置的归因挪了家，
-     * 而这一格必须**原地不动**。哪天有人改了它，这条会红，
-     * 那时他去看上面这段话，就知道要连带改哪三处测试与哪个登记。
+     * 登记当时给的**两条不改的理由，本轮逐条查过，两条今天都不成立**（这句必须留档，
+     * 因为"当时不改"当时是对的 —— 依据烂了才轮得到改）：
+     *  1. "被 lang / new-page / responses 三个文件的等待测试钉着" —— 那几处的
+     *     `cause === 'env-unavailable'` 钉的是**另一支**（缺 adapter、一次都没问成，
+     *     摘要里刻意不出现"等待超时"）。真超时那一支只有这一条测试钉着。本轮改完，
+     *     那三组仍全绿（它们绿着才是"改动没越界"的证据，不是靠我读代码说没越界）。
+     *  2. "改归因等于改看板分组这个磁盘格式，得连历史抖动的可比性一起考虑" ——
+     *     `failure_signatures` 只在 docs/01 的表设计里，`packages/store` 里没有实现，
+     *     **今天没有任何一份落盘的归因历史可比**。等有了一份，再回来考虑它。
+     *
+     * 顺带一条本轮查出来的：这一格其实是**engine 里唯一一处 `fail` 却不归因 product-bug**
+     * 的地方（`finish()` 对 fail 的默认归因就是它）。那份显式覆盖是"从前只分
+     * continue / 其余"那版代码的残留，三态补齐之后它就孤立了。所以修法是**删覆盖**，
+     * 不是加判据。
+     *
+     * ⚠ 这一改**不动退出码**：`gate.ts` 明写"刻意不按 cause 细分退出码"（理由是
+     *   env-unavailable 同时覆盖"没配 adapter"与"环境连不上"，一分就共用一个码）。
+     *   所以别把这条测试读成"超时现在换了一个 CI 结论"，它换的是报告上那行归因。
      */
     const r = await run(scen([
       { ...b('a'), kind: 'wait', condition: { type: 'expr', expr: 'false' }, timeoutMs: 300, pollMs: 50, onTimeout: 'fail' },
     ]));
     const x = res(r, 'a');
     assert.equal(x.status, 'fail');
-    assert.equal(x.cause, 'env-unavailable', `实际 ${x.cause}：本轮刻意没动这一格`);
-    // 与"一次都没跑成"那一支分得开吗？分得开，但靠的是摘要不是归因（两支同为 env-unavailable）：
-    // 那一支的摘要里有"一次都没求成"，这一支里有"等待超时"。归因分不开这两件事，
-    // 正是上面那个登记的要点。
+    assert.equal(x.cause, 'product-bug',
+      `实际 ${x.cause}：作者选的是 fail（"等不到就是产品不对"），归因不能反过来写"去查环境"。`
+      + '想要那个结论的取值是 onTimeout:\'error\'，它在下面那一条测试里有自己的落点');
     assert.match(x.assertionSummary ?? '', /等待超时/);
+
+    /*
+     * 反方向的一半：三支里**只有这一支**的归因跟着状态走。另两支各钉一条，
+     * 因为把三态压成"看起来都一样"是这一族最常见的回归写法
+     * （`error` 那一支当年就是因为和 fail 混在一起才登记的）。
+     */
+    const e = res(await run(scen([
+      { ...b('a'), kind: 'wait', condition: { type: 'expr', expr: 'false' }, timeoutMs: 300, pollMs: 50, onTimeout: 'error' },
+    ])), 'a');
+    assert.equal(e.status, 'error', 'onTimeout=error 的状态不许跟着变');
+    assert.equal(e.cause, 'env-unavailable', '作者显式要求"等不到算环境问题"，这一支自洽，一个字节都不许动');
+
+    const c = res(await run(scen([
+      { ...b('a'), kind: 'wait', condition: { type: 'expr', expr: 'false' }, timeoutMs: 300, pollMs: 50, onTimeout: 'continue' },
+    ])), 'a');
+    assert.equal(c.status, 'pass');
+    assert.equal(c.cause, undefined, 'continue 是 pass，没有归因这一栏');
+
+    /*
+     * **"一次都没问成"那一支必须还是 error + env-unavailable**，而且摘要里不许出现
+     * "等待超时"。这一条和上面那一条是本轮改动最容易互相越界的地方：
+     * 两处都在 wait 分支里、都返回归因，把缺 adapter 也一起改成 product-bug 的话，
+     * 值班人会去查一个没坏的功能（而那条 SQL 压根没被执行过）。
+     */
+    const n = res(await run(scen([
+      { ...b('a'), kind: 'wait', condition: { type: 'dbRow', sql: 'SELECT 1', datasource: 'main', expect: 'row' }, timeoutMs: 300, pollMs: 50, onTimeout: 'fail' },
+    ])), 'a');
+    assert.equal(n.status, 'error', '缺 adapter 不是超时，不许跟着本轮这一改变成 fail');
+    assert.equal(n.cause, 'env-unavailable', '缺的是平台的口，归因就该是环境');
+    assert.ok(!/等待超时/.test(n.assertionSummary ?? ''), `"${n.assertionSummary}"：把"一次都没问"说成"问了没等到"`);
   });
 });
 
