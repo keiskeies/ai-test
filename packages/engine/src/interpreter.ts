@@ -1281,6 +1281,44 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
          */
         const wantsNewPage = s.kind === 'act' && s.expectNewPage;
         const newPageBaselineBefore = wantsNewPage ? (adapters.newPage?.count() ?? 0) : 0;
+        /*
+         * **`hoverThen` 声明了就必须真的做第二件事，而它今天没人做。**
+         *
+         * 这不是"少一个功能"：`act{action:'hover', hoverThen:'click'}` 的实际行为是
+         * hover 完就停、**步骤 pass**。作者声明了一个动作、平台一个都没做、还报绿 ——
+         * 与 `expectNewPage` 本轮修掉的那条同族同方向（docs/14 §4.3 子类 (a)）。
+         * 而它比 `expectNewPage` 更隐蔽：默认值是 `'none'`，
+         * 所以"声明了 click"与"没声明"**跑起来一模一样**，连一个可疑的信号都没有。
+         *
+         * 为什么在这里拦而不是"实现掉"：docs/06 §2 要这个字段的场景是
+         * "hover **A** 才出现 **B**、再点 **B**" —— 两个元素，而 `act` 只有**一个** locator。
+         * 也就是说这个字段**按现有 schema 表达不了它自己的动机**，
+         * 硬做出来只能做"对同一个元素 hover 完再点它自己"，
+         * 那**恰好覆盖不了下拉菜单** —— 一个看似实现、实则语义不符的功能，
+         * 比不实现更容易让人以为验到了。语义要先定（见 docs/06 §2），本轮先把假绿堵住。
+         *
+         * **归因是 error 而不是 fail**：产品没做错任何事，是**平台**没实现这一步。
+         * 判 fail + product-bug 会让人去提一个"点击不生效"的 bug。
+         * 沿用 `script` 步骤那一处（本文件 "script 节点在 P0 被禁用"）的形状：
+         * **未实现的功能一律 error，不静默 pass**。
+         * 退出码会是 RUNTIME(5) 而不是 ENV(4)（门禁把所有 error 统一按"没测成、可重试一次"处理），
+         * 所以那句"可重试"是白花的 —— 但**红**是重要的那一半：
+         * 静态那一半在 `lint.ts` 的 `HOVER_THEN_NOT_IMPLEMENTED`（error 级，
+         * 跑之前就 exit 3，一个浏览器都不用起）。**两层都要**：
+         * `atest run` 默认不跑 lint（那是 commands.ts 里刻意的设计），
+         * 只有静态那一半的话直接 run 仍然是绿的。
+         */
+        if (s.kind === 'act' && s.hoverThen !== 'none') {
+          return {
+            status: 'error',
+            summary: `act 声明了 hoverThen:'${s.hoverThen}'，但"hover 完紧接着做第二件事"尚未实现 —— `
+              + '这一步只做了 hover，第二件事**一个都没做**（把它算成通过就是假绿）。'
+              + '且 IR 的 act 只有一个 locator，而该字段要的场景（hover A 才出现 B、再点 B）需要两个元素，'
+              + '所以不能靠"顺手实现一下"了结：语义未定，明细见 docs/06 §2 与 docs/08 §3',
+            cause: 'env-unavailable',
+            keyContext: { hoverThen: s.hoverThen, action: s.action },
+          };
+        }
         const performed = 'perform' in uiOrDev
           ? await (uiOrDev as { perform: (o: unknown, t: unknown, c: ExecContext) => Promise<{ artifactIds?: string[] } | void> })
             .perform(opOf(s), resolved, execCtx(targetOf(s, stepCtx), s.id))

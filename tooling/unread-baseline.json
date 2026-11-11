@@ -276,11 +276,6 @@
       "reason": "Act 步骤属于设备端（web/adb adapter 未开工）"
     },
     {
-      "id": "packages/ir/src/steps.ts#ActStepSchema.hoverThen",
-      "milestone": "P3+",
-      "reason": "**豁免留着，但理由先改正：原来写「web/adb adapter 未开工」，而 adapter-web 早已开工并接进 atest run —— 它依然没读这个字段。** 所以这不是「没开工」，是「已开工而这一格漏了」，且失效方向是假绿：`act{action:'hover', hoverThen:'click'}` 实际是 hover 完就停、步骤 pass（docs/14 §5 有登记行，明细在 docs/08 §3）。**它不是补一行读取就能了结的**：IR 里 act 只有一个 `locator`，而 docs/06 §2 给出的动机场景是「hover A 才出现 B、再点 B」—— 单一 locator 表达不了那个场景。所以先要定语义：要么给它加第二个 locator（schema 改动，会影响所有端的 act），要么收窄成「对同一个元素 hover 完再动作」并如实写明它覆盖不了下拉菜单。语义定下来之前不实现，比按猜的语义实现便宜"
-    },
-    {
       "id": "packages/ir/src/steps.ts#AppStepSchema.activity",
       "milestone": "P3+",
       "reason": "App 步骤属于设备端（web/adb adapter 未开工）"

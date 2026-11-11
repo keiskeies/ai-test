@@ -27,9 +27,12 @@
  *    其中"别的浏览器上下文开的窗口不算在本页头上"那条的**噪声来自 Chrome 而不是夹具**。
  *    仍然**没有**的是 hitTargetCheck=false（IR 有字段、没人读；Web 端恒做命中测试，
  *    所以在这里"关掉它"无效但不危险 —— 危险的是别的端，登记在 docs/14 §5）。
- *  - **hoverThen 不在本包，但记在这里免得被当成已实现**：IR 里
- *    `act{hoverThen:'click'}` 声明了"hover 完立刻点一下"，而**全仓没人读它** ——
- *    现在的行为是 hover 完就停、步骤 pass。那是**假绿**，不是少一个功能。
+ *  - **hoverThen 也不在本包，而且本包也不该读它**：拦它的位置在引擎
+ *    （`lint.ts` 的 HOVER_THEN_NOT_IMPLEMENTED + interpreter 里 perform **之前**的运行时拦），
+ *    不是在 adapter —— 因为"能不能原子做完两件事"是**场景语义**问题（IR 的 act
+ *    只有一个 locator，装不下"hover A 才出现 B、再点 B"那两个元素），
+ *    在 adapter 里补一个 hover+click 反而会把语义不符的实现坐实（见 docs/06 §2）。
+ *    本轮只堵住了"hover 完就停、步骤 pass"这条假绿；**功能本身仍未实现**。
  *  - storageState 复用与登录态（docs/06 §5，P2 的硬骨头）
  */
 export {

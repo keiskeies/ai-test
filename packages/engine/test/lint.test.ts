@@ -9,7 +9,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lintScenario, toReport, type LintCode, type LintContext } from '../src/index.js';
+import { lintScenario, toReport, LINT_DOCS, type LintCode, type LintContext } from '../src/index.js';
 import { CONTAINER_KINDS } from '@atest/ir';
 import { b, scen, getStep, tapStep, run, res, type StepDraft } from './helpers.js';
 
@@ -377,7 +377,21 @@ describe('报错质量（这条比规则数量更重要）', () => {
   });
   test('规则码必须是已登记的枚举（防止拼错的码静默失效）', () => {
     const issues = dirty();
-    const KNOWN = new Set(['ASSERT_FREE_STEP','ASSERT_FREE_SCENARIO','SLEEP_USED','LOOP_UNBOUNDED','VAR_UNDEFINED','DEPENDENCY_CYCLE','LITERAL_OVERFIT','HARDCODED_SECRET','RESOURCE_LEASE_MISSING','TEARDOWN_DIRTY','CROSS_TARGET_MISSING_WAIT','STEP_BUDGET_EXCEEDED','EXPR_SYNTAX','DUPLICATE_STEP_ID','CLEARDATA_VS_PRESERVE_SESSION','PIXEL_ASSERT_ON_NONHIERARCHY','NEGATIVE_ASSERT_VISION_BASED','TEMPLATE_NOT_UNIQUE','TEMPLATE_NO_ROI','LLM_ASSERT_RATIO_HIGH','VISION_STEP_IN_CI_GATE','DEPRECATED_OPERATION','SELF_REFERENCING_CALL','INPUT_UNUSED','PARALLEL_VAR_RACE']);
+    /*
+     * 这里原先是一份**手抄的字符串数组**，而它已经飘了：
+     * `RETRY_ON_CONTAINER` 有规则、有测试（本文件 404 行那一段），却不在这份名单里 ——
+     * 只是 dirty() 那个夹具恰好不触发它，所以名单一直没被证伪。
+     * 这正是本仓反复那一族：**同一个事实两处记，其中一处就会过期**。
+     * 改成从 `LINT_DOCS` 取（它是 `Record<LintCode, string>`，
+     * 少一个键就编译不过 —— 于是"登记"这件事由类型系统兜着，名单不再需要人记得更新）。
+     * 本轮加 `HOVER_THEN_NOT_IMPLEMENTED` 时就是靠那条编译错误发现必须同时补 doc 的。
+     */
+    const KNOWN = new Set<string>(Object.keys(LINT_DOCS));
+    // 27 = 本文件写下的这一刻 LINT_DOCS 的键数。**这条下限不是拿来卡"不许删码"的**
+    // （删码是合法操作，改这里就行），它防的是另一件事：Object.keys 因为
+    // import 路径指错/循环依赖拿到一个空对象时，下面那个 for 循环会**恒通过**
+    // —— "名单永远成立"正是本仓那一族缺陷的形状（同 mutate.mjs 里 noTestsIn 的教训）。
+    assert.ok(KNOWN.size >= 27, `LINT_DOCS 只解析出 ${KNOWN.size} 个键，这不对 —— 名单本身没内容，下面的循环是空转`);
     for (const i of issues) assert.ok(KNOWN.has(i.code), `未登记的 LintCode: ${i.code}`);
   });
   test('toReport 只在有 error 时判不通过（warning 不拦人）', () => {
@@ -464,5 +478,70 @@ describe('RETRY_ON_CONTAINER（容器上的 retry 现在什么都不做，所以
     } as never);
     assert.ok(lintScenario(s).some((i) => i.code === 'RETRY_ON_CONTAINER' && i.stepId === 's1'),
       '只查 body 的话"前置里配了个不会生效的重试"照样静默');
+  });
+});
+
+describe('HOVER_THEN_NOT_IMPLEMENTED（声明了第二件事而平台一件都不做，所以要响）', () => {
+  /*
+   * 这条守的是**本轮新登记的一条假绿**（docs/08 §3 有整行明细）。
+   * `act{action:'hover', hoverThen:'click'}` 的真实行为是 hover 完就停、**步骤 pass**：
+   * 作者声明了一个动作、平台一个都没做、报告写绿。
+   *
+   * 它与 `expectNewPage` 同族（docs/14 §4.3 子类 (a)「schema 有字段、执行侧没人读」），
+   * 而**比它更隐蔽**：hoverThen 的默认值是 'none'，所以
+   * "声明了 click" 与 "压根没声明" 跑起来**一模一样**，连一个可疑信号都不留。
+   *
+   * **为什么不顺手把它实现掉**（这条注释必须留，否则下一个人一定会去做）：
+   * docs/06 §2 给的动机场景是"hover **A** 才出现 **B**、再点 **B**" —— 两个元素，
+   * 而 IR 的 act 只有**一个** locator。按现有 schema 只能做成
+   * "对同一个元素 hover 完再点它自己"，那**恰好覆盖不了下拉菜单**。
+   * 一个语义不符、看着像实现了的功能，比不实现更容易让人以为验到了。
+   */
+  const actHover = (over: Record<string, unknown> = {}): StepDraft =>
+    ({
+      id: 'a', kind: 'act',
+      locator: { intent: '菜单', primary: { by: 'testid', value: 'menu' } },
+      action: 'hover', ...over,
+    } as StepDraft);
+
+  test('hoverThen:"click" => error 级，且修法要说"改成两个显式步骤"', () => {
+    const i = find([actHover({ hoverThen: 'click' })], 'HOVER_THEN_NOT_IMPLEMENTED');
+    assert.ok(i, '声明了 hoverThen 而 lint 不响 => 这一步会静默 pass（本轮修的就是这个）');
+    assert.equal(i!.level, 'error',
+      'warning 会被无视，而这一格失效的方向是**假绿**。error 让 CI 在跑之前就停（exit 3），'
+      + '一个浏览器都不用起');
+    assert.equal(i!.stepId, 'a');
+    assert.match(i!.message ?? '', /pass|假绿/, 'message 要说清后果，不能只说"未实现"');
+    assert.match(i!.fix ?? '', /两个显式步骤/, '要给一个今天就能用的绕法，否则人会把字段删掉——那等于把需求也删了');
+  });
+
+  test('hoverThen:"fill" 同样报（枚举里两个非默认取值都得响）', () => {
+    assert.ok(codes([actHover({ hoverThen: 'fill' })]).includes('HOVER_THEN_NOT_IMPLEMENTED'),
+      '只判 === "click" 的实现会让另一半静默通过 —— 枚举的每个非默认取值都是一条路');
+  });
+
+  test('对照：hoverThen 不写（默认 none）不报', () => {
+    const c = codes([actHover()]);
+    assert.ok(!c.includes('HOVER_THEN_NOT_IMPLEMENTED'),
+      '默认值就报 => 每个 hover 步骤都被拦，症状是"照文档写的用例 lint 说不许写"');
+  });
+
+  test('对照：action 不是 hover 但写了 hoverThen 也报（别把规则绑在 action 上）', () => {
+    /*
+     * 这条近邻守卫是我写规则时**自己差点写错**的方向：
+     * 直觉会把判据写成 `s.action === 'hover' && s.hoverThen !== 'none'`，
+     * 于是 `{action:'click', hoverThen:'click'}` 这种（语义上奇怪但 IR 收得下）
+     * 的写法会静默通过 —— 而它的失效方向和 hover 那一格**完全相同**：
+     * 声明了第二件事、平台不做、判 pass。**要拦的是"声明了 hoverThen"，不是"在 hover"**。
+     */
+    assert.ok(codes([actHover({ action: 'click', hoverThen: 'click' })]).includes('HOVER_THEN_NOT_IMPLEMENTED'));
+  });
+
+  test('setup / teardown 里的 act 同样查（与 RETRY_ON_CONTAINER 同一条理由）', () => {
+    const s = scen([{ ...b('h'), kind: 'noop' }] as never[], {
+      setup: [actHover({ hoverThen: 'click' })] as never[],
+    } as never);
+    assert.ok(lintScenario(s).some((i) => i.code === 'HOVER_THEN_NOT_IMPLEMENTED' && i.stepId === 'a'),
+      '只查 body 的话"前置里点了一次不会发生的操作"照样静默 —— 前置里 hover 出菜单再点是很常见的写法');
   });
 });

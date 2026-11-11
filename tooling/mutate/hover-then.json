@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "hoverThen 的两层闸（tests: hover-then.test.ts 运行时 + lint.test.ts 静态）。",
+    "",
+    "**这一族要守的东西：又一条实测到的假绿。** 改动前 `act{action:'hover', hoverThen:'click'}`",
+    "的实际行为是 hover 完就停、第二件事**一件都不做**、步骤 pass。",
+    "而它比 expectNewPage 更难发现：默认值是 'none'，于是「声明了 click」与「压根没声明」",
+    "**跑起来一模一样**，连一个可疑信号都不留 —— 这类字段不会有人去查，因为它从不\"出问题\"。",
+    "",
+    "**没有实现掉它是刻意的**（下一个人一定会想做，所以写在 lint.ts 与 docs/06 §2 里）：",
+    "IR 的 act 只有一个 locator，而该字段的动机场景是「hover A 才出现 B、再点 B」—— 两个元素。",
+    "按现有 schema 只能做成「对同一个元素 hover 完再点它自己」，**恰好覆盖不了下拉菜单**。",
+    "所以本轮只堵假绿，语义待定。",
+    "",
+    "**第 4、5 条是我自己写这条规则时真实写错的两个形状**（各被一条近邻测试抓住）：",
+    " - 判据绑在 `action === 'hover'` 上 => 另一种 action 配 hoverThen 静默通过；",
+    " - 静态那一半放进只走 body 的那个 walk => setup/teardown 里的 act 漏网",
+    "   （是「setup / teardown 里的 act 同样查」那条测试把它测红的，不是我看出来的）。",
+    "",
+    "**顺带记录一次过程教训**：本轮先用临时脚本手工搬 guard 验\"拦在 perform 之前\"那条测试，",
+    "**连着三次都是空变异**（一次变成复制两份、两次插进下面的 /* */ 里变成注释），",
+    "而每次\"测试全绿\"都看着像\"这条测试抓不到\"。真相是**变异压根没生效**。",
+    "这正是 tooling/mutate.mjs 那套锚点校验与还原核对存在的理由 ——",
+    "所以这几条现在是本文件里的正式 case，不再靠临时脚本。",
+    "**没有给「guard 挪到 perform 之后」写变异**（写过，删了：它的 anchor+replace 与 R1 一模一样，",
+    "等于把同一条破坏记两遍，而 R1 抓的是\"拿掉\"、R4 想抓的是\"搬位置\"，两回事）。",
+    "原因是具体的：搬一行 = 删一处 + 加一处 = **两处编辑**，单锚点 harness 表达不了；",
+    "只删不加的话编译不过，判读是「没跑成」而不是结论。",
+    "守它的是 hover-then.test.ts 里「拦在 perform 之前：不会先把 hover 做一次再报错」那条",
+    "（断言 `performed` 为空数组）。**手工验过它确实只守得住这一个方向**：",
+    "把 guard 真的搬到 `: undefined;` 之后重建，7 条里**只有这一条**变红，其余 6 条全绿 ——",
+    "既证明这条测试不是装饰，也证明其余 6 条**看不见**位置。写不出变异不等于没守，",
+    "但**也别把它记成「已被变异集守住」**。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "R1 运行时闸拿掉（回到本轮之前：声明了也照样 pass）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (s.kind === 'act' && s.hoverThen !== 'none') {\n          return {\n            status: 'error',",
+      "replace": "        if (false) {\n          return {\n            status: 'error',",
+      "testFile": "packages/engine/test/hover-then.test.ts"
+    },
+    {
+      "label": "R2 归因改成 product-bug（平台没实现，却让人去给被测产品提 bug）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            cause: 'env-unavailable',\n            keyContext: { hoverThen: s.hoverThen, action: s.action },",
+      "replace": "            cause: 'product-bug',\n            keyContext: { hoverThen: s.hoverThen, action: s.action },",
+      "testFile": "packages/engine/test/hover-then.test.ts"
+    },
+    {
+      "label": "R3 判 fail 而不是 error（fail 会说\"产品坏了\"，且 CI 不会按\"没测成\"处理）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "            status: 'error',\n            summary: `act 声明了 hoverThen:",
+      "replace": "            status: 'fail',\n            summary: `act 声明了 hoverThen:",
+      "testFile": "packages/engine/test/hover-then.test.ts"
+    },
+    {
+      "label": "R5 判据绑在 action==='hover' 上（我第一版就是这么写的）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (s.kind === 'act' && s.hoverThen !== 'none') {\n          return {\n            status: 'error',",
+      "replace": "        if (s.kind === 'act' && s.action === 'hover' && s.hoverThen !== 'none') {\n          return {\n            status: 'error',",
+      "testFile": "packages/engine/test/hover-then.test.ts"
+    },
+    {
+      "label": "S1 静态那一半降成 warning（假绿方向降级 = CI 照绿）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      code: 'HOVER_THEN_NOT_IMPLEMENTED', level: 'error', stepId: s.id,",
+      "replace": "      code: 'HOVER_THEN_NOT_IMPLEMENTED', level: 'warning', stepId: s.id,",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "S2 静态那一半只走 body（setup/teardown 里的 act 漏网 —— 我第一版的形状）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {\n    if (s.kind !== 'act' || s.hoverThen === 'none') return;",
+      "replace": "  walk(scenario.body, (s) => {\n    if (s.kind !== 'act' || s.hoverThen === 'none') return;",
+      "testFile": "packages/engine/test/lint.test.ts"
+    },
+    {
+      "label": "S3 静态判据也绑在 action==='hover' 上（与 R5 同错，另一层各守一次）",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (s.kind !== 'act' || s.hoverThen === 'none') return;",
+      "replace": "    if (s.kind !== 'act' || s.action !== 'hover' || s.hoverThen === 'none') return;",
+      "testFile": "packages/engine/test/lint.test.ts"
+    }
+  ]
+}

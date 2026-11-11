@@ -32,7 +32,8 @@ export type LintCode =
   | 'STEP_BUDGET_EXCEEDED' | 'EXPR_SYNTAX' | 'DUPLICATE_STEP_ID' | 'CLEARDATA_VS_PRESERVE_SESSION'
   | 'PIXEL_ASSERT_ON_NONHIERARCHY' | 'NEGATIVE_ASSERT_VISION_BASED' | 'TEMPLATE_NOT_UNIQUE'
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
-  | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER';
+  | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
+  | 'HOVER_THEN_NOT_IMPLEMENTED';
 
 export interface LintContext {
   /** 已导入资源的快照能力。缺省时跳过依赖资源的检查（CLI 单独 lint 一个文件时的正常状态） */
@@ -116,6 +117,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   SLEEP_USED: 'docs/02 §3',
   LOOP_UNBOUNDED: 'docs/02 §2',
   RETRY_ON_CONTAINER: 'docs/05 §4',
+  HOVER_THEN_NOT_IMPLEMENTED: 'docs/06 §2',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
   LITERAL_OVERFIT: 'docs/02 §4、docs/00 §6.3',
@@ -463,6 +465,54 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
       message: `${s.kind} 上写了 retry.count=${s.retry?.count}，但**容器级重试已不再生效**：重跑一个块会重发块里的 POST，且上一次尝试的子步骤行撤不掉（会变成同 id 两份结论）`,
       fix: '把 retry 挪到块内**那条幂等请求**上（GET/HEAD/OPTIONS/PUT/DELETE）；块里若有 POST，重试要显式配 idempotencyKey 后再议（docs/05 §4）',
       doc: 'docs/05 §4、docs/08 §3',
+    });
+  });
+
+  /*
+   * **`hoverThen` 声明了但平台不会做**（error 级，不是 warning）。
+   *
+   * 为什么是 error：这一格失效的方向是**假绿** —— `act{action:'hover', hoverThen:'click'}`
+   * 今天的行为是 hover 完就停、**步骤 pass**。warning 会被无视，而假绿不能。
+   * 为什么默认值 `'none'` 反而让它更隐蔽：声明了 `'click'` 与压根没声明
+   * **跑起来一模一样**，连一个可疑信号都不留（docs/14 §4.3 子类 (a) 里
+   * 比 `expectNewPage` 更难发现的一例 —— 那条至少名字看起来是个开关）。
+   *
+   * 为什么不在这里顺手实现：`act` 只有**一个** locator，而 docs/06 §2 给的动机场景是
+   * "hover A 才出现 B、再点 B" —— **两个**元素。按现有 schema 只能做成
+   * "对同一个元素 hover 完再点它自己"，那恰好覆盖不了下拉菜单。
+   * 一个语义不符、看着像实现了的功能，比不实现更容易让人以为验到了。
+   * 语义定了之前，先把假绿堵住。
+   *
+   * **判据不绑 `action === 'hover'`**：要拦的是"声明了 hoverThen"，
+   * 不是"正在 hover"。写成 `action==='hover' && hoverThen!=='none'` 的话，
+   * `{action:'click', hoverThen:'click'}`（IR 收得下）会静默通过，
+   * 而它的失效方向与 hover 那一格**完全相同**。
+   *
+   * 单独一个 walk，而且走 **setup + body + teardown**：这条不需要 path / orderIdx /
+   * 任何跨步骤状态，所以并进上面那个只走 body 的 walk 只是"少写一行"，
+   * 代价是前置/后置里的 act 静默逃过（**我第一版就是这么放的**，
+   * 是 `setup / teardown 里的 act 同样查` 那条测试把它测红的）。
+   * 本文件 PARALLEL_VAR_RACE 那处的注释写的就是同一条理由：
+   * **解释器对这三段都真跑**（前置里"hover 出菜单再点一下"尤其常见）。
+   *
+   * **静态这一半拦得住 CI，拦不住直接 `atest run`**（run 默认不跑 lint，
+   * 那是 commands.ts 里刻意的设计：否则 lint error 与运行结果压成同一个退出码）。
+   * 所以解释器里还有一道同名的运行时拦（interpreter.ts 的 hoverThen 那一处）——
+   * **两层守同一个假绿，不是重复**：一层管"跑之前就能确定的配置问题"
+   * （`atest lint` / `run --strict` 落 EXIT.INVALID(3)，一个浏览器都不用起），
+   * 一层管"没跑 lint 就跑了的人"。只留静态那层，这条登记就又变成一处
+   * "写了但没人执行"。（同族的 PARALLEL_VAR_RACE 在 420 行附近把这套
+   * "为什么 lint 与运行时闸都要留"论证完整写过，包括那道运行时闸在退出码上是哑的这件事。）
+   */
+  walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => {
+    if (s.kind !== 'act' || s.hoverThen === 'none') return;
+    push({
+      code: 'HOVER_THEN_NOT_IMPLEMENTED', level: 'error', stepId: s.id,
+      message: `act 声明了 hoverThen:'${s.hoverThen}'，但"hover 完紧接着做第二件事"未实现 —— 这一步只会做 hover，第二件事一个都不做，而步骤会判 pass（假绿）`,
+      fix: '暂时改成两个显式步骤（hover + 第二个动作），并接受它比原子组合更容易 flaky；'
+        + '真要原子做，得先给 act 加第二个 locator —— 现有 schema 只有一个，'
+        + '而该字段的动机场景（hover A 才出现 B、再点 B）需要两个元素',
+      doc: 'docs/06 §2',
     });
   });
 

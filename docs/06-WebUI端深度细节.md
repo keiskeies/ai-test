@@ -58,9 +58,12 @@ Run ──▶ Browser（或 connectOverCDP 到共享 browser 池）
     那**恰好覆盖不了下拉菜单**（菜单不是被悬停的那个元素）。
     实现之前要先定：给 `act` 加第二个 locator（schema 改动，牵动所有端），
     还是把这一档**改名并收窄**成"同元素 hover+动作"、另外用别的形式表达跨元素那一种。
-    **当前状态是**：字段有 `.default('none')`、被 zod 校验、**全仓没有任何地方读它** ——
-    声明 `hoverThen:'click'` 与不声明**跑起来一模一样**（hover 完就停、步骤 pass）。
-    明细与两处登记在 `docs/08` §3 与 `docs/14` §5。
+    **本轮把假绿堵住了，但功能仍未实现**（这两件事必须分开说，否则容易读成"修好了"）：
+    今天 `act{action:'hover', hoverThen:'click'}` 第二件事**依然一件都不做**，
+    只是不再判 pass 了 —— `lint.ts` 的 `HOVER_THEN_NOT_IMPLEMENTED`（error 级）
+    加解释器里一道同名运行时拦（error + env-unavailable，判在 perform **之前**，
+    所以被拦的那一步连页面都不会动）。
+    语义定了之后这一格要改成真实现，登记行见 `docs/14` §5 与 `docs/08` §3。
 
 ---
 
