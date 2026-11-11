@@ -26,6 +26,10 @@
  *     不一致判 `RESIDUE` 并中止（未跑的条目进表标 `NOT_RUN`）。
  *  7. 上一轮死在中途时，本轮读到的 `original` **本身就是变异版**，于是第 6 条那道核对
  *     永远通过、每轮都自认为干净。开跑前的 `detectResidue()` 就是为这种状态准备的**独立信号**。
+ *  8. **测试因为"抛 ReferenceError"而红，会被记成"抓到了"**（本轮踩过，判据见 `crashIn()`）。
+ *     那种红不证明任何断言守住了判据 —— 它只证明那个标识符不存在。
+ *     现在每条抓到的 case 会额外打一行 `⚠` 提示去看落点（**不改判、不改退出码**，
+ *     理由写在 `crashIn` 的注释里）。
  *
  * 用法：
  *   node tooling/mutate.mjs <spec.json> [--force]
@@ -270,6 +274,57 @@ export function noTestsIn(out) {
   return Number(pass[1]) === 0 && Number(fail[1]) === 0;
 }
 
+/**
+ * 这批红**是不是全部来自"某个标识符不存在"**（ReferenceError）？返回 `{ crashed, fails }`。
+ *
+ * ## 为什么要有这一条
+ *
+ * 本文件其它几档（ANCHOR_NOT_FOUND / BUILD_BROKEN / RESIDUE / NO_TESTS_RAN）挡的是"没跑成"，
+ * 而这一档挡的是**跑成了、而红得没有意义**：本轮写 lease-scope 的 S2 时，
+ * replace 里用了一个当时已不在 import 列表里的函数名，于是 `lintScenario` 一进来就抛
+ * `ReferenceError: deriveTargetsNoProbe is not defined` —— **15 条里 14 条红**，
+ * 驱动记成 `caught`。而那句"这条断言挡得住实现被改坏"是**假的**：
+ * 红的头一条甚至是「A0 **对照**：device 与 tap 都在 body → 不报」，
+ * 一个要求**不报**的测试因为被测代码整个崩了而红。
+ * 假的方向与坑 2（跑旧 dist 记成"未抓到"）同样恶劣 —— 它让人给一条没守住的断言
+ * 补上"已验证"（docs/08 §3：看起来有防护，实际漏一个）。
+ *
+ * ## 为什么只认 ReferenceError
+ *
+ * 它的意思是"这个名字不存在"，几乎只可能来自 spec 自己写错
+ * （replace 引用了不存在的标识符，或删掉了声明），而不是被测代码的**行为变化**。
+ * 而 `TypeError` 那一族（删掉 `??` 让下游拿到 undefined）**往往恰恰就是**要模拟的坏法，
+ * 把它也报上会让每条正常变异都带着 ⚠ —— 一直亮的警告和没有警告等价。
+ *
+ * ## 为什么**只提示、不改判**
+ *
+ * 红是真实发生的，代码确实被改动并执行到了；而这一档分不清"名字写错"
+ * 与"作者故意删掉一个真存在的依赖、让它当场炸"（后者是合法的变异）。
+ * 所以它是一句**要人去看落点**的话，不是一档结论 —— 与 `forcedNote` 同一类。
+ * 真要它阻断，得先给出"合法的崩溃变异"长什么样，而那个判据现在没有（没有就别装有）。
+ *
+ * ## 它只在**同包**变异上可达（这条限制要说白，不然会被读成"崩溃都拦得住"）
+ *
+ * 本轮活体复跑量到的两个方向：
+ *  - **同包**（spec 顶层 `build:false`，测试用 tsx 直接 import src）：编译不参与，
+ *    于是那句不存在的调用一路跑到运行时 → 14 条红 + 本函数报 `crashed` + 一行 ⚠（实测到了）。
+ *  - **跨包**（`mustBuild()` 强制 `npm run build`）：tsc 先不过 → 判 **BUILD_BROKEN**，
+ *    压根走不到这里（也实测到了，同一份 replace 换个 spec 就是另一个结果）。
+ * 所以这一档补的是"编译器管不到的那一半"，而 BUILD_BROKEN 那一半自己会喊。
+ * 反过来说：**同包 spec 是这一档的唯一战场**，而那正是最容易图快不重建的一类。
+ *
+ * 方向取 **fails > 0 且 ReferenceError 条数 >= fails**（每条红都是 ReferenceError）。
+ * 混合形态（有的红在断言、有的红在 ReferenceError）**不报**：那种多半是变异真的改了行为，
+ * 只是顺带让某条夹具拿到 undefined。认 `name: 'ReferenceError'` 这一行而不是裸词 ——
+ * 测试标题与断言消息里也可能出现这三个字（本仓那条"针扎中文的守卫会把文档当数据"）。
+ */
+export function crashIn(out) {
+  const fails = Number(/^# fail (\d+)$/m.exec(out)?.[1] ?? NaN);
+  if (!Number.isFinite(fails) || fails === 0) return { crashed: false, fails: 0 };
+  const re = (out.match(/^\s*name: 'ReferenceError'$/gm) ?? []).length;
+  return { crashed: re >= fails, fails };
+}
+
 /** 从测试输出里抓第一条失败。只用于打印，不参与判定 */
 function firstFail(out) {
   const m = /(^|\n)\s*(not ok [^\n]+|✗[^\n]+)/.exec(out);
@@ -362,7 +417,18 @@ function runDriver(spec) {
         v = classify({ hits, testRed: r.red, expected, noTestsRan: empty });
         if (empty) note = '测试文件一条都没跑（多半是真浏览器的测试而本机没有 Chrome）。'
           + '这**不是"未被抓到"** —— 什么都没执行。装 Chrome 或设 ATEST_BROWSER_BIN 再跑';
-        else if (r.red) note = firstFail(r.out);
+        else if (r.red) {
+          note = firstFail(r.out);
+          // 崩溃型红单独提一句（判读不变，理由见 crashIn）。放在 firstFail 之前：
+          // 这一句决定人**下一步去查什么**（查 spec 里的名字），firstFail 只是现象
+          const cr = crashIn(r.out);
+          if (cr.crashed) {
+            const warn = '⚠ ' + cr.fails + ' 条红全是 ReferenceError（标识符不存在）：'
+              + '这可能不是判据被抓到，而是 replace 引用了一个不存在的名字。'
+              + '去看落点（要求"不报"的那条也红 = 被测代码整个崩了），确认后再信这条 caught';
+            note = warn + ' | ' + note;
+          }
+        }
       }
     } finally {
       // 还原 src **并且**把 dist 也恢复成干净版 —— 只还原 src 会留下变异的 dist，

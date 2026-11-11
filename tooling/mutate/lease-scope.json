@@ -48,11 +48,15 @@
       "testFile": "packages/engine/test/lease-scope.test.ts"
     },
     {
-      "label": "S2 前置判据退回 scenario.targets（它只从 body 推 => setup-only 的移动端步骤仍漏）",
+      "label": "S2 前置判据退回读那个冗余字段 scenario.targets（历史那一版坏法的原样）",
       "file": "packages/engine/src/lint.ts",
-      "anchor": "    const needsDevice = deriveTargets(three).some((t) => ['android', 'ios', 'harmony'].includes(t));",
+      "anchor": "    const needsDevice = deriveNeedsDevice(three);",
       "replace": "    const needsDevice = scenario.targets.some((t) => ['android', 'ios', 'harmony'].includes(t));",
-      "testFile": "packages/engine/test/lease-scope.test.ts"
+      "testFile": "packages/engine/test/lease-scope.test.ts",
+      "_why": "这一条的 replace 换过两次，两次都被实测否掉，记下来免得再来一遍：\n 1. 原本写的是\"退回 scenario.targets\"（就是这里现在这一版）。\n 2. 本轮改成 `deriveTargets(three).some(...)`，跑出来 caught，**但那是假负控**：\n    `deriveTargets` 在 lint.ts 第 11 行的 import 列表里已经被本轮换掉了（换成 `deriveNeedsDevice`），\n    所以变异体是一个 ReferenceError —— 手工复跑量到 14 红 / 1 绿，红的头一条是\n    「A0 **对照**：device 与 tap 都在 body → 不报」，一个要求**不报**的测试因为 lint 整个崩了而红。\n    那咬不住任何东西（docs/08 §3：一个不是旧实现的假负控，比缺这一条更坏，它让人以为这块有牙）。\n    （当时也不能顺手把 import 加回去：noUnusedLocals 会让 src 编译不过，而 BUILD_BROKEN 没有结论。）\n 3. 于是留**历史那一版真实现**：它不需要 import，而且现在仍然有牙（读数见 _measured）。\n\"判据本体不许从端集合派生\"这件事的永久落点在**源头**：target-sources.json 的 T10\n（改 `deriveNeedsDevice` 那一行本体，只用 scenario.ts 里本来就有 import 的 `deriveTargets`，\n实测 4 条红、第一条正是「漏写 device 步的裸 tap」）。两个位置各测各的，不必在这里再造一个假负控。",
+      "_锚点备注": "只取这一行：上面那段注释里也出现 scenario.targets / deriveNeedsDevice 字样，连注释一起取会让锚点不唯一。",
+      "_measured": "抓到。驱动只印每条 case 第一个红的**测试标题**、不印落点，所以行级读数是手工复跑量的\n（把 S2 单独贴上去跑 `lease-scope.test.ts`）：11 pass / 4 fail，四个落点依次是\n :51「B tap **只**在 setup…→ 要报」、:57「反向：全场无租约、tap 在 body → 仍然要报」、\n :111「逐个 kind：裸的移动端步骤必须照报」、:268「L6 嵌套 parallel…」，\n全部在\"要求**报**\"的那一侧红 —— 与这一条的意图一致：过滤变窄 ⇒ 该报的不报，而要求不报的照旧不报。\n顺带一个读数：退回 `scenario.targets` 之后**没有任何一条\"不该被烦\"的对照变红**，\n也就是说这一版坏法是**纯漏报**、不含误报，正是最难自己发现的那种。",
+      "_note_forCrashGuard": "⚠ 这一条就是本轮把 harness 逼出新判据的那次：第一版 replace 用的是 `deriveTargetsNoProbe(...)`（一个不存在的名字，为了让注释里那句派生判据读得通），结果 lint 整个崩了、14 条红、驱动记成 caught。修好判据之后，这一条**顺带成了 crashIn 那条提示的活体负控**：谁再把 replace 改成一个不存在的标识符，除了看到 caught，还会看到一句「N 条红全是 ReferenceError」。所以别把 replace 改回任何编译得过而运行不存在的写法 —— 它现在用的是历史真实现，见 _why。"
     },
     {
       "label": "S3 parallel 的一段退回\"整个 steps 数组\"（两支被当成顺序执行 => A 支租约喂给 B 支）",
@@ -98,6 +102,16 @@
       "replace": "    let c: LeaseCursor = { has: inBranch ? false : entry };",
       "testFile": "packages/engine/test/lease-scope.test.ts",
       "_note": "**这条是 L6 那条测试的非空转证明**，实测只有 L6 会红（L1/L2/L3/L4/L4b/L5 全绿 —— 它们都是单层形状，`inBranch` 在它们那里不改变 entry）。形状与运行侧的 T8 成镜像：那边是\"嵌套时少继承一层 slot\"，这边是\"嵌套时少继承一层游标\"，都是**只在嵌套时坏**的那一类，所以都只能用嵌套形状测。方向也刻意选的是**变严**（内层那个裸 tap 被误报）：静态严 = 拦掉一份能跑的合法 IR，与本文件开头记的第一轮误报同一种坏，而不是\"放行一份必红的 IR\"那一种 —— 两个方向各有一条变异才叫都守住了。"
+    },
+    {
+      "label": "S9 前置过滤整个去掉（更宽的那个方向：不许用\"恒放行\"糊弄这条闸）",
+      "_why": "S2 测的是\"过滤太窄 → 静默\"，这一条测反方向：把过滤删掉（等于恒放行）。没有它的话，\"把 needsDevice 写成 true\"这种改动能让 S2 与全部形状测试全绿（更宽的过滤当然一条不漏），而代价是每条纯 API / 纯 Web 用例都被这段遍历走一遍。一条守卫只测\"不许漏\"，最后一定会被改成一个恒真的巨无霸 —— 所以两个方向各要一条。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    const needsDevice = deriveNeedsDevice(three);\n    if (needsDevice) {",
+      "replace": "    const needsDevice = deriveNeedsDevice(three);\n    void needsDevice;\n    if (true) {",
+      "testFile": "packages/engine/test/lease-scope.test.ts",
+      "expect": "equivalent",
+      "_measured": "等价（survived），而且**这是预期结果**，所以登记成 equivalent 而不是\"未抓到\"。\n手工复跑：15 pass / 0 fail —— 把前置过滤整个删掉，**一条测试都不会红**，\n包括那条专门对照\"纯 API / 纯 Web 不该被这条闸烦\"的。原因写在代码上：\n过滤只是**性能**上的短路（`walkLease` 自己按 `LEASE_REQUIRED` 决定报不报，\n纯 http 场景走进去也没有可报的步），所以任何\"更宽\"的过滤都语义等价。\n**这一条的价值不在抓到什么，而在把这件事量出来并钉住**：有了它，\n\"这条前置过滤是错的、应该删掉\"这种说法今后要么实测出等价（那就是纯性能问题，可以删但要认账），\n要么红 —— 而不是停在一段注释里。它同时也说明为什么 S2 那个方向（更窄）才是有牙的一侧。"
     }
   ]
 }

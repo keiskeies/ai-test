@@ -73,6 +73,42 @@
       "anchor": "    if (targetsOfStep(s).includes(target)) out.push({ at: s.id, what: s.kind, chain: path });",
       "replace": "    if (targetsOfStep(s).length >= 0) out.push({ at: s.id, what: s.kind, chain: path }); // 变异 T4：无中生有那一侧的判据失效",
       "testFile": "packages/ir/test/target-sources.test.ts"
+    },
+    {
+      "label": "T9 mobile 那一支不再只认 device（回到\"任何叫 target 的字段都当平台\"）",
+      "_why": "本轮那次修复的本体。删掉这一行守卫，`tap.target`（一个**定位器对象**）与`assertUi.target`（一个**字符串引用**）就又被读成平台了 —— 于是纯 iOS 场景多出一个 android、一个叫 ios 的元素让整条场景声称要 iOS 设备。与 T2 的区别：T2 把整个 mobile 档压成 android（那测的是\"细分没了\"），这一条保留 device 的细分而把**边界**放掉（那才是本轮真正的判据改动）。",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "    if (s.kind !== 'device') return [];",
+      "replace": "    // 变异 T9：去掉那道 kind 守卫（本轮修的那个缺陷的原样）",
+      "testFile": "packages/ir/test/target-sources.test.ts",
+      "_measured": "抓到。5 pass / 5 fail（一次咬掉五条：这一条把 tap.target、input.target、assertUi.target\n全部重新当平台读，而本文件里对着这三样的钉子各有一条）。手工复跑量的行级落点：\n:148「每个 kind 的 targetsOfStep 与 STEP_TARGET 那张权威表逐条一致」（驱动印的第一条红）、\n:183「mobile 那一支只读 device.target」、:339「iOS 场景的 targets 只有 ios」、:359「漏写 device 步的裸 tap」。\n四个落点分属四件事（表对得上 / 边界 / 人看的那一栏 / 派生判据的漏洞），\n这正是\"一条判据改动被四处独立钉着\"的实证 —— 只看驱动日志它们读起来是同一条红线。"
+    },
+    {
+      "label": "T10 deriveNeedsDevice 退化成\"从端集合派生\"（本轮量出来的那个静默）",
+      "_why": "新函数的判据必须是**档位**而不是平台。写成从 targets 派生的话，\"作者漏写 device 步的裸 tap\"这个形状会答\"不要设备\"，而它是**最需要报警**的形状 —— 本轮就是先写了这一版，实测 RESOURCE_LEASE_MISSING 对裸 tap 整个不响（改前报 error@t）。这一条与 S2 成对：S2 改调用点、T10 改判据本体，缺一侧就只有一侧会被发现。",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "  walk(steps, (s) => { if (STEP_TARGET[s.kind] === 'mobile') needs = true; });",
+      "replace": "  for (const t of deriveTargets(steps)) { if (t !== \"api\" && t !== \"web\") needs = true; }",
+      "testFile": "packages/ir/test/target-sources.test.ts",
+      "_measured": "抓到。6 pass / 4 fail，第一条红在「漏写 device 步的裸 tap：targets 是空集而 needsDevice 是 true」\n（手工复跑落点 :361，正是 needsDevice 那一断，消息「而它百分百要设备。这两个读数**必须同时成立**」）。\n另外三个落点：:369「setup 里 device + body 里 tap」、:390「逐 kind 对照：needsDevice 是 LEASE_REQUIRED 的超集」、\n:419「容器里的移动端步骤也算要设备」。\n其中 :390 那条是**结构性**的那一条（逐 kind 比两张表，不靠样本），所以今后新增一个移动端 kind\n而忘了登记 `LEASE_REQUIRED`，会在这一格红，而不是靠样本碰巧命中。"
+    },
+    {
+      "label": "T11 场景级 targets 推导退回只看 body（那一栏只会说自己那一段）",
+      "_why": "`withDerivedTargets` 改走三层之前，\"device 在 setup + tap 在 body\"这份场景的 targets 是 `[]`，而它同时喂给：服务端场景列表那一栏（人看的）、dryrun 的 estimate.targets（人看的）。**一个字段只知道自己那一段、而所有读它的人以为知道全部**，就是这一条要拦的。它红的是 estimate 那两条（targets 从空变成 [\"ios\"]）。",
+      "file": "packages/ir/src/index.ts",
+      "anchor": "  const steps = layers.flatMap((a) => (Array.isArray(a) ? (a as Step[]) : []));",
+      "replace": "  const steps = (Array.isArray(draft.body) ? (draft.body as Step[]) : []);",
+      "testFile": "packages/engine/test/dryrun-estimate.test.ts",
+      "_measured": "抓到。8 pass / 1 fail，唯一那条红在「缺陷 1：device 在 setup、tap 在 body → 要设备」，\n而红的是它的**第二断**（:61，targets 那一句 deepEqual，实际是空数组），\n不是 needsDevice 那一断 —— 因为 needsDevice 早就不读这个字段了。这个落点很有说服力：\n它精确地说明\"根上的推导退回只看 body\"今天只伤到**人看的那一栏**（estimate.targets →\n前端「端 x/y」），而不再伤到判据。**跨包**的一条：改 `packages/ir/src/index.ts`、\n测试在 `packages/engine`，靠引擎侧那条 `@atest/ir` 的 dist 软链生效。"
+    },
+    {
+      "label": "T12 显式写了 targets 也被推导覆盖（屏幕上那一栏与 IR 文件不一致）",
+      "_why": "本轮之前**全仓没有一条测试**守着这句提前返回：实测把这一整行删掉，\nnpm test 1678 条全绿（探针 .scratch/probe-explicit-targets.mts，永久落点是\ntarget-sources.test.ts 里那条「显式写了 targets 就以它为准」）。\n它不是可有可无的宽容：写下来的 targets 是作者在**声明能力**（\"还要一台 iOS 机做对照\"），\n覆盖掉它会让装配期少建一个 adapter，而报错说的是\"没有可用的 adapter\"，\n与真实原因（有人用推导盖了声明）隔了一层 —— docs/08 §3 那一族：错误会说谎。\n与 T11 成对：T11 打\"推的层级\"（只看 body vs 三层），这一条打\"要不要推\"。\n两个判据挨在一起、坏法完全不同，所以各要一条。",
+      "file": "packages/ir/src/index.ts",
+      "anchor": "  if (draft.targets !== undefined) return draft;",
+      "replace": "  // 变异 T12：去掉\"写了就以写的为准\"，永远用推导覆盖",
+      "testFile": "packages/ir/test/target-sources.test.ts",
+      "_measured": "抓到。12 pass / 1 fail，唯一那条红在「显式写了 targets 就以它为准」，\n手工复跑量到落点 :465，正是第一断（多出来那一端），消息「声明里多出来的那一端不许被推导抹掉」。\n第二断（写成空数组那个方向）在这一条下同样会红（推导出 api 而作者写的是空），\n所以两个方向各自有牙 —— 只是驱动与 node:test 都只报第一个。\n**改前的读数才是这一条的重点**：把这行整个删掉跑 npm test，1678 条全绿、0 红。\n也就是说此前\"显式优先\"这件事在全仓没有任何东西守着，而那四行实现看着人畜无害，\n谁都会以为它坏了立刻有人发现。"
     }
   ]
 }

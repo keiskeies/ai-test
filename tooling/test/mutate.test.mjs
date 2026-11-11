@@ -11,7 +11,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classify, decideLock, detectResidue, mustBuild, noTestsIn, summaryLine } from '../mutate.mjs';
+import { classify, crashIn, decideLock, detectResidue, mustBuild, noTestsIn, summaryLine } from '../mutate.mjs';
 
 describe('classify：三种"没跑成"都不许被当成结论', () => {
   test('锚点匹配不到 -> ANCHOR_NOT_FOUND，且**不是**"未被抓到"', async () => {
@@ -84,6 +84,84 @@ describe('classify：三种"没跑成"都不许被当成结论', () => {
     assert.equal(classify({ hits: 1, testRed: true, expected: 'equivalent' }).ok, false);
     // 两种情况的 verdict 仍是事实本身，不被期望改写：报告要能看出实际发生了什么
     assert.equal(classify({ hits: 1, testRed: true, expected: 'equivalent' }).verdict, 'caught');
+  });
+});
+
+/*
+ * crashIn：把"红得没有意义"这件事说出来。
+ *
+ * 夹具一律照抄**真实 TAP 输出**（本轮那份崩溃日志的形状：每个失败块里有
+ * `failureType` / `error` / `code` / `name` 那几行，汇总行是 `# fail 14`），
+ * 不自己编形状 —— 这一档的判断完全建立在"哪一行存在"上，夹具写错一个缩进
+ * 就等于在测一个不存在的格式（本仓那条"照记忆写 fixture"的老教训）。
+ */
+describe('crashIn：全是 ReferenceError 的红要提示，混合与纯断言不提示', () => {
+  const block = (name, extra = '') => [
+    '    not ok 1 - 某个测试标题',
+    '      ---',
+    '      duration_ms: 33.5',
+    "      failureType: 'testCodeFailure'",
+    "      error: 'x is not defined'",
+    "      code: 'ERR_TEST_FAILURE'",
+    `      name: '${name}'`,
+    '      stack: |-',
+    // 栈里那行**不带行号**：ref-lint 会把 `文件:行` 读成一条会烂掉的引用，
+    // 而 crashIn 压根不读 stack —— 它只数 `name:` 那一行与 `# fail N`
+    '        lintScenario (/repo/packages/engine/src/lint.ts)',
+    extra,
+    '      ...',
+  ].join('\n');
+  const sum = (n) => `# tests 15\n# pass ${15 - n}\n# fail ${n}\n# cancelled 0\n`;
+
+  test('每条红都是 ReferenceError -> crashed（本轮 S2 第一版的真实形状）', () => {
+    const out = block('ReferenceError').repeat(14) + sum(14);
+    const r = crashIn(out);
+    assert.equal(r.crashed, true, '14 条红、14 个 ReferenceError = 被测代码整个崩了，不是判据被抓到');
+    assert.equal(r.fails, 14, '条数要说得出：那句提示靠它说"N 条红全是 ReferenceError"');
+  });
+
+  test('纯断言红 -> 不提示（否则每条正常变异都带着 ⚠，警告就废了）', () => {
+    assert.deepEqual(crashIn(block('AssertionError') + sum(1)), { crashed: false, fails: 1 });
+  });
+
+  test('混合形态 -> 不提示。有的红在断言、有的在 ReferenceError，多半是变异真改了行为', () => {
+    const out = block('AssertionError') + block('ReferenceError') + sum(2);
+    assert.equal(crashIn(out).crashed, false);
+  });
+
+  test('全绿 -> 不提示（fails 0 时后面那套计数根本不该参与）', () => {
+    assert.deepEqual(crashIn('# tests 15\n# pass 15\n# fail 0\n'), { crashed: false, fails: 0 });
+  });
+
+  test('解析不到汇总行 -> 不提示，沿用原判读（与 noTestsIn 同一个"宁可漏报"的方向）', () => {
+    assert.deepEqual(crashIn(block('ReferenceError')), { crashed: false, fails: 0 });
+    assert.deepEqual(crashIn('整体通过，无失败'), { crashed: false, fails: 0 });
+  });
+
+  test('针只扎 name 那一行：测试标题或断言消息里出现 ReferenceError 三个字不算', () => {
+    /*
+     * 这一条是防"守卫自己漏报/误报"里那个反方向：如果按裸词计数，
+     * 一条**断言消息**里写着"应当抛 ReferenceError"的正常红会被判成崩溃，
+     * 于是每次真抓到都带着 ⚠ —— 与本文件那条"针扎中文的守卫会把文档当数据"同族。
+     */
+    const prose = ['    not ok 1 - 坏引用应当抛 ReferenceError',
+      "      error: '这里不该出现 ReferenceError 字样'",
+      "      name: 'AssertionError'",
+      '      ...'].join('\n');
+    assert.deepEqual(crashIn(prose + sum(1)), { crashed: false, fails: 1 });
+  });
+
+  test('缩进不同（子测试更深一层）也要认', () => {
+    const deep = block('ReferenceError').replace(/^    not ok/gm, '        not ok')
+      .replace(/^      ---/gm, '        ---').replace(/^      (\w)/gm, '        $1');
+    assert.equal(crashIn(deep + sum(1)).crashed, true, 'TAP 的缩进随嵌套深度变，针不能只认一层');
+  });
+
+  test('守卫自己也要被验一次：把"每条红都是 ReferenceError"这个判据的方向钉住', () => {
+    // 20 条红而只有 19 个 ReferenceError => 至少一条是别的错，不该报
+    assert.equal(crashIn(block('ReferenceError').repeat(19) + block('AssertionError') + sum(20)).crashed, false);
+    // 恰好相等 => 报（>= 而不是 ===，因为 TAP 的 name 行可能比 fail 少见的场景更少）
+    assert.equal(crashIn(block('ReferenceError').repeat(20) + sum(20)).crashed, true);
   });
 });
 
