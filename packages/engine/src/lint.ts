@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, iterConditions, parallelHazards, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, deriveTargets, isExprField, iterConditions, parallelHazards, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { HIERARCHY_ONLY_ASSERTS, PIXEL_CAPABLE_ASSERTS, VarRefPattern, GEN_KINDS, isValueForm } from '@atest/ir';
@@ -447,14 +447,21 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
         refsAt.push({ ref, stepId: s.id, definedAtOrder: 0, useOrder: 0 });
       }
     }
-    // 表达式语法
-    if ('condition' in s && typeof s.condition === 'string') {
-      const e = validateExpr(s.condition);
-      if (e) push({ code: 'EXPR_SYNTAX', level: 'error', stepId: s.id, message: `condition 表达式语法错误：${e}`, fix: EXPR_SYNTAX_FIX });
-    }
-    if (s.when) {
-      const e = validateExpr(s.when);
-      if (e) push({ code: 'EXPR_SYNTAX', level: 'error', stepId: s.id, message: `when 表达式语法错误：${e}`, fix: EXPR_SYNTAX_FIX });
+    /*
+     * 表达式语法。**字段名从 schema 派生**（`isExprField`），不是在这里抄一份：
+     * 这一处从前手抄了 `condition` 与 `when` 两个，而 `forEach.items` / `switch.value`
+     * 同样是 `ExprSchema` —— 于是它们写坏了**没有任何生产可达的静态闸报**
+     * （`dryRun` 查 items，但它生产里零调用方）。明细 docs/14 §5 那一行。
+     *
+     * 与 `dryRun` 同问这一个判据，所以"lint 报了而 dry-run 不报"这种分叉
+     * 结构上不存在（本轮之前就存在过，而且是双向的）。
+     */
+    for (const key of Object.keys(s)) {
+      if (!isExprField(s.kind, key)) continue;
+      const v = (s as Record<string, unknown>)[key];
+      if (typeof v !== 'string') continue;
+      const e = validateExpr(v);
+      if (e) push({ code: 'EXPR_SYNTAX', level: 'error', stepId: s.id, message: `${key} 表达式语法错误：${e}`, fix: EXPR_SYNTAX_FIX });
     }
   };
   walk([...scenario.setup, ...scenario.body, ...scenario.teardown], (s) => checkRefs(s));

@@ -166,13 +166,16 @@ describe('假绿本身：守卫、循环、断言三处都不许把"写坏了"�
   });
 });
 
-describe('静态闸：EXPR_SYNTAX 现在也管路径本体（只修运行期的话这一组全红）', () => {
+describe('静态闸：EXPR_SYNTAX 管路径本体，且管的字段从 schema 派生（不是抄来的清单）', () => {
   /*
-   * 两道闸**分开测**，因为它们不是同一份代码：
-   *  - `lintScenario` 只看 `condition` 与 `when`（lint.ts 里两处 `validateExpr`）；
-   *  - `dryRun` 自己再扫一遍 `condition / when / value / items` 四个字段。
-   * 合成一个 `findings()` 就查不出"dry-run 扫了而 lint 没扫"这种半拉子 ——
-   * 而那正是 `items` 这一族的形状（下面那条钉它）。
+   * 这一族的原始形态是**两份手抄的字段名清单**，两份同时坏、方向相反
+   * （`lint.ts` 抄了 condition/when，漏掉 items 与 switch.value；`dryrun.ts` 多抄一个
+   * value，把要填进输入框的字面量当表达式校验）。现在判据只有一份
+   * （`ir/steps.ts` 的 `isExprField`），而 dryRun 那份扫描整块删了。
+   *
+   * 所以**下面这几条测的对象其实只有一个：lint 那一遍扫了哪些字段、拿什么判据**。
+   * `dry()` 仍然留着，但它的用途缩到两个：钉"不许再叠一份重复 finding"、
+   * 以及当 lint 的代理入口（它内部就是 lintScenario）。
    */
   const lint = (body: StepDraft[]) =>
     lintScenario(scen(body), {}).filter((f) => f.code === 'EXPR_SYNTAX');
@@ -195,32 +198,108 @@ describe('静态闸：EXPR_SYNTAX 现在也管路径本体（只修运行期的�
       assert.equal(f.length, 0, `${JSON.stringify(w)} 被报了：${f[0]?.message}`);
     }
   });
-  test('dry-run 也响，且**管的字段比 lint 宽**（但它今天没有生产调用方 —— 别把这条读成"CI 会拦"）', () => {
-    // `items` 在 lint 里压根不查，只有 dryRun 查。这一条同时钉住两件事：
-    // "这一族没被漏掉" + "两道闸覆盖面不同这件事本身别在改代码时被人抹平"。
+  test('dry-run 与 lint 管的字段**现在一致**（从前 dryRun 多管 items、错管 value）', () => {
     const cases: Array<[string, StepDraft[], boolean]> = [
       ['when', [{ ...b('a'), kind: 'noop', when: '$.n[' }], true],
       ['condition', [{ ...b('a'), kind: 'if', condition: '$.n[', then: [{ ...b('t'), kind: 'noop' }], else: [] }], true],
       ['items', [{ ...b('f'), kind: 'forEach', items: '$.list[', as: 'x', maxIterations: 3, steps: [{ ...b('z'), kind: 'noop' }] }], true],
+      // switch.value 也是真表达式（ExprSchema）。它从前**两道闸都不管**：
+      // lint 的清单里没它，dryRun 的清单里那个 `value` 命中的是"填进输入框的值"那族。
+      ['switch.value', [{ ...b('w'), kind: 'switch', value: '$.n[', cases: [{ is: 1, steps: [{ ...b('z'), kind: 'noop' }] }], default: [] }], true],
     ];
     for (const [name, body, expectDry] of cases) {
       const d = dry(body);
       assert.equal(d.length > 0, expectDry, `dry-run 对 ${name} 报了什么：${d.map((i) => i.message).join(' | ') || '（无）'}`);
       if (expectDry) assert.match(d[0]!.message, /引用路径写坏/, `${name}：消息里没说清是路径写坏`);
+      /*
+       * ⚠ **这个断言现在几乎是恒成立的，而这是本轮改动的结果，不是巧合**：
+       * `dryRun` 第一行就把 `lintScenario(...)` 的结果全收进 `issues`，而它自己那份
+       * 扫描本轮**被删了**（见 dryrun.ts 里那段）。所以 lint 报什么 dry-run 就报什么，
+       * 一致性是**结构性的**，不再需要测试来守 —— 这条留着只为防"重复实现长回来"
+       * （那种情况下 dry-run 会比 lint **多**报，下面那条「只出现一次」也一起红）。
+       *
+       * 真正有牙的是**旁边那两条**：
+       * 「dry-run 与 lint 管的字段**现在一致**（从前 dryRun 多管 items、错管 value）」
+       * （漏报方向，改回手抄清单就红）与
+       * 「**反方向**：往输入框里填的字面量里带 `$` 也不许被当表达式校验」
+       * （误报方向，同一条变异也靠它抓）。**别把这条当成本轮那处收敛的钉子** ——
+       * 一条由构造成立的断言，钉不住任何回归。
+       *
+       * 还有一条要说清：`dryRun` 在本仓**一个生产调用方都没有**
+       * （`grep -rn dryRun packages tooling` 除了自己的定义与这条测试只剩 `dist/` 的产物；
+       * 它的定位是"编辑器常驻面板 + Agent 的第三道闸"，而前端还没做）。
+       * `run --strict` 走 `lintScenario`，**不经过 dryRun**。所以本轮那处收敛在
+       * 生产里的实际受益方只有 lint 那半边。
+       */
+      const l = lint(body);
+      assert.equal(l.length > 0, d.length > 0, `${name}：lint ${l.length ? '报了' : '没报'} 而 dry-run ${d.length ? '报了' : '没报'} => 字段清单又分叉成两份了`);
+      if (d.length && l.length) assert.equal(l[0]!.message.replace(/^\w+ /, ''), d[0]!.message.replace(/^\w+ /, ''), `${name}：两处消息主体不同 = 两处各写了一份报错文案`);
     }
+  });
+  test('同一步骤的同一条表达式在 dry-run 里**只出现一次**（改前是两次）', () => {
     /*
-     * ⚠ **这条测的是"引擎里那个函数会报"，不是"CI 会拦"**，两者差得很远：
-     * `dryRun` 在本仓**一个生产调用方都没有**（`grep -rn dryRun packages tooling`
-     * 除了自己的定义与这条测试只剩 `dist/` 里的产物）。它的定位是"编辑器常驻面板
-     * + Agent 的第三道闸"（dryrun.ts 文件头），而前端还没做。`run --strict` 走的是
-     * `lintScenario`（commands.ts），**不经过 dryRun**。
-     * 所以 `items` 写坏了，**今天生产里没有任何静态闸报它** —— 只有本轮修好的运行期
-     * 那一半兜着（该步 error + case-stale）。别把这条测试读成"items 有人静态管着"。
-     * lint 不查 items 也不是"漏了一行"那么轻：那一串的字段名是手抄的，
-     * 抄这件事本身的后果见 docs/14 §5「dryRun 那份字段名清单」那一行。
+     * `dryRun` 第一行就把 `lintScenario` 的结果全收进 issues，而它从前**又自己扫了一遍**
+     * `condition` / `when` —— 于是同一条错误出现两行。实测改前：`when: '$.n['`
+     * lint 报 1 条、dry-run 报 2 条。编辑器面板会渲染成两行一模一样的红字，
+     * 用户以为有两个问题；而 `atest lint --json` 那类消费方按条数统计，
+     * 会得出"这一份场景有两个表达式问题"。
+     *
+     * 本轮把 dryRun 那份重复扫描删了（理由见 dryrun.ts 那段），这条钉它别长回来。
+     * 写法上按 (stepId, code) 计数而不是"总条数 == 1"，因为一个步骤可以有
+     * `when` 与 `condition` 两个真表达式字段，那种情况报两条是**对的**。
      */
-    const itemsLint = lint([{ ...b('f'), kind: 'forEach', items: '$.list[', as: 'x', maxIterations: 3, steps: [{ ...b('z'), kind: 'noop' }] }]);
-    assert.equal(itemsLint.length, 0, 'lint 现在开始管 items 了：把上面那条的期望与这里一起改掉');
+    const body = [
+      { ...b('a'), kind: 'noop', when: '$.n[' },
+      { ...b('i'), kind: 'if', condition: '$.m[', then: [{ ...b('t'), kind: 'noop' }], else: [] },
+      { ...b('f'), kind: 'forEach', items: '$.l[', as: 'x', maxIterations: 3, steps: [{ ...b('z'), kind: 'noop' }] },
+    ] as StepDraft[];
+    const d = dry(body);
+    const l = lint(body);
+    const key = (x: { stepId?: string; code?: string }) => `${x.stepId ?? ''}`;
+    const cnt = (xs: Array<{ stepId?: string }>) => {
+      const m = new Map<string, number>();
+      for (const x of xs) m.set(key(x), (m.get(key(x)) ?? 0) + 1);
+      return [...m.entries()].sort();
+    };
+    assert.deepEqual(cnt(d), cnt(l), 'dry-run 里某个步骤的 finding 数与 lint 不等 = 叠了第二遍同一条判据');
+    assert.equal(d.length, 3, `应当是 3 个步骤各一条，实际 ${d.length} 条：${d.map((x) => x.message).join(' | ')}`);
+  });
+
+  test('**反方向**：往输入框里填的字面量里带 `$` 也不许被当表达式校验（误报 = 合法场景被 --strict 拒）', () => {
+    /*
+     * `act.value` / `input.value` 是 `ValueSchema` —— 那是**要填进输入框的内容**。
+     * 而 `dryrun.ts` 那份手抄清单里有一个 `value`，于是这些值被喂进 `validateExpr`。
+     * 实测（`.scratch/probe-value-field2.mts`）改前：`价格 3$` 得到
+     * 「value 表达式错误：尾部有多余内容 "3"」、`$100 起`、`cost: $1,000` 同样报，
+     * 而 `EXPR_SYNTAX` 是 **error 级** —— `--strict` 与 `atest lint` 的退码判据正是 error 数，
+     * 也就是**填一个含 `$` 的价格就把整份合法场景拒了**。
+     *
+     * 这一条在变异里对应"把字段清单改回手抄 / 把 value 加回去"，
+     * 所以它是这一组里唯一钉**误报方向**的（其余各条钉的都是漏报）。
+     */
+    const loc = { intent: 'X', primary: { by: 'testid', value: 'x' } };
+    for (const v of ['价格 3$', '$100 起', 'cost: $1,000', 'P@ssw0rd!', 'a,b', 'tel: 138-0000', '50%', '{"k":1}', '折扣$.x折', '张三']) {
+      const body = [{ ...b('a'), kind: 'act', locator: loc, action: 'fill', value: v }] as StepDraft[];
+      const d = dry(body);
+      assert.deepEqual(d.map((i) => i.message), [], `act.value = ${JSON.stringify(v)} 被当表达式校验了：合法输入值不该出现在静态闸的报错里`);
+      assert.deepEqual(lint(body).map((i) => i.message), [], `act.value = ${JSON.stringify(v)} 在 lint 里被报：同上`);
+    }
+    const inBody = [{ ...b('a'), kind: 'input', value: '$100 起' }] as StepDraft[];
+    assert.deepEqual(dry(inBody), [], 'input.value（ADB 按键入值）同样不该被当表达式');
+    assert.deepEqual(lint(inBody), [], '同上（lint 那一侧）');
+  });
+  test('去掉 `v.includes("$")` 那个前置条件之后，不含 $ 的坏表达式**两道闸都还报**（不是靠那个跳过挡掉的）', () => {
+    /*
+     * 改前 dryRun 的判据是 `typeof v === 'string' && v.includes('$')` ——
+     * 那是**第二处**自作主张的判据：不含 `$` 的表达式同样能写坏（`len(name) > 0`
+     * 这种裸名写法一个 `$` 都没有，`1 +` / `not` 也不含 `$`）。
+     * 本轮把它去掉，所以这条钉"去掉之后没漏"。
+     */
+    for (const w of ['1 +', 'not', 'nopefn(1)', '1 ==']) {
+      const body = [{ ...b('a'), kind: 'noop', when: w }];
+      assert.ok(dry(body).length > 0, `${w}：dry-run 没报`);
+      assert.ok(lint(body).length > 0, `${w}：lint 没报（两处必须同时报，否则又是一处分叉）`);
+    }
   });
   test('validateExpr 报的路径 == 运行时会抛的路径（**同一条判据，不是两份**）', () => {
     /*

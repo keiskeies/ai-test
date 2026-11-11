@@ -482,6 +482,81 @@ export const WaitStepType = WaitStepSchema;
 export type WaitStepInput = z.input<typeof WaitStepSchema>;
 export type { WaitPredicate, LocatorSpec };
 
+/*
+ * ── **"这个字段是表达式吗"只许有一处定义** ─────────────────────────────────
+ *
+ * 静态闸必须知道这件事，而它从前是**两份手抄的字段名清单**：
+ *   `lint.ts` 抄了 `condition`、`when` 两个；
+ *   `dryrun.ts` 抄了 `condition`、`when`、`value`、`items` 四个。
+ * 两份**同时**坏，且坏的方向相反（都实测过，明细 docs/14 §5 那一行）：
+ *  - **漏报**：`forEach.items` 与 `switch.value` 是真的 `ExprSchema`，而
+ *    `lint` 一个都不查 —— 于是写坏了**没有任何生产可达的静态闸报它**
+ *    （`dryRun` 查 items，但它生产里零调用方）。
+ *  - **误报**：`act.value` / `input.value` 是 `ValueSchema`，即**要填进输入框的
+ *    字面量**，而 `dryRun` 把它当表达式喂给 `validateExpr`。改前实测
+ *    （`.scratch/probe-value-field2.mts`）：`价格 3$` →
+ *    「value 表达式错误：尾部有多余内容 "3"」、`$100 起`、`cost: $1,000` 同样报，
+ *    而 `EXPR_SYNTAX` 是 **error 级**，`--strict` / `atest lint` 的退码判据正是 error 数。
+ *    改后这一族由 `packages/engine/test/expr-strict.test.ts` 里「往输入框里填的字面量
+ *    里带 `$` 也不许被当表达式校验」那条钉着（误报方向），漏报方向由同文件
+ *    「dry-run 与 lint 管的字段**现在一致**」那条（它逐个字段要求两道闸同报，
+ *    退回手抄清单就红）+ 本文件 `expr-fields.test.ts` 那组钉。
+ *
+ * 所以这份从 **schema 派生**：`ExprSchema` 用在哪些字段，问 schema 而不是问我的记性。
+ * 判据用**对象同一性**（`unwrap(f) === ExprSchema`）而不是"它是不是 string" ——
+ * IR 里 `string` 字段几十个（`url`、`note`、`sql`、`name`），按类型筛会把
+ * `url: 'a b'` 这类合法值判成表达式写坏，那比原来那两份清单更错。
+ *
+ * ⚠ **两个已知边界**（都是"派生不到"，不是"派生错了"，所以宁可少报也不猜）：
+ *  1. `wait` 步骤谓词树里的 `{type:'expr', expr}` **不在这里** —— 它藏在
+ *     `WaitPredicateSchema` 的 union 里，不是步骤上的直接字段。那一族的静态校验
+ *     至今没有（本轮把它的**运行期**归因接上了 `causeOfError`）。
+ *  2. 只走一层 `shape`。嵌套对象里的 `ExprSchema`（目前没有）不会被找到。
+ *
+ * 与 `CHILD_KEYS` / `CONTAINER_KINDS` 同处一地的理由一样：**这份清单错了会同时
+ * 影响 lint 与 dry-run 两道闸**，而它们各自抄一份的时候，正是这两道闸给出
+ * 不同答案的那两年。
+ */
+
+/** 剥掉 optional / nullable / default 包装，拿到最里面那个 schema 实例。 */
+function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  const def = (schema as unknown as { def?: { innerType?: z.ZodTypeAny } }).def;
+  return def?.innerType ? unwrapSchema(def.innerType) : schema;
+}
+
+/**
+ * kind → 该步骤里**是表达式**的字段名（含所有步骤共有的 `when`）。
+ *
+ * 派生而不是手写，理由见上面那段。运行时算一次并冻结：本文件已经是 ESM 求值顺序
+ * 敏感的地方（见 `childSteps()` 那里的 `z.lazy`），但这段只碰 `StepSchema.options`
+ * 与各自的 `def.shape`，不触发任何校验，所以放在 `StepSchema` 之后是安全的。
+ */
+export const EXPR_STEP_FIELDS: Readonly<Partial<Record<Step['kind'], readonly string[]>>> = (() => {
+  const out = new Map<string, string[]>();
+  const options = (StepSchema as unknown as { options?: z.ZodTypeAny[] }).options ?? [];
+  for (const opt of options) {
+    const shape = (opt as unknown as { def?: { shape?: Record<string, z.ZodTypeAny> } }).def?.shape;
+    if (!shape) continue;
+    // kind 是 z.literal，值就是那个字面量；拿不到就整条跳过（宁缺毋滥：
+    // 认不出 kind 的 schema 贡献一个字段名，等于凭空给所有步骤加一条 lint）。
+    const kindDef = shape.kind as unknown as { value?: unknown; def?: { value?: unknown } } | undefined;
+    const kind = kindDef?.value ?? kindDef?.def?.value;
+    if (typeof kind !== 'string') continue;
+    const fields = Object.entries(shape)
+      .filter(([, v]) => v !== undefined && unwrapSchema(v) === (ExprSchema as unknown as z.ZodTypeAny))
+      .map(([k]) => k);
+    out.set(kind, fields);
+  }
+  const rec: Record<string, readonly string[]> = {};
+  for (const [k, v] of out) rec[k] = Object.freeze([...v]);
+  return Object.freeze(rec) as Readonly<Partial<Record<Step['kind'], readonly string[]>>>;
+})();
+
+/** 这个步骤的这个字段是不是表达式。**lint 与 dry-run 同问这一个函数**。 */
+export function isExprField(kind: string, field: string): boolean {
+  return EXPR_STEP_FIELDS[kind as Step['kind']]?.includes(field) ?? false;
+}
+
 /** 步骤类型 → 所属目标端。用于 lint（跨端检查）、UI 图标、能力校验（docs/09 §1.1 约束 3）。 */
 export const STEP_TARGET: Record<Step['kind'], 'api' | 'web' | 'mobile' | 'any'> = {
   sequence: 'any', if: 'any', switch: 'any', forEach: 'any', while: 'any', repeat: 'any', parallel: 'any',
