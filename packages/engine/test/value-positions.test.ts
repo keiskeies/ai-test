@@ -28,7 +28,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { StepSchema, ValueSchema, defineScenario, type ScenarioDraft } from '@atest/ir';
+import { ScenarioSchema, StepSchema, ValueSchema, defineScenario, type ScenarioDraft } from '@atest/ir';
 import { b, run, scen, type StepDraft } from './helpers.js';
 import { lintScenario, type AdapterRegistry } from '../src/index.js';
 
@@ -315,6 +315,28 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
         for (const o of u.def.options) if (holdsValue(o)) return findValues(o, path, out, depth + 1);
       }
     };
+    /** 这一支（往任意深度走）里有没有**步骤**（数组元素是 StepSchema 或其 union 成员） */
+    const holdsElementOfStepSchema = (s: unknown, depth = 0): boolean => {
+      if (depth > 6) return false;
+      const u = unwrap(s) as { def?: { type?: string; element?: unknown; valueType?: unknown; shape?: Shape; options?: unknown[] } } | null;
+      if (!u) return false;
+      const stepKinds = new Set((StepSchema as unknown as { options: Array<{ def?: { shape?: Shape } }> }).options
+        .map((o) => (o?.def?.shape?.kind as { value?: string } | undefined)?.value)
+        .filter((k): k is string => typeof k === 'string'));
+      const isStep = (x: unknown): boolean => {
+        const uu = unwrap(x) as { def?: { type?: string; shape?: Shape } } | null;
+        // 步骤本身：union 成员，或直接带 kind 字面量的 object
+        if (uu === (StepSchema as unknown)) return true;
+        const k = uu?.def?.shape?.kind as { value?: string } | undefined;
+        return typeof k?.value === 'string' && stepKinds.has(k.value);
+      };
+      const t = u.def?.type;
+      if (t === 'array') return isStep(u.def?.element) || holdsElementOfStepSchema(u.def?.element, depth + 1);
+      if (t === 'record') return isStep(u.def?.valueType) || holdsElementOfStepSchema(u.def?.valueType, depth + 1);
+      if (t === 'object' && u.def?.shape) return Object.values(u.def.shape).some((v) => isStep(v) || holdsElementOfStepSchema(v, depth + 1));
+      if (Array.isArray(u.def?.options)) return u.def.options.some((o) => isStep(o) || holdsElementOfStepSchema(o, depth + 1));
+      return false;
+    };
     const sites = new Set<string>();
     for (const opt of (StepSchema as unknown as { options: Array<{ def?: { shape?: Shape } }> }).options) {
       const shape = opt?.def?.shape;
@@ -328,12 +350,64 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
       }
     }
     /*
+     * **第二条根：场景级字段**（本轮补的洞）。
+     *
+     * 上面那条根只走 `StepSchema` 的 union 成员，所以任何**不在步骤里**的值形态位置
+     * 压根不进 `sites`。后果不是"少测一格"，是**那条 `stale` 断言对它是空的**：
+     * 清单里没列它 => `unjudged` 查不到（它不在 sites 里），列了它 => `stale` 立刻红
+     * （schema 扫不到）。也就是说**新增一个场景级值形态位置，本文件既不会问"你判过了吗"，
+     * 也不许你写进清单** —— 一个自称防漏的守卫，对自己管不到的那一层是彻底沉默的。
+     * （这个边界本轮之前是**写在注释里的**，标题就是"这一格在本文件里既查不到也漏不掉"。
+     * 注释说得再准，也不会有人来读它 —— 所以这一轮把它变成一条会红的断言。）
+     *
+     * 三段步骤数组（`body` / `setup` / `teardown`）**不在这里扫**：它们的元素就是
+     * `StepSchema`，位置与上面那条根**是同一个 schema 节点**（同一个 union 成员），
+     * 判一次就是一次。在这里再扫一遍会造出 `setup[].call.args.*` 这种**同一个判据的
+     * 三个别名**，于是"求值过了"这张清单要并排写三格，而三格并行维护正是本仓记过的
+     * 失效形状（加一个 kind 就得记得改三处，忘了的那处静默）。
+     * "setup 里的步骤真的走同一条执行路径"这件事**不由本条守卫负责**，
+     * 它有自己的正向载体（见下面那组 setup/teardown 的测试）—— 一个守卫只答一个问题。
+     */
+    const STEP_ARRAYS = new Set(['body', 'setup', 'teardown']);
+    const scenShape = (ScenarioSchema as unknown as { def?: { shape?: Shape } }).def?.shape;
+    assert.ok(scenShape, 'ScenarioSchema 取不到 shape：它被包了一层（optional/default/pipe）？那这条守卫要看一眼 unwrap');
+    const scenSites = new Set<string>();
+    for (const [f, v] of Object.entries(scenShape ?? {})) {
+      if (STEP_ARRAYS.has(f)) continue;
+      if (holdsValue(v)) findValues(v, f, scenSites);
+    }
+    /*
+     * 三段步骤数组**必须真的是步骤数组**，而且**除了它们没有别的字段藏着步骤**。
+     * 这一条是上面那个 `continue` 的根据：我跳过三段是基于"读了一遍 schema"，
+     * 而读一遍这件事会过期。如果有人新加一个场景级步骤数组（`onAbort` 之类），
+     * 或者把 `body` 改名，这里红 —— 而不是安静地少扫一棵树。
+     */
+    const stepArrays = Object.entries(scenShape ?? {})
+      .filter(([f, v]) => !STEP_ARRAYS.has(f) && holdsElementOfStepSchema(v))
+      .map(([f]) => f).sort();
+    assert.deepEqual(stepArrays, [],
+      `场景级出现了步骤数组而不在 STEP_ARRAYS 里：${stepArrays.join('、')}。`
+      + '新加一段步骤 = 新加一条执行路径，先确认它走的是同一个 executeStep，再把它加进那张表');
+    for (const f of STEP_ARRAYS) {
+      assert.ok(scenShape?.[f], `场景级已经没有字段 ${f} 了：那条跳过它的 continue 现在是空跳，去掉它或改成实际存在的字段`);
+    }
+    /*
      * 数量自检。**不许只写 `>= 10`**：一层遍历当时给的是 10 个，递归之后是 20 个，
      * 而"扫到 10 个"在那一版里也满足 `>= 10` —— 一条阈值断言挡不住"少扫一半"。
      * 有内容的版本是：认出几个 kind、以及下面那两张清单**加起来正好覆盖扫到的一切**
      * （多一个少一个都红，所以清单和扫描互相核对）。
+     *
+     * **场景级那一根的产出并进来一起对撞**，而不是另开一张表：分开对撞的话，
+     * "这个位置判过没有"就取决于它落在哪条根上，而"落在哪条根上"是扫描器的实现细节，
+     * 不是这条判据关心的问题。合成一个集合后，`resolved` 里每一格都必须被**某一条**
+     * 根扫到，多一格少一格都红。
      */
-    assert.ok(sites.size >= 15, `只认出 ${sites.size} 个 ValueSchema 位置：遍历又退化成一层了？`);
+    const allSites = new Set([...sites, ...scenSites]);
+    // 第二条根至少得扫出 `inputs[].default`，否则"我加了第二条根"这句话本身没被验过：
+    // 根接错了字段（比如 shape 取成空对象）时，扫描静默返回空集而上面那些断言全绿
+    assert.ok(scenSites.has('inputs[].default'),
+      `第二条根没扫出 inputs[].default（扫到：${[...scenSites].join('、') || '空'}）：根接错了，这条守卫等于没加`);
+    assert.ok(allSites.size >= 16, `只认出 ${allSites.size} 个 ValueSchema 位置：遍历又退化成一层了？`);
     /** 已经求值、且本文件里逐位置测过的位置 */
     const resolved = [
       'act.value', 'input.value', 'assertPage.contains', 'assertPage.expected',
@@ -366,6 +440,19 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
        * 要问的不是"哪个文件里有 switch 的测试"，是"哪个文件里有**用了值形态的** switch 测试"。
        */
       'switch.cases[].is',
+      /*
+       * `inputs[].default` —— **场景级**的位置，本轮之前它在这一格里"既查不到也漏不掉"：
+       * 扫描器只有步骤那一条根，`inputs` 不在任何步骤里 => 不进 `sites`；
+       * 我把它写进清单呢，又会被 `stale` 判成过期（"schema 扫不到"）。
+       * 也就是说下一轮如果有人新加一个场景级值形态位置而**不求值**，本文件一句都不响。
+       * 现在有了第二条根（见上面 `STEP_ARRAYS` 那一段），所以它可以像其他格子一样
+       * 被要求"判过"。它本来就是判过的，两处都是实的：
+       *  · 求值本身（四种形态 × 三个真入口）→ `input-defaults.test.ts`
+       *  · 语法预先校验 → `value-form-syntax.test.ts` 那一组
+       * （`inputs[].default` 这个缺陷当年是 M6 查出的，症状会指错方向：本地手工跑能过、
+       *   CI 里必炸 —— 手工跑带了默认值，CI 只给场景本体。）
+       */
+      'inputs[].default',
     ];
     /**
      * 判过、**刻意不求值**的位置。每一格都要有理由，否则它就是一个待修的洞。
@@ -379,21 +466,6 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
      */
     const deliberatelyUnresolved: Record<string, string> = {};
     /*
-     * ⚠ **这一张表管不到场景级的位置**，而这不是疏忽而是上面那个扫描器的边界：
-     * 它走的是 `StepSchema` 的 union 成员，所以 `inputs[].default`（不在任何步骤里）
-     * **压根不会出现在 `sites` 里**。于是"清单里有而 schema 扫不到 = 过期"那一条
-     * 也不会因为我没列它而响 —— 也就是说**这一格在本文件里既查不到也漏不掉**。
-     *
-     * 记在这里而不是"顺手把它加进 resolved"：加进去会被 `stale` 那一条判成过期
-     * （扫描器扫不到它），那是对的 —— 这张表只能装**扫描器认得的**位置。
-     *
-     * `inputs[].default` 现在的守卫在别处，两处都是实的：
-     *  · 求值本身（四种形态 × 三个真入口）→ `input-defaults.test.ts`
-     *  · 语法预先校验 → `value-form-syntax.test.ts` 那一组
-     * 要真把它也纳入本文件的对撞，得先给扫描器加"从 `ScenarioSchema` 起扫、
-     * 跳过三段步骤树"的第二条根，而那是另一件事（登记在 docs/14 §5）。
-     */
-    /*
      * 同一个 request 对象上紧挨着 formData 的那一格 —— `files[].fixtureRef`
      * —— **不是 ValueSchema**（`z.string()`），所以它不进这张表（进了就会被下面
      * 那条"清单里有而 schema 扫不到"判成过期，那是对的：这张表只能装值形态位置）。
@@ -404,9 +476,9 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
      * 两组钉子在本文件最后一组。
      */
     const listed = new Set([...resolved, ...Object.keys(deliberatelyUnresolved)]);
-    const unjudged = [...sites].filter((s) => !listed.has(s)).sort();
+    const unjudged = [...allSites].filter((s) => !listed.has(s)).sort();
     assert.deepEqual(unjudged, [], `这些位置能写值形态而没人判过它求不求值：${unjudged.join('、')}`);
-    const stale = [...listed].filter((s) => !sites.has(s)).sort();
+    const stale = [...listed].filter((s) => !allSites.has(s)).sort();
     assert.deepEqual(stale, [], `清单里有这些位置而 schema 扫不到 = 字段改名了或遍历又变浅了：${stale.join('、')}`);
     /*
      * 两张清单**不许有交集**。交集意味着同一个位置同时被声明"求值了"和"刻意不求值"

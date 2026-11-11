@@ -323,7 +323,7 @@
     {
       "id": "packages/ir/src/steps.ts#HttpRequestSchema.fixtureRef",
       "milestone": "P1",
-      "reason": "fixtureRef（响应打桩）没有消费者：今天只有 live/frozen 两种模式，桩数据不落盘也没法按 operationId 索引"
+      "reason": "fixtureRef 是**上传附件的引用**（files: [{field, fixtureRef}]），未读的是「把这个引用变成字节流」那一半：全仓没有解析器，HttpExec.send 没有 files 字段，adapter-http 没有 multipart 编码器。带附件的请求因此被 lint（REQUEST_PART_NOT_IMPLEMENTED，error）与运行期各拦一次，不会发出一个少附件的请求。归属 fixture 存储那一轮（要和 storageState、证据包 artifact 上传一起定形状）。"
     },
     {
       "id": "packages/ir/src/steps.ts#InputStepSchema.clearFirst",
