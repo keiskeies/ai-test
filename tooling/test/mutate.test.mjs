@@ -11,7 +11,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classify, decideLock, detectResidue, mustBuild, noTestsIn } from '../mutate.mjs';
+import { classify, decideLock, detectResidue, mustBuild, noTestsIn, summaryLine } from '../mutate.mjs';
 
 describe('classify：三种"没跑成"都不许被当成结论', () => {
   test('锚点匹配不到 -> ANCHOR_NOT_FOUND，且**不是**"未被抓到"', async () => {
@@ -84,6 +84,52 @@ describe('classify：三种"没跑成"都不许被当成结论', () => {
     assert.equal(classify({ hits: 1, testRed: true, expected: 'equivalent' }).ok, false);
     // 两种情况的 verdict 仍是事实本身，不被期望改写：报告要能看出实际发生了什么
     assert.equal(classify({ hits: 1, testRed: true, expected: 'equivalent' }).verdict, 'caught');
+  });
+});
+
+describe('summaryLine：等价对照组不混进「抓到 / 未抓到」', () => {
+  /*
+   * 这一档是本轮**看着真输出**发现的，不是设想：跑 call-reflux.json 时表上
+   * `✓ survived 等价变异：先并孙子层再记自己`（符合预期、退出码 0），
+   * 而汇总行写的是「抓到 4 / 未抓到 1 / 没跑成 0」。那个"未抓到 1"就是它 ——
+   * 与"真有一条断言挡不住"长得一模一样，而两个数要求的下一步动作相反
+   * （前者要去补测试，后者什么都不该做）。
+   * 反方向同样错：等价变异红了要是计进「抓到」，汇总就把"有防护力"报给
+   * 一件根本没问过防护力的事。
+   */
+  const row = (verdict, over = {}) => ({ verdict, ok: true, conclusive: true, expected: 'caught', ...over });
+
+  test('等价变异活下来 = 不进「未抓到」，单独计一条', () => {
+    const l = summaryLine([
+      row('caught'), row('caught'),
+      row('survived', { expected: 'equivalent' }),
+    ]);
+    assert.equal(l, '抓到 2 / 未抓到 0 / 等价 1/1 / 没跑成 0（共 3）', l);
+    assert.doesNotMatch(l, /未抓到 [1-9]/, `等价对照组被算进"未抓到"了：${l}`);
+  });
+
+  test('真漏掉的那条仍然在「未抓到」里（新分档不许把它一起抹掉）', () => {
+    const l = summaryLine([row('caught'), row('survived'), row('survived', { expected: 'equivalent' })]);
+    assert.match(l, /未抓到 1/, l);
+    assert.match(l, /等价 1\/1/, l);
+  });
+
+  test('等价变异红了：不计进「抓到」，而这一档自己标红', () => {
+    const l = summaryLine([row('caught'), row('caught', { expected: 'equivalent', ok: false })]);
+    assert.equal(l.includes('抓到 1 '), true, `钉实现细节那条被算成防护力了：${l}`);
+    assert.match(l, /等价 0\/1/, l);
+    assert.match(l, /钉实现细节/, l);
+  });
+
+  test('没有等价条目时不出现这一档（不把每份输出都变长）', () => {
+    assert.doesNotMatch(summaryLine([row('caught')]), /等价/);
+  });
+
+  test('没跑成的条数照旧单独计，且总数含所有条目', () => {
+    const l = summaryLine([row('caught'), row('ANCHOR_NOT_FOUND', { ok: false, conclusive: false })]);
+    assert.match(l, /抓到 1 /, l);
+    assert.match(l, /没跑成 1/, l);
+    assert.match(l, /共 2/, l);
   });
 });
 

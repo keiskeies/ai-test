@@ -225,6 +225,32 @@ export function classify({ hits, buildFailed = false, testRed = false, expected 
 }
 
 /**
+ * 汇总行。**抽成纯函数**是为了能测 —— 它以前是 console.log 里的一串模板，
+ * 而这一行是整份驱动输出里**唯一被人扫一眼就读的东西**，判错方向的代价
+ * 全落在"读的人信了它"上，正适合钉死。
+ *
+ * 三个数各管一件事，混了任何两个都会误导下一步动作：
+ *  - 「抓到 / 未抓到」只统计**期望被抓到**的条目（`expect` 缺省即 caught）。
+ *  - `expect:"equivalent"` 的对照组单独一档 `等价 m/n`（m = 符合预期数）：
+ *    · 它**活下来**是本来的目的，混进"未抓到"就长得像"有一条断言挡不住"，
+ *      于是人去补一条本来就多余的测试 —— 和 BUILD_BROKEN 不记 survived 是同一条理由；
+ *    · 它**红了**说明测试在钉实现细节（另一种问题），混进"抓到"就把"有没有防护力"
+ *      和"钉没钉细节"两件事报成同一个数。
+ *  - 「没跑成」（!conclusive）永远单独打印：那几条压根没有结论。
+ *
+ * @param results classify 之后的条目，需带 verdict / ok / conclusive / expected
+ */
+export function summaryLine(results) {
+  const wanted = (v) => results.filter((r) => r.verdict === v && r.expected !== 'equivalent').length;
+  const equiv = results.filter((r) => r.expected === 'equivalent');
+  const equivOk = equiv.filter((r) => r.ok).length;
+  const inconclusive = results.filter((r) => !r.conclusive).length;
+  const equivPart = equiv.length === 0 ? ''
+    : ` / 等价 ${equivOk}/${equiv.length}${equivOk === equiv.length ? '' : ' ✗ 有等价变异红了：测试在钉实现细节'}`;
+  return `抓到 ${wanted('caught')} / 未抓到 ${wanted('survived')}${equivPart} / 没跑成 ${inconclusive}（共 ${results.length}）`;
+}
+
+/**
  * 这份测试输出里**一条测试都没跑**吗？
  * 只认 TAP 汇总行 `# pass 0` + `# fail 0` 同时成立；解析不到就返回 false
  * （见 classify 里 NO_TESTS_RAN 那条：漏报这个形态比误判一次"抓到了"便宜）。
@@ -399,12 +425,7 @@ function runDriver(spec) {
     console.log(`${mark} ${pad(r.verdict, 16)} ${r.label}`);
     if (r.note) console.log(`    ${r.note}`);
   }
-  const caught = results.filter((r) => r.verdict === 'caught').length;
-  const survived = results.filter((r) => r.verdict === 'survived').length;
-  // 三类"没跑成"合并计数并**单独打印**：它们都没有结论，
-  // 混进上面两个数里，要么高估覆盖率、要么误导人去补一条本来就多余的测试
-  const inconclusive = results.filter((r) => !r.conclusive).length;
-  console.log(`\n抓到 ${caught} / 未抓到 ${survived} / 没跑成 ${inconclusive}（共 ${results.length}）`);
+  console.log(summaryLine(results));
   console.log('注意：「没跑成」里的每一条都**还没有结论** —— 修锚点重跑，别补记成任何一种判定。');
 
   // 收尾**全量**核对，放在表格**之后**（先前放在之前，结果就是"报了残留、但没人看到那轮跑了什么"）。
