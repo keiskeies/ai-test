@@ -1791,7 +1791,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         // **响应体落证据**。这一句之前不存在：saveArtifact 端口定义了却没人调用，
         // 于是 evidence.zip 里**没有响应体** —— 而失败排查第一个要看的就是它。
         // M6 的判据是"一次失败 run 产出可独立打开的 evidence.zip"，
-        // 一个不含响应的证据包只是四份元数据，打开它什么也查不出来。
+        // 一个不含响应的证据包只有那几份元数据，打开它什么也查不出来。
         //
         // 为什么在这里**无条件存**（而不是"失败才存"）：
         // 步骤级"失败"经常不在 http 这一步 —— 200 回来后由 assert 步骤判红。

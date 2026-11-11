@@ -19,7 +19,7 @@
  *
  * ```
  * checkAbort() 抛 RunAborted('cancelled')  → RunReport.aborted
- *   → 门禁 EXIT.ABORTED(10)                → 四份产物照写
+ *   → 门禁 EXIT.ABORTED(10)                → run 目录那几份产物照写
  *   → teardown 照跑                        → 设备租约在 finally 里归还
  * ```
  *

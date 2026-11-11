@@ -10,11 +10,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
-  EVIDENCE_FILES, lintScenario, runScenario, toHtmlReport, toJUnitXml, toReport, toTraceJsonl, summaryText,
+  EVIDENCE_FILES, lintScenario, runScenario, toJUnitXml, toReport, summaryText,
   type AdapterRegistry, type RunReport, type ScenarioGraph, type ScenarioGraphGapCause, EVIDENCE_MEMBERS
 } from '@atest/engine';
 import { callSites, defineScenario, scenarioIdOfRef, type Scenario, type ScenarioDraft } from '@atest/ir';
-import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidencePackage } from '@atest/store';
+import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidenceMembers, writeEvidencePackage } from '@atest/store';
 
 import { formatErrors, type ParsedArgs } from './args.js';
 import { CI_HINT, EXIT } from './exit.js';
@@ -563,14 +563,27 @@ async function runOne(o: {
     if (gate.attention.length > 20) io.err(`  …另有 ${gate.attention.length - 20} 条`);
   }
 
-  // 产物。三样都写：trace 给机器/复盘，junit 给 CI，zip 给"下载给别人看"
+  /*
+   * 产物。**全部字节由 store 那一次组装交出，这里一个都不再渲染**。
+   *
+   * 改前这里是 `toTraceJsonl(...)` / `toJUnitXml(...)` / `toHtmlReport(...)` 各调一遍，
+   * 而 `buildEvidencePackage` 内部为组包**又各算了一遍** —— 两份产物、两处代码。
+   * 后果不是当下错（junit 那组参数逐字抄了两遍，所以值相同），
+   * 而是**没有任何东西能看出它是两份**：删掉任一份都不会有测试变红，
+   * 而参数一改就只改一处，那时"包里的 junit"与"目录里的 junit"就分叉了
+   * ——分叉方向还是"CI 读的那份"与"人点开的那份"给的 classname/suiteName 不一样。
+   *
+   * 而现在必须往 run 目录写**全部五个文档成员**，不只是原先那三个：
+   * `report.html` 正文里是相对链接 `./manifest.json`、`./summary.txt`，
+   * `GET /api/runs` 读的也是 `manifest.json`，服务端那份证据白名单五名全都放行。
+   * 改前少写那两个，症状是**报告里两个链接 404 + 运行记录列表一条都列不出**
+   * （`listRuns` 找不到 manifest 就跳过那一格，"存在但读不出"表现成"不存在"），
+   * 而 html / server / cli 三侧的单测**各自都绿**：没有一条测"这三件事在同一块磁盘上成立"。
+   * `artifacts/` 刻意**不**散装再写一份（体积翻倍 + 多一份未脱敏副本），
+   * 理由写在 store 的 `writeEvidenceMembers` 上，那句判据不在这里重述。
+   */
   const outDir = join(o.evidenceDir, safeRunId(report.runId));
-  await mkdir(outDir, { recursive: true });
-  await writeFile(join(outDir, EVIDENCE_FILES.trace), toTraceJsonl(report.events), 'utf8');
-  await writeFile(join(outDir, EVIDENCE_FILES.junit), toJUnitXml(report, { suiteName: scenario.id, classname: scenario.id }), 'utf8');
-  await writeFile(join(outDir, EVIDENCE_FILES.html), toHtmlReport(report, {
-    suiteId: scenario.id, scenarioName: scenario.name, frozen: scenario.frozen, summary: report.summary,
-  }), 'utf8');
+  await writeEvidenceMembers(outDir, pkg.entries);
   // 第四个参数：被砍断的 run 的文件名要写 aborted，不能写 pass（见 writeEvidencePackage）。
   // 只传"有没有中断"这个事实，**状态词由 store 侧定**，否则同一个词两处各拼一遍。
   const written = await writeEvidencePackage(outDir, report.runId, report.status, pkg.bytes, Boolean(report.aborted));
@@ -628,11 +641,13 @@ export function requireAdapters(scenario: Scenario, registry: DocRegistry, local
  * **清洗字符集不够，还必须显式拒掉 `.` 与 `..`。** 这不是理论问题，实测过：
  * `atest run <场景> --run-id ..` 一路跑到底，`safeRunId('..')` 原样返回 `..`
  * （`.` 恰好是 `[A-Za-z0-9._-]` 里的合法字符），于是
- * `join(evidenceDir, '..')` = **项目根**，四份产物直接落在仓库根上：
- * `trace.jsonl` / `junit.xml` / `report.html` / `evidence....pass.zip`。
+ * `join(evidenceDir, '..')` = **项目根**，整个 run 目录的产物直接摊在仓库根上：
+ * `trace.jsonl` / `junit.xml` / `report.html` / `manifest.json` / `summary.txt` /
+ * `evidence....pass.zip`。
  * 后果不是"文件难看"而是**这些文件会被 git 收走**：`.gitignore` 忽略的是
- * `evidence/` 与 `*.trace.jsonl`，而 `report.html`、`junit.xml`、
- * `evidence....pass.zip` 三个名字一个都不在其中 —— 证据包含**真实响应体**
+ * `evidence/` 与 `*.trace.jsonl`，而 run 目录摊开的那几个名字里，除 `trace.jsonl`
+ * 外一个都不被忽略（`report.html` / `junit.xml` / `manifest.json` / `summary.txt` /
+ * `evidence....zip`）—— 证据包含**真实响应体**
  * （可能带未脱敏 PII），就这么进了一次普通提交。
  * `--run-id` 的说明写着"CI 里用构建号"，也就是说它的值本来就是人/流水线给的，
  * 手滑打两个点完全在正常操作范围内，所以这一格必须自己防，不能靠"没人会这么写"。

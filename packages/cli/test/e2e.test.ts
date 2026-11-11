@@ -118,8 +118,29 @@ test('一次失败的 run 产出可被系统 unzip 验开的包，退出码是 T
     const zip = files.find((x) => x.endsWith('.zip'));
     assert.ok(zip, `没有 zip：${files.join(',')}`);
     assert.match(zip!, /^evidence\..*\.fail\.zip$/, '文件名要带状态，CI 上"哪个包是红的"要能肉眼分');
-    assert.ok(files.includes('trace.jsonl'), 'trace.jsonl 要在（crash 后只能靠它）');
-    assert.ok(files.includes('junit.xml'));
+    /*
+     * run 目录里**必须有全部五个文档成员**，一个都不能少。
+     *
+     * 这一格从前只断 trace.jsonl 与 junit.xml 两名，而那**正是漏的那一形状**：
+     * 写侧少写 manifest.json 与 summary.txt 时，这条测试照绿，
+     * 因为断的是"我记得的那两样在"。后果实测过，是三处同时坏：
+     *   - report.html 正文里是相对链接 `./manifest.json`、`./summary.txt` -> 404；
+     *   - 服务端的证据白名单五名全放行，多出的两名一直 404；
+     *   - `GET /api/runs` 读 `<runId>/manifest.json`，读不到就跳过那一格
+     *     -> **运行记录列表一条都列不出**，"存在但读不出"表现成"不存在"。
+     *
+     * **名单写死字面量，不拿 EVIDENCE_MEMBERS 去比**：写侧
+     * `writeEvidenceMembers` 的筛子就是 `Set(EVIDENCE_MEMBERS)`，
+     * 用它断它就是"用派生验派生" —— 名单少一名时两边一起缩，永远绿。
+     * 那与本文件下面 `evidence 缺参数…` 那条写下的是同一条判据。
+     */
+    for (const want of ['trace.jsonl', 'junit.xml', 'manifest.json', 'summary.txt', 'report.html']) {
+      assert.ok(files.includes(want), `${want} 要在 run 目录里（报告里的相对链接与运行记录列表都读它）：${files.join(', ')}`);
+    }
+    // **artifacts 不散装再写一份**（体积翻倍 + 多一份未脱敏副本），
+    // 而报告里那个链接仍要能点开 —— 那条路由 store 的 readRunMember 进包取，
+    // 在 `packages/store/test/evidence.test.ts` 里钉。这一格只钉磁盘形状。
+    assert.ok(!files.includes('artifacts'), `artifacts 不该散装落在 run 目录：${files.join(', ')}`);
 
     const zipPath = join(runDir, zip!);
     const report = execFileSync('unzip', ['-t', zipPath], { encoding: 'utf8' });
@@ -749,10 +770,11 @@ test('被砍断的 run：退出码 10，且**三个产物**都不说自己是 pa
  * 而 `.` 与 `..` **每个字符都在那个字符集里**，于是 `--run-id ..` 原样穿过，
  * `join(evidenceDir, '..')` 就是证据目录的上一级 —— 真实项目里那是**仓库根**。
  *
- * 实测过的落点（改前）：项目根上出现 `trace.jsonl`、`junit.xml`、`report.html`、
- * `evidence....pass.zip` 四个文件。要紧的不是难看，是**它们会被 git 收走**：
+ * 实测过的落点：项目根上摊着 `trace.jsonl`、`junit.xml`、`report.html`、
+ * `manifest.json`、`summary.txt`、`evidence....pass.zip` 这一堆。要紧的不是难看，是**它们会被 git 收走**：
  * `.gitignore` 忽略的是 `evidence/`、`tmp/`、`*.trace.jsonl`，
- * 而 `report.html` / `junit.xml` / `evidence....pass.zip` 三个名字一个都不在里面。
+ * 而摊在根上的那几个名字里，除 `trace.jsonl` 外一个都不被忽略
+ * （`report.html` / `junit.xml` / `manifest.json` / `summary.txt` / `evidence....zip`）。
  * 证据包内容是**真实响应体**（可能带未脱敏 PII），`.gitignore` 那条注释专门写了
  * "误提交后删除也不会从历史里消失" —— 一个 `--run-id ..` 就能把它送进一次普通提交。
  * `--run-id` 的说明写着"CI 里用构建号"，值来自人或流水线，打错两个点在正常操作范围内。
@@ -771,16 +793,17 @@ test('--run-id 不能把产物写到证据目录之外（`..` 是合法字符组
     // 夹具自检：这条 run 本身要跑成。否则"外面没文件"可能只是因为压根没产出
     assert.equal(code, EXIT.OK, `夹具要是一次成功的 run。实际 ${code}：${io.stderr.join(' | ')}`);
 
-    // ① 证据目录外面**一个产物都不许多**（改前这四样躺在 f.dir 上）
+    // ① 证据目录外面**一个产物都不许多**（上面那串名字就是改前躺在 f.dir 上的那些）
     const stray = (await readdir(f.dir)).filter((n) => /report\.html|junit\.xml|trace\.jsonl|^evidence\.|manifest\.json|summary\.txt/.test(n));
     assert.deepEqual(stray, [], `产物漏到证据目录外了：${stray.join(', ')}`);
 
     // ② 产物照旧齐全，只是落在证据目录**里面**的那个改名目录里。
-    //（manifest.json 与 summary.txt 在 zip **里面**，不在这一层 —— 别把它们列进这格）
+    //    五个文档成员一个不落 —— ① 那格筛子里有 manifest/summary，这格就得断它们：
+    //    否则"写侧少写这两名"只会让 ① 变红（它们本来就不该在外面），这里无人报警。
     const runDir = await onlyRunDir(evDir);
     assert.notEqual(basename(runDir), '..', '目录名不能还是 ..，否则 join 出来的还是外面');
     const names = await readdir(runDir);
-    for (const need of ['trace.jsonl', 'junit.xml', 'report.html']) {
+    for (const need of ['trace.jsonl', 'junit.xml', 'report.html', 'manifest.json', 'summary.txt']) {
       assert.ok(names.includes(need), `run 目录里缺 ${need}：${names.join(', ')}`);
     }
     assert.ok(names.some((n) => n.startsWith('evidence.') && n.endsWith('.zip')), `run 目录里没有证据包：${names.join(', ')}`);
