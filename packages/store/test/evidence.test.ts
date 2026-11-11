@@ -753,3 +753,30 @@ test('readRunMember：白名单外的名字一个都不给，坏包不拖垮整�
   writeFileSync(join(broken, 'evidence.r.bad.zip'), Buffer.from('这不是 zip'));
   assert.equal(await readRunMember(broken, EVIDENCE_FILES.manifest), undefined);
 });
+
+test('坏包排在前面时，后面那个好包仍然要读得出（坏一个不等于全死）', async () => {
+  /*
+   * 上一条只喂了"一个坏包"，于是 `catch { continue }` 与 `catch { return undefined }`
+   * **给出同一个答案** —— 变异驱动实测把那句换成 return 之后全仓零红（本轮实测，
+   * 变异集 tooling/mutate/evidence-layout.json 的 R3）。"坏包不拖垮整次读取"这句
+   * 判据压根没被钉住：它要的**不是**"坏了要说 undefined"，而是"坏了要换下一个"。
+   *
+   * 形状是实测过的：同一 runId 重跑两次会并排躺着两个包，而其中一个可能被人
+   * 拖去一半就断了（下载截断 / 磁盘清理写坏 / 手工编辑过）。
+   * 名字刻意让坏的那个**排在前面**（`aaa` < `zzz`，读取按 sort 后的次序遍历）——
+   * 反过来的话好包先命中，`return` 与 `continue` 又等价了。
+   * 并用 readdir 断言这个次序真的成立：夹具铺错方向，这条就又是一条假绿的测试。
+   */
+  const dir = await mkdtemp(join(tmpdir(), 'atest-mixed-'));
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  writeFileSync(join(dir, 'evidence.aaa.bad.zip'), Buffer.from('这不是 zip'));
+  writeFileSync(join(dir, 'evidence.zzz.fail.zip'), pkg.bytes);
+  assert.deepEqual(await readdir(dir), ['evidence.aaa.bad.zip', 'evidence.zzz.fail.zip'],
+    '夹具：坏包必须排在好包**前面**，否则测不到 continue 那一支');
+
+  for (const name of LOOSE) {
+    assert.ok(await readRunMember(dir, name), `${name} 只能从后面那个好包里取，而它必须取得到`);
+  }
+});

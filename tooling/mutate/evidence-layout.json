@@ -22,20 +22,20 @@
     },
     {
       "label": "R1 读侧不再回落进包：只认磁盘上那份",
-      "_why": "改前的真实行为就是这样（readIfFile）。'报告里 artifacts/<sha> 那个链接永远点不开'与'老布局的历史 run 列不出来'两条症状都出在这一格，所以这一条测的是**读侧**这一半，与 W1 是两处不同的代码。",
+      "_why": "改前的真实行为就是这样（readIfFile）。这一版变异刻意**不删代码**：上一版在循环前塞一句 `return undefined`，tsc 直接 BUILD_BROKEN（本轮实测），于是这一格**没有结论** —— 而\"编译不过\"不等于\"测试抓得到\"。现在改的是遍历用的过滤器：包扫不到，效果等同\"只认磁盘那份\"，而代码仍然编译。",
       "file": "packages/store/src/evidence.ts",
-      "anchor": "  let names: string[];\n  try { names = await readdir(runDir); } catch { return undefined; }",
-      "replace": "  return undefined;\n  // eslint-disable-next-line no-unreachable\n  let names: string[];\n  try { names = await readdir(runDir); } catch { return undefined; }",
+      "anchor": "  for (const z of names.filter((n) => n.startsWith('evidence.') && n.endsWith('.zip')).sort()) {",
+      "replace": "  for (const z of names.filter((n) => n.startsWith('evidence.NOPE.') && n.endsWith('.zip')).sort()) {",
       "testFile": "packages/server/test/evidence-http.test.ts",
       "expect": "caught"
     },
     {
       "label": "R2 成员白名单不再拒 artifacts 下的非哈希名",
-      "_why": "这一支是读侧唯一的形状判据。放宽它 = '报告里链什么名，磁盘/包里就有什么名'，而 runId 段之外再没有别的东西挡着 —— 于是这一条测的是守卫生效而不是函数能读文件。",
+      "_why": "这一支是读侧唯一的形状判据。放宽它 = \"报告里链什么名，磁盘/包里就有什么名\"。**上一版把 testFile 指到 http 那份，于是报了 survived，而那是 spec 的错不是代码的漏**（本轮实测）：服务端自己那关 resolveEvidence 就先拒了非 64hex 的名，根本轮不到 readRunMember 说话，所以 http 那份测试**结构上看不见**这一格。store 那份直接断 isEvidenceMember('artifacts/not-hex') === false，才是这一判据的载体。",
       "file": "packages/store/src/evidence.ts",
       "anchor": "  return name.startsWith(prefix) && ARTIFACT_MEMBER.test(name.slice(prefix.length));",
       "replace": "  return name.startsWith(prefix);",
-      "testFile": "packages/server/test/evidence-http.test.ts",
+      "testFile": "packages/store/test/evidence.test.ts",
       "expect": "caught"
     },
     {
