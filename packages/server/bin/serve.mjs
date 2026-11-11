@@ -34,7 +34,7 @@
  * ## Ctrl-C
  *
  * 直接按 Ctrl-C：正在跑的 run 会走 `installSignalHandlers` 那条链
- * （置标志 → 引擎 checkAbort → 四份产物照写 → 租约照还），退出码 10。
+ * （置标志 → 引擎 checkAbort → run 目录那几份产物照写 → 租约照还），退出码 10。
  * **这里不另造"优雅关闭"** —— 那会变成第二条取消路径，
  * 而取消必须只有一个入口（一次取消绝不该产生第二遍副作用，docs/02 §5）。
  */
@@ -80,4 +80,4 @@ const srv = await startServer({
 console.log(`atest 后台已起： ${srv.url}`);
 console.log(`工作目录：       ${cwd}`);
 console.log('静态根：/  (只发 index.html)、/app/、/pkg/ir|engine|zod/（只发 .js）');
-console.log('Ctrl-C 结束；正在跑的 run 会落完四份产物再退。');
+console.log('Ctrl-C 结束；正在跑的 run 会落完 run 目录里那几份产物再退。');

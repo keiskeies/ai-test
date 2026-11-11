@@ -34,10 +34,10 @@
  * ## 为什么"取消"这一栏在这里是空的
  *
  * 用户侧的取消走的是**进程信号**：Ctrl-C → `installSignalHandlers` 置标志 →
- * 引擎 `checkAbort` → 四份产物照写、teardown 照跑、租约照还（signals.ts 整段讲的是这条链）。
+ * 引擎 `checkAbort` → run 目录里那几份产物照写、teardown 照跑、租约照还（signals.ts 整段讲的是这条链）。
  * 一个 `POST /api/run/:id/cancel` **现在不给**，因为那需要 `AbortFlag` 能从外部注入，
  * 而 `installSignalHandlers` 只认信号 —— 造那条路要改 CLI 内部，
- * 而"改了之后中断到底会不会留下四份产物"是 docs/15 §3.7 那一轮的事。
+ * 而"改了之后中断到底会不会落齐那几份产物"是 docs/15 §3.7 那一轮的事。
  * **宁可这一栏空着并写清楚，也不要给一个装作能取消的端点。**
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -45,6 +45,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { DEFAULT_CONFIG, findConfig, loadScenarioFile, main, type Io } from '@atest/cli';
+import { EVIDENCE_FILES } from '@atest/engine';
+import { readRunMember } from '@atest/store';
 import { readIfFile, resolveEvidence, resolveStatic, type StaticRoot } from './files.js';
 
 /** 请求体上限。IR 是文本，几十 KB 顶天；这个数的作用是"失控的请求体不许吃掉内存" */
@@ -132,16 +134,34 @@ async function runCommand(argv: string[], cwd: string, collect: string[]): Promi
  * 而不是跳过那一格。跳过的表现是"这次 run 不存在"，
  * 而真相是"存在、但我读不出"—— 后者才是要不要找人来看的信号。
  * 这也和 store 那边 `missing` 的处置同一条口径（声明了但取不到，必须说出来）。
+ *
+ * ## 走 readRunMember，不走裸 readFile
+ *
+ * 因为磁盘上**不一定有散装那一份**：本轮之前写侧只把 trace/junit/report/zip
+ * 放进 run 目录，manifest.json 只在 evidence.zip 里 —— 于是这一格
+ * `readFile` 恒失败、`continue` 恒命中，**运行记录列表对每一次历史 run 都是空的**，
+ * 而它自己的单测全绿（测的是"坏 manifest 要标 broken"，
+ * 没有一条测"一次真跑完之后这里能列出东西"）。
+ * 现在散装那份由 `writeEvidenceMembers` 补上了，但**已经躺在盘上的老证据包**
+ * 仍然只有包里那份 —— 那些 run 该照样出现在列表里，而不是"看起来没跑过"。
+ *
+ * ## 读不出时仍然跳过，而且这是对的
+ *
+ * 上面那句"不许跳过"要与这句一起读。跳过只发生在**压根读不到 manifest** 时，
+ * 而那个时候它**确实不是一次 run** —— 证据目录里躺着 `<evidenceDir>/artifacts/`
+ * （内容寻址存储，见 cli 的 assemble），它没有 manifest，
+ * 把它列成一条 run 会凭空多一条空记录。
+ * 判据因此是"能不能读到 manifest"：**读不到 = 不是 run；读到但解不开 = 坏 run（标 broken）**。
  */
 async function listRuns(evidenceDir: string): Promise<unknown[]> {
   let names: string[] = [];
   try { names = await readdir(evidenceDir); } catch { return []; }
   const out: unknown[] = [];
   for (const name of names.sort()) {
-    const buf = await readIfFile(join(evidenceDir, name, 'manifest.json'));
+    const buf = await readRunMember(join(evidenceDir, name), EVIDENCE_FILES.manifest);
     if (!buf) continue;
     try {
-      const m = JSON.parse(buf.toString('utf8')) as Record<string, unknown>;
+      const m = JSON.parse(new TextDecoder().decode(buf)) as Record<string, unknown>;
       out.push({ dir: name, manifest: m });
     } catch (e) {
       out.push({ dir: name, broken: true, error: (e as Error).message });
@@ -249,9 +269,18 @@ export async function startServer(o: ServeOptions = {}): Promise<RunningServer> 
 
     const ev = /^\/evidence\/([^/]+)\/(.+)$/.exec(p);
     if (ev && req.method === 'GET') {
-      const abs = resolveEvidence(evidenceDir, decodeURIComponent(ev[1]!), decodeURIComponent(ev[2]!));
+      const runId = decodeURIComponent(ev[1]!);
+      const member = decodeURIComponent(ev[2]!);
+      // 白名单这一关照旧由 resolveEvidence 把（它同时管 runId 的保留段与成员名，
+      // 判据与 report.html 那一侧同族）。**过了白名单不等于磁盘上就有**：
+      // `artifacts/<sha>` 只在 evidence.zip 里（写侧刻意不散装再写一份，
+      // 理由在 store 的 writeEvidenceMembers），所以真正回答这个请求的是
+      // readRunMember —— 它先看散装那份，没有再进包里。
+      // 这一格改前只读磁盘文件，于是**报告里每一个证据链接都是 404**，
+      // 而 resolveEvidence 的单测全绿（它测的是"这个名字允许被读"，不是"读得到"）。
+      const abs = resolveEvidence(evidenceDir, runId, member);
       if (!abs) return text(res, 404, 'not found');
-      const buf = await readIfFile(abs);
+      const buf = await readRunMember(join(evidenceDir, runId), member);
       if (!buf) return text(res, 404, 'not found');
       const ext = abs.slice(abs.lastIndexOf('.'));
       return res.writeHead(200, {
