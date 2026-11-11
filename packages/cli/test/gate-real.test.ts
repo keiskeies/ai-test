@@ -91,6 +91,42 @@ test('容器传递子步骤的失败时**不重复计数**：一次循环失败�
   assert.match(g.said, /1 个断言失败/, `叶子有同状态结论时容器那份不该再数一遍。实际：${g.why}`);
 });
 
+test('parallel 把一支 error 折叠成容器 fail：形状真的存在，只是退出码仍由那条 error 决定', async () => {
+  /*
+   * 这条测试是**被自己的注释逼出来的**。gate.ts 与 gate.test.ts 里从前都写着
+   * "orphanFails 这个分支在现在的引擎下是空集"，理由有两串，本轮逐条实测后**全不成立**
+   * （详见 gate.ts 里 orphanFails 那段与 gate.test.ts 里那条 fixture 的注释）：
+   *  - "RunAborted 那条路会在外层 catch 追加 `__run__` 的 error 叶子" —— 不追加
+   *    （那句 push 外面套着 `if (!aborted)`），而且那条路上容器压根没记结论；
+   *  - "每一处容器 fail 旁边都有一条替它背书的叶子 fail" —— parallel 的收尾合并
+   *    不看那一支是 fail 还是 error，一律记 `status:'fail'`。
+   *
+   * 所以**判据本身要修的是"为什么这段代码存在"这句话**，不是退出码。
+   * 这条测试钉两件事，缺一不可：
+   *  1. RUNTIME 而不是 TEST_FAILED —— 今天决定退出码的是叶子那条 error（`errors.length`
+   *     那一段先返回）。这一条钉住"红是红的"，也钉住"红的原因"；
+   *  2. 理由里点名 boom 而**不点名** p0 —— 因为 p0 那份 fail 是被 orphanFails 那一段
+   *     数的，而那一段今天轮不到发言。要是哪天有人把两段返回顺序换一下，
+   *     这条会红，逼他重新回答"这个码是谁给的"，而不是让解释悄悄失效。
+   * 只钉第 1 条不够：码不变而原因变了，正是这类"注释与实现分家"最常见的发生方式。
+   */
+  const g = await run1(scen([
+    seed(200),
+    {
+      id: 'p0', kind: 'parallel', maxConcurrency: 2, failFast: false,
+      steps: [
+        okAssert('c0'),
+        { id: 'boom', kind: 'assert', against: '$nope', jsonPath: { $: { eq: 1 } } } as StepDraft,
+      ],
+    } as StepDraft,
+  ]));
+  assert.equal(g.code, EXIT.RUNTIME, `叶子那条 error 先决定退出码。实际：${g.why}`);
+  assert.match(g.said, /boom/, `理由里要点名真正没测成的那一步。实际：${g.said}`);
+  assert.doesNotMatch(g.said, /控制流步骤自己报失败/,
+    `p0 那份 fail 今天轮不到发言（先被 RUNTIME 分支返回）。真点名了说明两段返回的顺序或判据变了，`
+    + `要重新确认"这个码是谁给的"。实际：${g.said}`);
+});
+
 test('triage 只降级"断言过严"，不降级"容器压根没跑到子步骤"', async () => {
   const g = await run1(scen([seed(200), okAssert('c0'), racingPair()], { tags: ['triage'] }));
   assert.notEqual(g.code, EXIT.OK, `带 triage 的场景不能因为"标签降级"而什么都没验还拿 0。实际：${g.why}`);

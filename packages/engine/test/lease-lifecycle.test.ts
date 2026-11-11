@@ -207,22 +207,31 @@ test('第二个 device 步先归还前一台（改动前是裸赋值，前一台
 });
 
 /*
- * ── parallel 的分支共享同一个 stepCtx，所以它们也共享那**一个**租约槽 ──────
+ * ── parallel 的分支**各自一个租约槽**（改前是共享一个） ─────────────────────
  *
- * 这条测试是先写失败、后改代码的（本轮此前我在 docs/15 §3.1 里写的是
+ * 这一段的小标题从前写的是「分支共享同一个 stepCtx，所以它们也共享那**一个**租约槽」，
+ * 那是**改动前**的事实，而下面几条测试断的已经是改动后的行为 —— 标题留在旧事实上，
+ * 读的人会以为这几条测试在钉一个"共享"的语义（正好与实现相反）。
+ *
+ * 这条测试是先写失败、后改代码的。本轮此前我在 docs/15 §3.1 里写的是
  * "`parallel` 那一支今天压根不共享 `stepCtx`，因为 `runStep(c, …, branch, branchWindow)`
  * 里没有 stepCtx 参数" —— **那句是错的**，错在"从调用参数表推结论"：
- * `runStep` 是 `runScenario` 内部的闭包（interpreter.ts:426），它读的 `stepCtx`
- * 来自**外层作用域**而不是形参，所以"没有形参"根本推不出"不共享"。
- * 实测（`.scratch/probe-parallel-lease.mts`）：租约在 setup、parallel 两支各一个裸 tap
+ * `runStep` 是 `runScenario` 内部的闭包（interpreter 里 `const runStep = async (…)` 那一行），
+ * 它读的 `stepCtx` 来自**外层作用域**而不是形参，所以"没有形参"根本推不出"不共享"。
+ * 实测（`.scratch/probe-parallel-lease.mts`，改动前）：租约在 setup、parallel 两支各一个裸 tap
  * → 调用序 `lease → perform → perform → release`，两支**都跑通了**。
- * 共享本身是合理的（两支用同一台设备，符合"一个场景一台"的直觉），
+ *
+ * 那时候"共享"看着还挺合理（两支用同一台设备，符合"一个场景一台"的直觉），
  * 但它让上面那条"第二个 device 步先还前一个"的修法在并发下失效 ——
  * 两个 device 步并发跑，都看到"手上已有租约"，于是各自还掉**同一个** id，
- * 而自己新拿的那台**谁都不还**。实测（`.scratch/probe-parallel-race.mts`）：
+ * 而自己新拿的那台**谁都不还**。实测（`.scratch/probe-parallel-race.mts`，改动前）：
  *   lease 2 次、release 1 次、收尾在手上 1 台，而报告是 `p:pass`、整场 pass。
  * **一份全绿的报告漏掉一台真机**，这在设备农场里是持续累积的资源泄漏，
  * 而且没有任何一行字说它漏了 —— 与本仓那一族"看起来有防护，实际漏一个"同形。
+ *
+ * 现在每支一个 `newLeaseSlot(slot.lease)`（ interpreter 的 parallel 分支里那一行）：
+ * 借来的那台照旧看得见（`owns: false`，不还），分支自己申请的在**分支结束**时还。
+ * 于是"共享"这件事在语义上被取消 —— 下面那条"裸 tap 恒为 error"就是它的直接后果。
  */
 
 /** 带延迟的设备农场：`inflight()` 是"拿走了还没还"的台数，用来抓泄漏本身 */

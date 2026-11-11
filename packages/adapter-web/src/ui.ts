@@ -69,7 +69,8 @@ export interface WebAdapter {
   /**
    * 在被测页里求值。端口（UiExec）上**刻意没有**这一项：
    * IR 里唯一像"执行代码"的步骤是 `script`，而引擎直接拒掉它
-   * （interpreter.ts:917「沙箱未实现；它会绕过静态闸」）。
+   * （interpreter 的 `dispatch` 里 `script` 那一支，摘要原文是
+   * 「script 节点在 P0 被禁用（沙箱未实现；它会绕过静态闸）」）。
    * 如果 UiExec 上挂一个 eval，引擎就能把 script 步骤接上来 ——
    * 那等于 adapter 提供了一条让"沙箱未实现"这句判断作废的旁路，
    * 而静态闸从此管不到页面里跑了什么。所以它只挂在 adapter 上，**不在端口上**。
@@ -267,8 +268,8 @@ export async function createWebAdapter(opts: WebAdapterOptions = {}): Promise<We
           const id = await ctx.saveArtifact('screenshot', shot, stepId);
           /*
            * **这里原本还自己 emit 了一条 artifact.saved，删掉了。**
-           * 引擎的 ctxBase.saveArtifact 内部已经发过一条（interpreter.ts:237），
-           * 而它带的是 `data.id`；我那条写的是 `data.artifactId`。
+           * 引擎的 ctxBase.saveArtifact 内部已经发过一条（interpreter 的 `ctxBase.saveArtifact`
+           * 里那句 `emit({ kind: 'artifact.saved', … })`，它带的是 `data.id`）；我那条写的是 `data.artifactId`。
            * 后果不是"多一条日志"：evidence.ts 的兜底枚举读的是 `data.id`，
            * 所以我那条**永远不会被读到** —— 它看起来在做证据归属，实际什么都没做，
            * 而真正的归属靠引擎那条兜住了。写侧发一种字段名、读侧认另一种，

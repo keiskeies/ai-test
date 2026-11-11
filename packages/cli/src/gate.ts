@@ -142,13 +142,29 @@ function gateAfterRunCore(i: GateInput): GateDecision {
    * **容器自己下的结论**（不是把子步骤的结论往上递的那一份）。
    *
    * 容器的 fail/error 有两种来源，退出码必须区别对待：
-   *  - **传递**：`runChildren` 遇到子步骤 fail/error 时 `return { status: r.status, ... }`
-   *    （interpreter.ts:320-324），parallel 分支失败同理（:502-505）。这时**叶子那条
-   *    结果也在 results 里**，把它算第二遍就是"一次循环失败数出 N 条失败"——
+   *  - **传递**：`runChildren` 遇到子步骤 fail/error 时 `return { status: r.status, … }`
+   *    （interpreter 的 `runChildren` 里 `if (r.status === 'fail' || …)` 那一段）。
+   *    这时**叶子那条结果也在 results 里**，把它算第二遍就是"一次循环失败数出 N 条失败"——
    *    上面那份 leaves 过滤存在的唯一理由，`gate.test.ts` 里 "1 个断言失败" 那条钉的就是它。
-   *  - **自己下的**：容器压根没跑到子步骤。`parallel` 撞名被运行时闸拒（error/case-stale）、
-   *    `if` 的 condition 表达式求值抛错、`forEach` 的 items 不是可迭代对象 ——
-   *    这三种都是"容器记了一条结论，而**没有任何一条叶子结论替它背书**"。
+   *  - **自己下的**：容器压根没跑到子步骤。实测能用真 IR 造出来的有三种：
+   *    `parallel` 两支写同一个变量名（被 `parallelHazards` 那道运行时闸拒，error/case-stale）、
+   *    `forEach` 的 `items` 求值为 undefined（error/case-stale）、
+   *    `if` 的 `condition` **语法错**（`'1 +'` => ExprError => 容器 error/env-unavailable）。
+   *    三者都是"容器记了一条结论，而**没有任何一条叶子结论替它背书**"。
+   *
+   * ⚠ 这一段**从前那三条本轮逐个重造过，两条要收窄**（保留原措辞的记录是因为
+   * 它们都长得像对的，下一个人很可能照字面又写回去）：
+   *  - 「`parallel` 撞名」—— 闸的判据从来是**同名写**而不是步骤 id 撞名，
+   *    实测两支同 id 不同名时照跑、容器 pass。
+   *  - 「`if` 的 condition 表达式求值抛错」—— 成立但判据要写准：
+   *    `condition: '$nope.deep == 1'` 跑出来是容器 **pass**（未定义按假值走 else），
+   *    只有真的语法错才给 error。
+   *  - 「`forEach` 的 `items` 不是可迭代对象」—— **不成立**，`docs/08` 早就推翻过一次，
+   *    而这句话在本文件里一直没人回来同步。实测 `items` 指向一个已定义的数（`$notList`，
+   *    值为 5）时容器是 **pass**、摘要写"迭代 1 次"：`iterItems` 只对 `undefined` 抛，
+   *    其余交给 `toIterable`，而它对标量给 `[v]`（那个 `[v]` 在别处是对的语义 ——
+   *    响应里的可选数组）。"标量该不该被当成一项迭代"是个**没做过的判断**，
+   *    已作为未决项登记在 `docs/08`，不在本段范围。
    *
    * 第二种以前**完全进不了退出码**（本文件此前的行为，实测见 test 里那三条新用例）：
    * parallel 被闸拒 + 两条会过的断言 => 退出码 **0**，附一句"2 个断言全部通过。"
@@ -157,11 +173,27 @@ function gateAfterRunCore(i: GateInput): GateDecision {
    * "叶子有同状态结论"时两条路径给出的退出码本来就相同（error 优先于 fail 的
    * 优先级对传递与不传递一致），区别只出现在传递时**不重复计数**这一点上。
    *
-   * fail 与 error 一视同仁是**规则好陈述**的取舍（"容器结论只在没有叶子替它背时计入"），
-   * 实测只有 error 那条路径能用真实 IR 造出来：fail 型只在 RunAborted 从 parallel
-   * worker 里逃出来时才出现（interpreter.ts:504），而那条路径会在外层 catch 里
-   * 追加 `__run__` 的 error 叶子，退出码已经是 RUNTIME。留对称的另一半是为了
-   * 不让人以后加容器 kind 时来猜"fail 为什么不算"。
+   * ── orphanFails 这一支：形状造得出来，但永远轮不到它发言 ────────────
+   * 这一段**从前写的是**「fail 型只在 RunAborted 从 parallel worker 里逃出来时才出现，
+   * 而那条路径会在外层 catch 里追加 `__run__` 的 error 叶子，退出码已经是 RUNTIME」，
+   * 并据此说 orphanFails 是"今天不可达的兜底"。**两句都是错的**，本轮实测：
+   *  - RunAborted 那条路**不追加** `__run__`（那句 push 写的是 `if (!aborted)`），
+   *    而且 parallel 容器**压根没记结论** —— 分支结果还没收完就从 `dispatch` 抛走了。
+   *    所以它既不是容器 fail 的来源，也没有 error 叶子替它兜。
+   *  - 容器 fail **有另一个真来源**：parallel 的收尾合并把"有分支没成"一律记成
+   *    `status: 'fail'`（interpreter 的 `parallel` 分支里 `并行分支中有失败` 那一句），
+   *    **不管那一支是 fail 还是 error**。于是 `ok:pass + boom:error` 这种场景给出的就是
+   *    「容器 fail，叶子只有 error、一条 fail 都没有」—— orphanFails **命中**。
+   *
+   * 那它今天为什么仍然从没决定过退出码？因为**上面那段 `errors.length || orphanErrors.length`
+   * 先返回**：能让 orphanFails 命中的场景必然带一条叶子 error（parallel 是唯一把
+   * error 折叠成 fail 的容器 —— if/forEach/while 都是原样转递 `runChildren` 的状态），
+   * 于是先走 RUNTIME。**退出码始终是红的，这一点没变**，变的是"为什么红"的解释。
+   * 之所以仍要把 orphanFails 写全（而不是删掉当它多余）：判据要对**所有能进来的输入**
+   * 成立。今天兜住它的是"两条返回的先后顺序"，那是实现细节而不是设计 ——
+   * 谁把这两段的顺序换一下、或者以后加一个不产生叶子 error 的容器 kind，
+   * 这一支立刻变成唯一决定退出码的那一支。留对称的另一半也是为了
+   * 不让人以后来猜"fail 为什么不算"。
    */
   const isContainer = (r: StepResult) => CONTAINER_KINDS.includes(r.kind);
   const orphanErrors = errors.length ? [] : report.results.filter((r) => isContainer(r) && r.status === 'error');
@@ -458,7 +490,8 @@ function scopeConclusions(sc: Scope): {
  *
  * 为什么不按 `kind === 'assertLlm'` 一律排除：assertLlm 上有 `gatePolicy`
  * （`ir/src/asserts.ts`，默认 report-only），显式写 `"blocking"` 是**文档化的门禁 opt-in**
- * （要 UI 二次确认），引擎侧也确实让它判"否"时返回 fail（`assertions.ts:184`）。
+ * （要 UI 二次确认），引擎侧也确实让它判"否"时返回 fail
+ * （`assertions.ts` 的 `evalLlmAssert` 里 `if (gate === 'blocking')` 那一句）。
  * 按 kind 一刀切会把那个 opt-in 悄悄作废 —— 人显式要求"这条进门禁"，
  * 门禁说"你没进"，而现象是"我加了 blocking 还是不拦"，比不加还难查。
  *

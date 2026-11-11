@@ -155,16 +155,31 @@ test('容器 error 且叶子也有 error 时只数一次（orphan 判据反过�
   assert.match(d.reasons.join('\n'), /1 个步骤\*\*出错\*\*/, `容器那条是传递上来的，不该再数一遍。实际理由：${d.reasons.join(' / ')}`);
 });
 
-test('容器自己报 fail 且没有叶子替它背 => TEST_FAILED（引擎目前造不出这个形状，所以手写 fixture）', () => {
-  // **为什么这条用手工 fixture 而不是跑真引擎**（不是偷懒，要说清）：
-  // 逐个查过容器的 fail 是从哪儿来的 —— runChildren 把子步骤的 fail 原样往上递
-  // （interpreter.ts:320-324），forEach/while 转递 runChildren 的状态，parallel 的
-  // fail 只从某一条**已被记录的分支结果**里取（:502-505），RunAborted 那条路径则会在
-  // 外层 catch 里再追一条 `__run__` 的 **error** 叶子。所以**每一处容器 fail 旁边
-  // 都有一条替它背书的叶子 fail** —— orphanFails 在现在的引擎下是**空集**。
-  // 那这个分支是不是白写？不是：它是"以后加了新容器 kind / 改了递送方式"时的兜底，
-  // 而 gate 是纯函数，判据该对**所有能进来的输入**成立，不该只对"今天恰好能产出的那些"成立。
-  // 但**必须写明白它当前不可达**，否则下一个人会拿它当"引擎真会这样"的证据。
+test('容器自己报 fail 且没有叶子 fail 替它背 => TEST_FAILED（手工 fixture；真引擎能造出这个形状，见下面那段）', () => {
+  /*
+   * **这条从前写的是「引擎目前造不出这个形状，所以手写 fixture」，并给了一串理由。
+   * 那串理由本轮实测后全部不成立**，逐条记在这里（结论本身不变：还是 TEST_FAILED，
+   * 所以这个 fixture 的断言一条没改；改的是"为什么用 fixture"这句话）：
+   *  - 「runChildren 把子步骤的 fail 原样往上递，forEach/while 转递 runChildren 的状态」
+   *    —— 这句对，但它只覆盖 sequence/if/switch/forEach/while/repeat，
+   *    **漏了 parallel 不走 runChildren**（它有自己那套 worker 池 + 收尾合并）。
+   *  - 「parallel 的 fail 只从某一条**已被记录的分支结果**里取」—— 取是取了，
+   *    但**不看那一支是 fail 还是 error**：`并行分支中有失败` 那一句一律记 `status:'fail'`。
+   *  - 「RunAborted 那条路径会在外层 catch 里再追一条 `__run__` 的 error 叶子」——
+   *    **不追**。那句 push 外面套着 `if (!aborted)`，而 RunAborted 恰恰 aborted 为真；
+   *    而且那条路上 parallel 容器**压根没记结论**（分支还没收完就从 dispatch 抛走了），
+   *    所以它连"容器 fail"都不是。
+   *
+   * 于是这个形状**能用真 IR 造出来**（实测，探针 `.scratch/probe-orphan-gate2.mts`，
+   * 结论已由下面这条 permanent 测试接管）：parallel 两支，一支断言会过、
+   * 一支 `against: '$nope'`（跑不起来 => 叶子 error）。得到
+   * `叶子=ok:pass,boom:error` + `容器=par:fail`，orphanFails 命中 `[par]`。
+   *
+   * 那 fixture 还要不要留？**留**，但角色变了：它钉的是"gate 这个纯函数对这个输入
+   * 给什么码"，与引擎今天能不能产出无关（判据该对所有能进来的输入成立，不是只对
+   * 今天恰好能产出的那些）。真引擎那条端到端的钉法另开一条测试放在下面，
+   * 因为它要防的是**另一件事** —— "引擎以后再也不会这样了"这种说法本身会不会烂。
+   */
   const d = gateAfterRun({
     scenario: scen(),
     report: rep([

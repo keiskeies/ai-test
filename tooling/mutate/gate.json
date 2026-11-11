@@ -129,6 +129,13 @@
       "anchor": "    ? `${ownCount} 条断言全部通过${softTail(nonConclusive.filter((n) => !n.from))}${childNote}`",
       "replace": "    ? `${ownCount} 条断言全部通过${''}${childNote}`",
       "testFile": "packages/cli/test/gate-real.test.ts"
+    },
+    {
+      "label": "orphanFails 那段挪到 error 判定之前（今天保护它的只是两个 return 的先后，这条把它换掉）",
+      "file": "packages/cli/src/gate.ts",
+      "anchor": "  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
+      "replace": "  // 变异：把下面那段 orphanFails 整块**挪到 error 判定之前**（等价于调换两段返回的顺序）。\n  if (orphanFails.length) {\n    reasons.push(`${orphanFails.length} 个控制流步骤自己报失败但没有任何断言结论：${orphanFails.map((r) => r.stepId).join('、')}。`);\n    reasons.push('这类失败**不因 triage 降级**：triage 降级的是\"断言过严\"，而这里是\"压根没断言到\"。');\n    return { code: EXIT.TEST_FAILED, reasons, refused: false, suppressedFails: suppressed, attention };\n  }\n  if (errors.length || orphanErrors.length) {\n    const all = [...errors, ...orphanErrors];",
+      "testFile": "packages/cli/test/gate-real.test.ts"
     }
   ]
 }
