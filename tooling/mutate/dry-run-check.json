@@ -1,0 +1,108 @@
+{
+  "_comment": [
+    "编辑器「校验」那条路的 **dryRun 那一半**：判据在 `packages/engine/src/dryrun.ts`，",
+    "屏幕上那几句话在 `packages/web/src/check-lines.ts`，载体是新建的两份测试",
+    "（`packages/web/test/check-lines.test.ts` 纯 node；`dry-run-check.test.ts` 前半 node、后半真浏览器）。",
+    "",
+    "## 这一批打的是一类**此前完全没载体**的东西",
+    "`missingInputs` 那个判据是三个条件的与式（`required` / `!(name in inputs)` /",
+    "`default === undefined`），改前全仓**零断言** —— 三个条件里删掉任何一个，",
+    "`npm test` 一条都不会红。M1/M2/M3 各拆一个条件，M4 干脆把整个 dry 那一半从",
+    "`checkIr` 里摘掉。**一个三条件的与式，只测正向那一格等于测了 1/3。**",
+    "M4 那条尤其值得跑：`app.ts` 两处消费方都是可选链，**少了半份读数会被读成",
+    "'这半份没问题'**，而静态闸那枚徽章照绿（实测 `.scratch/probe-dry-absent.mts`）。",
+    "",
+    "## 为什么 testFile 分成两份",
+    " · M1–M4 打**判据**（`missingInputs` 该给谁、那一半在不在），挂 `dry-run-check.test.ts`；",
+    " · M5–M8 打**屏幕上那句话的范围**（一句话不许承诺它没覆盖的那一查），挂 `check-lines.test.ts`。",
+    "合成一份 testFile 的话，一条变异红了**看不出是判据坏还是措辞坏** ——",
+    "与 target-sources.json / wait-world-lint.json 分两份是同一个理由。",
+    "",
+    "## 这一批**没有** expect=equivalent 的条目，而这件事本身值得记一次",
+    "M5 我一开始标成了 equivalent，理由是'那句改回来的文本与改前的旧代码逐字相同'。",
+    "那是**用错了档位**：等价讲的是'不改变当前程序的可观测行为'，而屏幕上那几个字",
+    "就是可观测行为；'与历史一致'是 git 层的事实，'与当前等价'是行为层的事实。",
+    "标错的后果很具体：那条红了会被记成'测试在钉实现细节'，于是有人去删测试，",
+    "而真相是那句范围声明掉了、**该修实现**。一个假标签会把一次正确的红劝退成一次错误的删除。",
+    "",
+    "## 为什么 spec 顶层写 build:false",
+    "同包 case（`check-lines.ts` × `check-lines.test.ts`）不需要 dist 参与，重建一次几分钟；",
+    "跨包那几条（`dryrun.ts` / `check.ts` 与被测测试不同包）由 `mustBuild()` 机器强制重建，",
+    "这份 spec 里的 build:false 关不掉它 —— 所以这里不是'我确认不用建'的口头声明。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "M1 missingInputs 不再要求 required（可选输入被说成必填）",
+      "file": "packages/engine/src/dryrun.ts",
+      "anchor": "  const missingInputs = scenario.inputs.filter((p) => p.required && !(p.name in inputs) && p.default === undefined).map((p) => p.name);",
+      "replace": "  const missingInputs = scenario.inputs.filter((p) => !(p.name in inputs) && p.default === undefined).map((p) => p.name); // 变异 M1：丢掉 required 那一半",
+      "testFile": "packages/web/test/dry-run-check.test.ts",
+      "_why": "屏幕会说**缺必填输入**而那个参数压根是可选的。人会去传一个可选参数、或给一个本来不用填的参数补 default —— 两个动作都是在**修一个不存在的问题**，而唯一说真话的地方（IR 里那个 `required:false`）屏幕上看不见。**为什么它属于这份 spec**：判据三条件之一，与 M2/M3 各拆一个，方向互不重叠。",
+      "_measured": "实测（驱动 8/8 抓到 / 0 未抓到 / 0 没跑成）。红的是新加的那条反向对照「**不该点名的两种输入**」，`# pass 7 / # fail 1` —— **只红那一条**（`.scratch/measure-m1-m5-reds.py` 量全部红，驱动只打第一条），而正向那条「必填输入缺失被点名」**照绿，这符合预期**：M1 只让**不该报的**报出来，正向那一格行为没变。**一条变异只让分岔那一格红，红数不是判据**。"
+    },
+    {
+      "label": "M2 missingInputs 不再看调用方给没给（恒报）",
+      "file": "packages/engine/src/dryrun.ts",
+      "anchor": "  const missingInputs = scenario.inputs.filter((p) => p.required && !(p.name in inputs) && p.default === undefined).map((p) => p.name);",
+      "replace": "  const missingInputs = scenario.inputs.filter((p) => p.required && p.default === undefined).map((p) => p.name); // 变异 M2：不看 inputs 里有没有",
+      "testFile": "packages/web/test/dry-run-check.test.ts",
+      "_why": "填了也白填：这一栏变成恒报，而恒报的终点是**大家把它关掉**（本仓对误报代价的论证写在 `--force` 那一条）。与 M1 的分别不是'另一个条件'而是**另一个方向**：M1 让不该报的报，M2 让**报了又不许人消掉**。",
+      "_measured": "实测。红的是「给了那个输入，missingInputs 就**清空**」那条。恒报这一族只有**不断\"该不响\"就抓不到**；与 M1 是不同方向、不同测试：M1 中反向对照那条（不该报的报了），M2 中\"清空\"那条（报了不许消掉）。"
+    },
+    {
+      "label": "M3 missingInputs 不再承认 default（自带 default 的输入被点名）",
+      "file": "packages/engine/src/dryrun.ts",
+      "anchor": "  const missingInputs = scenario.inputs.filter((p) => p.required && !(p.name in inputs) && p.default === undefined).map((p) => p.name);",
+      "replace": "  const missingInputs = scenario.inputs.filter((p) => p.required && !(p.name in inputs)).map((p) => p.name); // 变异 M3：default 不算数",
+      "testFile": "packages/web/test/dry-run-check.test.ts",
+      "_why": "`default` 的意思就是'运行时自己补，不用传'。不认它，屏幕上那句「命令行传 --input userId=<值>」就把人支去传一个 **IR 已经写了怎么生成**的参数（本仓自己的 `examples/demo/cases/login.json` 正是这个形状：`userId` 必填 + `default:{gen:uuid}`）。**这一格是变异逼出来的**：写 M3 之前我没有一条测试覆盖 default 那一半，是先写下这条变异、跑了一次发现它没被抓到，才回头补那条反向对照的。",
+      "_measured": "实测。又是「**不该点名的两种输入**」那条，红在 default 那一格。**这条的来历比读数重要**：写它之前我压根没覆盖 default 那一半 —— 是先写下这条变异、跑了一次发现它**没被抓到**，才回头补那条反向对照的。三条件的与式我只测了 1/3，剩下 2/3 是变异替我数出来的（docs/14 §4.5 第 14 条）。"
+    },
+    {
+      "label": "M4 checkIr 不再交 dry 那一半（整半消失）",
+      "file": "packages/web/src/check.ts",
+      "anchor": "    dry: dryRun(scenario, inputs),",
+      "replace": "    // 变异 M4：这一行删掉 —— parsed/issues/canonical/irSha 全在，只有 dry 没了",
+      "testFile": "packages/web/test/dry-run-check.test.ts",
+      "_why": "本批**最想抓**的一条，因为它的坏法是静默的：`app.ts` 两处消费方写的是 `r.dry?.missingInputs ?? []` 与 `est ? … : []`，**可选链把'少了半份'读成'这半份没问题'** —— 屏幕上没有卡、没有预估行，而静态闸那枚徽章照绿。`dryRun` 就此退化成真正的零调用方，而**没有任何一条既有测试会红**（engine 侧那些测试直接 import `dryRun`，不经过 `checkIr`；`browser-modules.test.ts` 只断 lint 那半）。**docs/08 §3 的 (f)：有生产者、没有载体**，而它躲过了全仓唯一的校验路径测试。",
+      "_measured": "实测。红的正是本批最前面那条地板「合法 IR 的 dry 半**真的给出读数**」。**这一条是本批最想抓的**，因为它的坏法完全静默：`app.ts` 两处消费方都是可选链，缺了 dry 那一半会被读成\"这半份没问题\"（实测 `.scratch/probe-dry-absent.mts`：missing → `[]` ⇒ 卡片不画、estimate → `undefined` ⇒ 预估行不画、静态闸 error=0 ⇒ 徽章**绿**）。**既有测试一条都不红**：engine 侧那几份直接 import `dryRun` 不经过 `checkIr`，而 `browser-modules.test.ts` 只断 lint 那半 —— 它当时绿着，而它绿着的样子就像\"校验这条路径有载体\"。那是本仓\"一个不是旧实现的假负控\"的近亲：**载体存在，但不是这一块儿的载体**。"
+    },
+    {
+      "label": "M5 「静态闸通过」丢掉范围声明",
+      "file": "packages/web/src/check-lines.ts",
+      "anchor": "export const STATIC_GATE_PASS = '静态闸通过（与 CI 退码同口径）';",
+      "replace": "export const STATIC_GATE_PASS = '静态闸通过';",
+      "testFile": "packages/web/test/check-lines.test.ts",
+      "_why": "那半句话是本轮修那处说谎的判据本体：缺必填输入时屏幕上会同时出现「静态闸通过」与「缺少必填输入：who」，范围不点名，人就会拿那枚绿徽章去质疑一个绿的 CI —— 说谎的是屏幕，而**受损的是 CI 的可信度**。⚠ 这一条**差点被我标成 expect=equivalent，标错的原因值得记**：那句话与改前的旧代码逐字相同，我就顺手按'旧代码本来就是这样'判了等价。但等价的定义是**不改变当前程序的可观测行为**，而屏幕上这几个字就是可观测行为 —— '与历史一致'是 git 层的事实，'与当前等价'是行为层的事实。标成 equivalent 会让这条红了之后被记成'测试在钉实现细节'，于是有人去删测试，而真相是该修实现。**一个假标签会把一次正确的红劝退成一次错误的删除**（与 target-sources.json 那条'登记文本描述错字段'同族：结论写错了档位，比没写更坏）。",
+      "_measured": "实测：抓到，红「静态闸那句\"通过\"**点名自己的范围**」，`# pass 6 / # fail 1` —— **只红那一条**（同 M1，全部红用 `.scratch/measure-m1-m5-reds.py` 量的）。顺手 grep 到的那件事值得记：这个常量**全仓只有两处读** —— `check-lines.ts` 自己画那枚徽章那一行，以及 `check-lines.test.ts` 那条\"常量与实际画出来的那句必须同一串\"的守卫（防有人在页面里又拼一份）。**没有第三处**，所以那句范围声明一旦掉了，全仓就这一根针 —— 这也是它值得单独一条变异的原因。另外这条**差点被我标成 expect=equivalent**，错在哪写在 `_why`。"
+    },
+    {
+      "label": "M6 空态那句回到「引擎没报任何问题」（本轮就是来治这句假话的）",
+      "file": "packages/web/src/check-lines.ts",
+      "anchor": "  '静态闸这一查没报任何问题（输入完备性看上面那张卡）。注意下面这一行 —— 还有一查在这里压根没跑。';",
+      "replace": "  '引擎没报任何问题。注意下面这一行 —— 有一查在这里压根没跑。';",
+      "testFile": "packages/web/test/check-lines.test.ts",
+      "_why": "把本轮改掉的那句假话**原样装回去**。`dryRun` 也在 `@atest/engine` 里，所以缺必填输入时这句是假的，而它旁边那张卡正好写着「缺少必填输入：who」—— 屏幕上两句必须有一句说谎。**这条存在的价值是把'别把这句改回去'从一条 review 意见变成一条会红的命令**：这类句子没有结构性防护，只能这样钉（丑，但语义断言拦不住它一句一句漂回来）。",
+      "_measured": "实测：抓到，红「静态闸的**空态**那句不许说\"引擎没报任何问题\"」，fail=1。与 M7 **现在**落在不同测试上，而这一点是**改过之后才成立的**（见 M7 的 `_why`）。"
+    },
+    {
+      "label": "M7 卡片标题回到「引擎报错」（与 M6 同族，另一处独立漂）",
+      "file": "packages/web/src/check-lines.ts",
+      "anchor": "export const staticGateCardTitle = (n: number): string => `静态闸报错（${n} 条）`;",
+      "replace": "export const staticGateCardTitle = (n: number): string => `引擎报错（${n} 条）`;",
+      "testFile": "packages/web/test/check-lines.test.ts",
+      "_why": "与 M6 同族而**契约不同**：M6 是空态正文（只在零 finding 时出现），这条是卡片标题（**每次都在**）。`dryRun` 唯一报了一条 error 时那张卡显示「静态闸报错（0 条）」，那句是当着人、与旁边「缺少必填输入：who」一起被读的 —— 空态那条测试结构上够不到这一格。那张卡只画 `r.issues`（= 静态闸那一份），自称「引擎报错」就在覆盖面上说谎；而且当 `dryRun` 唯一报了一条 error 时它显示「引擎报错（0 条）」，与旁边那张「缺少必填输入」**直接打架**。",
+      "_measured": "实测：抓到，红「卡片标题也点名静态闸 —— 而且它在**有 finding 的时候**同样要说真话」，fail=1。⚠ **这条的 `_why` 我原先写的是\"与 M6 分得开、各钉一处才分得清是谁掉的\"—— 那句当时是假的**：第一版我把标题那句断言写进了**空态那条测试**内部，所以 M6 与 M7 施加之后，驱动打出来的第一条红**是同一个标题**（用 `.scratch/measure-m67-detail.py` 量出来的，临时脚本、clone 下来不存在，结论以这段文字为准）。**我没有把措辞改软来让那句话变成真的，而是把契约拆开**：标题每次都在屏幕上、空态那句只在零 finding 时出现，两者可见条件本来就不同；`dryRun` 唯一报了一条 error 时那句「静态闸报错（0 条）」是**当着人**被读的，而空态那条测试结构上进不去那个分支。拆完重量，M6 与 M7 才各红各的。顺序很重要：**先测出那句是假的，再动代码**。反过来做（先把话说软）本仓有名字，叫把一次正确的红劝退（与 §4.5 第 12、13 条同源）。"
+    },
+    {
+      "label": "M8 缺输入那枚徽章永不出现（回到只有一个结论）",
+      "file": "packages/web/src/check-lines.ts",
+      "anchor": "  if (missing.length) out.push({ kind: 'badge', status: 'fail', text: missingInputsBadge(missing.length) });",
+      "replace": "  // 变异 M8：这一句删掉 —— 缺必填输入时屏幕上仍只有一枚（绿的）静态闸徽章",
+      "testFile": "packages/web/test/check-lines.test.ts",
+      "_why": "本批**反向**那一半：M1–M3 打'报得对不对'，这条打'报了之后人看不看得见'。删掉之后判据、issues、卡片**全部照旧正确**，只有状态行那一枚没了 —— 只扫一眼角标的人会以为整个校验只有一个结论就走开，而他那条场景本地根本跑不起来。'绿徽章 + 红卡片'能接受，**'绿徽章 + 没有第二个信号'不能**。它与 M4 是一对：M4 是**半份读数消失**，M8 是**读数在而入口没了**。",
+      "_measured": "实测：抓到，红「缺必填输入时，状态行上**必须有两枚徽章**」。与 M4 成对而**不可互相替代**：M4 是**半份读数消失**（判据整个不在），M8 是**读数全在而入口没了**（`missingInputs`、`r.dry.errors`、卡片全部照旧正确）。M4 红在地板那条、M8 红在徽章那条，两份 testFile 各一根 —— 这正是把 testFile 拆成两份的回报：红了就知道坏的是判据还是显示。"
+    }
+  ]
+}

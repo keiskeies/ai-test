@@ -33,15 +33,20 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
    * `['condition','when','value','items']`），本轮删掉了。三个理由，从重到轻：
    *
    *  1. **它是 `lintScenario` 里那一查的重复实现**，而重复实现的坏法本仓已经数过很多轮：
-   *     两份清单**同时**坏、方向相反 —— 漏抄 `items` 与 `switch.value`（真表达式，
-   *     于是没有任何生产可达的闸管它们：lint 不查，而 dryRun 查 items 但它**零生产调用方**），
-   *     多抄一个 `value`（`act.value` / `input.value` 是 `ValueSchema`，
-   *     那是**要填进输入框的字面量**）。实测改前填 `价格 3$` 会得
+   *     两份清单**同时**坏、方向相反 ——
+   *     **漏抄** `items` 与 `switch.value`：它们是真 `ExprSchema`，而 lint 那一遍不查，
+   *     dryRun 查 items 而当时它没有生产调用方 ⇒ 写坏了没有任何生产可达的闸管。
+   *     ⚠ 这里从前还挂着半句**现在时**的「但它零生产调用方」，而 `web/src/check.ts`
+   *     落地之后那句就是假的（编辑器的「校验」按钮走 `checkIr` → `dryRun`）。
+   *     改成过去式而不是删掉：那段判断**在它写下的当天是对的**，删掉会让人以为
+   *     它从没被核对过。`dryRun` 今天的调用方与载体见本文件末那段与 docs/14 §5。
+   *     **多抄**一个 `value`：`act.value`（往输入框填的内容）/ `input.value`（ADB 按键入值）
+   *     是 `ValueSchema`，那是**要填进输入框的字面量**。实测改前填 `价格 3$` 会得
    *     「value 表达式错误：尾部有多余内容 "3"」，`EXPR_SYNTAX` 是 error 级。
    *  2. **它自己还多加了一个前置条件** `v.includes('$')`，于是 `nopefn(1)` / `1 +`
    *     这类不含 `$` 的坏表达式在这一侧**看不见**，而在 lint 那一侧看得见 ——
    *     同一个场景、同一个字段，两道闸给出不同答案。
-   *  3. 删掉之后**覆盖面一点没少**：上面第 24 行那句 `lintScenario(...)` 的返回值
+   *  3. 删掉之后**覆盖面一点没少**：本函数开头那句 `lintScenario(...)` 的返回值
    *     直接进 `issues`，而 lint 那一查走的是 `walk([...setup, ...body, ...teardown])`
    *     —— 与这份被删的 `visit` 完全同样的三层遍历（`CHILD_KEYS` 也含
    *     `steps/then/else/default` 与 `cases[].steps`）。

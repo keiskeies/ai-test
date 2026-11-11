@@ -687,8 +687,14 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     /*
      * 表达式语法。**字段名从 schema 派生**（`isExprField`），不是在这里抄一份：
      * 这一处从前手抄了 `condition` 与 `when` 两个，而 `forEach.items` / `switch.value`
-     * 同样是 `ExprSchema` —— 于是它们写坏了**没有任何生产可达的静态闸报**
-     * （`dryRun` 查 items，但它生产里零调用方）。明细 docs/14 §5 那一行。
+     * 同样是 `ExprSchema` —— 于是它们写坏了**没有任何生产可达的静态闸报**。
+     * ⚠ 这里从前还补了一句「`dryRun` 查 items，但它生产里零调用方」，**那句在
+     * `web/src/check.ts` 落地之后就是假的**（编辑器的「校验」按钮走 `checkIr` →
+     * `dryRun`，而那个页面挂在 `/app/`），本轮按实测改掉它。
+     * 那句话的坏处不是"过期"，是它读起来像一条核对过的口径，于是每个读到的人
+     * 都拿它当"这一侧不必测"的理由 —— **假注释会把测试欠账固定下来**。
+     * `dryRun` 现在有的载体：`packages/web/test/dry-run-check.test.ts` +
+     * `check-lines.test.ts` + 变异集 `mutate/dry-run-check.json`。明细 docs/14 §5。
      *
      * 与 `dryRun` 同问这一个判据，所以"lint 报了而 dry-run 不报"这种分叉
      * 结构上不存在（本轮之前就存在过，而且是双向的）。

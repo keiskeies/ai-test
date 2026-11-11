@@ -225,11 +225,15 @@ describe('静态闸：EXPR_SYNTAX 管路径本体，且管的字段从 schema �
        * （误报方向，同一条变异也靠它抓）。**别把这条当成本轮那处收敛的钉子** ——
        * 一条由构造成立的断言，钉不住任何回归。
        *
-       * 还有一条要说清：`dryRun` 在本仓**一个生产调用方都没有**
-       * （`grep -rn dryRun packages tooling` 除了自己的定义与这条测试只剩 `dist/` 的产物；
-       * 它的定位是"编辑器常驻面板 + Agent 的第三道闸"，而前端还没做）。
-       * `run --strict` 走 `lintScenario`，**不经过 dryRun**。所以本轮那处收敛在
-       * 生产里的实际受益方只有 lint 那半边。
+       * 还有一条要说清（**这一句本轮按实测改过**）：这里从前写的是
+       * 「`dryRun` 在本仓一个生产调用方都没有，而前端还没做」—— 那句在
+       * `web/src/check.ts` 落地之后就是假的。今天它有**一个**生产调用方：
+       * 编辑器那个「校验」按钮 → `checkIr` → `dryRun`（页面挂在 `/app/`）。
+       * 仍然成立的那一半是：`run --strict` 与 `atest lint` 走 `lintScenario`，
+       * **不经过 dryRun**，所以 CI 那侧的受益方仍然只有 lint 这半边；
+       * dryRun 这一侧的读者是**界面上那一张卡**（必填输入）与状态行那枚徽章，
+       * 载体是 `packages/web/test/dry-run-check.test.ts` 与 `check-lines.test.ts`。
+       * （Agent 那道闸——也就是 dryRun 设计里的第二个读者——今天还是没有。）
        */
       const l = lint(body);
       assert.equal(l.length > 0, d.length > 0, `${name}：lint ${l.length ? '报了' : '没报'} 而 dry-run ${d.length ? '报了' : '没报'} => 字段清单又分叉成两份了`);

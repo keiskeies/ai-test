@@ -22,6 +22,7 @@
  */
 import { CSS } from './styles.js';
 import { checkIr, GRAPH_NOT_AVAILABLE, type CheckResult } from './check.js';
+import { checkStatusLines, EMPTY_STATIC_GATE, missingInputHint, SECRET_ROUTE_HINT, staticGateCardTitle } from './check-lines.js';
 import { describeStatus, STATUS_ICON } from './status.js';
 import { newJobId, requestCancel, submitRun } from './run-job.js';
 import type { LintIssue } from '@atest/engine';
@@ -284,19 +285,19 @@ async function pageScenario(id: string): Promise<void> {
   void runCheck();
 }
 
-/** 校验状态行。**图缺失时说明"这一查没跑"**，否则"没报环"会被读成"查过、没有环" */
+/**
+ * 校验状态行。**这一格只画 `check-lines.ts` 给的那些句子**，不在这里拼字符串。
+ *
+ * 为什么判据性的句子要在纯模块里：浏览器测试在没有 Chrome 的机器上是 skip，
+ * 而 node:test 对全跳过的文件给 pass 0 / fail 0 / 退出码 0 —— 那种情况下
+ * "这几句话被守着"是假的。句子在 `check-lines.ts`，node 测句子，这里只测接线。
+ * 完整理由写在那个文件头上。
+ */
 function renderStatus(r: CheckResult): Node[] {
-  if (!r.parsed) return [h('span', { class: 'err-text mono', text: `IR 不合法：${r.parseError ?? ''}` })];
-  const errs = r.issues.filter((i) => i.level === 'error').length;
-  const warns = r.issues.filter((i) => i.level === 'warning').length;
-  const est = r.dry?.estimate;
-  return [
-    badge(errs > 0 ? 'fail' : 'pass', errs > 0 ? `${errs} 个 error` : '静态闸通过'),
-    ...(warns ? [badge('triaged', `${warns} 个 warn`)] : []),
-    ...(est ? [h('span', { class: 'mono dim', text: `约 ${est.steps} 步 · ${est.needsDevice ? '要设备' : '不要设备'} · 端 ${est.targets.join('/') || '—'}` })] : []),
-    ...(r.irSha ? [h('span', { class: 'mono dim', text: `irSha ${r.irSha.slice(0, 12)}…` })] : []),
-    ...(r.irShaError ? [h('span', { class: 'err-text mono', text: r.irShaError })] : []),
-  ];
+  return checkStatusLines(r).map((l) =>
+    l.kind === 'badge' ? badge(l.status, l.text)
+      : l.kind === 'error' ? h('span', { class: 'err-text mono', text: l.text })
+        : h('span', { class: 'mono dim', text: l.text }));
 }
 
 function renderIssues(r: CheckResult): Node[] {
@@ -304,7 +305,23 @@ function renderIssues(r: CheckResult): Node[] {
   const missing = r.dry?.missingInputs ?? [];
   const nodes: Node[] = [];
   if (missing.length) {
-    nodes.push(card('缺少必填输入', h('div', { class: 'row', children: missing.map((m) => h('code', { text: m })) })));
+    /*
+     * 卡片要说清**上哪儿填**，只点名变量名是不够的。
+     *
+     * 改前它只有一排 `<code>who</code>`，而这个人此刻站在编辑器前面，手边有
+     * 「运行」按钮 —— 他会以为点运行就能补上，而运行**永远不会**带上输入
+     * （`runIt` 不传 `inputs`，那一格还没做，已登记 docs/14 §5）。
+     * 所以这里给的是**今天真的能用**的那条路（CLI 的 `--input`），而不是含糊一句
+     * "请提供参数"。为什么不在这里放一个输入框：`/api/run` 今天把 inputs 拼成
+     * CLI 的 `--input k=v` 放进 argv，而 argv 会被 `ps aux` 与 CI 的命令日志收走 ——
+     * 那正是本仓对密钥立的那条纪律要挡的形状，界面上多一个"看起来随便填"的框
+     * 会把这条路径变成默认路径。修法与这条约束一起登记在 docs/14 §5。
+     */
+    nodes.push(card('缺少必填输入', h('div', { class: 'stack', children: [
+      h('div', { class: 'row', children: missing.map((m) => h('code', { text: m })) }),
+      h('div', { class: 'fix', text: missingInputHint(missing) }),
+      h('div', { class: 'fix', text: SECRET_ROUTE_HINT }),
+    ] })));
   }
   const issueRow = (i: LintIssue): HTMLElement => h('div', {
     class: 'issue', level: i.level,
@@ -317,10 +334,24 @@ function renderIssues(r: CheckResult): Node[] {
       ] }),
     ],
   });
+  /*
+   * 这一格只列 `r.issues`，所以空态那句话**必须点名它问的是哪一查**。
+   *
+   * 改前写的是「引擎没报任何问题」。而缺必填输入时 `r.issues` 是空的、
+   * `r.dry.errors` 里躺着一条 error —— 于是屏幕上"引擎没报任何问题"与上面那张
+   * 「缺少必填输入：who」同时出现，**两句里必须有一句在说谎**，而说谎的是卡片这句
+   * （`check.ts` 头上写着三查都在引擎里，`dryRun` 也是引擎）。
+   *
+   * 治法是**把那句收窄到它真的覆盖面**，而不是把 dry 那几条并进来：并的话要
+   * "两次 `lintScenario` 逐字一致"当显示层的隐式前提（`checkIr` 与 `dryRun`
+   * 各调一次），那条前提没东西守，一旦 ctx 分叉就是**同一件事画两行红字** ——
+   * 本仓为那种双报修过不止一次。那条 error 的载体本来就存在（上面那张卡 +
+   * 新加的那枚徽章），坏的是这一格的一句话与一枚徽章都没有，不是没有载体。
+   */
   const issueBody = r.issues.length === 0
-    ? h('p', { class: 'empty', text: '引擎没报任何问题。注意下面这一行 —— 有一查在这里压根没跑。' })
+    ? h('p', { class: 'empty', text: EMPTY_STATIC_GATE })
     : h('div', { children: r.issues.map(issueRow) });
-  nodes.push(card(`引擎报错（${r.issues.length} 条）`, issueBody));
+  nodes.push(card(staticGateCardTitle(r.issues.length), issueBody));
   nodes.push(h('div', { class: 'banner', kind: 'info', text: GRAPH_NOT_AVAILABLE }));
   nodes.push(card('canonical IR（与 CLI 侧 irShaOf 的输入同一串）', h('pre', { class: 'code', text: r.canonical ?? '' })));
   return nodes;

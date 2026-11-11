@@ -490,8 +490,10 @@ export type { WaitPredicate, LocatorSpec };
  *   `dryrun.ts` 抄了 `condition`、`when`、`value`、`items` 四个。
  * 两份**同时**坏，且坏的方向相反（都实测过，明细 docs/14 §5 那一行）：
  *  - **漏报**：`forEach.items` 与 `switch.value` 是真的 `ExprSchema`，而
- *    `lint` 一个都不查 —— 于是写坏了**没有任何生产可达的静态闸报它**
- *    （`dryRun` 查 items，但它生产里零调用方）。
+ *    `lint` 一个都不查 —— 于是写坏了**没有任何生产可达的静态闸报它**。
+ *    （这里从前写的是「`dryRun` 查 items，但它生产里零调用方」—— 那句在
+ *    `web/src/check.ts` 落地之后就是假的，本轮改掉；`dryRun` 今天的调用方与
+ *    载体见 `packages/web/test/dry-run-check.test.ts`。）
  *  - **误报**：`act.value` / `input.value` 是 `ValueSchema`，即**要填进输入框的
  *    字面量**，而 `dryRun` 把它当表达式喂给 `validateExpr`。改前实测
  *    （`.scratch/probe-value-field2.mts`）：`价格 3$` →
