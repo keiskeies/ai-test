@@ -1,0 +1,20 @@
+{
+  // 与 src 那份的唯一实质差别：测试要 node:test / node:assert，所以 types 里有 node。
+  //
+  // **注意这条例外只覆盖"测试跑在 Node 上"这件事**，不覆盖被测对象本身：
+  //  src/ 那份 tsconfig 的 types: [] 才是"前端能在浏览器里跑"的机制，
+  //  测试里 import node 模块不会让那条约束变松（lint-layers 的 exempt 也只豁免这一条）。
+  //
+  // 反过来说，有一类违例这个 tsconfig **抓不住**：src/ 里某文件悄悄用了
+  // `process.env`。src 那份 types: [] 会当场报，所以不需要在这里补。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "composite": false,
+    "types": ["node"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": ["test/**/*.ts"],
+  "references": [{ "path": "../ir" }, { "path": "../engine" }, { "path": "./" }]
+}

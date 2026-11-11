@@ -1,0 +1,20 @@
+{
+  // 前端这一层跑在浏览器里，所以：
+  //  - **types: []**（没有 node）—— 与 ir/engine 同一套纪律。这一层能 import 的
+  //    运行时依赖只有 @atest/ir 与 @atest/engine，而那两包本身被 lint-layers
+  //    拦住不许碰 node，所以"前端能跑在浏览器里"不是愿望，是被传染的性质。
+  //  - **lib 里有 DOM**：这是它区别于 engine 的唯一一处，也是它存在的目的。
+  //  - 产物**不经打包器**：服务端直接发 packages/web/dist/*.js，
+  //    浏览器靠 import map 解析 'zod' / '@atest/ir' / '@atest/engine'
+  //    （已实测：`.scratch/probe-browser-ir.mts`，浏览器里 lintScenario 真的报出了 issue）。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "../../.tsbuild/web.tsbuildinfo",
+    "types": [],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../ir" }, { "path": "../engine" }]
+}

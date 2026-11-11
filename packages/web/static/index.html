@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  前端唯一的 HTML 文档。它存在的理由是**只有一件事必须发生在 HTML 里**：
+  import map。浏览器解析裸名（'@atest/ir'、'zod'）只能在 import map 里教，
+  而 import map 必须在**任何模块图开始加载之前**就位 —— 所以它不能由 JS 注入。
+
+  除此之外这个文件故意什么都不做：
+   - 不写 <style>：全部样式在 src/styles.ts 里，由 app 注入。
+     多一条样式加载路径就多一条"哪一份生效"的歧义（docs/13 §6"三套真相"那一格）。
+   - 不写业务 DOM：页面结构是 TS，能被 typecheck，拼错 id 会在编译期红。
+   - 不引任何外部资源。本机无外网是事实，而"引了 CDN"在离线机器上的表现是
+     页面白屏且不报错 —— 那正是本平台最不能出现的那类失效（看起来在工作）。
+
+  静态根是 `packages/web/static/` 且**只放行 .html**（见 packages/server/src/files.ts）。
+  这一格里除了本文件什么都没有，所以"这一格能被读"不构成风险面。
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>atest · 测试平台</title>
+<script type="importmap">
+{
+  "imports": {
+    "zod": "/pkg/zod/index.js",
+    "@atest/ir": "/pkg/ir/index.js",
+    "@atest/engine": "/pkg/engine/index.js",
+    "@atest/web/": "/app/"
+  }
+}
+</script>
+<div id="root"></div>
+<noscript>
+  <p>这个页面需要 JavaScript —— 静态校验（IR 解析、lint、dry-run）跑的是浏览器里的
+     <code>@atest/engine</code> 本体，不是服务端另算的一份。</p>
+</noscript>
+<script type="module" src="/app/app.js"></script>

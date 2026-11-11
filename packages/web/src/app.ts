@@ -1,0 +1,339 @@
+/**
+ * 前端主体 —— 一个够小的 hash 路由 + 四个页面。
+ *
+ * ## 一条贯穿全文件的规矩：**不用 innerHTML**
+ *
+ * 页面上显示的每一段文字都来自三个不信任源：**用户的 IR**（里面能写任意字符串）、
+ * **被测系统的响应**（证据里那些）、**引擎的报错文本**。
+ * 用字符串拼 HTML 再塞进 innerHTML 的话，"这段文字里有个 `<script>`"就变成执行，
+ * 而防它不能靠"记得转义" —— 那是黑名单，靠每次想全。
+ *
+ * 所以这里的**唯一**建 DOM 通道是 `h()`/`txt()`：文本一律走 `textContent`，
+ * 结构走 `createElement`。**没有 innerHTML 这条通道**（除了 CSS 那一处，
+ * 那份 CSS 是我们自己写的常量，不是数据）。这样"某个字符串里有尖括号"
+ * 这个失败模式在这份代码里**没有入口**，而不是"目前没被用到"。
+ *
+ * ## 四页对应 docs/12 §3 的 B1 / B2（局部）/ C1 / C2（局部）
+ *
+ * docs/12 那句"P0 的 UI 应当故意简陋"是这里克制的全部依据：
+ * 场景编辑器只做"JSON + 引擎实时校验"，运行详情直接**链到 evidence 包里那份
+ * report.html**（零脚本、自包含、已在 CI 里跑过的那一份），不在前端重画一遍 trace。
+ * 重画会造出第二份"一次 run 长什么样"，而那份没有测试。
+ */
+import { CSS } from './styles.js';
+import { checkIr, GRAPH_NOT_AVAILABLE, type CheckResult } from './check.js';
+import { describeStatus, STATUS_ICON } from './status.js';
+import type { LintIssue } from '@atest/engine';
+import type { StepStatus } from '@atest/ir';
+
+type Route = { page: 'scenarios' } | { page: 'scenario'; id: string } | { page: 'runs' };
+
+function parseHash(): Route {
+  const h = location.hash.replace(/^#\/?/, '');
+  const [head, ...rest] = h.split('/');
+  if (head === 'scenario' && rest[0]) return { page: 'scenario', id: decodeURIComponent(rest.join('/')) };
+  if (head === 'runs') return { page: 'runs' };
+  return { page: 'scenarios' };
+}
+
+/* ═══ 建 DOM 的唯一通道 ═══ */
+function txt(s: unknown): Text { return document.createTextNode(String(s)); }
+
+interface Attrs {
+  class?: string;
+  text?: unknown;
+  href?: string;
+  /** 状态徽章用：值必须来自 IR 的 StepStatus，不能是页面自己编的词 */
+  status?: StepStatus;
+  level?: 'error' | 'warning';
+  kind?: 'error' | 'info';
+  pressed?: boolean;
+  current?: boolean;
+  colspan?: number;
+  id?: string;
+  on?: Partial<Record<'click' | 'input' | 'change', (e: Event) => void>>;
+  /** 允许给单个节点：`children: h(...)` 比 `children: [h(...)]` 少一层括号，
+      而少一层括号就少一次我数不清花括号的失败模式（本文件第一版就是这么炸的） */
+  children?: Node | readonly (Node | null | undefined | false)[] | null;
+}
+
+function h(tag: string, a: Attrs = {}): HTMLElement {
+  const el = document.createElement(tag);
+  if (a.class !== undefined) el.className = a.class;
+  if (a.text !== undefined) el.textContent = String(a.text);
+  if (a.href !== undefined) el.setAttribute('href', a.href);
+  if (a.status !== undefined) el.setAttribute('data-s', a.status);
+  if (a.level !== undefined) el.setAttribute('data-l', a.level);
+  if (a.kind !== undefined) el.setAttribute('data-k', a.kind);
+  if (a.pressed !== undefined) el.setAttribute('aria-pressed', String(a.pressed));
+  if (a.colspan !== undefined) el.setAttribute('colspan', String(a.colspan));
+  if (a.id !== undefined) el.id = a.id;
+  if (a.current === true) el.setAttribute('aria-current', 'page');
+  for (const [ev, fn] of Object.entries(a.on ?? {})) el.addEventListener(ev, fn);
+  if (a.children instanceof Node) el.appendChild(a.children);
+  else for (const c of a.children ?? []) if (c) el.appendChild(c);
+  return el;
+}
+
+/** 状态徽章：色（data-s → CSS）+ 图标 + 文字，三重编码一次凑齐 */
+function badge(status: StepStatus, extra?: string): HTMLElement {
+  const v = describeStatus(status);
+  return h('span', { status, class: 'badge', children: [h('span', { class: 'bi', text: STATUS_ICON[status] }), txt(extra ?? v.label)] });
+}
+
+function card(title: string, body: Node, head?: Node): HTMLElement {
+  return h('section', { class: 'card', children: [
+    h('div', { class: 'hd', children: [h('h2', { text: title }), h('span', { class: 'spacer' }), ...(head ? [head] : [])] }),
+    h('div', { class: 'bd', children: [body] }),
+  ] });
+}
+
+const main = document.getElementById('root')!;
+
+/* ═══ 顶栏与骨架 ═══ */
+function shell(content: Node): void {
+  main.replaceChildren(h('div', { class: 'shell', children: [topbar(), h('div', { class: 'body', children: [nav(), h('main', { class: 'main stack', children: [content] })] })] }));
+}
+
+function topbar(): HTMLElement {
+  return h('header', { class: 'topbar', children: [
+    h('span', { class: 'brand', text: 'atest' }),
+    h('span', { class: 'dim', id: 'project-line', text: '项目信息加载中…' }),
+    h('span', { class: 'grow' }),
+    // 密度切换常驻顶栏，且写进 localStorage 而不是发给服务端（docs/13 §7 U7：
+    // 「演示者自己切宽松，不影响别人日常视图」—— 那是个人设置，不是项目设置）
+    h('div', { class: 'seg', children: (['compact', 'standard', 'relaxed'] as const).map((d) =>
+      h('button', { text: DENSITY_LABEL[d], pressed: density() === d, on: { click: () => { setDensity(d); render(); } } })) }),
+    h('button', { class: 'btn', text: theme() === 'dark' ? '亮色' : '暗色', on: { click: () => { setTheme(theme() === 'dark' ? 'light' : 'dark'); render(); } } }),
+  ] });
+}
+
+const DENSITY_LABEL = { compact: '紧凑', standard: '标准', relaxed: '宽松' } as const;
+
+function nav(): HTMLElement {
+  const r = parseHash();
+  const link = (href: string, ic: string, label: string, active: boolean): HTMLElement =>
+    h('a', { href, current: active, children: [h('span', { class: 'ic', text: ic }), txt(label)] });
+  return h('nav', { class: 'nav', children: [
+    link('#/scenarios', '▤', '场景库', r.page === 'scenarios' || r.page === 'scenario'),
+    link('#/runs', '◷', '运行记录', r.page === 'runs'),
+  ] });
+}
+
+/* ═══ 偏好：localStorage。取不到就用默认，不弹窗不打断 ═══ */
+type Density = keyof typeof DENSITY_LABEL;
+function density(): Density {
+  const v = localStorage.getItem('atest.density');
+  return v === 'standard' || v === 'relaxed' ? v : 'compact';
+}
+function setDensity(d: Density): void { localStorage.setItem('atest.density', d); applyPrefs(); }
+function theme(): 'light' | 'dark' { return localStorage.getItem('atest.theme') === 'dark' ? 'dark' : 'light'; }
+function setTheme(t: 'light' | 'dark'): void { localStorage.setItem('atest.theme', t); applyPrefs(); }
+function applyPrefs(): void {
+  const el = document.documentElement;
+  el.setAttribute('data-density', density());
+  el.setAttribute('data-theme', theme());
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, init);
+  const text = await res.text();
+  try { return { __status: res.status, ...(JSON.parse(text) as object) } as T & { __status: number }; }
+  catch { return { __status: res.status, error: text } as unknown as T & { __status: number }; }
+}
+
+/** 通过率那类指标旁边**必须有绝对数字**（docs/13 §2：百分比单独出现会被误读） */
+function tallyLine(m: Record<string, unknown>): Node {
+  const t = (m.tally ?? {}) as Record<string, number>;
+  return h('span', { class: 'mono dim', text: Object.entries(t).filter(([, v]) => typeof v === 'number').map(([k, v]) => `${k}:${v}`).join('  ') || '无 tally' });
+}
+
+/* ═══ B1 场景库 ═══ */
+async function pageScenarios(): Promise<void> {
+  shell(h('div', { class: 'stack', children: [h('p', { class: 'muted', text: '加载中…' })] }));
+  const [proj, list] = await Promise.all([
+    api<{ irDir?: string; evidenceDir?: string; hasConfig?: boolean; error?: string }>('/api/project'),
+    api<{ items?: Array<Record<string, unknown>>; error?: string }>('/api/scenarios'),
+  ]);
+  const pl = document.getElementById('project-line');
+  if (pl) pl.textContent = proj.hasConfig ? `场景目录 ${proj.irDir ?? '?'} · 证据 ${proj.evidenceDir ?? '?'}` : '没找到 atest.json（用默认目录）';
+
+  const items = list.items ?? [];
+  const table = h('table', { children: [
+    h('thead', { children: h('tr', { children: ['文件', '场景 id', '名称', '端', '步骤', '冻结'].map((x) => h('th', { text: x })) }) }),
+    h('tbody', { children: items.length === 0
+      ? [h('tr', { children: h('td', { class: 'empty', children: [txt('场景目录里没有 .json 文件。先跑 '), h('code', { text: 'atest init' }), txt(' 与 '), h('code', { text: 'atest gen --doc <名>=<openapi.json> --write' })] }) })]
+      : items.map((it) => {
+        if (it.broken) return h('tr', { children: [h('td', { class: 'mono', text: String(it.file) }), h('td', { colspan: 5, class: 'err-text', text: `解析失败：${String(it.error)}` })] });
+        const targets = (it.targets ?? []) as string[];
+        return h('tr', { children: [
+          h('td', { class: 'mono dim', text: String(it.file) }),
+          // id 是**用户写的字符串**：走 textContent，永远不拼进 HTML
+          h('td', { children: h('a', { href: `#/scenario/${encodeURIComponent(String(it.id))}`, children: txt(it.id) }) }),
+          h('td', { text: String(it.name ?? '') }),
+          h('td', { class: 'mono dim', text: targets.join(' / ') || '—' }),
+          h('td', { class: 'num', text: String(it.steps ?? '') }),
+          h('td', { children: it.frozen ? badge('pass', '已冻结') : badge('triaged', '未冻结') }),
+        ] });
+      }) }),
+  ] });
+  shell(card(`场景库（${items.length}）`, table));
+}
+
+/* ═══ B2 场景编辑 + 引擎实时校验 ═══ */
+async function pageScenario(id: string): Promise<void> {
+  shell(h('div', { class: 'stack', children: [h('p', { class: 'muted', text: '加载中…' })] }));
+  const res = await fetch(`/api/scenario?id=${encodeURIComponent(id)}`);
+  const text = await res.text();
+  if (!res.ok) {
+    shell(h('div', { class: 'banner', kind: 'error', text: text }));
+    return;
+  }
+  const area = h('textarea', { class: 'mono', on: {}, children: [] }) as HTMLTextAreaElement;
+  area.value = text;
+  area.rows = 24;
+  area.spellcheck = false;
+  const out = h('div', { class: 'stack' });
+  const statusLine = h('div', { class: 'row' });
+
+  const runCheck = async (): Promise<void> => {
+    statusLine.replaceChildren(h('span', { class: 'muted', text: '引擎校验中…' }));
+    let r: CheckResult;
+    try { r = await checkIr(area.value); }
+    catch (e) {
+      // 引擎抛了 = 我们的 bug。红着说出来，不许兜成"你的 IR 有问题"
+      statusLine.replaceChildren();
+      out.replaceChildren(h('div', { class: 'banner', kind: 'error', text: `引擎抛了异常（这是本工具的 bug，不是你的用例）：${(e as Error).stack ?? String(e)}` }));
+      return;
+    }
+    statusLine.replaceChildren(...renderStatus(r));
+    out.replaceChildren(...renderIssues(r));
+  };
+
+  const runIt = async (): Promise<void> => {
+    const btn = h('button', { class: 'btn primary', text: '运行中…', pressed: false }) as HTMLButtonElement;
+    btn.disabled = true;
+    statusLine.appendChild(btn);
+    const r = await api<{ exitCode?: number; output?: string; error?: string }>('/api/run', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scenario: id }),
+    });
+    btn.disabled = false;
+    btn.textContent = '运行';
+    const code = r.exitCode;
+    statusLine.appendChild(h('span', { class: 'mono', text: `退出码 ${code ?? '?'}${r.error ? ` · ${r.error}` : ''}` }));
+    if (r.output) out.prepend(card('CLI 输出', h('pre', { class: 'code', text: r.output })));
+  };
+
+  shell(h('div', { class: 'stack', children: [
+    card(id, h('div', { class: 'stack', children: [
+      statusLine,
+      area,
+      h('div', { class: 'row', children: [
+        h('button', { class: 'btn', text: '校验（本地引擎）', on: { click: () => void runCheck() } }),
+        h('button', { class: 'btn primary', text: '运行', on: { click: () => void runIt() } }),
+        h('span', { class: 'dim', text: '校验在浏览器里跑 @atest/engine 本体；运行走服务端 → CLI（信号、门禁、证据、租约归还那条已接线的路）' }),
+      ] }),
+    ] }), h('a', { href: '#/scenarios', text: '← 场景库' })),
+    out,
+  ] }));
+  void runCheck();
+}
+
+/** 校验状态行。**图缺失时说明"这一查没跑"**，否则"没报环"会被读成"查过、没有环" */
+function renderStatus(r: CheckResult): Node[] {
+  if (!r.parsed) return [h('span', { class: 'err-text mono', text: `IR 不合法：${r.parseError ?? ''}` })];
+  const errs = r.issues.filter((i) => i.level === 'error').length;
+  const warns = r.issues.filter((i) => i.level === 'warning').length;
+  const est = r.dry?.estimate;
+  return [
+    badge(errs > 0 ? 'fail' : 'pass', errs > 0 ? `${errs} 个 error` : '静态闸通过'),
+    ...(warns ? [badge('triaged', `${warns} 个 warn`)] : []),
+    ...(est ? [h('span', { class: 'mono dim', text: `约 ${est.steps} 步 · ${est.needsDevice ? '要设备' : '不要设备'} · 端 ${est.targets.join('/') || '—'}` })] : []),
+    ...(r.irSha ? [h('span', { class: 'mono dim', text: `irSha ${r.irSha.slice(0, 12)}…` })] : []),
+    ...(r.irShaError ? [h('span', { class: 'err-text mono', text: r.irShaError })] : []),
+  ];
+}
+
+function renderIssues(r: CheckResult): Node[] {
+  if (!r.parsed) return [card('schema 报错', h('pre', { class: 'code', text: r.parseError ?? '' }))];
+  const missing = r.dry?.missingInputs ?? [];
+  const nodes: Node[] = [];
+  if (missing.length) {
+    nodes.push(card('缺少必填输入', h('div', { class: 'row', children: missing.map((m) => h('code', { text: m })) })));
+  }
+  const issueRow = (i: LintIssue): HTMLElement => h('div', {
+    class: 'issue', level: i.level,
+    children: [
+      h('span', { class: 'lv', text: i.level === 'error' ? '✗' : '!' }),
+      h('div', { class: 'spacer', children: [
+        h('div', { children: [h('span', { class: 'code', text: i.code }), ...(i.stepId ? [txt(` · ${i.stepId}`)] : []), txt(` ${i.message}`)] }),
+        ...(i.fix ? [h('div', { class: 'fix', text: `修法：${i.fix}` })] : []),
+        ...(i.doc ? [h('div', { class: 'doc', text: `依据：${i.doc}` })] : []),
+      ] }),
+    ],
+  });
+  const issueBody = r.issues.length === 0
+    ? h('p', { class: 'empty', text: '引擎没报任何问题。注意下面这一行 —— 有一查在这里压根没跑。' })
+    : h('div', { children: r.issues.map(issueRow) });
+  nodes.push(card(`引擎报错（${r.issues.length} 条）`, issueBody));
+  nodes.push(h('div', { class: 'banner', kind: 'info', text: GRAPH_NOT_AVAILABLE }));
+  nodes.push(card('canonical IR（与 CLI 侧 irShaOf 的输入同一串）', h('pre', { class: 'code', text: r.canonical ?? '' })));
+  return nodes;
+}
+
+/* ═══ C1 运行列表 ═══ */
+async function pageRuns(): Promise<void> {
+  shell(h('div', { class: 'stack', children: [h('p', { class: 'muted', text: '加载中…' })] }));
+  const r = await api<{ items?: Array<{ dir: string; manifest?: Record<string, unknown>; broken?: boolean; error?: string }> }>('/api/runs');
+  const items = r.items ?? [];
+  const table = h('table', { children: [
+    h('thead', { children: h('tr', { children: ['runId', '场景', '结论', '计数', '耗时', '成本', '报告'].map((x) => h('th', { text: x })) }) }),
+    h('tbody', { children: items.length === 0
+      ? [h('tr', { children: h('td', { class: 'empty', children: [txt('还没有 run。到场景库挑一条点"运行"，或跑 '), h('code', { text: 'atest run <场景 id> --env <环境>' })] }) })]
+      : items.map((it) => {
+        if (it.broken) {
+          // manifest 读不出**照样占一行**：漏掉那一行等于说"这次 run 不存在"，而真相是"存在、我读不出"
+          return h('tr', { children: [h('td', { class: 'mono', text: it.dir }), h('td', { colspan: 6, class: 'err-text', text: `manifest 读不出：${it.error ?? ''}` })] });
+        }
+        const m = (it.manifest ?? {}) as Record<string, unknown>;
+        const sc = (m.scenario ?? {}) as Record<string, unknown>;
+        const st = String(m.status ?? 'error') as StepStatus;
+        const aborted = m.aborted !== undefined;
+        return h('tr', { status: st, children: [
+          h('td', { class: 'mono dim', text: it.dir }),
+          h('td', { children: [txt(String(sc.id ?? '?')), ...(sc.frozen === false ? [h('span', { class: 'dim', text: ' (未冻结)' })] : [])] }),
+          // 被中断的 run：manifest.status 可能仍是 pass（那是已完成步骤的结论），
+          // 而 aborted 才是"这一次没跑完"。两个都要显示，只显一个就是骗人。
+          h('td', { children: [badge(STEP_OK.includes(st) ? st : 'error'), ...(aborted ? [txt(' 已中断')] : [])] }),
+          h('td', { children: tallyLine(m) }),
+          h('td', { class: 'num mono', text: typeof m.durMs === 'number' ? `${m.durMs}ms` : '—' }),
+          h('td', { class: 'num mono', text: typeof m.costUsd === 'number' ? `$${m.costUsd.toFixed(4)}` : '—' }),
+          h('td', { children: [
+            h('a', { href: `/evidence/${encodeURIComponent(it.dir)}/report.html`, text: 'report', }),
+            txt(' · '), h('a', { href: `/evidence/${encodeURIComponent(it.dir)}/summary.txt`, text: 'summary' }),
+          ] }),
+        ] });
+      }) }),
+  ] });
+  shell(card(`运行记录（${items.length}）`, table));
+}
+
+/** manifest.status 允许是任意字符串（它是落盘 JSON），所以进徽章之前要过一次白名单 */
+const STEP_OK: readonly string[] = ['pass', 'fail', 'error', 'healed', 'skipped', 'triaged'];
+
+async function render(): Promise<void> {
+  const r = parseHash();
+  if (r.page === 'scenario') return pageScenario(r.id);
+  if (r.page === 'runs') return pageRuns();
+  return pageScenarios();
+}
+
+/** 样式注入。这是全文件唯一一处碰 head 的地方，而且喂进去的是自己写的常量，不是数据 */
+const style = document.createElement('style');
+style.textContent = CSS;
+document.head.appendChild(style);
+
+applyPrefs();
+addEventListener('hashchange', () => void render());
+void render();
