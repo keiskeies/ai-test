@@ -240,6 +240,97 @@ function mentionsNewPage(p: unknown): boolean {
 }
 
 /**
+ * 一条等待**要求哪一档 adapter 在场**（`web` / `mobile`），从谓词树里读出来。
+ *
+ * ## 返回的是"要求"，不是"问过"
+ *
+ * 这一字之差是本轮想过清楚的一件事，而它先是写错了一次才想清的：
+ * 第一版让"没写 `world`"的界面条件**两档都报**，理由是运行期规则 2
+ * （两档都在场而作者没写 ⇒ 抛 `AmbiguousWaitWorld`，不许猜），
+ * "不猜"在装配侧看着就该翻成"两个都备好"。**实测把这一版否掉了**
+ * （`.scratch/probe-undeclared-world-assembly.mts`）：一份 `device{android}` + `tap`
+ * + 一条没写 `world` 的 `uiPredicate` 的**纯安卓**场景，`needsWeb` 变成 true，
+ * 于是没装 Chrome 的机器上它被装配期那句「设 ATEST_BROWSER_BIN」挡掉 ——
+ * 而改前它跑得好好的（规则 3：只有一档在场就用那一档）。
+ * 更要紧的是**备了浏览器反而制造失败**：两档都在场正是规则 2 抛歧义的条件，
+ * 所以"两个都备好"会把一份本来正常的场景变成一条 error。
+ *
+ * 所以这里的语义是**硬需求**：只有"没有这一档就百分百跑不成"的才算。
+ * 一个"问哪一世界"的宽松判据若还要（给摘要用），那是另一个函数，别混进这个。
+ *
+ * ## 三条规则
+ *
+ *  1. 界面三兄弟（`uiPredicate` / `template` / `uiIdle`）**写了 `world`** ⇒ 只报那一档。
+ *     与 `resolveWaitWorld` 的判据 1 同一条，另一档顶不上。
+ *  2. **没写 `world`** ⇒ **什么都不报**。任一档都能服务它，所以没有哪一档是硬需求。
+ *     "该不该写"是另一件事，由 lint 那条 `WAIT_WORLD_UNDECLARED` 管
+ *     （只在场景里 web 与 mobile 两档步骤都有、因而两个槽位必然同时在场时报，
+ *      那才是运行期真会抛歧义的形状）。
+ *  3. **只有浏览器看得见的两个观测口**（`response` / `newPage`）⇒ 报 `web`。
+ *     判据不是推的，是接线事实：`adapters.network` 与 `adapters.newPage`
+ *     在 `wiring.ts` 里**只在起了浏览器之后**才赋值（两处都挂在 web 分支下），
+ *     而 `NoNewPageObserver` 自己的原话是"新窗口只有浏览器看得见"。
+ *     这一族没有 `world` 可写（schema `.strict()` 拒），所以它恒是硬需求。
+ *
+ * `expr` / `httpStatus` / `dbRow` 不报任何世界。前两个真的不问界面；
+ * `dbRow` 要的是 db adapter，而"这个场景用不用数据库"今天由环境配置决定
+ * （`NoConditionAdapter('dbRow')` 那句话就是为它准备的），不由这里管。
+ *
+ * ## 为什么这两张类型表是手抄的，以及它凭什么不会烂
+ *
+ * 因为类型本身在 schema 里没有可派生的特征：`uiPredicate` 与 `response` 在
+ * `WaitConditionSchema` 里长得一模一样（判别字面量 + 若干字段），
+ * "谁能提供这个数据"是**接线事实**，不在 schema 里。写在这里就是承认它是第二份账。
+ * 但"新增一种界面条件而这里没登记"是真会发生的坏法（它会让装配侧**看不见**一个新需求，
+ * 于是那条等待在运行期抛 env-unavailable —— 与本轮修掉的形状逐字相同），
+ * 所以 `ir/test/wait-worlds.test.ts` 有一条**从 schema 现取类型清单**的守卫：
+ * union 里每一种条件都必须在本表、观测口那一族、或"不问界面"那一组里出现，多一种就红。
+ */
+const UI_CONDITIONS = ['uiPredicate', 'template', 'uiIdle'] as const;
+/** 只有浏览器能观测的条件（观测口的接线位置见 wiring.ts 的 web 分支） */
+const BROWSER_ONLY_CONDITIONS = ['response', 'newPage'] as const;
+
+export function waitWorldDemand(step: { kind: string; condition?: unknown }): WaitWorld[] {
+  if (step.kind !== 'wait' || step.condition === undefined) return [];
+  const out = new Set<WaitWorld>();
+  for (const c of iterConditions(step.condition as WaitPredicate)) {
+    const type = (c as { type?: unknown }).type;
+    if (typeof type !== 'string') continue;
+    if ((BROWSER_ONLY_CONDITIONS as readonly string[]).includes(type)) {
+      out.add('web');
+      continue;
+    }
+    if (!(UI_CONDITIONS as readonly string[]).includes(type)) continue;
+    const w = (c as { world?: unknown }).world;
+    if (w === 'web' || w === 'mobile') out.add(w);
+    // 没写 world：任一档都能服务 => 没有硬需求。见函数头第 2 条与那条被否掉的第一版。
+  }
+  return [...out];
+}
+
+/**
+ * 这条等待里**有没有**"界面条件而作者没写 `world`"。给 lint 用（`WAIT_WORLD_UNDECLARED`）。
+ *
+ * 与 `waitWorldDemand` 分开是**必须的**：那个答"哪一档是硬需求"（这一格答"没有"），
+ * 而这个答"作者有没有说清问哪一档"（这一格答"没说"）。合成一个函数的话，
+ * 就必然要么把"没说"当成"两个都要"（本轮第一版，实测会把纯安卓场景挡在装配期），
+ * 要么把"没说"当成"什么都不缺"（那 lint 就没法报）。
+ */
+export function hasUndeclaredUiWorld(step: { kind: string; condition?: unknown }): boolean {
+  if (step.kind !== 'wait' || step.condition === undefined) return false;
+  for (const c of iterConditions(step.condition as WaitPredicate)) {
+    const type = (c as { type?: unknown }).type;
+    if (typeof type !== 'string' || !(UI_CONDITIONS as readonly string[]).includes(type)) continue;
+    const w = (c as { world?: unknown }).world;
+    if (w !== 'web' && w !== 'mobile') return true;
+  }
+  return false;
+}
+
+/** 本文件那两张手抄表（给测试对照 schema 用；导出而不是让测试去正则扫源码） */
+export const WAIT_UI_CONDITIONS: readonly string[] = UI_CONDITIONS;
+export const WAIT_BROWSER_ONLY_CONDITIONS: readonly string[] = BROWSER_ONLY_CONDITIONS;
+/**
  * 摊平谓词树，逐个条件交出来。**放在本文件**（与 mentionsNewPage 同一处理由）：
  * 加一种等待条件与更新这个遍历应当在**同一个文件里**，跨包的"忘了回来加一项"
  * 才是那族缺陷的成因。

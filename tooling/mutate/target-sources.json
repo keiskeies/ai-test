@@ -87,10 +87,11 @@
       "label": "T10 deriveNeedsDevice 退化成\"从端集合派生\"（本轮量出来的那个静默）",
       "_why": "新函数的判据必须是**档位**而不是平台。写成从 targets 派生的话，\"作者漏写 device 步的裸 tap\"这个形状会答\"不要设备\"，而它是**最需要报警**的形状 —— 本轮就是先写了这一版，实测 RESOURCE_LEASE_MISSING 对裸 tap 整个不响（改前报 error@t）。这一条与 S2 成对：S2 改调用点、T10 改判据本体，缺一侧就只有一侧会被发现。",
       "file": "packages/ir/src/scenario.ts",
-      "anchor": "  walk(steps, (s) => { if (STEP_TARGET[s.kind] === 'mobile') needs = true; });",
-      "replace": "  for (const t of deriveTargets(steps)) { if (t !== \"api\" && t !== \"web\") needs = true; }",
+      "anchor": "    if (STEP_TARGET[s.kind] === 'mobile') { needs = true; return; }\n    // 与 targetsOfStep 那一格对称的另一半：`wait{world:'mobile'}` 明确要一台机器，\n    // 而它的 kind 在 'any' 档、租约名单也没有它。少这一句，\"全场只有一个\n    // wait{uiPredicate,world:'mobile'}\"这种场景会答\"不要设备\"，而它百分百需要一台\n    // —— 与本轮修掉的那个裸 tap 静默同形。\n    // **没写 world 的不算**（那是\"没说清\"，不是\"要设备\"），理由见 waits.ts 里\n    // waitWorldDemand 头上那段被实测否掉的第一版。\n    if (s.kind === 'wait' && waitWorldDemand(s as { kind: string; condition?: unknown }).includes('mobile')) needs = true;",
+      "replace": "    void s; for (const t of deriveTargets(steps)) { if (t !== \"api\" && t !== \"web\") needs = true; }",
       "testFile": "packages/ir/test/target-sources.test.ts",
-      "_measured": "抓到。6 pass / 4 fail，第一条红在「漏写 device 步的裸 tap：targets 是空集而 needsDevice 是 true」\n（手工复跑落点 :361，正是 needsDevice 那一断，消息「而它百分百要设备。这两个读数**必须同时成立**」）。\n另外三个落点：:369「setup 里 device + body 里 tap」、:390「逐 kind 对照：needsDevice 是 LEASE_REQUIRED 的超集」、\n:419「容器里的移动端步骤也算要设备」。\n其中 :390 那条是**结构性**的那一条（逐 kind 比两张表，不靠样本），所以今后新增一个移动端 kind\n而忘了登记 `LEASE_REQUIRED`，会在这一格红，而不是靠样本碰巧命中。"
+      "_measured": "抓到。手工复跑 target-sources.test.ts 的读数：**4 条红**，落点 :361、:369、:390、:419，\n四个落点分属四件事 —— 「漏写 device 步的裸 tap」（本轮那个静默的正主）、\n「setup 里 device + body 里 tap」（三层那半）、「逐 kind 对照：needsDevice 是 LEASE_REQUIRED 的超集」\n（结构性守卫：从两张表现取清单）、「容器里的移动端步骤也算要设备」（walk 那一半）。\n**驱动只印第一条**（:361 那条裸 tap），而它恰好是\"这条判据存在的全部理由\"那一条。\n本条锚点取的是**整个 walk 体（两格连注释）**，所以它测的是\"退化成从端集合派生\"这个大坏法，\n**分不清是哪一格没生效** —— 新加的第二格（`wait{world:'mobile'}`）由 T16 单独钉。\n另外这一格在 `wait-worlds.test.ts` 里也有独立断言（:230 与 :243 那个 describe），\n而本条 testFile 只跑 target-sources.test.ts，所以那两条**不计入本条的红数** ——\n读数时别把它们当本条的证据，也别以为\"换个 testFile 会红更多\"就能给本条加码。",
+      "_锚点备注": "锚点本轮换过两次：deriveNeedsDevice 的 walk 从单行变成两格（kind 档 + wait 世界），旧锚点整条没了，被 tooling/test/mutate.specs.test.mjs 当场报「那条变异其实根本没在测东西」。新锚点**连着注释一起取**：只取代码行的话，注释里那句\"没写 world 的不算\"会留在原地而代码已经不是那个意思 —— 而本仓最贵的那一族正是\"注释替行为作证\"。"
     },
     {
       "label": "T11 场景级 targets 推导退回只看 body（那一栏只会说自己那一段）",
@@ -109,6 +110,51 @@
       "replace": "  // 变异 T12：去掉\"写了就以写的为准\"，永远用推导覆盖",
       "testFile": "packages/ir/test/target-sources.test.ts",
       "_measured": "抓到。12 pass / 1 fail，唯一那条红在「显式写了 targets 就以它为准」，\n手工复跑量到落点 :465，正是第一断（多出来那一端），消息「声明里多出来的那一端不许被推导抹掉」。\n第二断（写成空数组那个方向）在这一条下同样会红（推导出 api 而作者写的是空），\n所以两个方向各自有牙 —— 只是驱动与 node:test 都只报第一个。\n**改前的读数才是这一条的重点**：把这行整个删掉跑 npm test，1678 条全绿、0 红。\n也就是说此前\"显式优先\"这件事在全仓没有任何东西守着，而那四行实现看着人畜无害，\n谁都会以为它坏了立刻有人发现。"
+    },
+    {
+      "label": "T13 逐步判据不再看 wait 问的世界（界面等待在装配侧重新隐形）",
+      "_why": "本轮修的那个缺陷的**原样**：单独一份 `wait{uiPredicate,world:'web'}` 场景，`STEP_TARGET.wait` 是 'any' ⇒ 旧判据报空 ⇒ `needsWeb` false ⇒ 不建浏览器 ⇒ 运行期抛 NoConditionAdapter，归因 env-unavailable。而 needsWeb 存在的全部理由就是『这种缺失要在装配期报错、不要进退出码』（见 wiring.ts 那段）。删掉这一格编译得过（返回值仍合法）、已有那几条 navigate 场景照旧全绿 —— 所以没有这一条的话，本体的修复没有钉子。",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "  if (s.kind === 'wait') {\n    const w = waitWorldDemand(s as { kind: string; condition?: unknown });\n    return w.includes('web') ? ['web'] : [];\n  }",
+      "replace": "  // 变异 T13：不看等待问的世界（回到『等待步骤不带端需求』那个旧形状）",
+      "testFile": "packages/ir/test/wait-worlds.test.ts",
+      "_measured": "抓到。本文件 15 条里这一条**只红一条**（手工复跑 wait-worlds.test.ts：23 pass / 1 fail）。\n驱动印的第一条红在 :227「wait{world:'web'} 进端集合，wait{world:'mobile'} 不进」，\n落点正是第一断（deriveTargets 从 ['web'] 变成空）。\n**只红一条不是覆盖薄**：这一格的行为改动就是「web 那一半从端集合里消失」，\n而端集合在 IR 侧只有那一个读数面，所以分岔只有一个人看得见 ——\n红数与 T14/T15 差一倍是**判据形状**不同，不是测试强度不同。\n同一条坏法在**装配出口**另有独立一条（见本文件最后那条 W5，测 cli 的 needsWeb 而不是 IR 的判据）。"
+    },
+    {
+      "label": "T14 观测口那一族不再算 web（response / newPage 只有浏览器能观测这件事被忘掉）",
+      "_why": "这一族与 uiPredicate 那一族是**两个独立的决定**：前者不问 `world`、作者也没法问，它的需求来自**接线事实**（`adapters.network` / `adapters.newPage` 只在 web 分支里赋值）。合成一条变异来测的话，删掉另一族也能让那条红，就看不出到底是哪一族没登记。所以两族各一条，各打各的那一行。",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "const BROWSER_ONLY_CONDITIONS = ['response', 'newPage'] as const;",
+      "replace": "const BROWSER_ONLY_CONDITIONS = [] as const;",
+      "testFile": "packages/ir/test/wait-worlds.test.ts",
+      "_measured": "抓到。19 pass / **5 fail**，落点 :72、:150、:202、:302（:150 那一格是 response 与 newPage\n两种条件各计一次，所以四落点五红）。\n**最有说服力的是 :302**（从 schema 现取条件类型清单的那条完整性守卫）：把观测口那一族摘空，\n名单与 union 就对不上 —— 它抓到的是**我自己的手抄表被改坏**，而不是实现被改坏，\n这正是「手抄表 + 一条从 schema 取的守卫」这套设计存在的理由。\n:72 是手抄名单自己的对照（WAIT_BROWSER_ONLY_CONDITIONS 变空数组），\n:202 是「嵌套两层里 newPage 也要走到」（树里唯一一个 web 需求没了），\n:150 红的是那一格里断 worldsOf 的那一句，不是断 schema 的那一句。\n五红分布在**四个不同的问题**上（名单登记 / 需求语义 / 遍历 / 嵌套），不是同一条断言重复五次。"
+    },
+    {
+      "label": "T15 没写 world 也算两档都硬需求（本轮第一版那个被实测否掉的坏法）",
+      "_why": "这一条钉的是**我自己写错的那一版**，不是历史实现，所以它值得单独一条：\n第一版让没写 `world` 的界面条件把 web 与 mobile 都报出来，理由是运行期规则 2「不许猜」\n像是该翻成「两个都备好」。实测（.scratch/probe-undeclared-world-assembly.mts）否掉了它：\n一份 device{android} + tap + 一条没写 world 的 uiPredicate 的**纯安卓**场景，\nneedsWeb 变成 true，于是没装 Chrome 的机器上它被装配期那句「设 ATEST_BROWSER_BIN」挡掉，\n而改前它跑得好好的（规则 3：只有一档在场就用它）。\n更反直觉的是**备了浏览器反而制造失败**：两档都在场正是运行期抛 AmbiguousWaitWorld 的条件。\n所以这里取「硬需求」语义，而「作者没说清」那一问另交给 lint 的 WAIT_WORLD_UNDECLARED。\n反方向（一个都不报、连写了 world 的也不算）由 T13/T14 与那个 describe 里的\n「写了 world 就只报那一档」一起拦住。",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "    // 没写 world：任一档都能服务 => 没有硬需求。见函数头第 2 条与那条被否掉的第一版。",
+      "replace": "    else { out.add('web'); out.add('mobile'); }",
+      "testFile": "packages/ir/test/wait-worlds.test.ts",
+      "_measured": "抓到。19 pass / **5 fail**，落点 :99、:131、:242（:99 那一格是三种界面条件各计一次，故三落点五红）。\n这一条钉的是**我自己写错的那一版**，而它值得单独一条的理由在 :131 那格 ——\n「两个判据的答案在没写 world 这一格**必须不同**」：合成一个函数时无论保留哪一半，\n另一半的读者都会拿到假答案，而那一格是这条结构性事实**唯一**的直接载体\n（:99 与 :242 也会红，但它们读起来像「某个条件的读数变了」，看不出是「两个问法被合成一个」）。\n**注意 :131 红的是第一断**（装配侧应当是空数组，合成版给出两个世界），\n而第二断 hasUndeclaredUiWorld === true 在合成版下**碰巧仍然成立** ——\n所以「两个方向都断」在这里是必需的：只断第二断的测试会让这个坏法全绿通过。"
+    },
+    {
+      "label": "W5 装配侧看不见等待问的那一档（IR 判据对、needsWeb 仍然 false）",
+      "_why": "与 T13 **同一条坏法、不同的测试文件**，这不是重复：T13 测 IR 那一格判据本身，这一条测判据到**装配出口**之间那一段（webSources 的三层数组 → targetSources 的逐步判据 → needsWeb 那个 length > 0）。本仓为「每个消费者都各自正确，而对同一件事的假设互不相容」记过多次账，而 needsWeb 坏掉的代价是**实际的**：不建浏览器 ⇒ 运行期抛 NoConditionAdapter / NoNetworkObserver / NoNewPageObserver ⇒ 归因 env-unavailable ⇒ 进退出码 ⇒ CI 照 CI_HINT 白重试一次。**跨包**（改 packages/ir、测 packages/cli）⇒ mustBuild() 强制重建，所以这条读不到崩溃型红。写之前先验过它不是假钉子：把 T13 那一格整个删掉、npm run build 之后跑 wiring-web.test.ts，红的正是新加的那条「一条等待问哪一世界，也拉动装配」（7 pass / 1 fail），其余七条原样绿。",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "  if (s.kind === 'wait') {\n    const w = waitWorldDemand(s as { kind: string; condition?: unknown });\n    return w.includes('web') ? ['web'] : [];\n  }",
+      "replace": "  // 变异 W5：与 T13 同一个坏法，问的是装配出口而不是 IR 判据",
+      "testFile": "packages/cli/test/wiring-web.test.ts",
+      "_measured": "抓到。16 条里本条红 1 条：`cli/test/wiring-web.test.ts` 的\n「一条**等待**问哪一世界，也拉动装配」，而那份文件另外七条**原样绿**。\n\"**另外七条绿**\"是本条有意义的全部来源：它证明红**只**由装配侧那一格引起，\n不是我把 needsWeb 的别的面碰坏了。**写这条测试之前先手工量过这件事**\n（删掉 `targetsOfStep` 里那一格 → `npm run build` → 跑 wiring-web.test.ts → 7 pass / 1 fail），\n确认它不是假钉子才写进 spec —— 与 T12 那条\"改前删掉整行 npm test 全绿\"是同一个动作的正反两面：\n先量\"没有它会怎样\"，再决定这条测试算不算数。\n**跨包**（改 `packages/ir/src/scenario.ts`、测 `packages/cli`）⇒ `mustBuild()` 强制重建，\n所以这条**读不到崩溃型红**（tsc 会先判 BUILD_BROKEN，`crashIn` 的可达范围见 mutate.mjs 头第 8 条）。\n测试里同时钉了**不许多报**（没写 `world`、`world:'mobile'`、`expr`、`dbRow` 四格都必须是 false）：\n装配侧多报的代价是白起一个 Chrome（1~2s、几百 MB），而那四格正是本轮第一版写错的方向。"
+    },
+    {
+      "label": "T16 deriveNeedsDevice 只丢掉 wait 那一格（本轮新加的那一半没有自己的钉子）",
+      "_why": "T10 的锚点是**整个 walk 体**（两格一起取，连注释），所以它测的是「deriveNeedsDevice 退化成从端集合派生」这个大坏法，**分不清是哪一格没生效**。而本轮新加的正是第二格（wait{world:'mobile'} 百分百要一台机器），它也是最容易被\"顺手删掉\"的一格：它看着像在重复第一格（wait 的 kind 在 'any' 档，所以并不重复），删掉之后**纯移动端步骤的场景照旧全绿** —— 只有\"全场只有一条 wait{uiPredicate,world:'mobile'}\"这种形状会答\"不要设备\"，而那正是租约静态闸与设备装配共同的入口。与 T13 成对：T13 打 web 那一半（进端集合），这一条打 mobile 那一半（进\"要不要设备\"），两半各一条才说明**它们真的是两个问法**而不是一个函数被叫了两次。",
+      "file": "packages/ir/src/scenario.ts",
+      "anchor": "    if (s.kind === 'wait' && waitWorldDemand(s as { kind: string; condition?: unknown }).includes('mobile')) needs = true;",
+      "replace": "    // 变异 T16：只删第二格（第一格 kind 档位照旧），于是只有『全场一条移动端等待』会答错",
+      "testFile": "packages/ir/test/wait-worlds.test.ts",
+      "_measured": "实测（驱动 17/17 抓到）。落点是手工复跑同一 testFile 量到的（驱动只打印第一条红的标题、不打行号），还原用改前 cp 的备份逐字覆盖、跑完比对内容一致（不是 git stash，也不是反向 replace —— 后者是 docs/14 §4.5 第 11 条那个坑）。2 条红都在 packages/ir/test/wait-worlds.test.ts 那个「接到两个读者身上」的 describe 里，都是断言红（expected true / actual false），不是 ReferenceError 崩溃红：「wait 写了 world:web 进端集合，写了 world:mobile 不进」里那句「而\"要不要设备\"这一问必须答对：它百分百要一台」（deriveNeedsDevice 对一条问移动端的等待答成 false），以及「没写 world 的界面等待：两个读者都不该被它拉动」末尾那句正向对照「写了 mobile 就只拉动后者」。同一 describe 里那两句 deriveTargets 断言照绿 —— 这正是本条与 T13 的分工：T13 打 web 那一半（红在端集合那一格与 cli 装配出口 W5），本条打 mobile 那一半，两半各一条才说明它们真是两个问法而不是一个函数被叫了两次。"
     }
   ]
 }

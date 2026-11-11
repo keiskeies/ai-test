@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveNeedsDevice, eachValuePosition, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveNeedsDevice, deriveTargets, eachValuePosition, hasUndeclaredUiWorld, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { redactSecretText } from './redact.js';
@@ -36,7 +36,8 @@ export type LintCode =
   | 'TEMPLATE_NO_ROI' | 'LLM_ASSERT_RATIO_HIGH' | 'VISION_STEP_IN_CI_GATE' | 'DEPRECATED_OPERATION'
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
   | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE'
-  | 'REQUEST_PART_NOT_IMPLEMENTED' | 'CALL_GRAPH_INCOMPLETE' | 'REF_PATH_SYNTAX';
+  | 'REQUEST_PART_NOT_IMPLEMENTED' | 'CALL_GRAPH_INCOMPLETE' | 'REF_PATH_SYNTAX'
+  | 'WAIT_WORLD_UNDECLARED';
 
 /**
  * `call` 调用图，给 `DEPENDENCY_CYCLE` 用。
@@ -362,6 +363,7 @@ export const LINT_DOCS: Record<LintCode, string> = {
   HOVER_THEN_NOT_IMPLEMENTED: 'docs/06 §2',
   REQUEST_PART_NOT_IMPLEMENTED: 'docs/02 §2、docs/14 §5',  // fixture 仓库是 P1；本轮只保证它不再静默发一个少附件的请求
   SQL_PLACEHOLDER_UNBOUND: 'docs/15 §3.2',
+  WAIT_WORLD_UNDECLARED: 'docs/02 §3、docs/15 §3.6',
   RESERVED_KEY_REWRITE: 'docs/02 §5、docs/14 §5',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
@@ -972,6 +974,55 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
               : '在场景开头加 { kind:"device", require:{…} } 申请租约',
           }));
       }
+    }
+  }
+
+  /*
+   * **界面等待条件没写 `world`，而这一场两档都会在场** => 提前一句 warning。
+   *
+   * 运行期那条判据是现成的（`resolveWaitWorld` 规则 2：两档都在场而作者没写
+   * ⇒ 抛 `AmbiguousWaitWorld`，**不许猜**）。这条 lint 只是把同一件事挪到提交前，
+   * 而挪的理由与 dry-run 那套一样：本平台的主要用例产出者是 LLM，
+   * lint 是它唯一能在提交前拿到反馈的那道闸。
+   *
+   * ## 为什么只在"两档都会在场"时才报
+   *
+   * 因为那是运行期**唯一真会抛**的形状。一份纯安卓场景里没写 `world` 的等待
+   * 走的是规则 3（只有一档在场就用它），**行为与改动前逐字相同**，报它是误报。
+   * 而误报的代价本仓量过一次：一道常被误报的闸会被人关掉（`--force` 那个论证）。
+   * 本轮第一版判据写成"只要没写就报"，实测否掉了它 —— 那一版顺带把 `needsWeb`
+   * 也撑成 true，于是纯安卓场景在装配期就要 Chrome。
+   * 这个"不报"的方向现在由 `engine/test/wait-world-lint.test.ts` 里
+   * 「纯 Web / 纯移动 / 纯 API 场景不报」那三条钉着（装配侧那一半的读数和被否掉的
+   * 第一版记在 `ir/test/wait-worlds.test.ts` 与 `tooling/mutate/target-sources.json` 的 T15）。
+   *
+   * ## 为什么是 warning 而不是 error
+   *
+   * **今天它跑不出来。** `wiring.ts` 压根不装配 `adapters.device`（ADB/iOS/鸿蒙
+   * 那半边没开工，docs/14 §5），所以真实运行里最多一个槽位在场，永远走规则 3。
+   * 一个 error 级 finding 会说"这条跑不起来"，而那句今天是**假话**
+   * （同一族错话记过：`NOT_EVALUATED` 那句"运行期会抛"）。
+   * 设备侧 adapter 一接上，这条立刻从"将来会歧义"变成"现在就歧义"，
+   * 那时把它升成 error 是一次改判据级别的动作，而不是顺手 —— 升的那一刻
+   * 要连着 `docs/15` §3.6 那句"它今天靠测试活着"一起改。
+   */
+  {
+    const three = [...scenario.setup, ...scenario.body, ...scenario.teardown];
+    const wantsWeb = deriveTargets(three).includes('web');
+    const wantsDevice = deriveNeedsDevice(three);
+    if (wantsWeb && wantsDevice) {
+      walk(three, (s, path) => {
+        void path;
+        if (s.kind !== 'wait') return;
+        if (!hasUndeclaredUiWorld(s as { kind: string; condition?: unknown })) return;
+        push({
+          code: 'WAIT_WORLD_UNDECLARED', level: 'warning', stepId: s.id,
+          message: '这条等待里的界面条件没写 world，而本场景 Web 与移动端步骤**都会**在场 —— '
+            + '运行期会报"该问哪一世界"（两档都能答时不替作者挑）',
+          fix: '给那个条件加 world:"web"（问浏览器页面）或 world:"mobile"（问设备屏幕）',
+          doc: 'docs/02 §3',
+        });
+      });
     }
   }
 

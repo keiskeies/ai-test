@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "`WAIT_WORLD_UNDECLARED` 那条 lint 规则（界面等待没写 `world`，而两档都会在场）。",
+    "tests: packages/engine/test/wait-world-lint.test.ts。spec 顶层 build:false ——",
+    "**这条是刻意的，两个理由**：",
+    " 1. 被测的是 `packages/engine/src/lint.ts`，测试文件同包且直接 import `../src/index.js`，",
+    "    不需要 dist 参与（跨包那一半由 `mustBuild()` 机器强制，这里碰不到）；",
+    " 2. 同包不重建才是**崩溃型红可达**的那个配置（`mutate.mjs` 的 crashIn 头上记着：",
+    "    跨包 case 会先在 tsc 上判 BUILD_BROKEN，看不到'红全是 ReferenceError'这一种）。",
+    "",
+    "这一批的靶子是一类**新写**的判据。新判据最危险的失效不是'报错了'，而是：",
+    "  (a) **恒报** —— 前置条件写松，纯 Web / 纯移动场景收到一句它改不了的话，",
+    "      于是这道闸被人关掉（本仓对误报代价的论证：`--force` 那条）；",
+    "  (b) **恒不报** —— 守卫自己漏报比没有守卫更坏（docs/08 §3）；",
+    "  (c) **级别说谎** —— warning 升成 error 等于说'这条跑不起来'，而今天",
+    "      `wiring.ts` 压根不装配 `adapters.device`，那句是假话；",
+    "  (d) **两个问法被合成一个** —— 用 waitWorldDemand 的答案代替'作者说清了吗'，",
+    "      于是 `expr` / `response` 这些**压根没有 world 可写**的条件收到",
+    "      '请写一个你写不了的字段'。L5 打的就是这一格。",
+    "",
+    "与 target-sources.json 的分工：那一份打**装配侧**（waitWorldDemand 的需求语义，",
+    "T13/T14/T15），这一份打**提示侧**（hasUndeclaredUiWorld + 那条规则本身）。",
+    "同一个缺陷形状的两半各有一份，因为把它们合成一条变异的话，",
+    "另一侧被删掉也能让那条红 —— 就看不出到底是哪一半没登记。"
+  ],
+  "build": false,
+  "cases": [
+    {
+      "label": "L1 前置从'两档都会在场'放宽成'任一档在场'（本轮第一版那个误报方向）",
+      "_why": "本轮第一版的判据是'只要没写 world 就报'，实测否掉了它：纯安卓场景里没写 world 的等待走的是运行期规则 3（只有一档在场就用它），**行为与改动前逐字相同**，报它是纯噪音。`&&` 换成 `||` 是那个坏法在 lint 侧的等价形态（而且比'恒真'更像人会写的东西：它看起来仍然像在做前置过滤）。抓到它的是那三条'纯 Web / 纯移动 / 纯 API 场景不报'里的头两条 —— 第三条在 `||` 下仍然绿（纯 API 两档都不要），这是**读数时要看的东西**：一条变异不必让所有相关测试都红，只要让**分岔那一格**红。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (wantsWeb && wantsDevice) {",
+      "replace": "    if (wantsWeb || wantsDevice) { // 变异 L1：前置放宽成'任一档在场'，纯 Web / 纯移动场景开始被烦",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "_measured": "实测（驱动 7 条抓到 6 / 等价 1/1 / 没跑成 0，本条在内）。本文件 **4 条红**，全在「不许恒报」那一族：「纯 Web 场景不报」与「纯移动场景不报」（0 变成 1）、「不是\"只要有个 wait 就报\"：没有移动端那一半时同样不报」（0 变成 1）、「反方向：没有任何 web 档步骤时，即使有移动端步骤也不报」（true 变成 false，那格读的是 codesOf 里有没有这条码）。**「纯 API 场景不报」在这一条下照绿**（两档都不要，`||` 也是 false）—— 这是读数时该看见的那件事：一条变异只让分岔那一格红，红数不是判据。四根红分布在**三个不同的形状**上（只有 web / 只有 mobile / 只有 web 而换了 kind），所以不是同一格重复四次。"
+    },
+    {
+      "label": "L2 级别从 warning 升成 error（一句今天是假话的'跑不起来'）",
+      "_why": "这条规则**今天跑不出来**：`wiring.ts` 不装配 `adapters.device`，真实运行里最多一个槽位在场，永远走'只有一档在场就用它'。一个 error 级 finding 的字面效果是 toReport 判不通过 → CI 拦下，等于断言'这条跑不起来'，而那句今天是假的。本仓为同一族错话删过 `NOT_EVALUATED` 那句'运行期会抛'（一句过期的安慰比不安慰更坏，一句过期的恐吓也一样）。设备侧 adapter 接上那天，升级别是一次**改判据**的动作，要连着 docs/15 §3.6 那句'它今天靠测试活着'一起改 —— 这一条红就是那次改动的入场券。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "          code: 'WAIT_WORLD_UNDECLARED', level: 'warning', stepId: s.id,",
+      "replace": "          code: 'WAIT_WORLD_UNDECLARED', level: 'error', stepId: s.id, // 变异 L2：级别说谎",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "_measured": "实测。本文件 **2 条红**，而且是**两件不同的事**：①「是 warning 而不是 error」—— 断言消息就是那句「升成 error 要连着 docs/15 §3.6 那句『它今天靠测试活着』一起改」（'warning' 变成 'error'），这一格是**级别本身**；②「warning 不拦人：同一份场景 toReport 仍然 ok」—— 实际 errors=[\"WAIT_WORLD_UNDECLARED\"]、ok 变成 false，这一格是**级别的后果**。两条不是重复：①看的是 issues 里那个字段，②看的是出口那个字。把 `toReport` 改成不看 level 而看 code 白名单之类的话，①照绿而②红（那正是②存在的理由，也是 L7 那一格的对面）。⚠ ②的夹具**必须自己带一条断言**（`assertPage`），否则 `ASSERT_FREE_SCENARIO`（error 级）会先进来，ok 恒 false 而这一格变成永远红 —— 我第一版就红在这里，那句红与本条变异无关。"
+    },
+    {
+      "label": "L3 只扫顶层步骤（容器里那条没写 world 的等待重新没人说）",
+      "_why": "`walk` 换成顶层 forEach 之后，`sequence` / `if` / `switch` 里的等待全部静默 —— 而 Agent 生成的用例里界面等待**大多在容器里**（分支里等一个界面出现）。这一族的本仓老账是'静态闸只看 body'（docs/15 §3.6 那条整节讲的就是它），同一个错误在容器维度重演的表现一模一样：规则报'没写 world'，人检查了顶层发现没写的那条不在顶层。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "      walk(three, (s, path) => {\n        void path;",
+      "replace": "      three.forEach((s) => {",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "_measured": "实测。**1 条红**：「容器里的界面等待也报」，断言消息「sequence 里的那条等待漏了」（1 变成 0）。只有一根不是覆盖薄：那一格对 sequence / if / switch / parallel 四种容器循环断言，**第一格就红**，node:test 报第一个失败就停 —— 四种容器在 `ir/test/target-sources.test.ts` 与`wait-worlds.test.ts` 里另有各自的钉子，所以这一条不需要把它们全跑红才算数。"
+    },
+    {
+      "label": "L4 不核对'是不是界面条件而没写 world'（恒报）",
+      "_why": "去掉那道 guard，混合场景里**每一条 wait** 都会收到一句'请给那个条件加 world' —— 包括 `expr`、`httpStatus`、`dbRow`，以及 `response` / `newPage` 那两种 schema `.strict()` 直接拒 `world` 的条件。让一份完全合法的 IR 收到一句'写一个你写不了的字段'，与 L1 的恒报同族而更糟（L1 至少只烦真没写的）。抓到它的是两条不同方向的钉子：'写了 world 就不报'与'非界面条件不算' —— 同一行代码被两格独立钉着。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "        if (!hasUndeclaredUiWorld(s as { kind: string; condition?: unknown })) return;",
+      "replace": "        // 变异 L4：恒报",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "_measured": "实测。**2 条红**，方向不同：①「写了 world 就不报，两个值都不报」（0 变成 1，消息里连那条 finding 的完整 JSON 都打出来了 —— 作者写了 `world:\"web\"` 而仍被要求「给那个条件加 world」，这就是恒报的读感）；②「非界面条件不算」（`expr` 收到同一句话）。同一行 guard 被**两格独立**钉着：①管「已经说清的别再烦」，②管「压根没法说清的别烦」。把 ① 删了 ② 仍在（L5 就是只有 ② 红的形态），所以这两格不是同一条断言抄两遍。"
+    },
+    {
+      "label": "L5 用'哪一档是硬需求'的答案代替'作者说清了吗'（两个问法被合成一个）",
+      "_why": "本仓最贵的那一族是**一个函数答两个问题**。`waitWorldDemand` 答'哪一档是硬需求'（没写 world ⇒ 没有），`hasUndeclaredUiWorld` 答'作者有没有说清'（没写 ⇒ 没说清）；两个答案在'没写 world'那一格**必须不同**，`ir/test/wait-worlds.test.ts` 里有一条专门钉这件事。这一条是那个合成在**跨包另一端**的形态：把 `hasUndeclaredUiWorld` 的内部实现改成由 `waitWorldDemand` 派生（`硬需求为空 ⇒ 没说清`），并把'是不是界面条件'那道过滤一起摘掉（不摘的话非界面条件照样 continue，这条就退化成等价变异 —— **我第一版就是这么写的，写之前应该先想清楚合成之后谁会多报**）。合成之后：界面条件那一半**碰巧仍然全对**（写了 world ⇒ 有硬需求 ⇒ 说清了；没写 ⇒ 无硬需求 ⇒ 没说清），而 `expr` / `httpStatus` / `dbRow` 三个的硬需求本来就是空 ⇒ 一律判'没说清' ⇒ 混合场景里每条纯逻辑等待都收到一句'请给那个条件加 world'，而 `world` 在那三种条件的 schema 上是 `.strict()` 拒的字段。读到这条时注意它**不会**让'写了 world 就不报'那格红（那一格在合成版下确实还对）——红的是「非界面条件不算」那一格，这正是本仓反复记的那件事：**一条变异只该让分岔那一格红**，而'抓到了几条红'从来不是判据，'红在哪一格'才是。",
+      "file": "packages/ir/src/waits.ts",
+      "anchor": "    if (typeof type !== 'string' || !(UI_CONDITIONS as readonly string[]).includes(type)) continue;\n    const w = (c as { world?: unknown }).world;\n    if (w !== 'web' && w !== 'mobile') return true;",
+      "replace": "    if (typeof type !== 'string') continue; // 变异 L5：界面条件那道过滤摘掉，答案整个由\"哪一档是硬需求\"派生\n    void c;\n    return waitWorldDemand(step).length === 0;",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "_跨包备注": "改 packages/ir 而测试在 packages/engine -> `mustBuild()` 强制重建，所以这条**读不到崩溃型红**（tsc 会先接住编译问题）。这是跨包 case 的固有限制，不是这一条的缺陷；crashIn 的可达范围写在 mutate.mjs 头上。",
+      "_measured": "实测（跨包：改 `packages/ir/src/waits.ts`，驱动强制重建，编译照过 —— 返回值仍是合法的 `boolean`）。**1 条红**，而且正是 `_why` 里预判的那一格：「非界面条件不算」里的 `expr`（0 变成 1）。**「写了 world 就不报」照绿** —— 合成版下那一半确实仍然对（写了 world ⇒ 有硬需求 ⇒ 判\"说清了\"），这正是「两个问法被合成一个」这类坏法的形状：**大部分读数不变，只有两类条件的分岔露出来**（这里露出的是 `expr`/`httpStatus`/`dbRow` 那三种硬需求天生为空、而 schema `.strict()` 又拒 `world` 的条件）。另外 `response` / `newPage` 在合成版下**也不报**（它们有硬需求 ⇒ 判\"说清了\"），所以那一格里只有 `expr` 那一支红 —— 五支条件各写了一份，红的是唯一那支分岔的。"
+    },
+    {
+      "label": "L6 不核对 kind 是 wait（看着像漏了一层判据，其实等价）",
+      "_why": "这一条取 expect=equivalent，而且**它值得占一格**：`if (s.kind !== 'wait') return;` 是 lint 侧的一层防御，而被调的 `hasUndeclaredUiWorld` 自己第一句就守 kind（waits.ts 里那句 `if (step.kind !== 'wait' || ...) return false`）。Scenario 是 `.strict()` 解析出来的，非 wait 步骤压根带不了 `condition` 键，所以删掉外层这一句**不可观测**。登记它的理由：这行代码看着像'少了它就有洞'，下一个人很可能顺手给它配一条假测试（拿一个带 condition 的 tap 步去跑 lint —— 那个 fixture 过不了 schema，于是那条测试只会测 zod）。写成 equivalent 之后，'它为什么没有测试'就有了答案：**真正守着这件事的是被调函数那一句 + 它自己的测试**。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "        if (s.kind !== 'wait') return;",
+      "replace": "        // 变异 L6：外层不守 kind（依赖被调函数自己那一句）",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "expect": "equivalent",
+      "_measured": "实测：0 条红，与 `expect:\"equivalent\"` 一致（不是\"没跑成\"：同文件在其余六条下都能红，说明这份 testFile 是活的）。等价的原因写在 `_why`：外层那句 kind 守卫删掉后，行为由被调的 `hasUndeclaredUiWorld` 自己第一句兜着，而 `.strict()` 解析出的非 wait 步骤压根带不了 `condition` 键 —— 不可观测。**这一格占位的价值就是那句\"它为什么没有测试\"有答案**，否则下一个人会给它配一条假测试（拿带 condition 的 tap 步去跑 lint，那个 fixture 过不了 schema，于是那条测试实际测的是 zod）。"
+    },
+    {
+      "label": "L7 toReport 不再由 error 决定通过与否（'warning 不拦人'被写成'什么都不拦'）",
+      "_why": "这一条打的是**后果**那一半，而不是级别那一半（级别由 L2 打）。`toReport` 里那句 `ok: errors.length === 0` 是整道静态闸唯一的出口：它变成恒 true 之后，`atest lint` 退 0、`atest run --strict` 照跑，而报告上**每一条 error 级规则都不再拦人** —— 全部代码与文案照旧、`rep.errors` 照旧非空，所以只有 `ok` 这个字在说谎。本仓给这条出口记过账（docs/15 §3.3 那张表的 A′ 行：同一条场景，看 `toReport().ok` 与只看 issues 是两种结局，`RESOURCE_LEASE_MISSING` 是 error 就拦 CI）。**为什么它还值得单独一条**（这一半我先猜错过一次，按实测改过）：我原本写的是「`engine/test/lint.test.ts` 那条总的用的是跨夹具比大小，动不了这行」—— **那句是错的**：施加本条之后那份文件实测红 2 条（「toReport 只在有 error 时判不通过」里 `errs.ok === false` 那一断、以及「撞名场景在 CLI 眼里必须是不通过」），所以**全仓并非没人守 `toReport`**，别说\"此前这条出口没钉子\"。本条的独立价值在另一头，也是量出来的：本文件里**旧形状**（只断 `ok === true` 加 warning 在场）在这一条下**不红**，补上「同一份场景多一条 error 时 ok 必须翻 false」那句反向对照才红 —— 所以这条的载体是这次新加的那半句读数：**同一份场景、同一个 warning，只因为旁边多了一条 error 就整体不通过**，而那两条总的测试都给不出（它们的夹具与等待无关）。读到这条的下一个人在改 `toReport` 之前应该先看到这一格。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    ok: errors.length === 0,",
+      "replace": "    ok: true, // 变异 L7：静态闸永远放行（errors 照旧填，只有出口这个字说谎）",
+      "testFile": "packages/engine/test/wait-world-lint.test.ts",
+      "_measured": "实测。**本文件 1 条红**，而红的正是**新加的那半句**：「warning 不拦人」格里的反向对照，断言消息「error 级 finding 必须让静态闸判不通过（否则上面那句 ok===true 是恒真好听）」（false 变成 true）。**这一格是量出来的、不是推的**：把这一条施加到 lint.ts 上、单跑\"只有 ok===true + warning 在场\"那个旧形状，它**不红**（`.scratch/check-l7-old-shape.mts`，临时脚本、clone 下来不存在，结论以这段文字为准）。也就是说 `ok` 恒 true 这个坏法在本文件里此前**无人拦**，是这次补反向对照才有牙的 —— 而\"顺手加一句 ok===true\"看着像在测后果，实际一句也没测到，这正是本仓那一族：**只断\"不该拦\"而不断\"该拦时真拦\"，判据就退化成恒真**。⚠ **同时要把话说回来**：`engine/test/lint.test.ts` 在这一条下也红 **2 条**（「toReport 只在有 error 时判不通过」的 `errs.ok === false`、「撞名场景在 CLI 眼里必须是不通过」），所以**全仓并非没有反向钉子** —— 本条挂在这份 spec 名下，是因为它钉的是**同一份场景、同一个 warning，只因为旁边多了一条 error 就整体不通过**那个配对读数，而那不是那两条能给出的（它们的夹具与等待无关）。别把这条读成\"此前 toReport 没人守\"：有人守，只是没守在这一格上。"
+    }
+  ]
+}

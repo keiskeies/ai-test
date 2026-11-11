@@ -7,6 +7,7 @@ import { StepSchema, type Step } from './steps.js';
 import { TargetKindSchema } from './targets.js';
 import type { TargetKind } from './values.js';
 import { STEP_TARGET, walk } from './steps.js';
+import { waitWorldDemand } from './waits.js';
 
 export const SCHEMA_VERSION = '1';
 
@@ -133,6 +134,27 @@ export function targetsOfStep(s: Step): TargetKind[] {
   const t = STEP_TARGET[s.kind];
   if (t === 'api') return ['api'];
   if (t === 'web') return ['web'];
+  /*
+   * `wait` 落在 'any' 那一档（等待步骤本身不带端），**但它问的那个界面是端需求**。
+   * 本轮之前这一格什么都没有，于是"整条场景只有一个 wait{uiPredicate,world:'web'}"
+   * 这种写法在装配侧完全隐形：`needsWeb` 是 false ⇒ 不建浏览器 ⇒ 运行期抛
+   * `NoConditionAdapter` / `NoNetworkObserver` / `NoNewPageObserver`，
+   * 归因 `env-unavailable`。**改前实测**逐个条件量过，那张读数表贴在
+   * `ir/test/wait-worlds.test.ts` 文件头那张表上（改前的行为本来就没有测试，
+   * 表里记的是"改前是什么"，钉住**现状**的是那个文件里的每一条断言）。
+   * 而 `needsWeb` 存在的**全部理由**就是"这种缺失要在装配期报错、不要进退出码"：
+   * 没装 Chrome 的机器上纯 API 用例照跑，而真要浏览器的用例该拿到一句
+   * `设 ATEST_BROWSER_BIN=…`，不是一句让人去查环境的 env-unavailable + 一次 CI 重试。
+   *
+   * 判据不在这里写，在 `waits.ts` 的 `waitWorldDemand`。
+   * **这里只从它的世界里取 `web`** —— "要 mobile" 那一半由 `deriveNeedsDevice` 读
+   * （它也读这一格，见那个函数）。又是那两个问法分开的那件事：
+   * 一个 `wait{world:'mobile'}` 确实要一台机器，而它说不出要哪一端。
+   */
+  if (s.kind === 'wait') {
+    const w = waitWorldDemand(s as { kind: string; condition?: unknown });
+    return w.includes('web') ? ['web'] : [];
+  }
   if (t === 'mobile') {
     // 只有 device 那一步真的带平台。其余 mobile 步骤返回空：**不是漏**，
     // 是"这件事不由这一步说"。要"要不要设备"去问 deriveNeedsDevice。
@@ -211,7 +233,16 @@ export function deriveTargets(steps: Step[]): TargetKind[] {
  */
 export function deriveNeedsDevice(steps: Step[]): boolean {
   let needs = false;
-  walk(steps, (s) => { if (STEP_TARGET[s.kind] === 'mobile') needs = true; });
+  walk(steps, (s) => {
+    if (STEP_TARGET[s.kind] === 'mobile') { needs = true; return; }
+    // 与 targetsOfStep 那一格对称的另一半：`wait{world:'mobile'}` 明确要一台机器，
+    // 而它的 kind 在 'any' 档、租约名单也没有它。少这一句，"全场只有一个
+    // wait{uiPredicate,world:'mobile'}"这种场景会答"不要设备"，而它百分百需要一台
+    // —— 与本轮修掉的那个裸 tap 静默同形。
+    // **没写 world 的不算**（那是"没说清"，不是"要设备"），理由见 waits.ts 里
+    // waitWorldDemand 头上那段被实测否掉的第一版。
+    if (s.kind === 'wait' && waitWorldDemand(s as { kind: string; condition?: unknown }).includes('mobile')) needs = true;
+  });
   return needs;
 }
 

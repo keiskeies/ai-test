@@ -108,6 +108,71 @@ test('用到 Web 而没配浏览器 => **装配期**报错并点名 ATEST_BROWSE
   });
 });
 
+test('一条**等待**问哪一世界，也拉动装配（改前整条场景只有一个界面等待时完全隐形）', async () => {
+  /*
+   * `needsWeb` **就是** `webSources(...).length > 0`（见 wiring.ts 那句注释），
+   * 所以这一格真正测的是"装配侧能不能看见等待问的那一档"。
+   *
+   * 改前的形状（读数表在 `packages/ir/test/wait-worlds.test.ts` 文件头，
+   * 那里逐条件量过 `needsWeb` 与真跑出来的结果）：`STEP_TARGET.wait` 是 `'any'`
+   * 而 `targetsOfStep` 里没有任何一格读 `world`，于是**全场只有一条界面等待**的
+   * 场景 `needsWeb` 恒 false ⇒ 不建浏览器 ⇒ 运行期抛 `NoConditionAdapter` /
+   * `NoNetworkObserver` / `NoNewPageObserver`，归因 `env-unavailable`。
+   * 那句话会进退出码，而 CI 照 `CI_HINT` 白重试一次 —— 装配期这句
+   * 「设 ATEST_BROWSER_BIN」存在的**全部理由**就是把这件事挡在重试之前。
+   *
+   * **为什么不满足于 IR 侧那几条**：那边测的是判据本身，而判据到装配之间还隔着
+   * `webSources` 那三层数组与 `targetSources` 的逐步判据。本仓为这一族记过多次账
+   * （"每个消费者都各自正确，而对同一件事的假设互不相容"），所以这里从**装配出口**
+   * 再问一次：`needsWeb` 与那句报错点名的 id 集合。
+   */
+  const LOC = { intent: 'x', primary: { by: 'css', value: 'a' } };
+  const w = (condition: unknown, id = 'w1') => ({ id, kind: 'wait', condition, timeoutMs: 500 });
+
+  // 硬需求那一侧：写了 web 的界面条件 + 只有浏览器看得见的两种观测口
+  assert.equal(needsWeb(scen([w({ type: 'uiPredicate', target: LOC, world: 'web' })])), true,
+    'wait{uiPredicate,world:"web"} 要浏览器（改前是 false）');
+  assert.equal(needsWeb(scen([w({ type: 'template', target: LOC, world: 'web' })])), true);
+  assert.equal(needsWeb(scen([w({ type: 'uiIdle', world: 'web' })])), true);
+  assert.equal(needsWeb(scen([w({ type: 'response', urlPattern: '/api/x' })])), true,
+    'response 恒要浏览器（它没有 world 可写，判据是接线事实）');
+  assert.equal(needsWeb(scen([w({ type: 'newPage' })])), true);
+  // 容器里的等待也算（needsWeb 走 walk，这条与上面那条"容器里的 Web 步骤"同一族）
+  assert.equal(needsWeb(scen([{ id: 's1', kind: 'sequence', steps: [w({ type: 'uiPredicate', target: LOC, world: 'web' })] }])), true);
+  // setup 里也算（三层数组那一格对本格同样成立）
+  // setup 那一份要自己造（上面的 scen 夹具只接 body），否则"顺手只算了 body"这种半吊子改法能过
+  const setupOnly = parseScenario({ ...base, body: [{ id: 'p', kind: 'noop' }], setup: [w({ type: 'newPage' })] });
+  if (!setupOnly.ok || !setupOnly.scenario) throw new Error('夹具不合法');
+  assert.equal(needsWeb(setupOnly.scenario), true, '等待写在 setup 里也要拉起浏览器');
+
+  // **不许多报**：多报的代价是白起一个 Chrome（1~2s、几百 MB），
+  // 而"没装 Chrome 的机器上纯 API / 纯移动端用例必须照跑"是按需装配存在的全部理由
+  assert.equal(needsWeb(scen([w({ type: 'uiPredicate', target: LOC })])), false,
+    '没写 world 不算硬需求 —— 这是本轮第一版写错的那一格（把纯安卓场景挡在装配期）');
+  assert.equal(needsWeb(scen([w({ type: 'uiPredicate', target: LOC, world: 'mobile' })])), false,
+    '问移动端的等待不许拉浏览器（它要的是一台机器，那是 deriveNeedsDevice 那一问）');
+  assert.equal(needsWeb(scen([w({ type: 'expr', expr: '1 == 1' })])), false);
+  assert.equal(needsWeb(scen([w({ type: 'dbRow', sql: 'SELECT 1' })])), false,
+    'dbRow 要的是 db adapter，算成 web 会白起一个浏览器');
+
+  // 报错点名：等待是"谁要浏览器"的答案里新出现的一种 kind，它必须说得出**是哪一步**，
+  // 而 `world:'mobile'` 那一步不许被列成 web 需求来源（那是本轮从端集合里删掉的同一件坏事）
+  const registry = await DocRegistry.load([]);
+  let msg = '';
+  await withoutBrowser(async () => {
+    try {
+      await assemble({
+        scenario: scen([w({ type: 'newPage' }, 'waitNew'), w({ type: 'uiPredicate', target: LOC, world: 'mobile' }, 'waitDev')]),
+        env: {}, registry, evidenceDir: '/tmp/atest-wiring-test',
+        clock: { now: () => 0, mono: () => 0, sleep: async () => {}, random: () => 0, mode: 'frozen' as const },
+      });
+    } catch (e) { msg = e instanceof Error ? e.message : String(e); }
+  });
+  assert.match(msg, /ATEST_BROWSER_BIN/, '仍然要指名该设哪个变量');
+  assert.match(msg, /waitNew/, `要点名那条真要浏览器的等待：${msg}`);
+  assert.ok(!/waitDev/.test(msg), `问移动端的那条不许被列成 web 需求来源：${msg}`);
+});
+
 test('报错点名"Web 需求来自哪几步"：容器不当罪名、截断要说出口', async () => {
   /*
    * docs/15 §3.3 五步链的第 3 步，本轮第一次量到：一份只有 `app` 步骤
