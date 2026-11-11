@@ -19,13 +19,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
-  EVIDENCE_FILES, deterministicClock, parseTraceJsonl, redactForDisk, runScenario,
+  EVIDENCE_FILES, EVIDENCE_MEMBERS, deterministicClock, parseTraceJsonl, redactForDisk, runScenario,
   toJUnitXml, toTraceJsonl, type RunReport,
 } from '@atest/engine';
 import type { Scenario, StepDraft } from '@atest/ir';
 import { b, scen } from './helpers.js';
 import { DiskArtifactStore } from '../src/artifacts.js';
-import { buildEvidencePackage, writeEvidencePackage, readEvidenceMember } from '../src/evidence.js';
+import { buildEvidencePackage, isEvidenceMember, readRunMember, writeEvidenceMembers, writeEvidencePackage, readEvidenceMember } from '../src/evidence.js';
 import { irShaOf } from '../src/ir-hash.js';
 import { buildZip, dosStamp, readZipEntries } from '../src/zip.js';
 
@@ -614,4 +614,142 @@ test('被中断的 run：文件名换成 aborted，而 manifest.status **照实�
     readZipEntries(pkg.bytes).find((e) => e.name === 'summary.txt')!.data,
   );
   assert.match(summary.split('\n')[0]!, /被中断/, summary);
+});
+
+// ── run 目录里那几份散装副本，与"从包里读"这条路 ──────────────────────────
+
+/**
+ * **手写死的五名**，不从 `EVIDENCE_MEMBERS` 取。
+ *
+ * 写侧 `writeEvidenceMembers` 的筛子就是 `Set(EVIDENCE_MEMBERS)`，
+ * 拿同一个名单去断"它把名单里的都写了"是**用派生验派生**：
+ * 名单少一名时两边一起缩，测试永远绿 —— 而那恰好是本次缺陷的形状
+ * （少写 manifest.json / summary.txt）。与本文件下面
+ * `evidence 缺参数…` 那条写下的是同一条判据。
+ */
+const LOOSE = ['trace.jsonl', 'junit.xml', 'manifest.json', 'summary.txt', 'report.html'];
+
+/*
+ * 这一族测试的存在理由是一次**实测到的 404**，而不是"顺便补个覆盖"。
+ *
+ * 改前的磁盘布局：run 目录里只有 trace.jsonl / junit.xml / report.html / evidence.*.zip。
+ * 而三处消费者读的都是**没写出来的那两样**：
+ *   - report.html 正文里是相对链接 ./manifest.json 与 ./summary.txt（点开 404）；
+ *   - 服务端的证据白名单五名全放行，多出的两名一直 404；
+ *   - GET /api/runs 读 <runId>/manifest.json 来列运行记录 ——
+ *     读不到就 continue，于是**运行记录列表一条都列不出**。
+ * 三个包的单测当时**各自全绿**：html 测"我写出了这个链接"，
+ * server 测"白名单允许这个名字"，cli 测"包里确实有 manifest.json"。
+ * 没有一条测"这三件事在同一块磁盘上同时成立"。所以下面的断言全部围绕
+ * **磁盘上到底有什么**，而不是"函数返回了什么"。
+ */
+
+test('writeEvidenceMembers：五个文档成员全都落盘，artifacts/ 一个都不落', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atest-loose-'));
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+
+  // 夹具自检：这条要断的是"**没有**散装 artifacts"，
+  // 而如果这次 run 压根没产证据，它会因为"确实一个都没有"而恒绿。
+  const artifactEntries = pkg.entries.filter((e) => e.name.startsWith(`${EVIDENCE_FILES.artifactsDir}/`));
+  assert.ok(artifactEntries.length >= 1, '夹具没产出证据，下面那条"不写 artifacts"的断言将没有鉴别力');
+
+  const written = await writeEvidenceMembers(dir, pkg.entries);
+  const onDisk = await readdir(dir);
+  for (const name of LOOSE) {
+    assert.ok(onDisk.includes(name), `${name} 该在 run 目录里（报告里的相对链接与运行记录列表都要读它）：${onDisk.join(', ')}`);
+  }
+  assert.deepEqual(written.slice().sort(), LOOSE.slice().sort(), '返回值要说清写了哪些，且只写了这些');
+  // 反向：EVIDENCE_MEMBERS 与 LOOSE 必须此刻仍相等。两边都是判据的一部分，
+  // 而上面那批断言用的是 LOOSE —— 有人在 schema 侧加/删一名时，这条会来对账。
+  assert.deepEqual([...EVIDENCE_MEMBERS].sort(), LOOSE.slice().sort(),
+    'EVIDENCE_MEMBERS 与本文件那份手写名单对不上：加/删成员要同时改这里（这是有意的两道）');
+  for (const a of artifactEntries) {
+    assert.ok(!onDisk.includes(a.name), `${a.name} 不该散装再写一份（体积翻倍 + 多一份未脱敏副本）`);
+    assert.ok(!onDisk.includes('artifacts'), 'artifacts 目录本身也不该被建出来');
+  }
+});
+
+test('散装副本与包内成员逐字节相同（只有一个产出者，不是"再渲染一遍"）', async () => {
+  /*
+   * 这条钉的是这次改动的**机制**而不是结果。改前 CLI 自己调
+   * toTraceJsonl/toJUnitXml/toHtmlReport 各算一遍，store 组包时又算一遍；
+   * junit 那组参数逐字抄了两遍，所以值恰好相同 —— 于是没有任何测试能看出
+   * 它是两份，删掉任一份都不会有东西变红，而参数一改就只改一处。
+   * 现在副本直接来自 buildEvidencePackage 交出的 entries，所以"相同"是结构性的，
+   * 而这条测试的作用是让"有人把它改回第二次渲染"这件事必须显式地撞墙。
+   */
+  const dir = await mkdtemp(join(tmpdir(), 'atest-same-'));
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  await writeEvidenceMembers(dir, pkg.entries);
+  const inZip = new Map(readZipEntries(pkg.bytes).map((e) => [e.name, Buffer.from(e.data)]));
+  for (const name of LOOSE) {
+    const loose = readFileSync(join(dir, name));
+    const zipped = inZip.get(name);
+    assert.ok(zipped, `包里该有 ${name}`);
+    assert.equal(loose.equals(zipped), true, `${name} 的散装副本与包内成员必须逐字节相同`);
+  }
+});
+
+test('readRunMember：散装的优先；artifacts/<sha> 只在包里，也读得出', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atest-readrun-'));
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  await writeEvidenceMembers(dir, pkg.entries);
+  await writeEvidencePackage(dir, 'run_x', 'fail', pkg.bytes, Boolean(report.aborted));
+
+  const manifest = await readRunMember(dir, EVIDENCE_FILES.manifest);
+  assert.ok(manifest, 'manifest 读不出就等于"这次 run 不存在"');
+  assert.match(new TextDecoder().decode(manifest), /"runId"/);
+
+  const artifact = pkg.entries.find((e) => e.name.startsWith(`${EVIDENCE_FILES.artifactsDir}/`))!;
+  const fromZip = await readRunMember(dir, artifact.name);
+  assert.ok(fromZip, `${artifact.name} 只在包里，readRunMember 必须进包取（report.html 里那个链接靠它）`);
+  assert.equal(Buffer.from(fromZip).equals(Buffer.from(artifact.data)), true, '从包里取出的字节必须与写入时相同');
+});
+
+test('readRunMember：老布局的 run 目录（散装一样没有、只有 zip）照样读得出全部成员', async () => {
+  /*
+   * 修的是写侧，但**盘上已经躺着老布局的 run**。那些 run 该照样出现在
+   * 运行记录列表里、报告里那个链接该照样点得开，而不是"看起来没跑过"。
+   * 这一条就是拿"只有 zip"这个形状喂进去的。
+   */
+  const dir = await mkdtemp(join(tmpdir(), 'atest-old-'));
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  const w = await writeEvidencePackage(dir, 'run_old', 'fail', pkg.bytes);
+  assert.deepEqual(await readdir(dir), [w.path.split('/').pop()], '夹具：目录里只有 zip');
+
+  for (const name of LOOSE) {
+    assert.ok(await readRunMember(dir, name), `${name} 只能从包里取，而它必须取得到`);
+  }
+});
+
+test('readRunMember：白名单外的名字一个都不给，坏包不拖垮整次读取', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atest-guard-'));
+  const store = await freshStore();
+  const { scenario, report } = await failingRun(store);
+  const pkg = await buildEvidencePackage({ scenario, report, store });
+  await writeEvidenceMembers(dir, pkg.entries);
+
+  // 这些名字**在磁盘上真实存在**（或被写成存在），判据必须是名单而不是"文件在不在"
+  writeFileSync(join(dir, 'env.json'), '{"token":"leak"}');
+  writeFileSync(join(dir, 'evidence.run_x.fail.zip'), pkg.bytes);
+  for (const bad of ['env.json', 'evidence.run_x.fail.zip', 'artifacts/not-hex', 'artifacts/' + '0'.repeat(63), '../manifest.json', 'sub/manifest.json', '']) {
+    assert.equal(await readRunMember(dir, bad), undefined, `${JSON.stringify(bad)} 不该被读出`);
+    assert.equal(isEvidenceMember(bad), false, `isEvidenceMember 对 ${JSON.stringify(bad)} 该说否`);
+  }
+  for (const ok of [...LOOSE, `artifacts/${'a'.repeat(64)}`]) {
+    assert.equal(isEvidenceMember(ok), true, `${ok} 该被认作成员`);
+  }
+
+  // 坏包：读不出来的那个 zip 不许让整次读取失败，也不许假装读到了
+  const broken = await mkdtemp(join(tmpdir(), 'atest-broken-'));
+  writeFileSync(join(broken, 'evidence.r.bad.zip'), Buffer.from('这不是 zip'));
+  assert.equal(await readRunMember(broken, EVIDENCE_FILES.manifest), undefined);
 });

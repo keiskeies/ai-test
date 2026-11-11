@@ -17,10 +17,10 @@
  * ```
  */
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  EVIDENCE_FILES, toJUnitXml, toTraceJsonl, manifestJson, summaryText, toHtmlReport,
+  EVIDENCE_FILES, EVIDENCE_MEMBERS, toJUnitXml, toTraceJsonl, manifestJson, summaryText, toHtmlReport,
   evidenceChildrenOf, type EvidenceManifest, type JUnitOptions,
 } from '@atest/engine';
 import type { RunReport } from '@atest/engine';
@@ -53,6 +53,32 @@ export interface EvidencePackage {
   /** 组装时被跳过的证据（存储里已经不存在了）。**必须带出来**：
    *  静默少一个 artifact，人会以为那次运行压根没产证据 */
   missing: string[];
+  /**
+   * 包里的全部成员（含 `artifacts/`）。带出来的唯一用途是
+   * `writeEvidenceMembers()` —— 让 run 目录里那几份**散装副本与包内字节同源**。
+   *
+   * 为什么要有散装副本、又为什么要同源：`report.html` 的正文里写着
+   * 「原件在包内 artifacts/ 下（本页不内嵌）」，而它的链接是**相对路径**
+   * （`./manifest.json`、`./summary.txt`）。这份 html 是散装写在 run 目录里的，
+   * 于是"双击打开 report.html 就能点到 manifest/summary"是它对读者做的承诺；
+   * 服务端那一侧同样按 `EVIDENCE_MEMBERS` 准备了一份白名单，
+   * 而 `GET /api/runs` 读的是 `manifest.json`。
+   * **三个消费者加一份注释都在说这个布局，只有写侧不这么写** ——
+   * 改前实测 run 目录里只有 trace / junit / report / zip 四样，
+   * 于是报告里两个链接是坏的、运行记录列表是空的（列不出任何一次 run），
+   * 而每一侧的单测都绿：html 测"我写出了这个链接"，server 测"白名单允许这个名字"，
+   * cli 测"包里确实有 manifest.json"，**没人测这三件事在同一块磁盘上成立**。
+   *
+   * 所以副本不许由调用方**再渲染一遍**：改前 CLI 自己调
+   * `toTraceJsonl/toJUnitXml/toHtmlReport` 各算一遍，store 组包时又算一遍。
+   * junit 那一遍的参数**逐字抄了两遍**（CLI 传给 `buildEvidencePackage` 一份、
+   * 自己写盘又传一份），今天值相同 —— 所以没有任何测试能看出它是两份，
+   * 而删掉其中一份也不会让任何东西变红。参数一抄，改的人迟早只改一处，
+   * 那时"包里的 junit"与"目录里的 junit"就分叉了，而分叉的方向是
+   * "CI 读的那份"和"人点开的这份"给的 classname/suiteName 不一样。
+   * 现在只有**一个**产出者：这里算出来的 `entries`。
+   */
+  entries: ZipEntry[];
 }
 
 /**
@@ -252,7 +278,7 @@ export async function buildEvidencePackage(o: BuildEvidenceOptions): Promise<Evi
     ...members,
   ];
 
-  return { bytes: buildZip(entries, report.startedAt), manifest, missing };
+  return { bytes: buildZip(entries, report.startedAt), manifest, missing, entries };
 }
 
 /**
@@ -293,6 +319,122 @@ export async function readEvidenceMember(path: string, name: string): Promise<st
   // 而真相通常是成员名记错了
   if (!found) throw new Error(`${path} 里没有 ${name}（现有成员：${entries.map((e) => e.name).join(', ') || '空'}）`);
   return new TextDecoder().decode(found.data);
+}
+
+/**
+ * 把包里的**文档成员**散装再写一份到 run 目录。
+ *
+ * ## 为什么"包里有"不够
+ *
+ * 三个消费者读的都是磁盘上那一份，不是 zip 里的那一份：
+ *  - `report.html` 正文里是**相对链接** `./manifest.json`、`./summary.txt`，
+ *    而这份 html 本身就是散装写在 run 目录里的（双击能开是它的判据）；
+ *  - 服务端的证据白名单按 `EVIDENCE_MEMBERS` 整份准备（`server/src/files.ts`），
+ *    多出来的那两名一直 404；
+ *  - `GET /api/runs` 读 `<runId>/manifest.json` 来列运行记录。
+ *
+ * 改前这三处**同时是坏的**：报告里两个链接点开是 404、运行记录列表**一条都列不出**
+ * （`listRuns` 找不到 manifest 就 `continue`，于是"存在但读不出"表现成"不存在"）。
+ * 而三个包的单测各自都绿 —— html 测"我写出了这个链接"，server 测"白名单允许这个名字"，
+ * cli 测"包里确实有 manifest.json"，没有一条测"这三件事在同一块磁盘上同时成立"。
+ *
+ * ## 为什么**只**写文档成员，`artifacts/` 不写
+ *
+ * 不是省事，是两条具体的代价：
+ *  1. **体积**。文档成员是 KB 级（本仓一次典型 run 五份合计约 11KB），
+ *     而 artifact 是响应体/截图/hierarchy，单件上限 32MB。
+ *     再写一份等于把证据盘的占用**翻倍**，而翻倍买不到任何新能力
+ *     （包里有原件，`GET /evidence/<runId>/artifacts/<sha>` 直接从包里取）。
+ *  2. **多一份未脱敏副本**。落盘的散装文件不在 zip 里，不在"下载给别人"这个动作里，
+ *     但**在备份与磁盘清理的视野里**。多复制一份就多一处要考虑"谁读得到它"的地方，
+ *     而这一格要的能力是"报告里那个链接点得开"，散装文档成员就够了。
+ *
+ * 所以判据是成员名**在 `EVIDENCE_MEMBERS` 里**，不是"不含斜杠"——
+ * 后者今天恰好等价，但加一个带目录的文档成员就会悄悄写出去。
+ * 直接 `mkdir(recursive:true)` 也是同一个立场：不许依赖"顺序上恰好没有"。
+ *
+ * 名字直接取 `entry.name`。它已经过 `validateName`（写侧拦过 zip slip），
+ * 而这里再走一次同一道判据不是重复防御 —— 这个函数的入参是 `ZipEntry[]`，
+ * 调用方可以凭空构造一份，而"往 dir 外面写文件"是它唯一能做的坏事。
+ */
+export async function writeEvidenceMembers(dir: string, entries: readonly ZipEntry[]): Promise<string[]> {
+  await mkdir(dir, { recursive: true });
+  const docs = new Set<string>(EVIDENCE_MEMBERS);
+  const written: string[] = [];
+  for (const e of entries) {
+    if (!docs.has(e.name)) continue;
+    await writeFile(join(dir, e.name), e.data);
+    written.push(e.name);
+  }
+  return written;
+}
+
+/** 包内 `artifacts/` 下那一名成员的形状。与 manifest.artifacts[].sha256 同源：内容寻址 id */
+const ARTIFACT_MEMBER = /^[0-9a-f]{64}$/;
+
+/**
+ * 这个成员名允许被读吗。**从 `EVIDENCE_MEMBERS` 派生，不另抄一份名单**：
+ * 抄的那份在本轮加 `report.html` 时就漏过一格（症状是"人不知道能 show 它"，
+ * 不报错也不变红）。artifacts 那一支单独判，因为它不是固定名而是内容寻址 id。
+ */
+export function isEvidenceMember(name: string): boolean {
+  if ((EVIDENCE_MEMBERS as readonly string[]).includes(name)) return true;
+  const prefix = `${EVIDENCE_FILES.artifactsDir}/`;
+  return name.startsWith(prefix) && ARTIFACT_MEMBER.test(name.slice(prefix.length));
+}
+
+/**
+ * 读一次 run 的某个成员：**先查 run 目录里那份散装的，没有再进证据包**。
+ *
+ * ## 为什么需要"再进包里"这一支
+ *
+ * `report.html` 正文里的链接是**相对路径**，而 `artifacts/<sha>` 那一类
+ * **刻意不写散装副本**（见 `writeEvidenceMembers`：体积翻倍 + 多一份未脱敏副本）。
+ * 于是"报告里那个链接点不开"是写侧的**有意选择**与读侧的"只认磁盘文件"两件事
+ * 撞出来的结果 —— 两边各自都合理，合起来是个 404，而两侧的测试都绿。
+ * 这里就是那个合起来的地方。
+ *
+ * 另一个更常见的入口是**老布局的 run**：本轮之前写侧只落四样，
+ * manifest/summary 只在包里。那些历史 run 该照样出现在运行记录里，
+ * 而不是"看起来没跑过"。
+ *
+ * ## 为什么允许"目录里那份不算、以包为准"
+ *
+ * 散装副本与包内成员**同源**（都来自 `buildEvidencePackage` 那一次 `entries`），
+ * 所以正常情况下两份字节相同，先查哪个都对。不一致只可能是有人手改过散装那份，
+ * 而那时**包才是原件**：它有 sha256、能被 `unzip -t` 验、是"下载给别人"的那一份。
+ *
+ * ## 多个 zip 时为什么"取第一个命中的"是安全的
+ *
+ * 同一个 run 目录里可能有第二个包：`--run-id` 指定同一个名字重跑一次，
+ * 第一次红第二次绿，于是 `evidence.r.fail.zip` 与 `evidence.r.pass.zip` 并排躺着。
+ * 挑哪个都不影响字节 —— 成员名是**内容哈希**，同名成员在两个包里必然逐字节相同。
+ * 内容寻址把"该信哪个包"这个问题消解掉了，所以这里不需要"最新的那个赢"这种规则。
+ *
+ * ## 不缓存
+ *
+ * 每次请求读一遍包（本地磁盘、KB～MB 级）。不在进程里缓存解压结果：
+ * 缓存的是**未脱敏的真响应体**，而这是个常驻进程。为了省一次本地读
+ * 把证据留在内存里直到进程退出，这笔交易对本仓的纪律来说是反的。
+ *
+ * 包坏了 / CRC 不符 / 一个包都没有 → `undefined`（读不出，不是"没有"，
+ * 但调用方只需要 404；服务端那一侧刻意不发 403，理由在它自己文件里）。
+ */
+export async function readRunMember(runDir: string, name: string): Promise<Uint8Array | undefined> {
+  if (!isEvidenceMember(name)) return undefined;
+  try {
+    return new Uint8Array(await readFile(join(runDir, name)));
+  } catch { /* 散装那份不存在（artifacts/ 那一类就是这样），继续进包里找 */ }
+  let names: string[];
+  try { names = await readdir(runDir); } catch { return undefined; }
+  for (const z of names.filter((n) => n.startsWith('evidence.') && n.endsWith('.zip')).sort()) {
+    try {
+      const entries = readZipEntries(new Uint8Array(await readFile(join(runDir, z))));
+      const hit = entries.find((e) => e.name === name);
+      if (hit) return hit.data;
+    } catch { continue; }   // 这个包读不出/坏了：换下一个，而不是把整次读取判死
+  }
+  return undefined;
 }
 
 export type { ZipEntry };
