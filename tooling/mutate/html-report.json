@@ -77,9 +77,10 @@
     {
       "label": "esc 不再转 < >（正文注入面）",
       "file": "packages/engine/src/html.ts",
-      "anchor": "  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
-      "replace": "  return s.replace(/&/g, '&amp;');",
-      "testFile": "packages/engine/test/html.test.ts"
+      "anchor": "  return redactSecretText(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
+      "replace": "  return redactSecretText(s).replace(/&/g, '&amp;');",
+      "testFile": "packages/engine/test/html.test.ts",
+      "why": "锚点本轮跟着 esc 变了（esc 现在先 redactSecretText 再转义），变异语义不变：只留 & 的转义、丢掉 < >。"
     },
     {
       "label": "htmlAttr 退化成 esc（属性可提前闭合）",

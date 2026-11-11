@@ -30,7 +30,8 @@
 import type { RunReport } from './interpreter.js';
 import type { StepResult } from '@atest/ir';
 import { CONTAINER_KINDS, ASSERTION_KINDS, flakyAttempts, isFlakyPass } from '@atest/ir';
-import { redactForDisk } from './redact.js';
+import { redactForDisk, redactSecretText } from './redact.js';
+import { advisoryItems, advisoriesHidden, collectAdvisories } from './advisories.js';
 import { EVIDENCE_FILES, EVIDENCE_MEMBERS, type EvidenceManifest } from './report.js';
 
 export interface HtmlOptions {
@@ -101,14 +102,34 @@ const CAUSE_LABEL: Record<string, string> = {
 };
 
 /**
- * HTML 文本转义。
+ * HTML 文本转义 + **值形态脱敏**。这两个职责合在一个函数里是刻意的，理由分两半：
  *
- * 只转 `& < >`。属性值另走 htmlAttr（多转引号）—— 与 report.ts 里
- * xmlText/xmlAttr 分两个函数是同一条理由：**属性里的引号会提前闭合属性，
- * 后面的内容就变成标签**，那已经不是"报告难看"而是注入。
+ * ## 转义：只转 `& < >`
+ *
+ * 属性值另走 htmlAttr（多转引号）—— 与 report.ts 里 xmlText/xmlAttr 分两个函数是
+ * 同一条理由：**属性里的引号会提前闭合属性，后面的内容就变成标签**，
+ * 那已经不是"报告难看"而是注入。
+ *
+ * ## 脱敏：本轮补的，改动前这里**只转义不脱敏**
+ *
+ * 本文件原来只在 `keyContext` 那一格调 `redactForDisk`（有条测试钉着），
+ * 而**散文**那一列 —— `assertionSummary`、`report.summary`、容器提示带里那句 ——
+ * 一个都没脱。实测后果：一次本地 schema 校验拦截（`请求体不符合 spec（发送前拦截）：
+ * $.password 实际 <真 token>`）把真 JWT 与真 AWS key **原样写进 report.html**，
+ * 同一次 run 的 `trace.jsonl` 反倒是干净的。`html.test.ts` 那条脱敏钉子查的是
+ * keyContext，所以它绿着、页面漏着 —— 正是 docs/08 §3 那个测试侧镜像
+ * （**测试通过的原因和它想验的东西无关**）。
+ *
+ * 放在 `esc` 而不是各个调用点：本文件有 **十余处** 文本出口（行摘要、详情块、
+ * 失败区、待审区、提示带、页脚），漏一处就等于没有。这条与"转义也必须在这"
+ * 是同一条判断 —— 一个函数是所有文本的唯一通路，性质就只能在它身上成立。
+ *
+ * **不做字段名规则**：那是结构化数据才有的概念（`redactForDisk` 负责 keyContext，
+ * 那条路照旧走）。这里做的是值形态（JWT / AKIA / sk- / 私钥 / Bearer），
+ * 对散文是充分的那一半：一句中文里没人能"给字段改名"。
  */
 function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return redactSecretText(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 function htmlAttr(s: string): string {
   return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -465,6 +486,45 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
       + `<ul>${unfinished.map((r) => `<li><code>${esc(r.stepId)}</code> <span class="hint mono">${esc(r.assertionSummary ?? '')}</span></li>`).join('')}</ul></div>`
     : '';
 
+  /*
+   * **运行期提醒**那一条带（`lint.reported` 事件的人读出口）。
+   *
+   * 与上面那条**故意分开、不合并成一条带**：两条说的是不同的事 ——
+   * `unfinished` 说的是"某几个循环少跑了"（有步骤坐标、是**这次运行**的事实），
+   * 这一条说的是"某道闸压根没生效"或"某个特性还没实现"（多半与运行配置有关，
+   * 而且常常没有步骤坐标，例如 `ARTIFACT_STORE_MISSING` 是整场一次）。
+   * 合成一条会得到一句两头都不准确的话，而本文件上一版就犯过这个错
+   * （提示带标题写"没跑完数据"，对 `neverRun` 那一支是假话）。
+   *
+   * **不进 `bad` / `attn` / `assertions` / `counted` 那四个计数与分区，也不出行**：
+   * 与 `unfinishedList` 同一条纪律 —— 页面上的用例数必须与 CI 数出来的相等。
+   * 这里连步骤行都不产生（提醒不是用例），所以行/`<testcase>` 双向那条钉子
+   * 天然不受影响；有测试专门钉这一点。
+   *
+   * **数据源是 `report.events`，只此一处**：子场景的事件在 `call` 分支里已经
+   * 原样中继到父事件流（interpreter 的 `for (const e of rep.events) a.emit(...)`，
+   * 实测带 `path: ["body","c1"]`），所以这里**不需要**再扫一遍
+   * `childRuns` —— 扫了会双计（同一件事算两次），那是"多报"，
+   * 而多报会让提示带变成噪声、进而被人整个关掉。
+   * 反过来，**不能改用 childRuns 里的 results 当源**：绝大多数 code 不落 results，
+   * 那等于回到"没人看得见"。
+   *
+   * **按 code 筛而不是按 code 白名单筛**（在 advisories.ts 里按 kind 筛）：
+   * 新增一条 emit 天然进得了页面。白名单的话，"加了 emit 忘了登记"的表现是
+   * 这条提醒静默不上页面 —— 正是这一族缺陷的标准形状。
+   *
+   * **detail 走 esc**：它是 adapter 写的字符串（`violations.join('; ')` 那条路），
+   * 属于不可信内容，既要转义（这条带在 `<body>` 顶部，注入成功就是整页改写）
+   * 也要值形态脱敏（校验失败最常见的对象是登录请求）。esc 两个都做。
+   */
+  const advisories = collectAdvisories(report.events);
+  const items = advisoryItems(advisories);
+  const hidden = advisoriesHidden(advisories);
+  const advisoryList = items.length
+    ? `<div class="body attn"><b>运行期提醒 ${items.length} 条${hidden ? `（还有 ${hidden} 条没列出，全文在 trace.jsonl）` : ''}——不影响红绿，但每一条说的都是"结论有水分"或"某道闸压根没生效"</b>`
+      + `<ul>${items.map((a) => `<li><code>${esc(a.code)}</code> <span class="hint mono">${esc(a.text)}</span></li>`).join('')}</ul></div>`
+    : '';
+
   return `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -474,6 +534,7 @@ export function toHtmlReport(report: RunReport, opts: HtmlOptions = {}): string 
 <body><div class="wrap">
 ${banner}
 ${unfinishedList}
+${advisoryList}
 <div class="grid">${cards}</div>
 ${badList}
 ${attnList}

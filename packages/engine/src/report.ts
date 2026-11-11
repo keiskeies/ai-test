@@ -16,8 +16,17 @@ import { StepResultSchema, TraceEventSchema, CONTAINER_KINDS, flakyAttempts, isF
 
 // 脱敏策略在 redact.ts（唯一一份）。本文件不重复定义 —— 那个文件顶部记着
 // "两份规则各自演化"的具体后果。注意原始证据走 redactArtifactText
-// 且**默认不 keepRaw**（store 侧决定），本文件只管结构化数据。
-import { redactForDisk } from './redact.js';
+// 且**默认不 keepRaw**（store 侧决定）。
+// 本文件管两类落盘文本，各用一条规则，**不是一条通吃**：
+//  - **结构化数据**（trace 事件、manifest、JUnit 的 context=）-> redactForDisk
+//    （字段名 + 值形态两条规则）；
+//  - **散文**（assertionSummary / report.summary 拼出来的句子）-> redactSecretText
+//    （只有值形态那条可用：一句中文里没有字段名可判）。
+// 出口共三处：这里的 xmlSafe、summaryText 的 plainSafe、html.ts 的 esc。
+// 三处都得过，漏一处就等于没有 —— 这就是"为什么在序列化那一刻而不是在上游"。
+import { redactForDisk, redactSecretText } from './redact.js';
+// 运行期提醒的三个出口共用 advisories.ts 那一份筛选（理由见那个文件的头部）。
+import { advisoriesProperty, advisoriesText, collectAdvisories } from './advisories.js';
 
 /** 容器判定。数组来自 ir（唯一权威），Set 只为把每次查找变 O(1) */
 const CONTAINER_SET = new Set<string>(CONTAINER_KINDS);
@@ -110,7 +119,25 @@ function junitBucket(r: StepResult): 'pass' | 'failure' | 'error' | 'skipped' {
 }
 
 /**
- * XML 1.0 里**合法**的字符判定。
+ * XML 文本的**唯一入口**：脱敏 + 字符合法性，两道缺一不可。
+ *
+ * ## 1. 值形态脱敏（本轮补的）
+ *
+ * 改动前这里只做字符合法性与转义，**没有脱敏** —— 实测后果：
+ * `assertionSummary` 里带着响应原文时，`junit.xml` 与 `summary.txt`
+ * 把真 JWT 与真 AWS key **原样写进磁盘**，而同一次 run 的 `trace.jsonl` 是干净的
+ * （它走 `redactForDisk`）。也就是说"证据包搜不到密钥"那句话只对了一半：
+ * `html.test.ts` 与 `evidence.test.ts` 各钉过一条脱敏，判据却都是 **keyContext**
+ * （结构化那条路），而**散文**那条路（`assertionSummary` / `report.summary` /
+ * 由 adapter violations 拼出来的句子）一个消费者都没有。
+ *
+ * 最典型的来路不是人手写，而是**本地 schema 校验的报错**：
+ * `请求体不符合 spec（发送前拦截）：$.password 实际 <真 token>` ——
+ * 这一步状态是 `error`、请求压根没发出去，摘要却把值抄满了。
+ * 所以修在**序列化那一刻**（docs/02 §5 的既有纪律），
+ * 而不是"让 assertionSummary 别带实际值"（那会把报告最有用的一列砍掉）。
+ *
+ * ## 2. XML 1.0 字符合法性
  *
  * 这条不是洁癖，是 JUnit 出口最常见的翻车点：
  * 响应体/页面文本/logcat 里出现 0x00–0x08 这类控制字符极其常见
@@ -118,10 +145,13 @@ function junitBucket(r: StepResult): 'pass' | 'failure' | 'error' | 'skipped' {
  * 直接写进去，XML 就**不合法**，Jenkins/GitLab 解析失败会**整份报告丢弃** ——
  * 于是构建看起来"没有测试报告"，而不是"有测试失败"。
  * 少一次红警比错一次红警更坏：没有任何信号进来。
+ *
+ * 幂等性有测试守着（`redactSecretText` 的占位符 `«JWT:已脱敏»` 不匹配任何值形态规则），
+ * 所以同一个串穿过两道出口（先 `<pre>` 里 `redactForDisk`、再这里）不会被二次改写。
  */
 function xmlSafe(s: string): string {
   let out = '';
-  for (const ch of s) {
+  for (const ch of redactSecretText(s)) {
     const c = ch.codePointAt(0)!;
     const okChar = c === 0x09 || c === 0x0a || c === 0x0d || (c >= 0x20 && c <= 0xd7ff) || (c >= 0xe000 && c <= 0xfffd) || (c >= 0x10000 && c <= 0x10ffff);
     // 非法字符替换成可见的占位（不是删掉）：删掉会让"哪个字段有问题"看不出来，
@@ -377,6 +407,10 @@ export function toJUnitXml(report: RunReport, opts: JUnitOptions = {}): string {
   lines.push(`<testsuites tests="${total}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="${(Math.max(0, report.durMs) / 1000).toFixed(3)}">`);
   lines.push(`  <testsuite name="${xmlAttr(name)}" tests="${total}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="${(Math.max(0, report.durMs) / 1000).toFixed(3)}" timestamp="${new Date(report.startedAt).toISOString()}">`);
   /*
+   * **properties：被中断 + 运行期提醒**，两件事共用同一个 `<properties>` 块。
+   *
+   * ## 被中断
+   *
    * **被中断要在 properties 里，而不只在 system-out 的散文里**。
    *
    * 这是同一个假绿的**第五个消费者**，而且是对机器说话的那一个：
@@ -385,16 +419,34 @@ export function toJUnitXml(report: RunReport, opts: JUnitOptions = {}): string {
    * 在 CI 侧的判据是**退出码**，有些流水线（或插件）只看这份 XML，
    * 于是修好退出码也只堵了一半。
    *
+   * ## 运行期提醒（atest.advisories）
+   *
+   * 之前只在 trace.jsonl 里，而 trace 是"复盘时才打开"的那个文件；
+   * `docs/14` §5 登记着"`ROW_LEASE_NOT_IMPLEMENTED` 会发出来、不至于静默"，
+   * 实测那半句是假的 —— HTML 不渲染事件、CLI 不读 `lint.reported`、门禁不读 events，
+   * 所以"行租约还没实现"这件事在一份只被 CI 读一次的 junit.xml 里也**零痕迹**。
+   * 这里给它一个**机器可读**的位置：值是 `CODE:次数` 的清单，
+   * 一条 grep 就能拉出"这一批 run 里哪些提醒出现过"，而聚合看板按它统计。
+   *
+   * **为什么值里不带 detail**（在 advisories.ts 里定）：detail 是散文，
+   * 属性位置既装不下也不该装 —— CI 要判的是"这一类有没有出现"，
+   * 具体那句话去 report.html 或 trace.jsonl 看。
+   *
    * 位置放在 testcase 之前：JUnit DTD 里 testsuite 的产生式是
    * `properties?, (testcase|error|failure)*, system-out?, system-err?`，
    * 顺序错了严格的解析器会拒（拒了的后果是"这份报告压根读不出来"，比撒谎更糟但也没好多少）。
+   * 所以两条 property 必须在同一个 properties 块里，不能各开一个 —— 产生式只有一个 `properties?`。
    * 计数**不动**（不加 skipped）：`sum == tests` 那条自洽性是本文件开头列的三条之一，
    * 而那些步骤确实执行过并且过了 —— 与 status 不改写的同一条判断。
    */
+  const advisoryValue = advisoriesProperty(collectAdvisories(report.events));
+  const props: string[] = [];
   if (report.aborted) {
-    lines.push(`    <properties><property name="atest.aborted" value="${xmlAttr(report.aborted.kind)}"/>`
-      + `<property name="atest.aborted.reason" value="${xmlAttr(report.aborted.reason)}"/></properties>`);
+    props.push(`<property name="atest.aborted" value="${xmlAttr(report.aborted.kind)}"/>`
+      + `<property name="atest.aborted.reason" value="${xmlAttr(report.aborted.reason)}"/>`);
   }
+  if (advisoryValue) props.push(`<property name="atest.advisories" value="${xmlAttr(advisoryValue)}"/>`);
+  if (props.length) lines.push(`    <properties>${props.join('')}</properties>`);
   lines.push(...bodies);
   lines.push(`    <system-out>${xmlText(report.summary)}</system-out>`);
   lines.push('  </testsuite>');
@@ -560,6 +612,23 @@ export function manifestJson(m: EvidenceManifest): string {
   return `${JSON.stringify(redactForDisk(m), null, 2)}\n`;
 }
 
+/**
+ * 纯文本出口的脱敏（`summary.txt`、CLI 摘要、CI 评论）。
+ *
+ * 与 `xmlSafe` / html.ts 的 `esc` 是**同一件事的三个出口**：这三份文字都会落盘
+ * 或进 CI 日志，而里面嵌的是 `assertionSummary` —— 散文那条路，
+ * `redactForDisk` 那种"按字段名判"的结构化规则对它完全不起作用。
+ * 三个出口各自都要过一遍值形态规则，漏一个就等于没有（同一次 run 曾经出现过
+ * trace.jsonl 干净而 summary.txt 里躺着真 JWT 的形状，见 `xmlSafe` 上那段）。
+ *
+ * 跑在**拼完整段之后**而不是每个片段上：判据是值形态（整段扫一遍即可），
+ * 而在末尾跑一次能保证"以后新加一行"天然带着这道处理 ——
+ * 这正是把它做成出口而不是做成约定唯一值得的理由。
+ */
+function plainSafe(s: string): string {
+  return redactSecretText(s);
+}
+
 /** 人类可读摘要。给 CI 日志和 PR 评论用，不进机器解析路径 */
 export function summaryText(report: RunReport, m: EvidenceManifest): string {
   const t = report.tally;
@@ -587,7 +656,20 @@ export function summaryText(report: RunReport, m: EvidenceManifest): string {
   if (bad.length) lines.push('', `需要处理（${bad.length}）：`, ...bad.map((r) => `  ✗ ${r.stepId} [${r.status}${r.cause ? ` ${r.cause}` : ''}] ${r.assertionSummary ?? ''}`));
   // 自愈单独列一段：它不该混在失败里（会让人以为功能坏了），也不该看不见
   if (attn.length) lines.push('', `需要人审（${attn.length}）：`, ...attn.map((r) => `  ~ ${r.stepId} [${r.status}] ${r.assertionSummary ?? ''}`));
-  return `${lines.join('\n')}\n`;
+  /*
+   * **运行期提醒最后一段**。放最后是有意的：这一段说的不是"哪一步坏了"，
+   * 而是"这份结论有没有水分"，它必须**在**、但不该抢在失败列表前面
+   * （`ARTIFACT_STORE_MISSING` 这种没配证据盘的提醒一次 run 会固定出现在这里，
+   *  抢在前面就等于每次排查都要先划走一段与本次失败无关的字）。
+   *
+   * 与 HTML 提示带、JUnit 的 `atest.advisories` 同源同措辞（`advisoriesText`），
+   * 三个出口各写一遍筛选迟早只改一处 —— 本仓那族毛病的标准形状。
+   *
+   * 脱敏由下面的 `plainSafe` 统一做（这一段里嵌的 detail 是 adapter 写的字符串）。
+   */
+  const adv = advisoriesText(collectAdvisories(report.events));
+  if (adv) lines.push('', adv);
+  return `${plainSafe(lines.join('\n'))}\n`;
 }
 
 /** 步骤结果数组的运行时校验（读磁盘上的旧报告时用；版本漂移要在这里挡，不要在深处炸） */

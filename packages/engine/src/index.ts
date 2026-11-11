@@ -26,6 +26,10 @@ export * from './resolve.js';
 export * from './executor.js';
 export * from './report.js';
 export * from './html.js';
+// 运行期提醒（lint.reported 事件）的人读出口。导出的理由与 redact.ts 同一条：
+// **同一件事的出口只许有一份**。三个消费者（HTML 提示带、JUnit property、summary.txt）
+// 各写一遍筛选逻辑，迟早只改一处 —— 而漏掉的那一处表现为"这份产物压根不提"。
+export * from './advisories.js';
 // 脱敏策略。导出给存储层用：证据写盘前要走**同一份**规则，
 // 在 store 里再写一份就是"某处加了关键词、另两处照旧明文"的分叉源头。
 export * from './redact.js';

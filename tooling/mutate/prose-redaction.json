@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "**散文出口**的值形态脱敏。tests: packages/engine/test/report-redaction.test.ts。",
+    "",
+    "本轮修的第二个缺陷类，与 disk-presence.json 那批（结构化路径 redactForDisk）",
+    "是**同一个纪律的两个通道**：脱敏发生在'序列化到磁盘那一刻'，",
+    "而那一刻有**两类**产物 —— JSON（按字段名判，走 redactForDisk）与",
+    "散文（HTML 正文 / XML 文本节点 / summary.txt，按**值形态**判，走 redactSecretText）。",
+    "改前的实测形状：同一次 run，trace.jsonl 干净，而 report.html / junit.xml /",
+    "summary.txt 三处的 assertionSummary 里躺着真 JWT 与真 AWS key。",
+    "根因不是规则表缺项（规则表两边共用），而是**三个散文出口一个都没过值形态规则**。",
+    "",
+    "为什么上一轮的测试没抓到：那些测试钉的是 keyContext 这个**结构化**通道，",
+    "散文通道压根没被断言过。这是本仓'测试通过的原因和它想验的东西无关'那个病的一个新入口 ——",
+    "同一个字段有两条到磁盘的路，只钉了一条。",
+    "",
+    "所以这一批每条都是'某一个出口不再过值形态规则'，三条都必须抓到；",
+    "漏一条就等于那个出口从此没人守（正是改前的状态）。",
+    "第四、五条是**顺序**与**幂等**：这两条是那条'这里不脱敏、交给出口脱'的",
+    "设计（advisories.ts 只排版）的前提，前提变了必须有人红。"
+  ],
+  "cases": [
+    {
+      "label": "HTML 出口不过值形态规则（esc 只转义，正文里的 JWT 原样进磁盘）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  return redactSecretText(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
+      "replace": "  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); // 变异 E1：转义保留、脱敏去掉",
+      "testFile": "packages/engine/test/report-redaction.test.ts"
+    },
+    {
+      "label": "JUnit 出口不过值形态规则（xmlSafe 只做 XML 字符合法性）",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "  for (const ch of redactSecretText(s)) {",
+      "replace": "  for (const ch of s) { // 变异 J1：XML 合法性保留、脱敏去掉",
+      "testFile": "packages/engine/test/report-redaction.test.ts"
+    },
+    {
+      "label": "summary.txt / CLI 出口不过值形态规则（plainSafe 退化成恒等）",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "function plainSafe(s: string): string {\n  return redactSecretText(s);\n}",
+      "replace": "function plainSafe(s: string): string {\n  return s; // 变异 S1：整段脱敏去掉\n}",
+      "testFile": "packages/engine/test/report-redaction.test.ts"
+    },
+    {
+      "label": "esc 里先转义再脱敏（顺序反过来）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  return redactSecretText(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
+      "replace": "  return redactSecretText(s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')); // 变异 E2：顺序反过来",
+      "expect": "equivalent",
+      "testFile": "packages/engine/test/report-redaction.test.ts",
+      "why": "如实记等价，并注明**为什么现在是等价的**：五道值形态规则（JWT / AKIA / sk- / 私钥头 / Bearer）匹配的字符集里都没有 & < >，所以转义不会把一个密钥打断成不匹配的形状；占位符 «…:已脱敏» 也不含需要转义的字符。它今天抓不到，但留在集里是个报警器 —— 将来谁往规则表里加一条会撞上 &amp; 之类转义结果的规则（例：按 URL 查询串脱 token，而值里可能有 &），这条会立刻变 caught，那时正确顺序就是硬要求。"
+    },
+    {
+      "label": "脱敏占位符写成会被再次匹配的样子（二次脱敏套娃）",
+      "file": "packages/engine/src/redact.ts",
+      "anchor": "    out = out.replace(new RegExp(re.source, re.flags), `«${name}:已脱敏»`);",
+      "replace": "    out = out.replace(new RegExp(re.source, re.flags), `«${name}:已脱敏 sk-PLACEHOLDERVALUE0123456789abcdef»`); // 变异 X1：占位符自己命中 sk- 规则",
+      "testFile": "packages/engine/test/report-redaction.test.ts"
+    }
+  ]
+}

@@ -1,0 +1,129 @@
+{
+  "_comment": [
+    "运行期提醒（lint.reported 事件）的三个出口。tests: packages/engine/test/advisories.test.ts。",
+    "",
+    "这批变异的靶子是本轮修的那个缺陷类的**镜像方向**。以往修的都是",
+    "'schema 有字段、执行侧没人读'（生产者存在、消费侧漏）；本轮是",
+    "'十一条 emit 全在响、而没有任何一个出口读它们'（生产者存在、**载体**不存在）。",
+    "实测（`leaseRows=true` 的 dataSource）：事件发了、步骤 pass，而",
+    "report.html / junit.xml / summary.txt / CLI 输出**四个地方一个都不提**。",
+    "所以这一批每条都对应'某一个出口不再提提醒'，而它必须让测试变红 ——",
+    "如果哪条存活，说明那个出口本来就没人守（正是本轮之前的状态）。",
+    "",
+    "另一条靶子是**筛选判据**：advisories.ts 按 `kind === 'lint.reported'` 筛，",
+    "而不是按 11 个 code 的白名单筛。白名单形状本身存活不了（删掉白名单反而更宽），",
+    "所以这里变异的是**判据反方向**（换成不筛 kind），它被抓到才说明'按 kind 筛'这件事有内容。",
+    "",
+    "为什么测试文件统一指 advisories.test.ts：三个出口（HTML 带 / JUnit property /",
+    "summary.txt 段）都在那一个文件里逐个 code 验过，html.test.ts 只覆盖页面那一支。",
+    "同包不重建由驱动自己判（mustBuild），这里不写 build。"
+  ],
+  "cases": [
+    {
+      "label": "HTML 提示带的数据源换成空数组（页面上永远没有提醒）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "  const advisories = collectAdvisories(report.events);",
+      "replace": "  const advisories = collectAdvisories([]); // 变异 H1：页面这一支不读事件",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "JUnit 的 atest.advisories 不再写（CI 与看板读不到）",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "  const advisoryValue = advisoriesProperty(collectAdvisories(report.events));",
+      "replace": "  const advisoryValue = ''; // 变异 J1：property 这一支不读事件",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "summary.txt（CLI 打的就是这份）最后那一段不写",
+      "file": "packages/engine/src/report.ts",
+      "anchor": "  const adv = advisoriesText(collectAdvisories(report.events));",
+      "replace": "  const adv = ''; // 变异 S1：纯文本这一支不读事件",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "筛选判据不再看 kind（所有事件都当提醒）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "const isAdvisory = (e: TraceEvent): boolean => e.kind === 'lint.reported';",
+      "replace": "const isAdvisory = (_e: TraceEvent): boolean => true; // 变异 K1：不筛 kind",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "没有 code 的事件也进列表（兜一个 UNKNOWN，页面上出现空条目）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "  return typeof c === 'string' && c.length > 0 ? c : undefined;",
+      "replace": "  return typeof c === 'string' && c.length > 0 ? c : 'UNKNOWN'; // 变异 C1：没 code 也兜一个，页面上出现空条目",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "聚合键退化成只看 code（不同 detail 合成一条 = 少报）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "    const key = JSON.stringify([code, detail]);",
+      "replace": "    const key = code; // 变异 G1：detail 不进键",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "聚合键改成字符串拼接（键的正确性从此依赖'code 里没有序列符'这个没写下来的假设）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "    const key = JSON.stringify([code, detail]);",
+      "replace": "    const key = `${code}|${detail}`; // 变异 G2：手挑分隔符，detail 里本来就有 |",
+      "testFile": "packages/engine/test/advisories.test.ts",
+      "why": "这条**起初标的是 caught 而实测存活**，存活的原因值得记：`${code}|${detail}` 在今天的真实输入下**确实**不会撞 —— code 全是 `A-Z_` 的常量，所以第一个 `|` 仍是唯一边界，detail 里带多少 `|` 都不影响解码。所以我没有把它标成 equivalent（那会说谎：它不是行为等价的改写，它依赖一个假设），而是补了一条**用带 `|` 的 code 构造**的测试把它打死 —— `code` 是从 `e.data.code` 读的任意字符串，今天全部 emit 点写死成大写标识符是**习惯不是约束**，而一个正确性依赖习惯的键，失效时表现为'两条不同的提醒合成一条'（少报），不表现为任何错误。"
+    },
+    {
+      "label": "detail 不截断（几十条 schema 违规把页面顶部一屏变成垃圾）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "  return s.length > MAX_DETAIL ? `${s.slice(0, MAX_DETAIL)}…（已截断，全文在 trace.jsonl）` : s;",
+      "replace": "  return s; // 变异 D1：不截断也不说",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "截断静默发生（列 20 类而实际 25 类，产物说'就这些'）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "  if (list.length > MAX_LINES) lines.push(`  ${ADVISORY_MORE_PREFIX}${list.length - MAX_LINES}${ADVISORY_MORE_SUFFIX}`);",
+      "replace": "  // 变异 T1：纯文本侧不说少了几个",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "HTML 侧的截断标记拿掉（同上，另一支出口）",
+      "file": "packages/engine/src/html.ts",
+      "anchor": "${hidden ? `（还有 ${hidden} 条没列出，全文在 trace.jsonl）` : ''}",
+      "replace": "",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "reportOnly 标记丢了（'只上报不计红绿'的响应侧符合性检查看起来像会拦人）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "      byKey.set(key, { code, detail, count: 1, reportOnly, stepIds: e.stepId ? [e.stepId] : [] });",
+      "replace": "      byKey.set(key, { code, detail, count: 1, reportOnly: false, stepIds: e.stepId ? [e.stepId] : [] }); // 变异 R1：首条丢标记",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "同类的 reportOnly 不再'有一条是就说是'（重复事件把标记冲掉）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "    if (reportOnly) hit.reportOnly = true;",
+      "replace": "    hit.reportOnly = reportOnly; // 变异 R2：最后一条说了算",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "detail 非字符串时不给 JSON（页面上那行变成 [object Object]）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "    try { s = JSON.stringify(d); } catch { s = '（该 detail 无法序列化）'; }",
+      "replace": "    s = String(d); // 变异 O1：数组/对象直接 String()",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "JUnit property 里不重复的 code 也标 ×1（机器侧读起来像被聚合过）",
+      "file": "packages/engine/src/advisories.ts",
+      "anchor": "  return [...byCode].map(([code, n]) => `${code}:${n}`).join(',');",
+      "replace": "  return [...byCode].map(([code]) => code).join(','); // 变异 P1：property 丢掉次数",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    },
+    {
+      "label": "子场景事件不中继到父事件流（子场景里的提醒在整场报告里消失）",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "  for (const e of rep.events) a.emit({ kind: e.kind, stepId: e.stepId, status: e.status, durMs: e.durMs, data: e.data, path: e.path });",
+      "replace": "  // 变异 N1：子场景事件不上行中继（载体的另一头断了）",
+      "testFile": "packages/engine/test/advisories.test.ts"
+    }
+  ]
+}
