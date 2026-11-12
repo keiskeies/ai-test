@@ -31,7 +31,7 @@ export interface AuthHookOptions {
   table: CredentialTable;
   resolveSecret: (ref: string) => string | undefined;
   tokenSources?: Map<string, TokenSource>;
-  cookieHeader?: () => string | undefined;
+  /* 从前这里有一个 `cookieHeader` 回调，往下透传给 resolver。理由见 apply.ts */
 }
 
 export interface AuthApplyInput {
@@ -157,7 +157,6 @@ export class AuthHook {
       docRef,
       resolveSecret: this.o.resolveSecret,
       tokenSources: this.o.tokenSources,
-      cookieHeader: this.o.cookieHeader,
     });
     this.resolvers.set(docRef, r);
     return r;

@@ -14,6 +14,8 @@
  * 在本层脱敏等于让用例断言看不到真实值 —— 断言会因此而失效。
  */
 import { parseJsonKeepBigInt, stringifyBody } from './bigint.js';
+import { setCookiesOf } from './cookies.js';
+import type { CookieJar } from './cookies.js';
 import { compileValidator, isValid, type Validator } from '../openapi/validate.js';
 import type { OperationSpec, ParsedDoc } from '../openapi/parse.js';
 import { TransportError, type ExecContext, type HttpExec } from '@atest/engine';
@@ -78,7 +80,29 @@ export interface HttpClientOptions {
    * 也是 SSRF 防护的作用点（服务端可以换成带 allowlist 的实现，docs/11 §8）。
    */
   fetchImpl?: typeof fetch;
-  /** 每个响应都过它（鉴权头注入、cookie jar）。 */
+  /**
+   * 会话 cookie 罐。**一个实例一个 jar，而一个实例服务一次 run**（装配在
+   * `cli/src/wiring.ts` 的 `assemble()` 里做）。不传就是没有会话：
+   * `Set-Cookie` 照旧回显在 `headers` 里，只是不会被带进下一个请求。
+   *
+   * 为什么挂在 client 上而不是让调用方自己在 `onResponse` 里攒：
+   * **用例的每一步**都从这一个类出去（`asHttpExec` 是唯一把 adapter 交给引擎的入口），
+   * 挂在 `onResponse` 上的话，`token.ts` 那条取 oauth2 token 的路
+   * （它刻意用自己的无 hook 的 client）就会是一个"看起来只是没配 hook"的例外。
+   *
+   * ⚠ **而 jar 挂在实例上、不是挂在这个类上 —— 全仓有第二个 `new HttpClient`，
+   * 它不带 jar**：`auth/token.ts` 里 `TokenSource` 自己建的那一个。
+   * 那是**刻意的**（token 交换是与 API 会话不同的一场协议对话：把跑用例攒出来的
+   * 会话 cookie 发给 IdP 的 token 端点，等于把 A 主机的凭证投递给 B 主机），
+   * 但它**曾被这三处注释写成"没有一条出网路径能绕过它"** —— 一句读起来像保证的假话，
+   * 而它的反面只要 grep 一次 `new HttpClient` 就能看见。
+   * 边界本身有测试钉住（`test/cookies.test.ts` 里「TokenSource 的那个 client 不带 jar」那一组：
+   * 一条读构造、一条把两边放在**同一台主机**上比后果 —— 不同主机的话，
+   * 「没带」可能只是域没匹配上，那条绿就证明不了任何事）。
+   * 不再靠这几段注释。
+   */
+  cookies?: CookieJar;
+  /** 每个响应都过它（鉴权头注入等）。cookie 合并**不在这里做**，见 `cookies` 那段 */
   onRequest?: (req: { url: string; method: string; headers: Record<string, string> }) => void | Promise<void>;
   onResponse?: (res: { url: string; status: number; headers: Record<string, string> }) => void | Promise<void>;
 }
@@ -87,10 +111,13 @@ export class HttpClient {
   private readonly timeoutMs: number;
   private readonly maxBytes: number;
   private readonly doFetch: typeof fetch;
+  /** 见 HttpClientOptions.cookies。暴露成只读字段是给装配侧自检（"这次到底有没有 jar"） */
+  readonly cookies: CookieJar | undefined;
 
   constructor(private readonly opts: HttpClientOptions = {}) {
     this.timeoutMs = opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxBytes = opts.defaultMaxBytes ?? DEFAULT_MAX_BYTES;
+    this.cookies = opts.cookies;
     // 注意：globalThis.fetch 必须**间接调用**。直接 `const f = fetch; f()` 在
     // undici 里会 IllegalInvocation（它要 Receiver 是 globalThis）。
     this.doFetch = opts.fetchImpl ?? ((input, init) => globalThis.fetch(input as never, init as never));
@@ -132,6 +159,21 @@ export class HttpClient {
       return networkFail('GET/HEAD 请求带了请求体，平台不会自动把它转成 query（那会改变请求语义）。请显式写进 queryParams', t0);
     }
 
+    /*
+     * 会话 cookie 合并 —— **在 onRequest 之前**，这样 hook 看到的是最终要发出去的那个头。
+     *
+     * 谁优先：`headers.cookie` 里已经写好的那些**赢**（人在 IR 里显式写的、
+     * 或 `apiKey in: cookie` 刚合进来的），jar 只补同名以外的。
+     * 判据与 `applyAuth` 的"不覆盖用户显式写的头"是同一句 ——
+     * IR 里看得见的东西，优先级高于运行时攒出来的状态。反过来的话，
+     * 一个人写了 `headers: {cookie: "sid=测试身份"}` 而 jar 里有上一条请求的 sid，
+     * 用例就会以**另一个身份**跑，而那件事在报告里完全看不出来。
+     */
+    if (this.cookies) {
+      const merged = this.cookies.headerFor(r.url, headers.cookie);
+      if (merged) headers.cookie = merged;
+    }
+
     await this.opts.onRequest?.({ url: r.url, method: r.method, headers });
 
     const timeoutMs = r.timeoutMs ?? this.timeoutMs;
@@ -149,6 +191,23 @@ export class HttpClient {
         // 不自己解 content-encoding：undici 会按 accept-encoding 自动解，
         // 手工 zlib 分支会和真实网关行为分叉（docs/05 §4 提到的 br 流式 bug 就是这么来的）
       });
+
+      /*
+       * 收 Set-Cookie 进 jar。两件判据都不显眼：
+       *
+       *  1. **不分状态码收。** 401/403 的响应也常带 `Set-Cookie: session=; Max-Age=0`
+       *     （后端最常见的登出写法）。只在 2xx 收的话，登出之后 jar 里那条会话还在，
+       *     后面的用例带着一个"服务端已经作废"的身份继续跑 ——
+       *     症状是"单独跑这条过，跟在前一条登出后面就挂"。
+       *  2. **归属地址用 `res.url`，不是 `r.url`。** 默认不跟随重定向时两者相同；
+       *     而 `followRedirects: true` 时 fetch 在内部跟完了整条链，
+       *     这里看到的响应属于**链尾那个主机**。用 `r.url` 归属，
+       *     等于把 B 主机给的 cookie 存到 A 主机名下，之后每个发往 A 的请求都带上它 ——
+       *     那是**跨主机泄露会话**，不是"归属不太准"。取不到 `res.url`
+       *     （自定义 fetchImpl 给的是空串，测试里常见）才退回 `r.url`，
+       *     而这条退回有测试钉住，不靠读代码的人相信它安全。
+       */
+      if (this.cookies) this.cookies.store(res.url || r.url, setCookiesOf(res.headers));
 
       await this.opts.onResponse?.({ url: r.url, status: res.status, headers: flattenHeaders(res.headers) });
 

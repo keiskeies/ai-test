@@ -48,8 +48,17 @@ export interface ApplyInput {
   accessToken?: (b: CredentialBinding, scopes: readonly string[]) => Promise<string>;
   /** 本次要求的 scope。没声明时退回 binding.scope，再退回 scheme 声明的全部 scope */
   scopes?: readonly string[];
-  /** 已解析出的 cookie jar（`in: cookie` 的 apiKey 要合进 Cookie 头，不能互相覆盖） */
-  cookieHeader?: string;
+  /*
+   * **这里从前有一个 `cookieHeader?: string`**，配 `hook.ts` / `interceptor.ts` /
+   * `cli/src/wiring.ts` 上那条 `cookieHeader: undefined` —— 一条从声明到装配
+   * 全程没人喂值的通道，而它的注释写着"已解析出的 cookie jar"。
+   * 会话这件事现在由 `http/cookies.ts` 的 jar 做，落在 **HttpClient 实例内部**
+   * （用例的每一步都从那里出去；`token.ts` 那个例外与它的理由写在 `client.ts` 的
+   * `cookies` 那一段）。留着这条通道就留下**第二个写 Cookie 头的人**：
+   * 两边各自"合并"一次，同名 cookie 就会出现两次，而后端取第一个 ——
+   * 表现是"偶发地用错身份"，而两个实现各自看起来都对（docs/08 §3 那一族）。
+   * 删的是**通道**，`headers.cookie` 显式写的那一路照旧有效（auth.test.ts 钉着它）。
+   */
 }
 
 /**
@@ -129,9 +138,14 @@ export async function applyAuth(i: ApplyInput): Promise<AppliedAuth> {
           detail: `apiKey in query: ${i.scheme.name}（${i.binding.secret}）。⚠ 密钥会进 URL，任何记录 URL 的地方都会留下它`,
         };
       }
-      // cookie 型：与 cookie jar 合并。互相覆盖的后果是"会话丢了"，
-      // 表现为登录后第二个请求 401，很难联想到是鉴权配置干的
-      const jar = headers.cookie ?? i.cookieHeader;
+      // cookie 型：与**这一步已经写好的** Cookie 头合并，不互相覆盖 ——
+      // 覆盖的后果是"会话丢了"，表现为登录后第二个请求 401，
+      // 很难联想到是鉴权配置干的。
+      // ⚠ 这里刻意**不**读会话 jar。jar 在下一层（`client.send`）合，
+      // 且同名时"已写好的"赢 —— 这一层写进去的 `sid` 正属于"已写好的"，
+      // 所以 jar 里同名的那条会被它压住。两层各合一次而不是在这一层去拿 jar，
+      // 理由就是上面那段"不留第二个写 Cookie 头的人"。
+      const jar = headers.cookie;
       const piece = `${i.scheme.name}=${v}`;
       headers.cookie = jar ? `${jar.replace(/;+$/, '')}; ${piece}` : piece;
       return { url: i.url, headers, secretValues, detail: `apiKey in cookie: ${i.scheme.name}（${i.binding.secret}）` };

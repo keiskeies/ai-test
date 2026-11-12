@@ -59,6 +59,10 @@ export {
 
 // —— HTTP ——
 export { HttpClient, asHttpExec, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS, type SendRequest, type SendResult, type HttpClientOptions } from './http/client.js';
+export {
+  CookieJar, parseSetCookie, setCookiesOf, domainMatches, pathMatches, defaultPath, expiryOf, normalizeDomain,
+  type StoredCookie, type CookieAttr, type CookieJarOptions,
+} from './http/cookies.js';
 export { parseJsonKeepBigInt, quoteBigInts, stringifyBody, BIG_INT_DIGITS } from './http/bigint.js';
 
 // —— 鉴权（docs/05 §2）——

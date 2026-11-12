@@ -16,7 +16,7 @@ import {
   type AdapterRegistry, type Clock, type RunOptions,
 } from '@atest/engine';
 import {
-  parseOpenApi, HttpClient, asHttpExec, startMockServer,
+  parseOpenApi, HttpClient, asHttpExec, startMockServer, CookieJar,
   AuthHook, CredentialTable, TokenSource, normalizeSecuritySchemes,
   type AuthConfigRaw, type ParsedDoc, type MockServer,
 } from '@atest/adapter-http';
@@ -346,7 +346,6 @@ export function buildAuthHook(o: {
     table,
     resolveSecret: o.resolveSecret,
     tokenSources,
-    cookieHeader: undefined, // cookie jar 是 P1（docs/05 §2 的会话那一行）
   });
 
   // oauth2 的 token 源按 docRef 建。两个容易踩的点都在这段里处理了：
@@ -398,7 +397,7 @@ export function buildAuthLayer(o: {
   envVars?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
 }): {
-  hook: AuthHook; table: CredentialTable; notes: string[]; client: HttpClient;
+  hook: AuthHook; table: CredentialTable; notes: string[]; client: HttpClient; cookies: CookieJar;
   resolveSecret: (ref: string) => string; missingSecrets: Set<string>;
 } {
   const missingSecrets = new Set<string>();
@@ -410,7 +409,21 @@ export function buildAuthLayer(o: {
   // 凭证表引用了、环境里没有值的密钥也要扫出来：env 配了 auth 段而 IR 不引用
   // 任何 secret 是完全可能的（鉴权完全由 spec 声明驱动，这正是"生成的用例不该全 401"的目标形态）
   for (const ref of built.table.refs()) resolveSecret(ref);
-  return { ...built, client: new HttpClient({ fetchImpl: o.fetchImpl }), resolveSecret, missingSecrets };
+  /*
+   * **一次装配一个 jar，而一次装配就是一次 run**（`assemble()` 每次 run 调一遍）。
+   * 这一行是这块唯一真正危险的地方：`packages/server` 是**常驻**进程，
+   * 把 jar 放成模块级单例（或在这里 new 一次往外传）会让**上一条用例登录的身份
+   * 带进下一条用例** —— 而且它不偶发，只要 job 顺序不变就一直绿。
+   * 那是假绿里最难查的一种：它看起来像"用例之间有依赖，是作者的错"，
+   * 而真相是平台把会话漏了过去。所以这里用 `o.now`（每次装配新闭包），
+   * 不碰任何进程级的东西。
+   *
+   * `atest auth-check` 也走这个函数，于是它也拿到一个 jar —— 那是对的而不是浪费：
+   * 那条命令的价值就是"与真实请求完全相同的装配"，会话这一项也不例外。
+   * 它只探 GET/HEAD，jar 在那条路上通常是空的。
+   */
+  const cookies = new CookieJar({ now: o.now });
+  return { ...built, client: new HttpClient({ fetchImpl: o.fetchImpl, cookies }), cookies, resolveSecret, missingSecrets };
 }
 
 /** 把 spec 里的 tokenUrl 变成绝对 URL。拼不出来就原样交出去（让 HTTP 层报它自己的错，别在这层编一个） */

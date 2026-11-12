@@ -27,7 +27,7 @@ export interface AuthResolverOptions {
   resolveSecret: (ref: string) => string | undefined;
   /** docRef → token 源。oauth2 才有 */
   tokenSources?: Map<string, TokenSource>;
-  cookieHeader?: () => string | undefined;
+  /* 从前这里有一个 `cookieHeader` 回调。删它的理由写在 `apply.ts` 里那段（不留第二个写 Cookie 头的人）*/
 }
 
 export interface AuthPlan {
@@ -129,7 +129,6 @@ export class AuthResolver {
               return tokens.accessToken(b, scopes);
             }
           : undefined,
-        cookieHeader: this.o.cookieHeader?.(),
       });
       url = applied.url;
       headers = applied.headers;
