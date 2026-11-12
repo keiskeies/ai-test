@@ -1,0 +1,41 @@
+{
+  "_comment": "钉住本轮修的那一条：`parseOpenApi` 里那个 `docRef` 闭包**自己把 error 级 issue 记进总表**，\n以及「记上了之后有没有人把它说给人听」这半条。\n\n改前的形状是纯透传（`(n, at) => dereference(...)`），记不记 issue 由每个调用点自己决定，\n五个调用点里只有一个记得记。**漏了几处是量的**（`git worktree` 拉 HEAD，四个位置各喂一个\n坏 `$ref`，数返回的 issues）：请求体本身 0 条、请求体的 json schema 0 条、某个响应码的\nschema 0 条，只有参数的 schema 那一位是 1 条（那位的子树已被前一次 walk 清空，不重不漏）。\n\n这一族的症状**不是红**：解不出来的 `$ref` 让 `dereference` 返回 `undefined`，紧挨着的\n`asObj(...)` 把它收成 `{}`，而 `{}` 在 JSON Schema 里等于任何值都合法 —— client 侧的\nvalidatorFor 与 validateResponse 双双走「没 schema ⇒ 没什么可校验的」那条分支\n（它们判 `Object.keys().length`），mock 侧那句「声明了 2xx 但没给 schema」的自检告警也不响\n（判的是 `!spec?.schema`，而 `{}` 是 truthy）。一份拆成多文件的 spec 跑起来是**全绿**的。\n\n四条各钉一件事，彼此不重叠：第 1 条没人记、第 2 条记了但说轻了、第 3 条记了但位置指错、\n第 4 条记了也打对了但**没人打印**。第 4 条是修完之后**新长出来的那一格**：把 issue 收进\nDocRegistry 只是造了生产者，命令里那句 `warnSpecIssues(registry, io)` 才是载体，\n而删掉它不会让任何一条**测 issue 的**测试变红 —— 只有走完整条命令的测试看得见。",
+  "cases": [
+    {
+      "label": "docRef 退回纯透传（issue 不再进总表，解不出的 $ref 静默变成 {} schema）",
+      "file": "packages/adapter-http/src/openapi/parse.ts",
+      "anchor": "    issues.push(...d.issues.filter((i) => i.level === 'error'));",
+      "replace": "    // 变异：回到「记不记由各调用点自己决定」，而四个调用点都不记",
+      "testFile": "packages/adapter-http/test/parse.test.ts",
+      "_why": "本组核心那一条，也是本轮真撞上的缺陷本体。载体是 parse.test.ts 的「外部 $ref」\ndescribe 下四条逐位测试（请求体 schema、整个 requestBody、响应 schema、参数 schema），\n各断恰好 1 条 REF_EXTERNAL_MISSING。撤掉记账后前三位各得 0 条。\n**逐位各写一条测试正是为了让这里少记一位就红一位** —— 合成一条「随便哪一位都会记」\n的话，修好任意一位它就绿，另外两位照旧漏（本仓记过的「形状对了不等于走到位」）。\n\n危害不是崩、不是红：`$ref: './common.yaml#/Order'` 解不出来时那一处 schema 变成 `{}`，\n而 `{}` 任何值都合法，于是请求/响应体的契约校验整个变成空操作、用例照绿\n（实测 client 侧两处判 `Object.keys().length` 走没 schema 分支，\nmock 侧自检告警因 `{}` 是 truthy 而不响）。",
+      "_measured": "本轮实测：驱动报的第一条红是 parse.test.ts 的「大部分 operation 解析成功，坏的那条只让自己失败」—— 不是新写那四条里的任何一条。\n这本身是个信息：**那条既有测试也在数 issues**（它断\"坏的那条只让自己失败\"时顺带断到了 issue 计数），\n所以缺陷的一部分早就有载体、只是当时那条测试绿着 —— 它绿是因为 fixture 里坏 ref 摆在\n**参数位**上（五个调用点里唯一记 issue 的那位）。新四条各自也红（逐位断言），只是驱动只印第一条。"
+    },
+    {
+      "label": "只记 warn 不记 error（等级判错，把「契约校验变空操作」降格成提示）",
+      "file": "packages/adapter-http/src/openapi/parse.ts",
+      "anchor": "    issues.push(...d.issues.filter((i) => i.level === 'error'));",
+      "replace": "    issues.push(...d.issues.filter((i) => i.level === 'warn'));",
+      "testFile": "packages/adapter-http/test/parse.test.ts",
+      "_why": "把 filter 的判据换成 warn，语义变成「ref 解不出来只是个小提示」，\n而实际后果是那一处的请求/响应体契约校验**整个变成空操作**、用例照绿。\n载体断的是 `hits[0].level === 'error'`。\n\n与第 1 条的区别要写清：第 1 条是没人记（issue 总数 0），这一条是记了但说轻了\n（总数仍是 1，只有等级不对）。所以**只断条数的测试对这一条完全盲** ——\n那正是本仓记过的「一个断言只能看见它写下去时想到的那种坏法」。",
+      "_measured": "本轮实测：驱动报的第一条红同样是「大部分 operation 解析成功，坏的那条只让自己失败」\n（既有那条按 level 数 error 的断言先红）。新写的四条里断 `level === error` 的那条也红。\n与第 1 条报同一条红不奇怪：两条变异打的是同一行 filter，只是坏法不同。"
+    },
+    {
+      "label": "响应 schema 位的 at 退回 operation 级（两个状态码各坏一个 ref 时报出两条位置一模一样的 issue）",
+      "file": "packages/adapter-http/src/openapi/parse.ts",
+      "anchor": "      schema: Object.keys(rContent).length ? asObj(docRef(rContent.schema, `${at}/responses[${code}]/content/application/json/schema`).value) : undefined,",
+      "replace": "      schema: Object.keys(rContent).length ? asObj(docRef(rContent.schema, at).value) : undefined,",
+      "testFile": "packages/adapter-http/test/parse.test.ts",
+      "_why": "**这一条是测试写出来之后才露出来的，不是改前就量到的缺陷。**\n改前这一处压根不记 issue，所以 at 太粗这件事当时不可见；把记账修好之后它才显形 ——\n实测（一份 200 与 404 各带一个坏 ref 的 spec）两条 issue 的 at 都是\n`#/paths[/z][POST]`，人分不清是哪个状态码的问题。载体断\n`at.endsWith('responses[200]/content/application/json/schema')`。\n\n它属于哪一族：报错指不准位置，危害不是报错写错了，而是\n**用户照着那个位置去改了本来没问题的地方**。位置是报错的一部分，不是装饰。",
+      "_measured": "本轮实测：驱动报的第一条红是「响应体的 schema 位上解不出来的 ref 记成 1 条 error issue（这一位改前在丢）」，\n正是 at 断言所在的那条。"
+    },
+    {
+      "label": "cmdRun 不再打印 spec 级告警（issue 记上了也打对了，但没有一个命令说给人听）",
+      "file": "packages/cli/src/commands.ts",
+      "anchor": "  const registry = await DocRegistry.load(a.multi.doc ?? []);\n  warnSpecIssues(registry, io);\n  const evidenceDir",
+      "replace": "  const registry = await DocRegistry.load(a.multi.doc ?? []);\n  const evidenceDir",
+      "testFile": "packages/cli/test/e2e.test.ts",
+      "_why": "本轮修完之后**新长出来的那一格**，也是 docs/08 §3(e)「有生产者、没有载体」的字面形状：\n第 1~3 条的变异都动「记」，这一条动「说」。删掉 `warnSpecIssues(registry, io)` 之后，\n`parseOpenApi` 照旧记 issue、`DocRegistry` 照旧收 issue、`specIssueLines()` 照旧返那些行，\n而**没有任何一条测 issue 的测试会红** —— 那些测试在 adapter-http 侧，压根不经过 CLI 这层。\n只有走完整条 `atest run` 的测试看得见。\n\n本轮实测（驱动报的第一条红）：e2e.test.ts 的「spec 里有解不出来的 $ref 时：跑照样全绿，\n而这件事必须说出来」。那条测试的第一个断言刻意是 `EXIT.OK` ——\n「绿着跑完」本身就是缺陷的症状，所以载体只能断 stderr，断退出码会盲。",
+      "_measured": "本轮实测：驱动报的第一条红是 e2e.test.ts 的「spec 里有解不出来的 $ref 时：**跑照样全绿，而这件事必须说出来**」。\n该测试第一个断言是 EXIT.OK 且当时照绿（缺陷的症状就是它不红），红的是后面断 stderr 的那几条。"
+    }
+  ]
+}

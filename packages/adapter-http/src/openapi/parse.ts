@@ -118,8 +118,49 @@ export function parseOpenApi(raw: unknown, opts: ParseOptions = {}): ParsedDoc {
   }
 
   const specDoc = { root };
-  const docRef = (node: unknown, at: string): { value: unknown; issues: RefIssue[] } =>
-    dereference(node, specDoc, { at, maxDepth: opts.maxDepth });
+  /**
+   * 解引用，**并且顺手把 error 级 issue 记进本次解析的 issue 表**。
+   *
+   * ## 为什么记账在函数里，而不是让每个调用点自己 push
+   *
+   * 原先这里是纯透传（`(n, at) => dereference(...)`），于是"记不记 issue"是**每个调用点
+   * 各自的一个决定**。全仓五个调用点里只有一个记得记（参数合并那一处，写的是
+   * `allIssues.push(...d.issues.filter(...))`）。**漏了几处是量出来的，不是数出来的**
+   * （`git worktree` 拉 HEAD，四个位置各喂一个坏 `$ref`，看 `parseOpenApi` 的 `issues` 条数）：
+   *   - 请求体本身是 ref —— 0 条（该处 bodySchema 变 `undefined`）
+   *   - 请求体的 application/json schema 是 ref —— 0 条（变 `{}`）
+   *   - 某个响应码的 schema 是 ref —— 0 条
+   *   - 参数的 schema 是 ref —— 1 条（就是原先唯一会记的那处）
+   * 参数那一位之所以"两个调用点都碰它"却不重不漏：`docRef(p, at)` 先把整参数对象走了一遍，
+   * 里面那个 `$ref` 已被替换成 `undefined`，随后 `docRef(p.schema ?? {}, at)` 拿到的是
+   * 清空后的子树，取不到 ref 也就不会再记一次（实测 1 条而不是 2 条）。
+   * 后果不是崩、不是红，是**一个坏掉的 `$ref` 变成一个空 schema**：
+   * `dereference` 返回 `undefined`，而这里紧挨着的那句 `asObj(...)` 把 `undefined` 收成 `{}`。
+   * `{}` 在 JSON Schema 里是"任何值都合法"，于是
+   * `client.ts` 的 `validatorFor` 与 `validateResponse` 双双走
+   * "没 schema ⇒ 没什么可校验的"那条分支（它们判的是 `Object.keys().length`，
+   * 实测成立），mock 侧那句"声明了 2xx 但没给 schema"的自检告警**也不响**
+   * （它判的是 `!spec?.schema`，而 `{}` 是 truthy，实测 selfCheckIssues 为空）。
+   * 一份拆成多文件的 spec 极常见，而它跑起来是**全绿**的。
+   *
+   * 所以这一格不属于"某处漏写一行"，属于**接口形状本身允许漏**：
+   * 只要"取值"与"记账"是两次动作，第五次写的时候还会漏。改成函数自己记账之后，
+   * 调用点想漏也没有东西可漏（`issues` 仍在返回值里给需要单独处理它的调用点用）。
+   *
+   * ## 只记 error，不记 warn
+   *
+   * `dereference` 还会产出两类 warn（`schema 嵌套超过 maxDepth 层`、
+   * `$ref 旁的 description 在 3.0 语义下应被忽略`）。这两类**刻意不在这儿收**：
+   * 后者对任何写了 `{$ref: ..., description: ...}` 的接口都会响（OAS3 里这写法极常见），
+   * 一次导入门禁就会刷出几百条，而"告警刷屏 ⇒ 用户把整个告警区关掉"是 lint 那套
+   * 规则反复踩过的坑（见 hook.ts 里 specIssues 为什么要按 docRef 去重）。
+   * 要收这两类 warn 得先决定分级，那是另一件事。
+   */
+  const docRef = (node: unknown, at: string): { value: unknown; issues: RefIssue[] } => {
+    const d = dereference(node, specDoc, { at, maxDepth: opts.maxDepth });
+    issues.push(...d.issues.filter((i) => i.level === 'error'));
+    return d;
+  };
 
   const specSecurity = asArray<Record<string, string[]>>(root.security);
   const paths = asObj(root.paths);
@@ -210,7 +251,9 @@ function buildOperation(
   for (const list of [asArray<unknown>(pathItem.parameters), asArray<unknown>(op.parameters)]) {
     for (const p of list) {
       const d = docRef(p, at);
-      allIssues.push(...d.issues.filter((i) => i.level === 'error'));
+      // 记账在 docRef 里做（见它的注释），这里只取值 —— 原先是 `allIssues.push(...d.issues
+      // .filter(...))`，那是五个调用点里**唯一**记得记账的一处（另外四个调用点各自漏了多少，
+      // 见上面 docRef 那段里的实测表：三个位置 0 条，参数这一位因为子树已被走过一遍而恰好是 1 条）。
       const pp = asObj(d.value);
       if (typeof pp.name === 'string' && typeof pp.in === 'string') merged.set(`${pp.in}:${pp.name}`, pp);
     }
@@ -269,7 +312,10 @@ function buildOperation(
     const r = asObj(rRaw);
     const rContent = asObj(asObj(r.content)['application/json']);
     responses[code] = {
-      schema: Object.keys(rContent).length ? asObj(docRef(rContent.schema, at).value) : undefined,
+      // at 要指到**这个状态码**的 schema：改前这一处传的是 operation 级的 at，
+      // 两个状态码各坏一个 ref 时两条 issue 的 at 一模一样，人分不清是哪个码的问题
+      // （实测 HEAD 上这条压根没有 at —— 它把 issue 整个丢了；修了记账之后这个粗 at 才显形）。
+      schema: Object.keys(rContent).length ? asObj(docRef(rContent.schema, `${at}/responses[${code}]/content/application/json/schema`).value) : undefined,
       description: typeof r.description === 'string' ? r.description : undefined,
     };
   }

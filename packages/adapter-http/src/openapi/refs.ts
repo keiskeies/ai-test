@@ -105,7 +105,21 @@ export function dereference(
           if (ext === undefined || ext === null) {
             issues.push({
               level: 'error', code: 'REF_EXTERNAL_MISSING',
-              message: `外部引用 "${ref}" 无法解析${doc.resolveExternal ? '（解析器返回空）' : '（未提供外部解析器）'}。该 operation 将被跳过，其余接口照常可用`,
+              /*
+               * ⚠ 这句话原先的结尾是「该 operation 将被跳过，其余接口照常可用」，**那是假的**。
+               * 实测（三种位置各喂一个跨文件 `$ref`，看 parseOpenApi 的返回值）：
+               * `operations` 数量不变、那条 operation 照旧在里面，
+               * 变的只有它身上那一处 schema —— `dereference` 返回 `undefined`，
+               * 调用点紧挨着的 `asObj(...)` 把它收成 `{}`。
+               * 一句说错后果的错误比没有错误更坏：人会去数接口列表里少了几条，
+               * 而真实症状是"那条接口的请求体/响应体校验悄悄变成空操作、用例全绿"。
+               * （真正会跳过 operation 的是另一个 code `OPERATION_SKIPPED`，在 parse.ts 的
+               * catch 里推，与这一条无关。）
+               */
+              message: `外部引用 "${ref}" 无法解析${doc.resolveExternal ? '（解析器返回空）' : '（未提供外部解析器）'}。`
+                + '此处按"没有 schema"处理：该处的请求/响应体校验与参数序列化都退回默认，'
+                + '接口本身仍在列表里、用例照跑照绿（不是跳过）。要让它真的生效，'
+                + '把被引用的文件一起导入或先内联展开',
               at,
             });
             return undefined;

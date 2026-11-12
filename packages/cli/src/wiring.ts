@@ -253,6 +253,12 @@ function readFileSyncSafe(path: string): string {
  */
 export class DocRegistry {
   private docs = new Map<string, ParsedDoc>();
+  /**
+   * 导入期收集到的**文档级**问题（`parseOpenApi` 的 error 级 issue）。
+   * 与 `docs` 一一对应地攒着，由 `specIssueWarnings` 出口化 —— 不在这里直接打印，
+   * 理由见那个函数的注释（`load` 被测试直接调，库函数里放 IO 会把测试输出刷脏）。
+   */
+  private readonly specIssues: string[] = [];
   private constructor(private readonly files: Map<string, string>) {}
 
   static async load(specArgs: string[]): Promise<DocRegistry> {
@@ -281,6 +287,10 @@ export class DocRegistry {
       }
       reg.docs.set(name, doc);
       reg.files.set(name, path);
+      for (const i of doc.issues) {
+        if (i.level !== 'error') continue;
+        reg.specIssues.push(`${name}（${path}）${i.at}：${i.message}`);
+      }
     }
     return reg;
   }
@@ -289,6 +299,53 @@ export class DocRegistry {
   names(): string[] { return [...this.docs.keys()]; }
   get(ref: string): ParsedDoc | undefined { return this.docs.get(ref); }
   fileOf(ref: string): string | undefined { return this.files.get(ref); }
+
+  /**
+   * 交给命令层打印的告警行（**措辞只有这一份**）。
+   *
+   * ## 为什么必须有人调它
+   *
+   * `parseOpenApi` 早就在返回值里给了一份 `issues`，而**全仓只有一处读它**：
+   * `auth/hook.ts` 的 `specIssues`，且只挂在鉴权那条路上（消息前缀写死是
+   * 「spec 的鉴权声明有问题」）。于是 `REF_EXTERNAL_MISSING` 这类
+   * "spec 自己引用的文件没导进来"的问题**没有任何一个命令会说出来**，
+   * 而它的实际后果是静默的：那一处 schema 退化成 `{}`，
+   * `{}` 在 JSON Schema 里等于"任何值都合法"，请求体/响应体的契约校验就此变成空操作，
+   * 用例照绿（实测：operations 数量不变、mock 回 `{}` 200、selfCheckIssues 为空）。
+   * docs/08 §3 那一族里的"有事实、没有人看的载体"这一格。
+   *
+   * ## 为什么不在 `load` 里直接打印，也不叫 `specIssueWarnings()` 直接返数组
+   *
+   * `load` 被测试直接调（authcheck.test.ts、wiring-web.test.ts 里十几处），
+   * 库函数里放 IO 会把测试输出刷脏。而"收集成裸数组、措辞让每个命令自己拼"
+   * 也不行 —— 那正好复制出本轮刚修过的那个形状：`--local` 那句"这不是真实后端"
+   * 当时在 wiring.ts 与 commands.ts 各写了一份，于是已有的那条测试改前改后都绿。
+   * 所以这里**返成品行**，命令层只负责 `io.err` 每一条。
+   *
+   * ## 只打前 3 条并报到总数
+   *
+   * 一份拆文件的 spec 可能有几十处坏 ref，全打出来会变成
+   * "告警刷屏 ⇒ 用户把整个告警区关掉"（lint 那套规则反复踩过的坑，也见 hook.ts 的
+   * specIssues 为什么按 docRef 去重）。
+   */
+  specIssueLines(): string[] {
+    if (!this.specIssues.length) return [];
+    /*
+     * ⚠ 这句文案我一开始写的是"按它生成的用例也**断不到任何东西**"，实测是假的：
+     * 同一份接口，schema 正常时 gen 出 4 条场景，schema 坏掉时出 2 条，
+     * 少掉的是 requiredMissing 与 typeViolation，而**留下来的 happyPath 照旧带两条 assert**。
+     * 量出来的真实形状是"**覆盖面悄悄缩了一截**"，而不是"生成的东西是空的"。
+     * 更麻烦的是 gen 自己给的理由写的是「请求体没有 required 字段」「schema 无 properties」
+     * —— 那是对**的结果说的老实话，但它把成因指错了方向：
+     * 人会去改自己 schema 的写法，而真正的问题是那个 `$ref` 没解析出来。
+     */
+    const head = `导入的 spec 有 ${this.specIssues.length} 处问题（下面列前 ${Math.min(3, this.specIssues.length)} 条）`
+      + ' —— 出问题的那一处按"没有 schema"继续跑：该处的请求/响应体契约校验是空的，而用例照样全绿。'
+      + '跑 gen 时它的表现是**少生成几类策略**（缺 required/类型/边界都"无从生成"），'
+      + 'gen 会把少掉的说出来、但会把成因写成"你的 schema 没有这些字段"。'
+      + '把被引用的文件一起导入，或先内联展开';
+    return [head, ...this.specIssues.slice(0, 3).map((s) => `  · ${s}`)];
+  }
 
   /** 给 asHttpExec 的 provider。找不到时抛**带 docRef 与现有 docRef 列表**的错 */
   provider(): (docRef: string) => ParsedDoc {

@@ -346,6 +346,7 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
   const env = buildEnv(envFile, a.multi['env-var'] ?? []);
 
   const registry = await DocRegistry.load(a.multi.doc ?? []);
+  warnSpecIssues(registry, io);
   const evidenceDir = str(a, 'evidence-dir') ?? cfg?.evidenceDir ?? join(io.cwd, DEFAULT_CONFIG.evidenceDir);
 
   /*
@@ -798,6 +799,7 @@ export async function cmdLint(a: ParsedArgs, io: Io): Promise<CommandResult> {
   if (!a.positionals.length) throw new CliError('lint 需要目标：atest lint <场景 id 或文件路径>[…]', EXIT.USAGE);
   const cfg = await findConfig(io.cwd);
   const registry = await DocRegistry.load(a.multi.doc ?? []);
+  warnSpecIssues(registry, io);
   const maxCost = str(a, 'max-cost') ? Number(a.flags['max-cost']) : undefined;
 
   let bad = false;
@@ -845,6 +847,7 @@ export async function cmdGen(a: ParsedArgs, io: Io): Promise<CommandResult> {
   }
   const cfg = await findConfig(io.cwd);
   const registry = await DocRegistry.load(specs);
+  warnSpecIssues(registry, io);
   const outDir = str(a, 'out') ?? cfg?.irDir ?? join(io.cwd, DEFAULT_CONFIG.irDir);
   // 读规范名 strategy（--strategies 是别名，解析后同样落在 multi.strategy 上）
   const strategies = a.multi.strategy?.length ? a.multi.strategy : ['happyPath'];
@@ -968,6 +971,20 @@ export async function cmdGen(a: ParsedArgs, io: Io): Promise<CommandResult> {
 
 async function readIfExists(p: string): Promise<string | undefined> {
   try { return await readFile(p, 'utf8'); } catch { return undefined; }
+}
+
+/**
+ * 把"导入的 spec 自己有毛病"说给人听。四个命令共用（run / lint / gen / auth-check）。
+ *
+ * 为什么单独一个函数而不是每处写 `for (const w of registry.specIssueLines()) io.err(w)`：
+ * 那行本身没什么可抄的，但**"哪几个命令要说这件事"是一个会漂的东西**。
+ * 收成一处之后，将来加第五个吃 `--doc` 的命令时，漏掉它的代价是"那条命令安静地
+ * 按空 schema 跑完"，而这里至少有一个地方能提醒（函数只有一行，注释写全）。
+ *
+ * 措辞与截断（前 3 条）都在 `DocRegistry.specIssueLines()`，见那里的注释。
+ */
+function warnSpecIssues(registry: DocRegistry, io: Pick<Io, 'err'>): void {
+  for (const w of registry.specIssueLines()) io.err(w);
 }
 
 // ── atest agent ───────────────────────────────────────────────────────────
@@ -1100,6 +1117,7 @@ export async function cmdAuthCheck(a: ParsedArgs, io: Io): Promise<CommandResult
   const envFile = envName ? await resolveEnvFile(cfg, envName, io.cwd) : undefined;
   const env = buildEnv(envFile, a.multi['env-var'] ?? []);
   const registry = await DocRegistry.load(specs);
+  warnSpecIssues(registry, io);
 
   const auth = buildAuthLayer({
     registry, env,

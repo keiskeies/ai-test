@@ -220,6 +220,70 @@ describe('外部 $ref', () => {
     const r = dereference({ $ref: './common.yaml#/Pagination' }, { root: spec }, { externals });
     assert.deepEqual(r.value, commonYaml.Pagination);
   });
+
+  /*
+   * 下面这一组测的是 **parseOpenApi 会不会把解不出来的 ref 记成 issue**。
+   *
+   * 改前的形状：`parseOpenApi` 里那个 `docRef` 闭包是纯透传，"记不记 issue"由**每个
+   * 调用点自己决定**，而五个调用点里只有一个记得记（参数合并那一处的
+   * `allIssues.push(...d.issues.filter(...))`）。
+   *
+   * **哪几位在漏是量出来的**：`git worktree` 拉 HEAD，四个位置各喂一个坏 `$ref`，
+   * 数 `parseOpenApi` 返回的 issues —— 请求体本身 0 条、请求体的 json schema 0 条、
+   * 某个响应码的 schema 0 条，只有**参数的 schema 那一位是 1 条**（它本来就没漏）。
+   * 所以前三条是"补上当时真的在漏的那一位"，第四条是**回归守卫**：
+   * 修完之后同一位子树被走过两次（`docRef(p)` 与 `docRef(p.schema)`），
+   * 那条断言 `恰好 1 条`而不是 2 条，钉的是"改成函数记账之后别把没漏的这处改成重复报"。
+   *
+   * 为什么必须逐位各写一条：漏的方式恰恰是**逐位**发生的，而
+   * "随便哪个位置都会记"式的写法修好任意一位就绿了，另外两位照旧漏 ——
+   * 那正是本仓记过的「形状对了不等于走到位」。
+   */
+  const wrap = (op: Record<string, unknown>) => ({
+    openapi: '3.0.0', info: { title: 't', version: '1' },
+    paths: { '/z': { post: { operationId: 'z', responses: { '200': { description: 'ok' } }, ...op } } },
+  });
+  const EXT = { $ref: './common.yaml#/Thing' };
+
+  for (const [name, spec, 位, 改前] of [
+    ['请求体的 schema 位', wrap({ requestBody: { content: { 'application/json': { schema: EXT } } } }), 'application/json/schema', '这一位改前在丢'],
+    ['整个 requestBody 位', wrap({ requestBody: EXT }), undefined, '这一位改前在丢'],
+    ['响应体的 schema 位', wrap({ responses: { '200': { description: 'ok', content: { 'application/json': { schema: EXT } } } } }), 'responses[200]/content/application/json/schema', '这一位改前在丢'],
+    ['参数的 schema 位', wrap({ parameters: [{ name: 'q', in: 'query', schema: EXT }] }), 'schema', '这一位改前就记着，此条是防重复报的回归守卫'],
+  ] as const) {
+    test(`${name}上解不出来的 ref 记成 1 条 error issue（${改前}）`, () => {
+      const r = parseOpenApi(spec);
+      const hits = r.issues.filter((i) => i.code === 'REF_EXTERNAL_MISSING');
+      assert.equal(hits.length, 1, `应恰好记 1 条，实得 ${hits.length}：${JSON.stringify(r.issues)}`);
+      assert.equal(hits[0]!.level, 'error', '这类问题会让那一处的契约校验变成空操作，不能降成 warn');
+      if (位) assert.ok(hits[0]!.at.endsWith(位), `位置要指到出问题的那一处，实得 ${hits[0]!.at}`);
+    });
+  }
+
+  test('好的 spec 一条 issue 都不该有（防"改成无条件记一条"这种假修法）', () => {
+    const r = parseOpenApi(wrap({
+      requestBody: { content: { 'application/json': { schema: { type: 'object' } } } },
+      responses: { '200': { description: 'ok', content: { 'application/json': { schema: { type: 'object' } } } } },
+      parameters: [{ name: 'q', in: 'query', schema: { type: 'string' } }],
+    }));
+    assert.deepEqual(r.issues, [], `干净的 spec 上不该冒出 issue：${JSON.stringify(r.issues)}`);
+  });
+
+  test('解不出来的 ref **不会**让那条 operation 消失（错误消息不许说谎）', () => {
+    /*
+     * refs.ts 里那条 error 的原文结尾曾是「该 operation 将被跳过，其余接口照常可用」。
+     * 实测是假的：三种位置各喂一个坏 ref，`operations.length` 都是 1、那条照旧在，
+     * 变的只有它身上那一处 schema（`undefined` 被调用点的 `asObj` 收成 `{}`）。
+     * 一句说错后果的错误比没有错误更坏：人会去数接口列表少了几条，
+     * 而真实症状是"这条接口的体校验悄悄变成空操作、用例全绿"。
+     * 所以这一条钉的是**消息与实际行为一致**，而不是消息的措辞。
+     */
+    const r = parseOpenApi(wrap({ requestBody: { content: { 'application/json': { schema: EXT } } } }));
+    assert.equal(r.operations.length, 1, 'operation 不该被跳过');
+    assert.equal(r.byId.has('z'), true);
+    assert.match(r.issues[0]!.message, /按"没有 schema"处理|没有 schema/, `消息要说清真实后果：${r.issues[0]!.message}`);
+    assert.doesNotMatch(r.issues[0]!.message, /将被跳过/, '这句话是假的，别写回去');
+  });
 });
 
 describe('别名冲突是**唯一**允许阻断解析的失败', () => {

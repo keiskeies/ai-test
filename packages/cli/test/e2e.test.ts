@@ -430,6 +430,55 @@ test('--local 还要把 **spec 自己的问题**说出来（改前：那段被�
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('spec 里有解不出来的 $ref 时：**跑照样全绿，而这件事必须说出来**', async () => {
+  /*
+   * 这一条测的是"命令把 spec 自己的毛病说给人听"这条**载体**，
+   * 而不是 parse 会不会记 issue（那在 adapter-http/test/parse.test.ts 里逐位钉着）。
+   * 分层是有意的：issue 记上了但没人打印，与根本没记，用户看到的**一模一样**。
+   * docs/08 §3 的"有事实、没有人看的载体"这一格，只有走完整条命令才测得出来。
+   *
+   * ⚠ 注意下面第一个断言是 `EXIT.OK`：**这一条绿着跑完正是缺陷的一部分**。
+   * 那个解不出来的 `$ref` 让请求体 schema 变成 `{}`，而 `{}` 在 JSON Schema 里
+   * 是"任何值都合法"，于是那一处的契约校验整个变成空操作（实测 client 侧
+   * validatorFor 与 validateResponse 都判 `Object.keys().length` 走"没 schema"分支，
+   * mock 侧"没给 schema"的自检告警也因 `{}` 是 truthy 而不响）。
+   * 所以这里刻意**不**断言退出码有问题，而是断"问题以告警的形式出现在 stderr"。
+   *
+   * 断言挑的是只有这条路径才知道的内容：docRef 名、文件路径、出错位置的 `at`。
+   * 只断"stderr 非空"的话，旁边那句 `--local 这不是真实后端`就能替它变绿
+   * （同一个文件里上一条测试刚记过这种"手抄一份所以改前改后都绿"的形状）。
+   */
+  const dir = await mkdtemp(join(tmpdir(), 'atest-cli-extref-'));
+  try {
+    const specPath = join(dir, 'split.json');
+    await writeFile(specPath, JSON.stringify({
+      openapi: '3.0.0', info: { title: 'shop', version: '1' },
+      paths: {
+        '/orders': { post: {
+          operationId: 'createOrder',
+          // 拆成多文件的 spec 极常见，而 CLI 只吃 `--doc` 给的那一个文件
+          requestBody: { required: true, content: { 'application/json': { schema: { $ref: './common.yaml#/Order' } } } },
+          responses: { '201': { description: 'created' } },
+        } },
+      },
+    }), 'utf8');
+    const casePath = await writeCase(dir, [
+      { id: 'c', kind: 'openapiCall', docRef: 'shop', operationId: 'createOrder', body: { sku: 'A-1' } },
+      { id: 'a', kind: 'assert', against: '$.step.c.resp', status: 201 },
+    ]);
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--local', '--doc', `shop=${specPath}`,
+                             '--evidence-dir', join(dir, 'ev-extref'), '--clock', 'deterministic'], io);
+    assert.equal(code, EXIT.OK, `这条本该"绿着跑完"（缺陷的症状就是它不红）：${io.stderr.join('\n')}`);
+    const err = io.stderr.join('\n');
+    assert.match(err, /common\.yaml/, `要点名是哪个引用解不出来：${err}`);
+    assert.match(err, /shop（.*split\.json）/, `要说到是哪个 docRef 与哪个文件：${err}`);
+    assert.match(err, /application\/json\/schema/, `要指到出错的那一处位置：${err}`);
+    assert.match(err, /没有 schema/, '要说清真实后果是"那一处按没有 schema 继续跑"，不是"接口被跳过"');
+    assert.equal(io.stdout.join('\n').includes('common.yaml'), false, '这类告警走 stderr，别混进 stdout 的结果里');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('agent 命令存在但明确不可用，且给出可执行的替代路径（不是 command not found）', async () => {
   const io = ioCapture();
   const code = await main(['agent', '下单后库存应减一'], io);
