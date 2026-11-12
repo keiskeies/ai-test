@@ -10,14 +10,23 @@ import { VarSpace } from './vars.js';
 export interface DryRunResult extends LintReport {
   /** 输入参数的解析结果（缺哪个必填项） */
   missingInputs: string[];
-  /** 表达式合法但引用了运行时才有的东西 —— 只列出，不算错 */
-  exprSummaries: { stepId: string; expr: string; refs: string[] }[];
+  /*
+   * **这里从前有一栏 `exprSummaries`**（"表达式合法但引用了运行时才有的东西，只列出不算错"），
+   * 恒为空数组、无生产者、无消费者。删它的判据与"为什么不该补生产者"写在下面那一大段末尾
+   * —— 一句话版本：**那一栏按判据划出来的集合就是"所有引用型表达式"**，
+   * 补上生产者等于在面板里画一份噪声清单，而那比空着更坏（它看着像有结论）。
+   *
+   * ⚠ 想把它加回来的话两道闸各拦一半，别以为一道就够：往 return 那个对象字面量加键
+   *   会被 `expr-strict.test.ts` 里那条「dryRun 的返回形状」拦（运行时读键，`npm test` 就红）；
+   *   只往本 interface 加必填字段则 `npm test` 全绿（tsx 不做 typecheck），
+   *   拦它的是 `npm run typecheck:test`（TS 缺属性报错）。
+   */
   /** 预估步骤数与最坏耗时（用于 UI 提示「这条场景大概要跑多久」） */
   estimate: { steps: number; minMs: number; needsDevice: boolean; targets: string[] };
 }
 
 /**
- * 干跑：静态闸 + 输入完备性 + 表达式引用摘要。
+ * 干跑：静态闸 + 输入完备性。
  * 与真执行共用 lint 规则，所以「dry-run 过了但真跑炸了」的情况应当被视为 bug。
  */
 export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {}, ctx: LintContext = {}): DryRunResult {
@@ -27,7 +36,6 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
     issues.push({ code: 'VAR_UNDEFINED', level: 'error', message: `缺少必填输入：${missingInputs.join(', ')}`, fix: '在运行参数里提供，或在场景里给 default' });
   }
 
-  const exprSummaries: DryRunResult['exprSummaries'] = [];
   /*
    * **这里从前有一份自己的表达式扫描**（`scanExpr` + 一个手抄的字段名清单
    * `['condition','when','value','items']`），本轮删掉了。三个理由，从重到轻：
@@ -65,12 +73,36 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
    *    （**引用测试名要照抄原名**：这三处我原先写的是自己简化的说法，
    *     照着去找会以为少了测试 —— 与"注释里写一个不存在的函数名"是同一种错。）
    *
-   * ⚠ `exprSummaries` **至今恒为空数组**（"表达式合法但引用了运行时才有的东西"
-   *    这一栏从来没有生产者，全仓也没有消费方 —— `grep -rn exprSummaries` 只剩
-   *    类型声明、这里的声明与返回那一行）。本轮**没删它**：它是 dryrun 设计里的
-   *    一栏，删除要连着 `DryRunResult` 这个对外类型一起做，而前端还没接。
-   *    但它现在这个形状**看着像有内容**，属于 docs/08 §3 那一族（"少一件东西看起来
-   *    像什么都没少"），已登记 docs/14 §5。
+   * ⚠ **`exprSummaries` 那一栏本轮删了**（类型里、这里、返回语句里各一处）。
+   *    它从前恒为空数组，登记的理由是「它是 dryrun 设计里的一栏，删除要连着对外类型一起做，
+   *    **而前端还没接**」。**那句已经不成立，而且不成立在两个方向上**：
+   *     · 前端**已经接了** —— `web/src/app.ts` 与 `check-lines.ts` 读的是 `missingInputs`
+   *       与 `estimate`，**唯独跳过 `exprSummaries`**。所以"等前端来读"这个等待条件
+   *       已经被证伪：读者到齐了，而它没读这一栏。
+   *     · 更根本的是**这一栏压根划不出内容**。判据是「表达式合法**但**引用了运行时才有的东西」，
+   *       而枚举过一遍（永久落点：`engine/test/expr-strict.test.ts` 里那一族
+   *       「被删掉的 `dryRun.exprSummaries`：判据划不出内容，所以它不该有生产者」，
+   *       三条 —— 枚举逐格问 lint、按引擎自己的 `compileExpr().refs` 算那一栏的容积、
+   *       钉 `dryRun` 的返回键集）：
+   *       一条合法表达式在静态时刻引用的东西只有四种身份 ——
+   *       前一步输出 `$.step.login.resp.*`（lint 不报）、输入 `$region`（不报）、
+   *       环境 `$env.x`（不报，且 dryRun 这一侧**刻意**给空表）、纯字面量 `1 + 1`（不报）；
+   *       唯一会报的是引用未声明的 `$nope.x`（`VAR_UNDEFINED` error），
+   *       而那一格**已经进 issues 了**，按判据它属于"不合法"那一侧、不该进这一栏。
+   *       ⇒ **「合法且引用运行时」= 所有引用型表达式**，不是一个可操作的小集合。
+   *    所以这一栏**不该补生产者**：补上就是给面板画一份"这条用例里写过的所有表达式"，
+   *    而那种清单在编辑器里没有任何动作可配（作者看了不会去改任何东西）。
+   *    **一个恒空的集合有两种成因**：有内容没人产（该补生产者）/ 判据划不出内容
+   *    （补生产者就是造噪声）。这两种处置相反，而**区分它们只能靠枚举**——
+   *    登记那句"它是设计里的一栏"恰恰跳过了这一步，所以它把一个该删的东西保了两轮。
+   *
+   * ⚠ **顺带记一条比这一栏更有用的发现**：本仓那条"谁读过这个字段"的扫描器
+   *    （`tooling/unread-fields.mjs`）**看不见这一类**。它只扫 `packages/ir/src` 里的
+   *    zod schema（那句注释写着"字段定义处只此一处"），而 `exprSummaries` 是
+   *    `engine/src` 里一个**普通 TS interface 的字段**。
+   *    于是"有字段、没生产者、没读者"这个本仓列为权威缺陷族的形状，
+   *    **只要长在 IR 之外就全程无人报警**。这一条已登记 docs/14 §5，
+   *    并把"扫描器扫不到非 zod 字段"当成一条已知边界写出来，而不是等下次再撞上。
    */
 
   /*
@@ -137,7 +169,7 @@ export function dryRun(scenario: Scenario, inputs: Record<string, unknown> = {},
   const three = [...scenario.setup, ...scenario.body, ...scenario.teardown];
   const needsDevice = deriveNeedsDevice(three);
   return {
-    ...toReport(issues), missingInputs, exprSummaries,
+    ...toReport(issues), missingInputs,
     estimate: { steps, minMs: steps * 50, needsDevice, targets: scenario.targets },
   };
 }

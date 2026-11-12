@@ -323,6 +323,116 @@ describe('静态闸：EXPR_SYNTAX 管路径本体，且管的字段从 schema �
   });
 });
 
+describe('被删掉的 `dryRun.exprSummaries`：判据划不出内容，所以它不该有生产者', () => {
+  /*
+   * **这一族测的是"一栏该不该存在"，不是"一栏填得对不对"** —— 那种测试本仓没有先例，
+   * 所以理由写足。
+   *
+   * `DryRunResult` 里从前有一栏 `exprSummaries: []`（"表达式合法但引用了运行时才有的东西，
+   * 只列出不算错"），恒为空、无生产者、无消费者，登记的理由是「它是设计里的一栏，
+   * **而前端还没接**」。本轮删它之前先做的不是删，是**枚举这一栏能装什么**：
+   * 一个恒空的集合有两种成因 —— ① 有内容没人产（该补生产者）② 判据本身划不出内容
+   * （补生产者 = 造噪声）。**两种处置相反，而区分它们只能靠枚举**；
+   * 登记那句"它是设计里的一栏"恰恰跳过了这一步，所以它把一个该删的东西保了两轮。
+   *
+   * ⚠ **下面第一条不是我对"有几种身份"的印象，是把每种身份各写一格、逐格问 lint**。
+   * 这一步本身踩过三次夹具坑（`switch.cases` 求 `is` 而 `min(1)` 被打回、
+   * 把 `lintScenario` 的返回值当 `LintReport` 读、以及引用语法写成 `$login.body.role`
+   * 那种**我自己编的**写法 —— lint 报 `VAR_UNDEFINED` 报的是我的夹具而不是缺陷）。
+   * 所以这里：载体用 `when`（`Base` 上的字段，所有 kind 都有）、
+   * `lintScenario` 按 `LintIssue[]` 读、步骤间引用照 docs/02 §5 写 `$.step.<id>.resp.…`。
+   * 三种"跑不起来"都说明不了被问的那件事，这是它们各自的代价。
+   */
+  const ENUM: Array<{ id: string; expr: string; identity: string; silent: boolean }> = [
+    { id: 'a-steppath', expr: "$.step.login.resp.body.role == 'admin'", identity: '前一步的输出', silent: true },
+    { id: 'b-input', expr: '$region', identity: '场景输入参数（调用方给值）', silent: true },
+    { id: 'c-literal', expr: '1 + 1', identity: '纯字面量（静态完全可判）', silent: true },
+    { id: 'e-env', expr: '$env.baseUrl', identity: '环境变量（静态时刻**刻意**查不到）', silent: true },
+    { id: 'd-undefined', expr: '$nope.x', identity: '谁都没声明', silent: false },
+  ];
+  const enumScen = (): Scenario =>
+    defineScenario({
+      schemaVersion: '1', id: 'scn.enum', name: '引用身份枚举',
+      env: { environmentRef: 'unit' }, targets: ['api'],
+      inputs: [{ name: 'region', type: 'string', required: true }],
+      body: [
+        { id: 'login', kind: 'http', request: { method: 'POST', url: '/login' } },
+        ...ENUM.map((c) => ({ id: c.id, kind: 'noop', when: c.expr })),
+      ],
+    } as ScenarioDraft);
+
+  test('枚举：一条合法表达式引用的东西只有四种身份，其中三种 lint 一言不发', () => {
+    /*
+     * 逐格问 lint「这一格算合法吗」。按 `stepId` 过滤而不是看总条数 ——
+     * 场景级的码（`ASSERT_FREE_SCENARIO` / `TEARDOWN_DIRTY`）stepId 是 undefined，
+     * 它们与"这一格合不合法"无关，混进计数就会把"我的夹具不干净"读成"判据变了"。
+     */
+    const issues = lintScenario(enumScen(), {});
+    for (const c of ENUM) {
+      const mine = issues.filter((i) => i.stepId === c.id);
+      assert.equal(mine.length === 0, c.silent, `${c.id}（${c.identity}）= ${JSON.stringify(c.expr)}：lint 说${mine.map((i) => `[${i.level}] ${i.code}`).join(' ') || 'nothing'}，与登记的不符`);
+      if (!c.silent) {
+        assert.equal(mine[0]!.code, 'VAR_UNDEFINED', `${c.id} 报了，但不是 VAR_UNDEFINED —— 登记的那句「唯一会报的是引用未声明」要看清楚再改`);
+        assert.equal(mine[0]!.level, 'error', `${c.id} 的级别变了：它进不进 issues 的判据跟着变`);
+      }
+    }
+    // 反面向的自检：这一格确实**进了 issues**，所以按判据它属于"不合法"那一侧、不该进那一栏
+    const dryIssues = dryRun(enumScen(), { region: 'cn' }).issues.filter((i) => i.stepId === 'd-undefined');
+    assert.equal(dryIssues.length, 1, '「不合法那一侧已经有人在报了」这件事必须成立，否则删掉那一栏会丢信息');
+  });
+
+  test('⇒「合法且引用运行时」= 所有引用型表达式，所以那一栏不该有生产者', () => {
+    /*
+     * **判据不我自己写**：一条表达式"引用了运行时的东西"由引擎自己的
+     * `compileExpr(src).refs` 说（它走 AST 收集 `ref` 节点），不是我数出来的清单 ——
+     * 手抄一份的话这条就只在"两份清单抄得一样"上成立，那是本仓反复的缺陷类。
+     *
+     * 于是"那一栏能装什么"变成一个可算的问题：按登记写下的判据
+     * （**合法** 且 **引用运行时**）跑一遍枚举样本，看剩下的集合有多大。
+     */
+    const scen = enumScen();
+    const issues = lintScenario(scen, {});
+    const legal = ENUM.filter((c) => !issues.some((i) => i.stepId === c.id));
+    const refBearing = legal.filter((c) => compileExpr(c.expr).refs.length > 0);
+    // 字面量那一格确实"合法但不引用任何东西" —— 它是这一栏唯一可能的容身之处
+    const noRef = legal.filter((c) => compileExpr(c.expr).refs.length === 0);
+    assert.deepEqual(noRef.map((c) => c.id), ['c-literal'], '夹具漂了：合法而不引用任何运行期东西的那格不止/不再是字面量');
+    assert.deepEqual(refBearing.map((c) => c.id).sort(), ['a-steppath', 'b-input', 'e-env'], '按判据留下的集合变了 —— 这一条的结论要跟着改');
+    /*
+     * 上面那行就是结论本身：**合法 ∩ 引用运行时 = 所有引用型表达式**。
+     * 也就是说那一栏若补上生产者，编辑器里会画出一份「这条用例写过的所有表达式」，
+     * 而那种清单没有任何动作可配（作者看了不会去改任何东西）——
+     * 比空着更坏，因为它看着像有结论。所以本轮的处置是**删栏，而不是补生产者**。
+     *
+     * 顺带把"唯一会报的那一格"排除在外这件事说清：`$nope.x` 也是引用型，
+     * 但它不合法，而它**已经在 issues 里**（上面那条钉着），按判据本来就不属于这一栏。
+     */
+  });
+
+  test('dryRun 的返回形状：LintReport 之外只有 missingInputs 与 estimate（`exprSummaries` 长回来这条就红）', () => {
+    /*
+     * **删一栏的证据是一栏回来了会红的测试**，不是一段"我们删了它"的注释。
+     * 运行时读键而不是读类型：`npm test` 走 tsx **不做 typecheck**，只钉类型的话
+     * 这一条在 CI 上是恒绿的。而这里还有一层结构性的东西 —— 想往
+     * `DryRunResult` 上加回一个必填字段，就**必须**同时往 return 那个对象字面量里加
+     * （TS 会因缺属性报错），所以运行时那一读覆盖面等于类型那一读。
+     *
+     * 断言用**完整键集**而不是"不含 exprSummaries"：后者对"随便多加一栏"是瞎的，
+     * 而对外形状多一栏少一栏是同一件事（`checkIr` 把它原样序列化给编辑器）。
+     */
+    const r = dryRun(enumScen(), { region: 'cn' });
+    const got = Object.keys(r).sort();
+    const want = ['errors', 'estimate', 'issues', 'missingInputs', 'ok', 'summary', 'warnings'].sort();
+    assert.deepEqual(got, want, `dryRun 的对外形状变了：多 ${got.filter((k) => !want.includes(k))} 少 ${want.filter((k) => !got.includes(k))}`);
+    // 序列化那一侧同样（编辑器读的是 JSON，不是 TS 对象；恒空数组过不了这一关的概率比不过 JSON 高）
+    assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(r))).sort(), want, 'JSON 形态与对象形态不一致 = 中间有人塞了派生字段');
+    // 对照：夹具没坏 —— 两栏真实存在的读者必须读到东西（否则上面那条 deepEqual 可能只是拿到空对象）
+    assert.deepEqual(r.missingInputs, [], '夹具失效：声明了必填输入却传了值，这一栏还空着说明 fixture 没走到位');
+    assert.equal(r.estimate.steps, ENUM.length + 1, '夹具失效：步骤数对不上，上面那条键集断言所在的对象不是我以为那一次调用的结果');
+    assert.ok(dryRun(enumScen()).missingInputs.includes('region'), '对照失败：missingInputs 压根不产，那"只有这两栏有读者"这句话就没被测到');
+  });
+});
+
 describe('活护栏：全仓每一条表达式字符串都不许被新查误伤', () => {
   /**
    * **为什么不能只靠注释里那句"实测零误报"**：判据会演进，语料也会长。

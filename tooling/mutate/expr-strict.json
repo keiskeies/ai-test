@@ -148,10 +148,18 @@
     },
     {
       "label": "dryRun 那份重复实现长回来（同一条 finding 在面板里出现两行）",
-      "_why": "本轮删掉的就是这份重复。这条变异取它**最小的可编译形状**：把 lint 已经报过的 EXPR_SYNTAX 再叠一遍（真加一份 scanExpr 要连着 import 一起改，一个锚点做不到）。它钉的是我新加那条「同一条表达式在 dry-run 里只出现一次」——而那两条覆盖面相关的钉子（items 只被一处管着）由上面「字段判据退回手抄清单」那条守。",
+      "_why": "本仓删掉的那份重复实现，这条取它**最小的可编译形状**：把 lint 已经报过的 EXPR_SYNTAX 再叠一遍（真加一份 scanExpr 要连着 import 一起改，一个锚点做不到）。它钉的是「同一步骤的同一条表达式在 dry-run 里只出现一次」。\n⚠ **锚点本轮搬过一次**：从前挂在 `const exprSummaries: ... = [];` 上 —— 那一行只是恰好是个方便的插入点，与本 case 的判据毫无关系。等 `exprSummaries` 被删掉时，这条就会报 ANCHOR_NOT_FOUND，而驱动把 ANCHOR_NOT_FOUND 记成**没跑成**（不是\"抓不到\"、更不是\"已修\"），整条 spec 要重跑。**把一条 case 的锚点建在它不讨论的代码上，等于让那次删除顺带废掉一条守卫** —— 所以挪到 `missingInputs` 那一行：它同样是`issues` 建好之后的稳定插入点，而且是本 case 自己要读的那半份读数。",
       "file": "packages/engine/src/dryrun.ts",
-      "anchor": "  const exprSummaries: DryRunResult['exprSummaries'] = [];",
-      "replace": "  const exprSummaries: DryRunResult['exprSummaries'] = [];\n  for (const dup of issues.filter((x) => x.code === 'EXPR_SYNTAX')) issues.push({ ...dup, message: dup.message + '（重复）' }); // 变异：重复实现长回来",
+      "anchor": "  const missingInputs = scenario.inputs.filter((p) => p.required && !(p.name in inputs) && p.default === undefined).map((p) => p.name);",
+      "replace": "  const missingInputs = scenario.inputs.filter((p) => p.required && !(p.name in inputs) && p.default === undefined).map((p) => p.name);\n  for (const dup of issues.filter((x) => x.code === 'EXPR_SYNTAX')) issues.push({ ...dup, message: dup.message + '（重复）' }); // 变异：重复实现长回来",
+      "testFile": "packages/engine/test/expr-strict.test.ts"
+    },
+    {
+      "label": "被删掉的 exprSummaries 那一栏长回来（面板上多一栏恒空的\"结论\"）",
+      "_why": "钉的是「dryRun 的返回形状：LintReport 之外只有 missingInputs 与 estimate」那条形状断言。\n**这一条与其他条目方向不同**：其余各条把好的实现改坏，这一条把**删掉的东西加回来** —— 删一栏的证据只能是「它回来会红」，而不是一段写着「我们删了它」的注释。\n⚠ **replace 换过一次形状，而换的原因是这条第一次跑出来是 BUILD_BROKEN**（=没跑成、不是结论）。原先写的是直接往 return 的对象字面量里加一个键，而 `return` 带返回类型标注 ⇒ 对象字面量走 excess-property 检查 ⇒ `tsc` 报 TS2353，测试压根没跑到。**我当时用 tsx 手工验过一遍说它能编译，那句是错的** —— `npm test` 走 tsx **不做 typecheck**，它绿只说明运行时无聊。现在改成 `...{ exprSummaries: [] } as Record<string, unknown>`：展开一个宽化过的对象**绕过**多余属性检查，编译真过，红由测试给出 —— 这才是这条要的形态。\n另一半（只往 interface 加必填字段、return 不动）**这条变异抓不到，也不该抓**：那种写法 `npm test` 侧全绿，红的是 `npm run typecheck:test`（实测 `TS2741: Property 'exprSummaries' is missing ... but required in type 'DryRunResult'`）。两道闸各抓一半、合起来才封死，这件事**写在这里而不是假装一条全包**。",
+      "file": "packages/engine/src/dryrun.ts",
+      "anchor": "    ...toReport(issues), missingInputs,",
+      "replace": "    ...toReport(issues), missingInputs, ...{ exprSummaries: [] as string[] } as Record<string, unknown>, // 变异：那一栏长回来了",
       "testFile": "packages/engine/test/expr-strict.test.ts"
     }
   ]

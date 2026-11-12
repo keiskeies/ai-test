@@ -28,7 +28,7 @@ const cleanMissing = (over: Partial<CheckResult> = {}): CheckResult => ({
   parsed: true, issues: [],
   dry: { ok: false, errors: [issue('error', 'VAR_UNDEFINED', '缺少必填输入：who')], warnings: [],
     issues: [issue('error', 'VAR_UNDEFINED', '缺少必填输入：who')], summary: '✗',
-    missingInputs: ['who'], exprSummaries: [], estimate: { steps: 2, minMs: 100, needsDevice: false, targets: ['api'] } },
+    missingInputs: ['who'], estimate: { steps: 2, minMs: 100, needsDevice: false, targets: ['api'] } },
   canonical: '{}', irSha: 'a'.repeat(64), ...over,
 });
 const texts = (r: CheckResult): string[] => checkStatusLines(r).map((l) => l.text);
