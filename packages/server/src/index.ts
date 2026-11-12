@@ -75,8 +75,21 @@ export interface ServeOptions {
    * 漏一条扩展名规则就把 `env/*.json` 发出去了。
    */
   staticRoots?: readonly StaticRoot[];
-  /** 覆盖 io.out（测试要断言 CLI 打了什么；默认写 stderr，因为 stdout 归 JSON 用） */
-  onOutput?: (s: string) => void;
+  /*
+   * **这里从前有一个 `onOutput?: (s: string) => void`**，注释写着"覆盖 io.out
+   * （测试要断言 CLI 打了什么）"。本轮删掉 —— 它**一个引用都没有**
+   * （全仓只有这一行声明本身），而它承诺的那件事**已经由另一条路做完了**：
+   * `runCommand` 自己建一个 `collect: string[]` 塞进 `io.out`/`io.err`，
+   * 随 `/api/run` 的响应以 `output` 字段发回，浏览器画成「CLI 输出」那张卡。
+   * 所以这不是"少一个功能"，是**一个看起来像接口的空头承诺**：
+   * 下一个人看见 `ServeOptions` 里有这一栏，会以为传个函数就能截获输出，
+   * 传了之后**安静地什么都没发生**（`ServeOptions` 是 `.strict()` 之外的普通
+   * interface，多余属性编译不报，运行时也没人读）。docs/08 §3 缺陷类 (a)。
+   *
+   * 判据与载体：`tooling/dead-iface-fields.mjs`（它当时报出的唯一一个零提及字段就是这个），
+   * 断言"CLI 输出真的到了响应里"的测试在 `test/cancel-http.test.ts`（读 `.output`）。
+   * ⚠ 真要"改 io.out"的话，改 `runCommand` 那个 `collect`，别加回这一栏。
+   */
 }
 
 export interface RunningServer {

@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "coverageDelta 那一格的变异集。判据本体与失效详情写在",
+    "packages/engine/src/lint.ts 里那个函数头上（键为什么不能靠分隔符拼），",
+    "永久落点是 packages/engine/test/coverage-delta.test.ts。",
+    "",
+    "**这一格只有一处真缺陷，而它是量出来的不是想到的**：把键从",
+    "`${operationId}|${strategy}` 换成成对编码这件事，是我准备给一个'今天零调用方'",
+    "的函数补测试时才撞出来的 —— 补测试的动作本身（'两个不同组合会不会算成一个'）",
+    "把缺陷问出来的。所以这份集子存在的意义不只是钉住那处改动，也是记一句：",
+    "**给'还没人用'的代码写测试，收益之一是可以拿它当问题生成器**，",
+    "那种代码没人依赖，反而没人核对过它的判据。",
+    "",
+    "⚠ **下面第二条是 expect=equivalent，而它等价的是**编码方式**不是判据**：",
+    "换成 `\\u0000` 之类的分隔符同样能挡住本轮那个碰撞（`operationId` 里不会出现 NUL），",
+    "所以它不红是对的。写出来是为了让'这一格哪些写法已经够安全'有明确记录，",
+    "免得下一个人以为只有 JSON.stringify 那一种改法被认。",
+    "",
+    "⚠ **反过来那条才是有牙的**：把键改回分隔符拼接必须红，而红的是",
+    "「operationId 带 `|` 时…」那一条 —— 其余几条（基本计数、批内重复、真重复）",
+    "**在改回去之后照样是绿的**。也就是说这一族如果只写了那几条常规用例，",
+    "这个缺陷会安静地活下来。跟本仓反复的那句话是同一件：",
+    "**常规用例测的是'实现自己以为的判据'，边界用例测的才是判据**。"
+  ],
+  "cases": [
+    {
+      "label": "键退回分隔符拼接（两个不同组合拼成同一个 => 真新增被算成重复）",
+      "_why": "改前就是这个形状。`operationId` 里可以有 `|` 不是假设：它从 swagger 原样透传，载体是 packages/adapter-http/test/parse.test.ts 里那条字符集测试。只有「operationId 带 | 时」那一条抓得住它，其余各条在这个变异下全绿。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  const keyOf = (k: CoverageKey): string => JSON.stringify([k.operationId, k.strategy]);",
+      "replace": "  const keyOf = (k: CoverageKey): string => `${k.operationId}|${k.strategy}`; // 变异：键退回拼接",
+      "testFile": "packages/engine/test/coverage-delta.test.ts"
+    },
+    {
+      "label": "等价变异：分隔符换成 NUL（同样撞不上，只是编码方式不同）",
+      "_why": "期望不被抓到。`\\u0000` 不会出现在 operationId / strategy 里，所以这个写法同样修掉了本轮那个碰撞 —— 它不红说明这一格认的是'键能不能区分开'，不是认某一种写法。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "  const keyOf = (k: CoverageKey): string => JSON.stringify([k.operationId, k.strategy]);",
+      "replace": "  const keyOf = (k: CoverageKey): string => `${k.operationId}\\u0000${k.strategy}`; // 等价变异：换分隔符",
+      "testFile": "packages/engine/test/coverage-delta.test.ts",
+      "expect": "equivalent"
+    },
+    {
+      "label": "批内重复不再算重复（每个生成都只跟 existing 比）",
+      "_why": "抓的实际红是「基本计数：三生成一新增；duplicates 里**两类混在一起**（这是刻意的，见注释）」—— ⚠ 我原先在这格写的是「generated 批内自己重复也算重复」那一条的名字，**而驱动跑出来红的不是它**（那条只比数量、不比 duplicates 内容，所以这个变异下它照样绿）。这是本仓登记过的同一族错：注释里点名一个不会为这个变异红的测试，照着找会以为守卫在别处。\n这一格失效的方向是**多报新增**：一批里两份同组合被算成 2 个新增，覆盖增量预览就永远显示'有新增'，那一栏的信号恒亮 —— docs/00 §6.1 说它是抑制过度生成的唯一手段，而恒亮的信号等于没有。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (have.has(key) || fresh.has(key)) duplicates.push(k);",
+      "replace": "    if (have.has(key)) duplicates.push(k); // 变异：只看既有，批内重复当新增",
+      "testFile": "packages/engine/test/coverage-delta.test.ts"
+    },
+    {
+      "label": "duplicates 只留一条（人看不到到底哪几条白生成）",
+      "_why": "抓的实际红同样是「基本计数：三生成一新增；duplicates 里**两类混在一起**」那一条（它 deepEqual 整个 duplicates 数组，所以'只留第一条'会红）。newCombinations 在这个变异下**照样对** —— 属于'数字对了而产物废了'那一类：调用方拿到一个数却不知道**该删哪几条**，那个界面没法落地。",
+      "file": "packages/engine/src/lint.ts",
+      "anchor": "    if (have.has(key) || fresh.has(key)) duplicates.push(k);",
+      "replace": "    if (have.has(key) || fresh.has(key)) if (!duplicates.length) duplicates.push(k); // 变异：只留第一条",
+      "testFile": "packages/engine/test/coverage-delta.test.ts"
+    }
+  ]
+}

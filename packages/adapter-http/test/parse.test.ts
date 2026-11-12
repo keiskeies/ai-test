@@ -46,6 +46,23 @@ describe('整体可用性：脏 spec 必须**基本能用**', () => {
     assert.equal(op('listUsers').aliasGenerated, false);
   });
 
+  test('operationId 是**原样透传的自由字符串**，不做字符集限制', () => {
+    /*
+     * 这条不是"顺手测一下怪名字"。`engine/lint.ts` 的 `coverageDelta` 从前用
+     * `${operationId}|${strategy}` 拼键去重，而它成立的前提就是"operationId 里没有 `|`"。
+     * 那个前提**在这里被否掉**：spec 作者写什么我们收什么，解析器不清洗。
+     * 于是 `(a|b, boundary)` 与 `(a, b|boundary)` 会拼成同一个键，
+     * 一条真新增的用例被算成重复 —— 而那一栏的用途正是"增量为 0 就劝人别生成"。
+     * 所以那边现在成对编码；这条钉住**为什么不能反过来靠"operationId 里没有分隔符"**。
+     */
+    const weird = parseOpenApi({
+      openapi: '3.0.0', info: { title: 't', version: '1' },
+      paths: { '/x': { get: { operationId: 'we|ird|id', responses: { '200': { description: 'ok' } } } } },
+    });
+    assert.deepEqual(weird.operations.map((o) => o.operationId), ['we|ird|id'], '解析器清洗了 operationId —— 那 lint 那边的键编码可以放宽，这条要跟着改');
+    assert.deepEqual(weird.issues.filter((i) => i.level === 'error'), [], '带 | 的 operationId 被报成 error，与"原样透传"矛盾');
+  });
+
   test('servers[0].url 只作为**建议值**返回，不参与任何解析结果', () => {
     // docs/05 §1：spec 的 servers 几乎总是错的；URL 必须来自环境配置
     assert.equal(parsed.suggestedBaseUrl, 'https://spec-says-this-is-wrong.example.com/v1');

@@ -123,10 +123,21 @@ export interface Session {
   close(): Promise<void>;
 }
 
+/**
+ * `Accessibility.getFullAXTree` 响应里**本仓真正读的那几个字段**。
+ *
+ * ⚠ 运行时拿到的是 CDP 那个**完整**节点（上面是 `send<{nodes: AxNode[]}>` 一个 cast，
+ * 没有投影），所以这个 interface 的作用是**声明"我们依赖哪几个字段"**，
+ * 而不是描述对象上有什么。因此多写一个没人读的字段不是"信息更全"，是
+ * **一句假的依赖声明** —— 下一个人会以为 AX→DOM 的映射已经接上了。
+ * 原先这里写着 `backendDOMNodeId?: number`（CDP 确实返回它），而全仓零读者：
+ * `tooling/dead-iface-fields.mjs` 报出来的第二个真死字段，本轮删掉。
+ * 真要做"AX 节点 → DOM 节点"那一步时，连同它的消费者一起加回来。
+ */
 export interface AxNode {
   nodeId?: string; parentId?: string; ignored?: boolean;
   role?: { value?: string }; name?: { value?: string };
-  childIds?: string[]; backendDOMNodeId?: number;
+  childIds?: string[];
 }
 
 /**

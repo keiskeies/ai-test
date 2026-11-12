@@ -213,8 +213,22 @@ export interface LintContext {
   /** 步骤 id → 该步骤目标界面的快照种类（更细粒度） */
   stepSnapshotKind?: Record<string, string>;
   maxCostUsd?: number;
-  /** 本场景已覆盖的组合（覆盖增量预览用，由调用方算好传入） */
-  coverageDelta?: { newCombinations: number; generated: number };
+  /*
+   * **这里从前有一个 `coverageDelta?: { newCombinations, generated }`**，
+   * 注释写着"由调用方算好传入"。本轮删掉 —— 它**没有读者**：
+   * `LintContext` 其余四栏（`snapshotKinds` / `scenarioGraph` / `stepSnapshotKind` /
+   * `maxCostUsd`）在 `lintScenario` 里各有一处以上读它，唯独这一栏一次都没有；
+   * 而 `LintCode` 那二十几个码里也**没有覆盖相关的码**。
+   * 于是它不是"等着被实现的接口"，是**一条没人接的输入**：
+   * 调用方辛辛苦苦算出"这批新增 0 个组合"传进来，静态闸**一个字都不说**。
+   * 那种形状比"压根没这个字段"更坏 —— 传的人会以为报告里有这一格。
+   *
+   * ⚠ **同名的那个函数 {@link coverageDelta} 留着**，而且本轮给它补了测试。
+   * 区别是判据型的：字段是"有人给、没人读"，函数是"没人调、但算得对且可验"，
+   * 而它是 docs/00 §6.1 那条"覆盖增量预览"里**唯一现在就能实现的一半**
+   * （另一半"已有组合从哪来"要一份组合清单的存储查询，那个还没有）。
+   * 它的"今天零生产调用方"写在函数头上，不写在注释里冒充已接。
+   */
 }
 
 /**
@@ -1695,12 +1709,42 @@ export function toReport(issues: LintIssue[]): LintReport {
 /** 覆盖增量预览（docs/00 §6.1：抑制过度生成的唯一有效手段） */
 export interface CoverageKey { operationId: string; strategy: string }
 
+/**
+ * 数"这批生成的用例新增了哪些 `operationId × strategy` 组合"。
+ *
+ * ⚠ **键不能用 `|` 拼**（本轮改的，改前是 `${operationId}|${strategy}`）。
+ * 拼出来的串不是注入面（它只进 `Set`、不进 SQL / shell / HTML），
+ * 但它**会让两个不同的组合算成同一个**：
+ * `(operationId:'a|b', strategy:'boundary')` 与 `(operationId:'a', strategy:'b|boundary')`
+ * 在改前拼出同一个键，于是**一条真新增的用例被算成重复**。
+ * 这在这一格里不是理论问题：`operationId` 是从 swagger 文档里**读来的自由字符串**
+ * （实测：把 operationId 写成 `we|ird|id` 喂 `parseOpenApi`，解析器原样收下、零 error issue，
+ * 载体是 `adapter-http/test/parse.test.ts` 里那条
+ * 「operationId 是**原样透传的自由字符串**，不做字符集限制」），
+ * 而这一栏的**用途**就是"增量为 0 就劝人别生成这条" ——
+ * 少报一次新增，等于把一条有用的用例劝掉，而这正是它设计上唯一会造成的伤害。
+ * 现在用 `JSON.stringify` 成对编码：不依赖"内容里没有分隔符"这个假设。
+ *
+ * ⚠ **今天它零生产调用方**（全仓除了测试没人调）。这一句写在这里而不是留一句
+ * "等 agent 生成那一侧来接"：那一侧要的是"已有组合从哪来"，那是一份组合清单的
+ * 存储查询，还没有。函数本身可验，所以先钉住；**调用方落地时这一句要跟着改**。
+ *
+ * ⚠ **返回的 `duplicates` 混了两类**（本轮量出来的，不是推测）："已被 `existing` 覆盖"
+ * 与"这一批里自己重复"。两者的处置不同（前者"别生成了，早有了"，后者"这批留一条就够"），
+ * 而当前形状**分不出来**。刻意**没有**现在拆成两栏：它零调用方，
+ * 等那个界面真存在时再按界面要的样子拆 —— 凭猜加一栏就是又造一次
+ * "未实现的对外契约"（`LintContext.coverageDelta` 那一栏本轮刚因此删掉）。
+ * 载体：`engine/test/coverage-delta.test.ts`，其中一条把"两类各一条"钉住，
+ * 拆分那天它会红。
+ */
 export function coverageDelta(generated: CoverageKey[], existing: CoverageKey[]): { newCombinations: number; duplicates: CoverageKey[]; total: number } {
-  const have = new Set(existing.map((k) => `${k.operationId}|${k.strategy}`));
+  /** 成对编码而不是拼接 —— 理由见函数头（拼接对内容里的分隔符敏感） */
+  const keyOf = (k: CoverageKey): string => JSON.stringify([k.operationId, k.strategy]);
+  const have = new Set(existing.map(keyOf));
   const fresh = new Set<string>();
   const duplicates: CoverageKey[] = [];
   for (const k of generated) {
-    const key = `${k.operationId}|${k.strategy}`;
+    const key = keyOf(k);
     if (have.has(key) || fresh.has(key)) duplicates.push(k);
     else fresh.add(key);
   }

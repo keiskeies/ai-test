@@ -162,7 +162,7 @@ export function makeLineOf(text) {
 }
 
 /** 从 `{` 的下标开始做深度配对，返回收尾 `}` 的下标；不配对则返回 -1。掩码文本上跑。 */
-function matchBrace(masked, open) {
+export function matchBrace(masked, open) {
   let depth = 0;
   for (let i = open; i < masked.length; i++) {
     const c = masked[i];
