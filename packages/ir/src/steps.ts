@@ -241,6 +241,21 @@ const HttpStepSchema = z
     maxResponseBytes: z.int().min(1024).max(50_000_000).default(10_000_000),
   })
   .strict();
+/**
+ * `openapiCall.strategy` 的合法值集合。单独成一个 schema 是为了下面
+ * `CALL_STRATEGIES` 能从**同一个来源**读出名单（`.options`）。
+ */
+const OpenApiCallStrategySchema = z.enum(['happyPath', 'requiredMissing', 'boundary', 'typeViolation', 'enumExhaustive', 'authMatrix', 'notFound', 'idempotency', 'contract', 'perfSmoke', 'statefulSequence', 'negativeFuzz']);
+
+/**
+ * `openapiCall.strategy` 的合法值。**从 schema 上取而不是另写一份名单**：
+ * 抄一份出来就会有人只改一处，而"名单只在一处"这件事是
+ * `engine/src/lint.ts` 的 `coverageDelta` 那条键编码判据的前提
+ * （拼接键只在 strategy 含 `|` 时才可能撞两个组合，
+ * 载体是 `ir/test/strategy-enum.test.ts`）。
+ */
+export const CALL_STRATEGIES: readonly string[] = OpenApiCallStrategySchema.options;
+
 const OpenApiCallStepSchema = z
   .object({
     kind: z.literal('openapiCall'),
@@ -253,10 +268,8 @@ const OpenApiCallStepSchema = z
     queryParams: z.record(z.string(), ValueSchema).default({}),
     headers: z.record(z.string(), ValueSchema).default({}),
     body: ValueSchema.optional(),
-    /** 生成用例的策略标签，报告按它分桶（docs/05 §3） */
-    strategy: z
-      .enum(['happyPath', 'requiredMissing', 'boundary', 'typeViolation', 'enumExhaustive', 'authMatrix', 'notFound', 'idempotency', 'contract', 'perfSmoke', 'statefulSequence', 'negativeFuzz'])
-      .optional(),
+    /** 生成用例的策略标签，报告按它分桶（docs/05 §3）。合法值见 CALL_STRATEGIES */
+    strategy: OpenApiCallStrategySchema.optional(),
     validateRequest: z.boolean().default(true),
     saveAs: VarNameSchema.optional(),
     identity: z.string().optional(),

@@ -51,9 +51,12 @@ describe('整体可用性：脏 spec 必须**基本能用**', () => {
      * 这条不是"顺手测一下怪名字"。`engine/lint.ts` 的 `coverageDelta` 从前用
      * `${operationId}|${strategy}` 拼键去重，而它成立的前提就是"operationId 里没有 `|`"。
      * 那个前提**在这里被否掉**：spec 作者写什么我们收什么，解析器不清洗。
-     * 于是 `(a|b, boundary)` 与 `(a, b|boundary)` 会拼成同一个键，
-     * 一条真新增的用例被算成重复 —— 而那一栏的用途正是"增量为 0 就劝人别生成"。
      * 所以那边现在成对编码；这条钉住**为什么不能反过来靠"operationId 里没有分隔符"**。
+     *
+     * ⚠ 但别把这条读成"那个键缺陷今天可达"。撞键还要 **strategy 那一侧也含 `|`**，
+     * 而 strategy 是 IR 的闭合 enum、合法值一个都不含 `|`
+     * （载体：`ir/test/strategy-enum.test.ts`）。这边只是**必要条件**。
+     * 上一轮我把这条当成充分条件登记过，准确的措辞写在被测函数头上。
      */
     const weird = parseOpenApi({
       openapi: '3.0.0', info: { title: 't', version: '1' },
@@ -61,6 +64,19 @@ describe('整体可用性：脏 spec 必须**基本能用**', () => {
     });
     assert.deepEqual(weird.operations.map((o) => o.operationId), ['we|ird|id'], '解析器清洗了 operationId —— 那 lint 那边的键编码可以放宽，这条要跟着改');
     assert.deepEqual(weird.issues.filter((i) => i.level === 'error'), [], '带 | 的 operationId 被报成 error，与"原样透传"矛盾');
+
+    // NUL 同样原样收下。它**单独撑起这条测试的存在理由**：
+    // 有人想把键分隔符从 `|` 换成 `\u0000`（"那个字符总不会有吧"），
+    // 而这里证明会有 —— NUL 在 JSON 字符串里本来就合法，解析器不拦。
+    // 所以"换个更少见的分隔符"不是一种修法，判据写在
+    // `engine/test/coverage-delta.test.ts` 那条"换一个分隔符（NUL）不算修好"。
+    const nul = String.fromCharCode(0);
+    const withNul = parseOpenApi({
+      openapi: '3.0.0', info: { title: 't', version: '1' },
+      paths: { '/y': { get: { operationId: `a${nul}b`, responses: { '200': { description: 'ok' } } } } },
+    });
+    assert.deepEqual(withNul.operations.map((o) => o.operationId), [`a${nul}b`], '解析器把 NUL 洗掉了 —— 那"分隔符不许依赖字符不出现"那条判据的依据就变了');
+    assert.deepEqual(withNul.issues.filter((i) => i.level === 'error'), [], '带 NUL 的 operationId 被报成 error，与"原样透传"矛盾');
   });
 
   test('servers[0].url 只作为**建议值**返回，不参与任何解析结果', () => {

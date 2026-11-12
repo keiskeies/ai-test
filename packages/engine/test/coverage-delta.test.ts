@@ -1,24 +1,35 @@
 /**
  * `coverageDelta` —— "这批生成的用例新增了哪些 `operationId × strategy` 组合"。
  *
- * ## 为什么给一个零生产调用方的函数写测试
+ * ## 这份测试写过两次，两次的前提不同
  *
- * 它今天**没人调**（函数头上那句说的就是这件事），所以这些是"实现落地前先把判据钉住"，
- * 不是回归守卫 —— 两种测试的价值不同，说清比让下一个人以为这里已经接通了强。
+ * 第一版写的时候它**零生产调用方**，那些用例是"实现落地前先把判据钉住"。
+ * 现在它有一个调用方：`packages/cli/src/coverage.ts` 的 `coveragePreview`
+ * （`atest gen` 的覆盖增量那一栏）。所以这些用例从"钉判据"升成了真回归守卫，
+ * 而**落地这一轮撞出来的两处都不是算术错**：
+ *  1. 单位错位（把调用当组合）→ 见 `cli/test/coverage-preview.test.ts`；
+ *  2. 上面那句"改前那个键缺陷今天可达"是**错的** → 见下面那条撞键用例的注释。
+ * 两件事都不是这个文件能抓到的 —— 它们错在**调用方怎么用这个函数**，
+ * 而不是函数算错了。这正好是"零调用方的代码，判据没人核对过"的具体样子：
+ * 函数自己绿了三轮，而它的判据被我误读了一次。
  *
  * 值得花这一格的理由在失效方向上：docs/00 §6.1 把覆盖增量预览列成抑制过度生成的
  * **唯一有效手段**，而它的产物只有一个数 `newCombinations`；docs/02 §5 给的用法是
  * "增量为 0 就提示合并/别生成"。**少报一次的代价不是数字不准，是一条本来有用的用例
  * 被劝掉**。所以下面每一条都对着"少报"或"多报"之一，而不是追求函数行覆盖。
  *
- * ## 本轮真修的一处
+ * ## 改过的那处键编码（以及它到底防的是谁）
  *
  * 键从前是 `${operationId}|${strategy}` 拼出来的。拼串不是注入面（它只进 `Set`），
- * 但它让**两个不同组合算成同一个**：`(a|b, boundary)` 与 `(a, b|boundary)`
+ * 但它让**两个不同组合算成同一个**：`(a, "b|boundary")` 与 `(a|b, "boundary")`
  * 改前拼出同一个键，于是一条真新增被算成重复。
- * 而 `operationId` 里可以有 `|` **不是假设** —— 它从 swagger 文档原样透传，
- * 载体是 `adapter-http/test/parse.test.ts` 里那条
- * 「operationId 是**原样透传的自由字符串**，不做字符集限制」。
+ *
+ * ⚠ 但**这一撞今天经生产路径抵达不了**：撞键要 strategy 含 `|`，而 IR 把 strategy
+ * 锁成闭合 enum（13 个合法值没有一个含 `|`）。第一版这里写的是
+ * "operationId 可以带 `|` 不是假设（载体：adapter-http 那条字符集测试）"，
+ * 于是读起来像个线上缺陷 —— 那半句是真的，可它是**必要条件不是充分条件**，
+ * 我当时没检查 strategy 那一侧能不能含 `|` 就登记了。
+ * 准确的措辞与被推翻的过程写在被测函数头上（`engine/src/lint.ts`）。
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -58,9 +69,42 @@ describe('coverageDelta：新增组合数是它唯一的产品', () => {
     assert.equal(r.duplicates.length, 1);
   });
 
-  test('⚠ operationId 带 `|` 时，两个不同组合不许算成同一个（改前会被报成 0 新增）', () => {
+  test('分隔符撞键：(a, "b|boundary") 与 (a|b, "boundary") 不许算成同一个（改前会报 0 新增）', () => {
+    /*
+     * ⚠ **这一条构造的是函数契约上的输入，不是今天生产路径上出现的输入。**
+     * 撞键要 strategy 里含 `|`，而 IR 把 strategy 锁成闭合 enum、
+     * 13 个合法值没有一个含 `|`（载体：`ir/test/strategy-enum.test.ts`）。
+     * 所以这条**不是**"线上缺陷的回归守卫"，是"参数是裸 string，谁都能这样调"的守卫。
+     * 上一轮我把 operationId 可以带 `|`（真，载体在 adapter-http）当成
+     * "这一撞今天可达"的证据登记过 —— 那是把必要条件当充分条件，
+     * 准确的现状写在被测函数头上。
+     */
     const r = coverageDelta([k('a|b', 'boundary')], [k('a', 'b|boundary')]);
     assert.equal(r.newCombinations, 1, '两个不同组合被拼成同一个键了（键编码退回分隔符拼接）');
+    assert.deepEqual(r.duplicates, [], '同上：这一栏不该把它当重复');
+  });
+
+  test('换一个分隔符（NUL）不算修好：编码不能依赖"某个字符不出现"', () => {
+    /*
+     * 这条存在的理由是**它推翻了我自己上一轮登记的一条 expect=equivalent**。
+     * 上一轮我给"换成 `\\u0000` 分隔符"那个变异写的是"等价、不红是对的"，
+     * 理由写的是"`\\u0000` 不会出现在 operationId / strategy 里" ——
+     * **那句没验，而且是假的**：实测把 operationId 写成 `a\\u0000b` 喂 parseOpenApi，
+     * 解析器**原样收下、零 issue**（NUL 在 JSON 字符串里本来就合法）。
+     * 所以换分隔符只是换了一个**更少见**的字符，缺陷一类没变。
+     *
+     * 判据因此不是"这个分隔符今天撞不上"，而是**编码方式不许依赖任何单个字符的不出现**。
+     * 这一点上 `|`、`\\u0000` 与 JSON.stringify **不是同一种东西**：前两者依赖假设，
+     * 后者不依赖。上面那条 `|` 的用例与这一条一起把这件事钉住 ——
+     * 少任何一条，另一种"看起来修好了"的改法就活得下来。
+     *
+     * ⚠ 与上面那条同样是**函数契约层面**的构造：strategy 含 NUL 经 IR 造不出来
+     * （闭合 enum）。区别在于 operationId 含 NUL **今天真的能经 swagger 抵达**，
+     * 所以这一条离生产路径比 `|` 那条近一格 —— 只差 strategy 那一侧。
+     */
+    const NUL = String.fromCharCode(0);
+    const r = coverageDelta([k(`a${NUL}b`, 'boundary')], [k('a', `b${NUL}boundary`)]);
+    assert.equal(r.newCombinations, 1, '两个不同组合被拼成同一个键了（换成 NUL 分隔符同样会这样）');
     assert.deepEqual(r.duplicates, [], '同上：这一栏不该把它当重复');
   });
 

@@ -17,6 +17,7 @@ import { callSites, defineScenario, scenarioIdOfRef, type Scenario, type Scenari
 import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidenceMembers, writeEvidencePackage } from '@atest/store';
 
 import { formatErrors, type ParsedArgs } from './args.js';
+import { coveragePreview, existingCombinations } from './coverage.js';
 import { CI_HINT, EXIT } from './exit.js';
 import { buildEnvFingerprint } from './fingerprint.js';
 import { gateAfterRun, gateBeforeRun, isTriage } from './gate.js';
@@ -877,6 +878,26 @@ export async function cmdGen(a: ParsedArgs, io: Io): Promise<CommandResult> {
 
   io.out('');
   io.out(`将写入 ${all.length} 个文件到 ${outDir}（当前是预览，加 --write 才落盘）：`);
+  for (const s of all) io.out(`  ${join(outDir, s.file)}`);
+
+  // **覆盖增量预览**（docs/00 §6.1：抑制过度生成的唯一有效手段）。
+  // 放在写盘清单**之后**、写盘**之前**：这时"这批要写什么"已经算完，而磁盘上还是
+  // 上一轮的样子 —— 先写再算的话第二次永远报 0 新增，那一栏就成了自证的噪声。
+  // 判据是**只提示、不裁剪**（原因写在 coverage.ts 的 formatCoverageLine 头上：
+  // 一次读盘读漏就会变成静默少生成，而那正是这一栏要防的失效模式）。
+  //
+  // ⚠ 新增那一侧**也走 bodyCombinations**，不直接用 `GeneratedScenario` 上那两个字段。
+  // 两边共用同一个判据是有意的：否则"生成侧数 openapiCall、已有侧数别的什么"
+  // 这种分叉会让增量大到一个永远不触发提示的数字，而两边各自看起来都对
+  // （docs/08 §3「每个消费者都各自正确，而它们对同一件事的假设互不相容」）。
+  // 于是手写一条 `http` 步骤、或者没填 strategy，两边都不算 —— 方向是多报新增，
+  // 细节在 coverage.ts 的 bodyCombinations 头上。
+  const cov = await existingCombinations(outDir);
+  const covLines = coveragePreview(drafts, cov, outDir);
+  if (covLines) for (const l of covLines) io.err(l);
+
+
+
   for (const s of all) io.out(`  ${join(outDir, s.file)}`);
 
   if (!flag(a, 'write')) {
