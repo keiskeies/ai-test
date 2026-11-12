@@ -17,7 +17,7 @@ import { VarError, VarSpace } from './vars.js';
 import { causeOfError, EnvMissing, AmbiguousWaitWorld } from './errors.js';
 import { TransportError, type AdapterRegistry, type Clock, type ExecContext, type ExecTarget, type ResolveResult } from './adapters.js';
 import { evaluateAssertions } from './assertions.js';
-import { resolveValue as resolveValueShared, strMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, truncatedByCap, hitCeiling, type ValueScope } from './resolve.js';
+import { resolveValue as resolveValueShared, strMap, valueMap, iterItems, flattenTimes, looseEq, locatorGate, chargeResolve, LocatorBudgetError, truncatedByCap, hitCeiling, joinBaseUrl, type ValueScope } from './resolve.js';
 import { waitUntil, WaitAdapterGap } from './wait.js';
 import { ResponseLedger, ResponseWindow } from './responses.js';
 import { CONTEXT_LIMITS, redactForDisk } from './redact.js';
@@ -1635,8 +1635,29 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
       case 'http': {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
         const headers = strMap(s.request.headers, (v) => resolveValue(v, vars));
-        const query_ = strMap(s.request.query, (v) => resolveValue(v, vars));
-        const url = buildUrl(resolveUrl(s.request.url, ctxBase.env), query_);
+        /*
+         * query 与 openapiCall 走**同一个** composeUrl，理由不是"顺手统一"：
+         * 改前这里是 `buildUrl(resolveUrl(url), strMap(query))`，于是这一条路上
+         * 数组值会被 strMap 压成一个 JSON 文本（`?tag=%5B%22a%22%5D`），
+         * 而 `query: record(string, Value)` 同样允许数组。两条请求路两种值形态，
+         * 就是"每个消费者各自正确、而它们对同一件事的假设互不相容"那一格。
+         *
+         * 这一栏**没有 op**（纯 http 步骤不去 spec 里定位 operation），
+         * 所以序列化走的是**规范默认值**（query=form + explode=true → 重复键）。
+         * 那不是"没按 spec 走"：默认值本身是 OAS 规定的，而且它给出的是
+         * `?tag=a&tag=b` 这种任何后端都认的形式，而不是一个 JSON 文本。
+         * ⚠ 手写在 url 里的那段 query（`/a?x=1`）由 composeUrl 保留并接上 `&`。
+         */
+        const composedHttp = await adapters.http.composeUrl({
+          urlTemplate: s.request.url,
+          queryParams: valueMap(s.request.query, (v) => resolveValue(v, vars)),
+        });
+        if (composedHttp.missing.length) {
+          return {
+            status: 'error', cause: 'case-stale',
+            summary: `http 步骤的地址里有未填的占位符：${composedHttp.missing.map((m) => `{${m}}`).join('、')}（http 步骤没有 pathParams 可填，改用 openapiCall 或把值写进 url）`,
+          };
+        }
         /*
          * **`formData` 必须真的进请求。** 改动前这一栏引擎一个字段都不读：
          * IR 写着 `formData: {user:'a'}`，`send()` 的入参里压根没有它，
@@ -1688,7 +1709,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           };
         }
         const res = await adapters.http.send({
-          method: s.request.method, url, headers, body: s.request.body === undefined ? undefined : resolveValue(s.request.body, vars),
+          method: s.request.method, url: resolveUrl(composedHttp.path, ctxBase.env), headers, body: s.request.body === undefined ? undefined : resolveValue(s.request.body, vars),
           ...(Object.keys(formData).length > 0 ? { form: formData } : {}),
           timeoutMs: s.timeoutMs ?? 30_000, maxBytes: s.maxResponseBytes, followRedirects: s.followRedirects,
           // 只交**引用与身份**，不交值。原先这里是
@@ -1735,22 +1756,58 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
         if (!adapters.http) return { status: 'error', summary: 'http adapter 未注册', cause: 'env-unavailable' };
         const op = await adapters.http.resolveOperation({ docRef: s.docRef, operationId: s.operationId, method: s.method, path: s.path });
         if (op.deprecated) emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'DEPRECATED_OPERATION', detail: s.operationId ?? `${op.method} ${op.urlTemplate}` } });
-        const params = strMap(s.pathParams, (v) => resolveValue(v, vars));
-        let url = op.urlTemplate;
-        for (const [k, v] of Object.entries(params)) {
-          // 只替换真实出现的占位符；没出现说明 pathParams 写错了名字 ——
-          // 静默忽略会得到"参数没生效但请求照样 200"的用例，所以要响
-          const tpl = `{${k}}`;
-          if (!url.includes(tpl)) {
-            return { status: 'error', summary: `pathParams 里的 "${k}" 不在 ${op.urlTemplate} 的占位符里（拼错了？接口变了？）`, cause: 'case-stale' };
-          }
-          url = url.replace(tpl, encodeURIComponent(String(v)));
-        }
-        // 剩余未填占位符必须报错：把 `{id}` 原样发出去得到的是 404，查不到原因
-        const leftover = url.match(/\{([^}/]+)\}/g);
-        if (leftover) return { status: 'error', summary: `URL 里还有未填的参数：${leftover.join('、')}`, cause: 'case-stale' };
-        const qs = strMap(s.queryParams, (v) => resolveValue(v, vars));
+        /*
+         * 参数表**原样交下去**（不先转成字符串），URL 由 adapter 按 spec 组成。
+         *
+         * 改动前这里是本文件最长的一段手搓序列化：`urlTemplate.replace('{k}',
+         * encodeURIComponent(String(v)))` 再补一个 `URLSearchParams` 版的 buildUrl，
+         * 而它同时犯了两件 docs/08 §3 记过的事：
+         *  ① **把 spec 的序列化规则在引擎里重写一遍**（`style`/`explode` 压根读不到，
+         *     `pipeDelimited` 的数组与默认的重复键形式发出来是同一种东西 —— 而"两种
+         *     不同实现算出同一个值"正是那种让测试失活的形状）；
+         *  ② **把 SQL 的值形态当成 URL 的值形态**（`strMap` 的 JSON.stringify 是给
+         *     SQL 的 JSON 列 / `IN` 那类比较用的），于是 IR 里合法的
+         *     `queryParams: {q: ['a','b']}` 实测发出 `?q=%5B%22a%22%2C%22b%22%5D`，
+         *     后端按 `|` 切只切出一个带引号方括号的垃圾值，而它照回 200、用例照绿。
+         *     载体是 `adapter-http/test/engine-e2e.test.ts`（那两条**改前是红的**）。
+         *
+         * `headers` 仍然走 strMap：HTTP 头的值在协议上**只能是字符串**，
+         * 那里没有"数组展开成多个头"这回事（那是 set-cookie 的活，另有通路），
+         * 所以把非字符串收成文本是对的 —— 只有 query/path 这两栏的值形态归 adapter 判。
+         */
+        const params = valueMap(s.pathParams, (v) => resolveValue(v, vars));
+        const qs = valueMap(s.queryParams, (v) => resolveValue(v, vars));
         const headers = strMap(s.headers, (v) => resolveValue(v, vars));
+        const composed = await adapters.http.composeUrl({
+          urlTemplate: op.urlTemplate,
+          opRef: { docRef: s.docRef, operationId: op.operationId ?? s.operationId, method: op.method ?? s.method, path: op.urlTemplate },
+          pathParams: params,
+          queryParams: qs,
+        });
+        /*
+         * 参数没填上 / 填错了名字：**报错，不发一个少了参数的请求**。
+         * 少发的请求通常也是 200（后端把缺参数当默认值），那是最贵的一种绿。
+         *
+         * ⚠ **两种错要一次说全，不能谁先命中就只报谁。** 它们通常是**同一个笔误的两面**：
+         * `pathParams: {userID:'1'}` 对上模板 `/orders/{id}`，既是"`id` 没填上"
+         * 也是"给了个不存在的 userID"。只报一半的话，两种改法都能让这一步不再报错，
+         * 而请求照样是坏的 —— 看到 missing 的人补一个 `id`（留下没人用的键），
+         * 看到 unknown 的人删掉 `userID`（留下没填的占位符）。
+         * 改前那份是"边替换边 return"，所以 unknown 先命中、missing 那条检查压根走不到；
+         * 统一走 composeUrl 后两个数组同时算出来了，**报不报得全就变成这一栏的判断**，
+         * 于是它得显式写出来（载体：`engine-e2e.test.ts` 那条"写了不存在的名字"，
+         * 它同时断两半句，只报一半就红）。
+         */
+        if (composed.missing.length || composed.unknown.length) {
+          const both = composed.missing.length > 0 && composed.unknown.length > 0;
+          const parts: string[] = [];
+          if (composed.missing.length) parts.push(`URL 里还有未填的参数：${composed.missing.map((m) => `{${m}}`).join('、')}（pathParams 里没给这些，或给的是 null）`);
+          if (composed.unknown.length) parts.push(`pathParams 里的 ${composed.unknown.map((k) => `"${k}"`).join('、')} 不在 ${op.urlTemplate} 的占位符里（拼错了？接口变了？）`);
+          return {
+            status: 'error', cause: 'case-stale',
+            summary: parts.join('；') + (both ? '；两边同时出现，多半是同一个名字写错了两边 —— 改名，而不是补一个键或删一个键' : ''),
+          };
+        }
         // identity 交给 adapter 解析，**引擎不再自己查密钥**。
         // 原先这里写 `ctxBase.secret('identity:' + s.identity)`，而 CLI 的
         // secretResolver 只认 `secret:<ref>` 形态：'identity:admin' 归一出来是空串，
@@ -1799,7 +1856,12 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
           emit({ kind: 'lint.reported', stepId: s.id, data: { code: 'VALIDATE_REQUEST_UNAVAILABLE', detail: 'http adapter 未实现 validateRequest，本步未做请求校验' } });
         }
         const res = await adapters.http.send({
-          method: op.method, url: buildUrl(resolveUrl(url, ctxBase.env), qs), headers,
+          // `composed.path` 已经带上按 spec 序列化好的 query（composeUrl 的产物），
+          // 这里只剩"补 baseUrl"这一步 —— baseUrl 是环境的事，序列化是 spec 的事，
+          // 两件事分开，谁也不替谁决定。改前这里是 buildUrl(resolveUrl(url, env), qs)，
+          // 也就是**在补域名之后**再拼 query：那决定了 `?` 与 `&` 的取舍由引擎判，
+          // 而"这个参数该展开成重复键还是分隔符"恰恰是引擎不知道的事。
+          method: op.method, url: resolveUrl(composed.path, ctxBase.env), headers,
           body: bodyForSend,
           timeoutMs: s.timeoutMs ?? 30_000, maxBytes: 10_000_000, followRedirects: false,
           // 就是上面那个 authIntent。它原先算完就被丢在这里不用了 ——
@@ -2535,12 +2597,6 @@ export function fmtMs(ms: number): string {
   return `${v.toFixed(1)}ms`;
 }
 
-function buildUrl(base: string, qs: Record<string, string>): string {
-  const entries = Object.entries(qs);
-  if (!entries.length) return base;
-  const usp = new URLSearchParams(entries.map(([k, v]) => [k, v]));
-  return `${base}${base.includes('?') ? '&' : '?'}${usp.toString()}`;
-}
 /**
  * 拼最终 URL。IR 里只写 path（或以 `{envVar}` 开头的显式绝对地址），
  * 域名一律来自环境配置 —— docs/05 §1：spec 的 servers 几乎总是错的或写死某测试域，
@@ -2549,12 +2605,16 @@ function buildUrl(base: string, qs: Record<string, string>): string {
  * 相对地址 + 环境没配 baseUrl = 直接 error（env-unavailable），
  * 不是"那就原样发出去"：相对 URL 交给 fetch 会得到 Invalid URL 或打到平台自己的域名上，
  * 两种都比一条明确的"环境没配 baseUrl"难查。
+ *
+ * 拼接本身在 `resolve.ts` 的 `joinBaseUrl`（全仓一份）。这里原先自己写的是
+ * `base.replace(/\/$/, '')` —— **只去一个尾斜杠**，而 auth-check 那一份去全部，
+ * 于是 `baseUrl: 'http://h//'` 时两条命令打的是两个地址。判据与实测记在那边。
  */
 function resolveUrl(url: string, env: Record<string, unknown>): string {
   if (/^https?:\/\//i.test(url)) return url;
   const base = typeof env.baseUrl === 'string' ? env.baseUrl : typeof env.baseUrlTemplate === 'string' ? env.baseUrlTemplate : undefined;
   if (!base) throw new EnvMissing(`环境（${JSON.stringify(Object.keys(env))}）里没有 baseUrl，而用例地址是相对路径 "${url}"。IR 不写死域名是刻意的（docs/05 §1）`);
-  return base.replace(/\/$/, '') + (url.startsWith('/') ? url : `/${url}`);
+  return joinBaseUrl(base, url);
 }
 /**
  * 平台那一维（android / ios / harmony），从**这一层槽位上的租约**读。

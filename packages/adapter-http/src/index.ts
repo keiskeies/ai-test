@@ -47,6 +47,14 @@ export {
   type ParamStyle,
   type Serialized,
 } from './openapi/style.js';
+/*
+ * URL 组成那一层也对外。导出它的理由不是"顺手统一一下"：
+ * **`composeUrl` 需要 operation 才能查 style/explode**，而调用方十有八九没有
+ * operation（纯 `http` 步骤不带 spec 坐标）。那些调用方要的是"按规范默认值组成"
+ * 这一半，而它只有传 `op: undefined` 才拿得到 —— 没有别的公开入口能拿到。
+ * 不导出的话，下一个需要组成 URL 的人只能再抄一份内联 replace（本轮删掉的正是这种副本）。
+ */
+export { composeUrl, type ComposedUrl } from './openapi/compose.js';
 export {
   compileValidator,
   validateAgainstSchema,
@@ -77,4 +85,4 @@ export { AuthResolver, type AuthResolverOptions, type AuthPlan } from './auth/in
 export { AuthHook, AuthRequiredError, type AuthHookOptions, type AuthApplyInput, type OpAuthNeed } from './auth/hook.js';
 
 // —— Mock ——
-export { startMockServer, sampleFromSchema, buildUrlFor, type MockServer, type MockOptions } from './mock/mock.js';
+export { startMockServer, sampleFromSchema, type MockServer, type MockOptions } from './mock/mock.js';

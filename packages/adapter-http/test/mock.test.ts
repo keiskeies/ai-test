@@ -11,7 +11,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseOpenApi } from '../src/openapi/parse.js';
-import { startMockServer, sampleFromSchema, buildUrlFor } from '../src/mock/mock.js';
+import { startMockServer, sampleFromSchema } from '../src/mock/mock.js';
 import { HttpClient } from '../src/http/client.js';
 import { dirtySpec } from './fixtures.js';
 import type { MockServer } from '../src/mock/mock.js';
@@ -118,6 +118,184 @@ describe('mock server 路由', () => {
   });
 });
 
+/*
+ * mock **不能被用例里的一个坏字节打死**。
+ *
+ * 这一组是新加的，因为它守的是一件本轮才量出来的事：`handle` 是 async 而它被
+ * `void handle(...)` 调，所以它抛出的任何东西都是一个没人接的 Promise ——
+ * 表现不是"这条用例红"，而是**一个字节都不回、客户端一直挂到超时**，
+ * 最后报成 `HTTP 请求失败：timeout`。改前两条真实可达的输入：
+ *  - `url: '/orders/A1?x=100%'`：`decodeURIComponent('100%')` 抛 URIError（实测 30044ms 挂死）；
+ *  - header `x-atest-mock-status: 000`：过了 `/^\d{3}$/` 却 `writeHead(0)` 抛
+ *    ERR_HTTP_INVALID_STATUS_CODE（实测挂死）。
+ * 两处都不是"平台写的值"，是**用例作者手写的值**，所以一定会再发生。
+ *
+ * ⚠ 这一组的断言刻意全部是"**多久之内、拿到什么**"而不是"不抛"：
+ * 判据若是 `assert.doesNotThrow`，那么"改了实现但还是会挂"这一种回归**测不出来**，
+ * 而挂死恰恰是这两种输入的原始症状。
+ */
+describe('mock 面对坏输入也要回一个响应（不能把错报成 timeout）', () => {
+  let mock: MockServer;
+  before(async () => { mock = await startMockServer(doc); });
+  after(async () => { await mock.close(); });
+  const client = new HttpClient({ defaultTimeoutMs: 3000 });
+
+  test('URL 里带不合法的百分号转义：照旧拿到响应，而不是挂到超时', async () => {
+    /*
+     * `100%` 少两位十六进制 —— 手写"百分比"这类值时极易写出。
+     * 期望值不是"报一个漂亮的错"，而是**跟真实后端一样**：不合法就按字面留着。
+     * 实测 node 自己的 `querystring.parse`、WHATWG 的 `URLSearchParams`、
+     * Express 底下的 qs 三者都不抛（`parse('x=100%')` 给 `{x:'100%'}`），
+     * 所以"mock 抛、后端不抛"是 mock 单方面制造的分歧。
+     */
+    const r = await client.send({ method: 'GET', url: `${mock.addr}/orders/A1?x=100%` });
+    assert.equal(r.error, undefined, `挂死或报错都说明解码没兜住：${r.error?.message}`);
+    assert.equal(r.status, 200);
+    const seen = mock.requests[mock.requests.length - 1]!;
+    assert.deepEqual(seen.query.x, ['100%'], '不合法的转义按字面留着，与后端一致');
+  });
+
+  test('裸 `+` 在 query 里解成空格（与所有 form 解析器一致）', async () => {
+    /*
+     * 平台自己发的查询串里**永远不会有裸 `+`**（`style.ts` 的 `encQ` 把它编成 `%2B`），
+     * 所以裸 `+` 只可能来自手写的 url。改前那一份把 `+` 原样留着，而任何真实
+     * form 解析器都把它读成空格 —— 于是"手写的 url"这一格里 mock 与后端看到的值不同，
+     * 用例在 mock 上绿、到真后端上查的是另一个值。
+     */
+    await client.send({ method: 'GET', url: `${mock.addr}/orders/A1?q=a+b` });
+    assert.deepEqual(mock.requests[mock.requests.length - 1]!.query.q, ['a b']);
+  });
+
+  test('重复键仍然解成两个值（换解码器不能把重复键吃掉）', async () => {
+    await client.send({ method: 'GET', url: `${mock.addr}/orders/A1?id=1&id=2` });
+    assert.deepEqual(mock.requests[mock.requests.length - 1]!.query.id, ['1', '2']);
+  });
+
+  test('`?__proto__=x` 要**记成一个键**，而不是改掉那个对象的 prototype', async () => {
+    /*
+     * 这不是理论形状：`decode` 之后的键直接进 `requests[].query`，而用例就断在那里。
+     * `out[k] = ...` 那种写法对 `__proto__` 走的是 setter —— 实测 `Object.keys` 是空的、
+     * `getPrototypeOf(out)` 变成一个数组。于是请求里明明带了 `__proto__=x`，
+     * 而**记到的那个键不存在**：断"这个参数没收到"的用例就此变绿。
+     * 谎报"没收到"比崩掉糟得多 —— 崩了有人会查，绿着没人查。
+     */
+    await client.send({ method: 'GET', url: `${mock.addr}/orders/A1?__proto__=x` });
+    const seen = mock.requests[mock.requests.length - 1]!;
+    assert.ok(Object.prototype.hasOwnProperty.call(seen.query, '__proto__'), '请求里带了这个键，就必须记下来');
+    assert.deepEqual(seen.query.__proto__, ['x']);
+    assert.equal(Object.getPrototypeOf(seen.query), Object.prototype, '一个请求不许改对象的 prototype');
+  });
+
+  test('普通 query 仍然等于一个普通字面量（防"为了 __proto__ 把原型换掉"那种修法）', async () => {
+    /*
+     * 避开 `__proto__` 的另一条常见写法是 `Object.create(null)`，
+     * 而那会让 `deepEqual(seen.query, { q: ['a'] })` **因为原型不同而红** ——
+     * 于是所有人被迫改断言写法。这一条就是钉"别用那招"。
+     */
+    await client.send({ method: 'GET', url: `${mock.addr}/orders/A1?q=a` });
+    assert.deepEqual(mock.requests[mock.requests.length - 1]!.query, { q: ['a'] });
+  });
+
+  for (const bad of ['000', '100', '199']) {
+    test(`header 指定不可用的状态码 ${bad}：回 400 说清哪个值，而不是让 writeHead 抛`, async () => {
+      /*
+       * 三个数都过改前那道 `/^\d{3}$/`，而两种坏法不同（都实测过）：
+       * `000` 走到 `writeHead(0)` → **抛** `ERR_HTTP_INVALID_STATUS_CODE`，
+       * 抛进没人接的 void → 一个字节都不回；
+       * `100`/`199` 是 1xx，`writeHead` **不抛**，客户端却**永远等不到最终响应**
+       * （raw 客户端实测两者各挂满 700ms 无响应）。后者更难查：一层错都不报。
+       */
+      const r = await client.send({ method: 'GET', url: `${mock.addr}/public/health`, headers: { 'x-atest-mock-status': bad } });
+      assert.equal(r.status, 400, `不可用的状态码必须在这一格拦下：实得 ${r.status}`);
+      const b = r.body as { error?: string; value?: string };
+      assert.equal(b.error, 'bad_mock_status');
+      assert.equal(b.value, bad, '要把作者写的那个值原样说出来，否则他还得回去数一遍 header');
+    });
+  }
+
+  test('四位的 header 也拦，而不是当"没写这个 header"（改前：静默忽略 → 回默认 2xx = 假绿）', async () => {
+    /*
+     * `1000` 与 `000` 的坏法**不同**，所以它得单独一条：
+     *  - `000` 过了 `/^\d{3}$/`，走到 `writeHead(0)` 抛 → 挂死（上面那条管）；
+     *  - `1000` 过不了 `/^\d{3}$/`，于是改前的代码把整个 header **当作没写**，
+     *    回默认的 2xx。实测改前拿到的就是 200。
+     * 后者比挂死更危险：用例断"这个接口该报错"，拿到一个漂亮的 200，
+     * 于是它绿着测了一件**根本没发生**的事（docs/08 §3 的最贵的一种绿）。
+     *
+     * ⚠ 我一开始把这条的理由写成"`writeHead(1000)` 会被静默截断成 200"，**那是错的**：
+     * 实测 `writeHead(1000)` 和 `writeHead(0)` 一样老实抛 `ERR_HTTP_INVALID_STATUS_CODE`。
+     * 症状（1000 → 200）是真的，成因记错了地方 —— 记错的话下一个读代码的人会去防 writeHead
+     * 而漏掉真正的宽判据。这条断言的价值因此是"拦在进 writeHead **之前**"，
+     * 与它是抛还是被忽略无关。
+     */
+    const r = await client.send({ method: 'GET', url: `${mock.addr}/public/health`, headers: { 'x-atest-mock-status': '1000' } });
+    assert.equal(r.status, 400, `四位数被当作"没写这个 header"了（那会回默认 2xx，一条该红的用例就此变绿）：实得 ${r.status}`);
+    assert.equal((r.body as { value?: string }).value, '1000');
+  });
+
+  test('合法的状态码照旧可用（这一组别把正路一起拦死）', async () => {
+    const r = await client.send({ method: 'GET', url: `${mock.addr}/orders/A1`, headers: { 'x-atest-mock-status': '404' } });
+    assert.equal(r.status, 404);
+  });
+});
+
+describe('兜底层：handle 里抛出任何东西时，也要回一个 500 而不是挂死', () => {
+  /*
+   * 这一条不是为了测 500，是为了让 `void handle(...).catch(...)` 那层兜底
+   * **有一个人看着**。先把话说清：本轮拿九个 wire 级输入去试
+   * （孤立代理项 `%ED%A0%80` 分别放在值上/键上/路径上、空键、`&&&`、`%25`、`%00`、
+   * CRLF 注入、3000 个键的超长 query），**一个都抛不出来了** —— 前两处根因修掉之后，
+   * 解码这一路已经打不到 throw。（超长 query 那格回 431，那是 node 自己的
+   * http server 在 `handle` **之前**就拒了，与这层兜底无关，所以它不算载体。）
+   *
+   * 所以这层兜底守的**不是**任意字节，而是**程序内构造的 ParsedDoc**：
+   * 本仓的测试、以及任何拿 `parseOpenApi` 的结果再改一手的调用方都会这么构造，
+   * 而 `handle` 里有两处 `JSON.stringify`，一个自引用的 example 就够它抛
+   * `TypeError: Converting circular structure to JSON`（实测 22ms 回 500，
+   * 而**去掉兜底**时同一格是 3000ms 读到 timeout）。
+   *
+   * ⚠ 这条测试**不是**在说"循环 example 是正常用法"，它也不是 JSON spec 写得出来的形状。
+   * 它是这层兜底目前**唯一可达**的入口。留着它的理由是 docs/08 §3 那一族：
+   * 一个没有载体的分支看起来像没写，下一个来清理的人会把它删掉；
+   * 而这层兜底防的恰恰是"下一次有人往 handle 里加了一行会抛的代码" ——
+   * 那一次不会先来改这条测试。
+   */
+  test('handle 内部抛异常 -> 500 里带着成因，而不是让客户端读到 timeout', async () => {
+    const circ: Record<string, unknown> = { id: 'A1' };
+    circ['self'] = circ; // 自引用：JSON.stringify 必抛
+    const badDoc = {
+      ...doc,
+      operations: doc.operations.map((op) =>
+        op.path === '/orders/{id}' ? { ...op, examples: { ...op.examples, '200': circ } } : op,
+      ),
+    };
+    const m = await startMockServer(badDoc);
+    try {
+      const r = await new HttpClient({ defaultTimeoutMs: 3000 }).send({ method: 'GET', url: `${m.addr}/orders/A1` });
+      assert.equal(r.error, undefined, `兜底没接住的话，这里读到的是 timeout：${r.error?.message}`);
+      assert.equal(r.status, 500);
+      const b = r.body as { error?: string; message?: string };
+      assert.equal(b.error, 'mock_internal_error');
+      assert.match(String(b.message), /circular/, '要把抛的东西原样带出来，否则读到的还是"一个 500，不知道为什么"');
+    } finally { await m.close(); }
+  });
+});
+
+describe('unmatchedStatus 配错时**起服务就抛**（不留到某个请求里挂死）', () => {
+  for (const bad of [0, 100, 1.5, 1000]) {
+    test(`unmatchedStatus=${bad} -> 构造期 RangeError`, async () => {
+      await assert.rejects(() => startMockServer(doc, { unmatchedStatus: bad }), RangeError);
+    });
+  }
+  test('合法值照常起服务', async () => {
+    const m = await startMockServer(doc, { unmatchedStatus: 418 });
+    try {
+      const r = await new HttpClient().send({ method: 'GET', url: `${m.addr}/nope` });
+      assert.equal(r.status, 418);
+    } finally { await m.close(); }
+  });
+});
+
 describe('客户端行为（docs/05 §4 清单）', () => {
   let mock: MockServer;
   before(async () => { mock = await startMockServer(doc); });
@@ -208,15 +386,24 @@ describe('客户端行为（docs/05 §4 清单）', () => {
   });
 });
 
-describe('buildUrlFor：客户端与 mock 共用同一套序列化规则', () => {
-  test('path 参数与 query 的 style 都按 spec 走', () => {
-    const op = doc.byId.get('listUsers')!;
-    const url = buildUrlFor('http://h:1/', op, { queryParams: { q: ['a', 'b'], page: 2 } });
-    // fixture 里 q 是 pipeDelimited + explode=false -> q=a|b
-    assert.match(url, /^\http:\/\/h:1\/users\?/);
-    assert.match(url, /q=a\|b/);
-  });
-  test('无 query 时不留问号', () => {
-    assert.equal(buildUrlFor('http://h', doc.byId.get('health')!, {}), 'http://h/public/health');
-  });
-});
+/*
+ * 这里**曾经有一整个 describe**，标题写着「客户端与 mock 共用同一套序列化规则」。
+ * 那句话在它存在的大部分时间里是假的：`mock.ts` 里那份 `buildUrlFor` 把 styleParam
+ * 的结果内联抄了一遍，路径段**一个字节都不编**（`{id}=a/b` 发出 `/orders/a/b`，
+ * 多出一整段路径），查询段却改用 `encodeURIComponent`，于是连规范里该留字面量的 `,`
+ * 也被编成 `%2C` —— 同一份文件里同时犯"该编的没编"和"不该编的编了"两个**相反方向**的错。
+ * 逐字节对比的实测结果记在 `openapi/compose.ts` 文件头那张分叉表里。
+ *
+ * 本轮把这个 describe 连同 `buildUrlFor` 一起删了，而**不是因为断言写错了** ——
+ * 四条断言的期望值全对。删它的理由是它们接的是一根没通电的线：`buildUrlFor`
+ * 从首个提交起就没有生产侧调用者（`git log -S` 追过），mock server 按路径段匹配请求、
+ * 自己不组成 URL。四条"会红会绿"的断言因此**不构成任何覆盖面**，
+ * 而它们的存在会让下一个来查"路径编码有没有人守"的人搜一眼就走开。
+ * 这是 docs/08 §3 那族里最费钱的一种：登记文本描述错字段 / 测试标题描述没发生的事，
+ * 与"有载体、没有生产者"叠在一起。
+ *
+ * 四条断言已逐个搬到真有生产代码走的路径上：
+ *  - 按 spec 查 style、`?` 的四格接法 → `test/compose.test.ts`（直接断 `composeUrl` 返回值）；
+ *  - 路径编码、查询分隔符、baseUrl 拼接 → `test/engine-e2e.test.ts`（断 mock 收到的**原始字节**）。
+ * `mock.test.ts` 从这里开始只测 mock 自己那部分：路由、造数据、坏输入下也要回响应。
+ */

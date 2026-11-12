@@ -1,0 +1,29 @@
+{
+  "_comment": "**这一组判的是『查询串/路径的编码规则有没有被测试守住』。** 载体：`packages/adapter-http/src/openapi/style.ts` 的 `encQ` 与 `spaceDelimited/pipeDelimited` 那一格 `raw`。\n\n为什么这一组要专门立一份：本轮之前，style.ts 是**整个 HTTP 侧最像\"已经有测试\"的一块** —— `style.test.ts` 里那几十条断言逐格照抄 OAS 3.0 规范表，绿灯密得像道墙。而墙上漏着两格，且两格都是**发出去的不是用户写的那个值**（不是发不出去）：`+` 在查询串里会被 form 解析器读成空格、`raw` 那一格压根没编码元素。这类缺陷的红不是红，是**绿着错**（后端把不认识的键丢掉、回 200），所以规范表那几十条抓不到它 —— 它们判的是\"分隔符形态对不对\"，两格漏的都发生在**值的内容**上。\n\n⚠ 每条 `_why` 只点名**驱动报出来的那一条红**（驱动只印第一条红的标题），不写『其余各条全绿』。",
+  "cases": [
+    {
+      "label": "encQ 不再编 + （查询串里 + 被服务端读成空格）",
+      "_why": "退回改前那一版：`enc(v).replace(/=/g, '%3D')`，没有 `+` 那一步。\n\n危害不是\"请求发不出去\"：`buildQuery([{name:'q',value:'a+b'}])` 发出 `q=a+b`，实测**两个主流解析器都把它读回成 `'a b'`**（`new URLSearchParams('q=a+b').get('q')` 与 `node:querystring.parse('q=a+b').q` 都是 `'a b'`）。于是查 `C++` / `2024+01+05` / 含 `+` 的密码的用例打到**另一个查询**上，而后端回 200 —— 用例绿灯而测的不是它声称测的那个值。`+` 是 RFC 3986 的 sub-delim，所以它在 `ALLOWED` 里对 **path** 是对的（`fillPath` 侧那条正向测试就钉着 `/u/a+b` 不许变），漏的是\"查询串是 x-www-form-urlencoded 的地盘\"这一层区别。\n\n本轮实测：驱动报的第一条红是 style.test.ts 的「值里有 + 时，服务端解回来仍是 +（查询串里 + 表示空格）」。",
+      "file": "packages/adapter-http/src/openapi/style.ts",
+      "anchor": "  return enc(v).replace(/=/g, '%3D').replace(/\\+/g, '%2B');",
+      "replace": "  return enc(v).replace(/=/g, '%3D'); // 变异：退回不编 +",
+      "testFile": "packages/adapter-http/test/style.test.ts"
+    },
+    {
+      "label": "raw 那一格不编码元素（一个参数被 & 劈成两个）",
+      "_why": "退回改前那一版：`raw: `${i.name}=${v.map(asText).join(...)}`` —— 元素原样拼进去。\n\n最刺眼的是**这一格的注释当时就写着\"已按规范编码好\"**（在 `Serialized.raw` 的字段注释上）：注释声明了那个性质，而代码没有它。实测 `['a&b','c']` 在 pipeDelimited 下发成 `q=a&b|c`，服务端解成 `{q:'a', 'b|c':''}` —— 一个参数劈成两个、第二个键是垃圾，而用例照样 2xx 照样绿。\n\n这条变异**同时**会被两个方向的断言咬住（所以它比\"只钉字节串\"的测试更难被绕过）：① 往返断言要求解回来还是**一个**参数且值完整；② 规范表那两格（`id=3%204%205` / `id=3|4|5`）要求分隔符仍是字面量。只改其中一侧的修法会红在另一侧。\n\n本轮实测：驱动报的第一条红是「spaceDelimited / pipeDelimited 的元素逐个编码，分隔符仍是字面量」。",
+      "file": "packages/adapter-http/src/openapi/style.ts",
+      "anchor": "          raw: `${encQ(i.name)}=${v.map((el) => encQ(asText(el))).join(style === 'spaceDelimited' ? '%20' : '|')}`,",
+      "replace": "          raw: `${i.name}=${v.map(asText).join(style === 'spaceDelimited' ? '%20' : '|')}`, // 变异：元素不编码",
+      "testFile": "packages/adapter-http/test/style.test.ts"
+    },
+    {
+      "label": "styleParam 去掉\"未知 style\"那道前置守卫（未知 style + 数组值 → 返回 undefined）",
+      "_why": "删掉函数开头那段 `if (!PARAM_STYLES.includes(...)) throw`。\n\n这一条抓的是**返回值的完整性**，而不是某个编码结果：`styleParam` 声明返回 `Serialized`（**没有** `| undefined`），而函数体是三个 switch、每个只列自己关心的那几格 —— 未知 style 配标量会落到标量那一支的 `default` 抛错，**配数组或对象则一路走到函数尾返回 undefined**。类型上没人拦：`ParamSpec.style` 在 parse.ts 里是 `typeof p.style === 'string' ? p.style : undefined`，只验\"是不是字符串\"，于是 spec 里写错的 style（`form` 小写、`space-delimited` 带连字符，都是手写 spec 的常见笔误）最后变成 `TypeError: Cannot read properties of undefined (reading 'raw')`。\n\n⚠ **这一条的测试刻意扫三种值形态**（标量/数组/对象）。只写\"未知 style 抛 StyleError\"而只喂标量的话，**改前也是绿的** —— 标量那一支本来就抛，只是话说的不对（\"只适用于数组/对象\"，而 `foo` 对谁都不适用）。那是 pitfall「测试在修之前就过」的现行样本，所以覆盖面本身就是这条测试的内容，另有一条 `combos > 100` 的下限断言守着\"别把外层循环删了让它变浅\"。\n\n本轮实测：驱动报的第一条红是「合法 style × 每种值形态：要么给出 Serialized，要么抛 StyleError（不许有第三种）」。\n\n⚠ 顺带记一处**我自己写错的断言**：这条测试初版还要求\"每个合法组合至少产出一点东西\"，而空数组在 `form`+explode=true 下产 `pairs: []` 是**对的**（没值就没参数，与 `?tag=` 空值语义不同，旁边 `null 值也算缺失` 那条守的就是这个区别）。实现没错、我的判据错了，所以是删断言而不是改实现 —— 细节留在测试注释里。",
+      "file": "packages/adapter-http/src/openapi/style.ts",
+      "anchor": "  if (!PARAM_STYLES.includes(style as ParamStyle)) {",
+      "replace": "  if (false as boolean) {",
+      "testFile": "packages/adapter-http/test/style.test.ts"
+    }
+  ]
+}

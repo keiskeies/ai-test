@@ -13,7 +13,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { b, scen, run, res } from './helpers.js';
+import { b, scen, run, res, stubComposeUrl } from './helpers.js';
 import type { StepDraft } from './helpers.js';
 import type { HttpExec } from '../src/index.js';
 
@@ -36,6 +36,7 @@ const ok = { status: 200, headers: {}, body: {}, bodyText: '{}', durationMs: 1, 
 function fakeHttp(send: HttpExec['send']): HttpExec {
   return {
     send,
+    composeUrl: stubComposeUrl(),
     resolveOperation: async (ref) => ({
       method: ref.method ?? 'GET',
       urlTemplate: ref.path ?? '/x',

@@ -508,9 +508,27 @@ async function runOne(o: {
   let mock;
   if (flag(a, 'local')) {
     if (o.registry.empty()) throw new CliError('--local 需要先导入 spec：--local --doc shop=<openapi.json>', EXIT.USAGE);
-    mock = await startLocalMock(o.registry, []);
+    /*
+     * 这里原本传的是一个**丢弃用的字面量 `[]`** —— `startLocalMock` 往里推的告警
+     * 于是没有一个到得了用户。而它推的**不是一句**：除了"这不是真实后端"
+     * （那句我当时在下一行**又手抄了一遍**，所以看起来像没事），还有
+     * 「spec 自身有 N 处结构与声明不一致（前 3 条）」那一整段 ——
+     * `mock` 侧收集的 `selfCheckIssues`（"声明了 2xx 但没给 schema，
+     * mock 只能返回空体（该接口的响应用例不会有实际断言）"这类话），
+     * 而那句话的**唯一读者就是正在用 --local 的人**：他看到 mock 全绿，
+     * 而真相是那些接口的响应**压根没被断到任何东西**。
+     * 这是 docs/08 §3(e)「有生产者、没有载体」最省事的一种成因 ——
+     * 载体只差一个变量名，而它差了就等于整条判据不存在。
+     *
+     * ⚠ 顺手收掉的**第二件**：那句"这不是真实后端"在 `wiring.ts` 与本文件里
+     * **各有一份手抄**（措辞只差两个标点）。所以现在**只印数组、删掉手抄那份** ——
+     * 反过来做（保留手抄、只把数组里剩下的几条印出来）会把那两份手抄**留在原地**，
+     * 下一轮改其中一处措辞时另一处照旧悄悄不动。
+     */
+    const localWarnings: string[] = [];
+    mock = await startLocalMock(o.registry, localWarnings);
     o.env.baseUrl = mock.addr;
-    io.err(`已对本地 mock 运行（${mock.addr}）。**这不是真实后端**：本次结果只证明"用例能跑通"，不证明产品行为。`);
+    for (const w of localWarnings) io.err(w);
   }
 
   const inputs = parseInputs(a.multi.input ?? []);

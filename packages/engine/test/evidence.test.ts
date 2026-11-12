@@ -20,7 +20,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ArtifactStore } from '../src/adapters.js';
-import { b, run, scen, type StepDraft } from './helpers.js';
+import { b, run, scen, stubComposeUrl, type StepDraft } from './helpers.js';
 
 /** 按 stepId 记账的内存 store。savedFor 就是"这个步骤的证据条数" */
 function memStore(): { store: ArtifactStore; savedFor: (stepId: string) => number; kinds: () => string[] } {
@@ -38,9 +38,13 @@ function memStore(): { store: ArtifactStore; savedFor: (stepId: string) => numbe
 /** 两条路共用同一个响应：200 + 一个可辨认的响应体 */
 const OK = { status: 200, headers: {}, body: { ok: true }, bodyText: '{"ok":true}', bytes: 11, truncated: false, durationMs: 3 };
 
-const httpExec = () => ({ async send() { return { ...OK }; } });
+// 同 advisories.test.ts：这两个夹具用 `as never` 绕过接口检查，端口加必选方法时
+// 编译器不响，所以 composeUrl 必须手动带（少了它两条请求路径全在"发之前"就炸，
+// 而本文件测的是**证据落没落盘**，症状与原因隔了一层）
+const httpExec = () => ({ async send() { return { ...OK }; }, composeUrl: stubComposeUrl() });
 const openapiExec = () => ({
   async send() { return { ...OK }; },
+  composeUrl: stubComposeUrl(),
   async resolveOperation() { return { operationId: 'getThing', method: 'GET', urlTemplate: '/things/{id}', requiredBodyFields: [], deprecated: false }; },
 });
 

@@ -28,7 +28,7 @@ import assert from 'node:assert/strict';
 
 import { parseStepResults, toJUnitXml } from '../src/report.js';
 import { TransportError, type AdapterRegistry } from '../src/adapters.js';
-import { b, res, run, scen, type StepDraft } from './helpers.js';
+import { b, res, run, scen, stubHttp, type StepDraft } from './helpers.js';
 import { countsTowardPassRate, IrValidationError } from '@atest/ir';
 import type { RunReport } from '../src/index.js';
 
@@ -56,15 +56,20 @@ const flakyOfOf = (r: { keyContext: Record<string, unknown> }): FlakyOf => {
  */
 function flakyHttp(failUntil: number, kind: 'network' | 'timeout' = 'network'): { adapters: AdapterRegistry; sends: () => number } {
   let n = 0;
+  /*
+   * `satisfies` 而不是 `as unknown as`。后者把整个适配器从编译器手里拿走了，
+   * 于是 `HttpExec` 加必选方法时这里**编译照样过**，运行时才在第一个 http 步骤上
+   * 炸成 `composeUrl is not a function` —— 而本文件那条主判据打印出来的是
+   * 「重试本身要真的发生」，一个形状问题伪装成行为问题（本轮就绕了这一圈）。
+   * `satisfies` 保留推断（send 的闭包变量照样能用），又让接口变化必须在这里显式补齐。
+   */
   const adapters = {
-    http: {
-      async send() {
-        n++;
-        if (n < failUntil) throw new TransportError(kind, `ECONNREFUSED #${n}`);
-        return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 5 };
-      },
-    },
-  } as unknown as AdapterRegistry;
+    http: stubHttp(async () => {
+      n++;
+      if (n < failUntil) throw new TransportError(kind, `ECONNREFUSED #${n}`);
+      return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 5 };
+    }),
+  } satisfies AdapterRegistry;
   return { adapters, sends: () => n };
 }
 
@@ -144,8 +149,8 @@ describe('不该重试的东西', () => {
     // 而那跟 fail 会不会被重试无关。
     let n = 0;
     const adapters = {
-      http: { async send() { n++; return { status: 500, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; } },
-    } as unknown as AdapterRegistry;
+      http: stubHttp(async () => { n++; return { status: 500, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; }),
+    } satisfies AdapterRegistry;
     const r = await run(scen([
       { ...b('h'), kind: 'http', request: { method: 'GET', url: 'http://x/a' }, retry: { count: 2 } } as StepDraft,
       { ...b('a'), kind: 'assert', against: '$.step.h', status: 200, retry: { count: 2 } } as StepDraft,

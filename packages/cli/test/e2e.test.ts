@@ -16,7 +16,7 @@
  */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { test } from 'node:test';
@@ -390,6 +390,44 @@ test('--local 对 mock 跑：结论照常产出，但必须大声说明这不是
     assert.equal(code, EXIT.OK, io.stderr.join('\n'));
     assert.match(io.stderr.join('\n'), /不是真实后端/);
   } finally { await f.close(); }
+});
+
+test('--local 还要把 **spec 自己的问题**说出来（改前：那段被一个 `[]` 吃掉了）', async () => {
+  /*
+   * 上面那条测的是"这不是真实后端"那一句 —— 而它**测不到这个缺陷**，
+   * 因为那一句当时在 `commands.ts` 里**另有一份手抄**，`startLocalMock`
+   * 推进来的那整张告警表（第二个参数）传的是一个丢弃用的字面量 `[]`。
+   * 于是这条测试改前改后**都绿**，而它绿着的样子正好像"--local 的告警有载体"。
+   * 所以这一条必须断**只有 `startLocalMock` 才知道的那部分内容**：
+   * spec 声明了 2xx 却没给 schema ⇒ mock 只能回空体 ⇒ 那些接口的响应用例
+   * **压根没断到任何东西**。用上面那份 SPEC 造不出这个形状（它的 201 有 schema），
+   * 所以这里另写一份。
+   *
+   * 为什么这句话值得单独一条测试：`--local` 的整个卖点是"clone 完第一条命令就全绿"，
+   * 而全绿里混着一批"响应结构压根没断到"的接口。不说，用户就把这次绿读成
+   * "接口没问题"；说了，他至少知道哪些接口在 mock 上是**空跑**。
+   */
+  const dir = await mkdtemp(join(tmpdir(), 'atest-cli-localwarn-'));
+  try {
+    const specPath = join(dir, 'noschema.json');
+    await writeFile(specPath, JSON.stringify({
+      openapi: '3.0.0', info: { title: 'shop', version: '1' },
+      paths: {
+        '/orders': { post: { operationId: 'createOrder', responses: { '201': { description: '只有一句 description，没 schema' } } } },
+      },
+    }), 'utf8');
+    const casePath = await writeCase(dir, [
+      { id: 'c', kind: 'openapiCall', docRef: 'shop', operationId: 'createOrder', body: {} },
+      { id: 'a', kind: 'assert', against: '$.step.c.resp', status: 201 },
+    ]);
+    const io = ioCapture();
+    const code = await main(['run', casePath, '--local', '--doc', `shop=${specPath}`,
+                             '--evidence-dir', join(dir, 'ev'), '--clock', 'deterministic'], io);
+    assert.equal(code, EXIT.OK, io.stderr.join('\n'));
+    const text = io.stderr.join('\n');
+    assert.match(text, /没给 schema|结构与声明不一致/, `spec 自检那条告警没到用户面前：${text}`);
+    assert.match(text, /POST \/orders/, '要说出是哪个接口，否则"有 1 处不一致"等于没说');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('agent 命令存在但明确不可用，且给出可执行的替代路径（不是 command not found）', async () => {

@@ -18,6 +18,7 @@ import { defineScenario, type Scenario, type ScenarioDraft, type StepDraft } fro
 import { readZipEntries } from '../src/zip.js';
 import { DiskArtifactStore } from '../src/artifacts.js';
 import { buildEvidencePackage } from '../src/evidence.js';
+import { stubHttp } from './helpers.js';
 
 const sub = (id: string, body: StepDraft[]): Scenario =>
   defineScenario({
@@ -38,19 +39,18 @@ async function freshStore(): Promise<DiskArtifactStore> {
 }
 
 /** 响应体带 URL：内容寻址下同内容同 id，不区分就没法验"两份不同的证据" */
-/**
- * http 夹具**写成 HttpExec 而不是 `as never`**（与 parallel.test.ts 同一条理由）：
- * 接口加必选方法时这里必须编译不过，否则夹具会一直"少一个方法也能跑"。
- * resolveOperation 本文件用不到，但它是必选项，所以老实返回形状正确的空解析结果。
+/*
+ * http 夹具直接用 helpers 里的 `stubHttp`（它返回的就是 HttpExec，不是 `as never`，
+ * 所以接口加必选方法时这里必须编译不过）。本文件那几条测的是证据归属与落盘，
+ * 压根不看 URL 长什么样。
+ *
+ * ⚠ 原先这里另抄了一份内联的 composeUrl（外加一份 resolveOperation），
+ * 与 helpers 那份只差"扫不扫占位符" —— 那正是本仓在删的东西：两份桩会各自漂移，
+ * 而漂移的表现是"某一份的 missing 分支永远走不到，测试却全绿"。
+ * 而本文件的 urlTemplate 是 `http://x/<id>` 这种完整地址，没有占位符可扫，
+ * 所以换成真扫占位符的那一份不改变任何断言的含义。
  */
-function fakeHttp(send: HttpExec['send']): HttpExec {
-  return {
-    send,
-    resolveOperation: async (ref) => ({
-      method: ref.method ?? 'GET', urlTemplate: ref.path ?? '/x', requiredBodyFields: [], deprecated: false,
-    }),
-  };
-}
+const fakeHttp = stubHttp;
 const http = () => fakeHttp(async (req) => {
   const bodyText = `{"url":"${req.url}"}`;
   return { status: 200, headers: {}, body: { url: req.url }, bodyText, bytes: bodyText.length, truncated: false, durationMs: 2 };

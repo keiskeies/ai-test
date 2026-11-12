@@ -275,6 +275,67 @@ export function strMap(o: Record<string, unknown> | undefined, resolve: (v: unkn
   return out;
 }
 
+/**
+ * `strMap` 的**保形**版本：同样求值、同样"null/undefined 不落键"，
+ * 但**不把非字符串压成一个字符串** —— 数组还是数组，对象还是对象。
+ *
+ * ## 为什么要单独一个函数，而不是让 strMap 少那句 JSON.stringify
+ *
+ * 那一句是为 **SQL 的 JSON 列**写的（`resolve.ts` 里 strMap 的头注释记着：
+ * 数组/对象参数要在 `IN` 那类比较里还能用），而它被复用到 HTTP 之后就变成了
+ * **把 SQL 的值形态当成 URL 的值形态**：IR 写着 `queryParams: {q: ['a','b']}`
+ * （schema 明明白白允许），实测发出的是 `?q=%5B%22a%22%2C%22b%22%5D` ——
+ * 一个 JSON 文本冒充两个值，而后端通常回 200，用例绿。
+ * 所以 strMap 一行不许动（db 那三处调用点靠它），URL 这条路改走这个函数，
+ * **值的序列化交给 composeUrl 那侧按 spec 判**。
+ *
+ * ## 为什么 null/undefined 仍然不落键（与 strMap 同一条规则）
+ *
+ * 不是顺手抄的：URL 上"没有这个参数"和 `?q=`（空值）语义不同，
+ * 而 IR 里 `null` 更接近"这个参数这次不存在"（fillPath 对 path 参数把 null 判成缺失、
+ * `style.ts` 里那条测试也钉着）。真要发空值，写空字符串 `''`，那是另一个值。
+ */
+export function valueMap(o: Record<string, unknown> | undefined, resolve: (v: unknown) => unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o ?? {})) {
+    const r = resolve(v);
+    if (r !== undefined && r !== null) out[k] = r;
+  }
+  return out;
+}
+
+/**
+ * 把 baseUrl 与一个 path 拼成绝对地址 —— **全仓一份**。
+ *
+ * ## 为什么要单独提出来（以及为什么它在这儿而不是别处）
+ *
+ * 本仓有**三处**各自写过这个拼接：`interpreter.ts` 的 `resolveUrl`、
+ * `authcheck.ts` 的 `probeOne`、`mock.ts` 的 `buildUrlFor`（本轮删了）。
+ * 三份**实测不一致**（逐对跑过同一批输入，不是推测）：
+ *  - `resolveUrl` 用 `replace(/\/$/, '')` —— **只去一个**尾斜杠；
+ *  - `authcheck` 用 `replace(/\/+$/, '')` —— 去全部。
+ * 于是 `baseUrl: 'http://h//'`（人从浏览器地址栏复制、或多拼了一次）时，
+ * 用例打的是 `http://h//orders/A1`，而 `atest auth-check` 打的是 `http://h/orders/A1`。
+ * **两边各自都"对"**，而它们对同一个接口的地址不一致 —— docs/08 §3 那句
+ * 「每个消费者都各自正确，而它们对同一件事的假设互不相容」在这里的字面形态：
+ * 现象会是"auth-check 说凭证没问题，跑起来却 404"，而这两条命令看起来都没错。
+ *
+ * ## 判据取哪一边
+ *
+ * 取"去全部"。多个连续尾斜杠不携带任何信息（`http://h//` 与 `http://h/` 是同一个源），
+ * 而保留它换来的是一条**路径里带空段**的地址：`http://h//orders/A1` 在多数路由里
+ * 与 `/orders/A1` 是**两个**路径（会 404），也就是说那个"只去一个"的版本
+ * 会让用例打到一个根本不存在的地址上，而它可能是绿的。
+ *
+ * ⚠ 这里只管拼接，**不判断 baseUrl 存不存在**：缺 baseUrl 时报什么错、
+ * 报成哪个 cause 是调用方的事（引擎要报 env-unavailable，auth-check 要报一行 not-probed），
+ * 这一层不认识步骤也不认识报告。
+ */
+export function joinBaseUrl(base: string, path: string): string {
+  const head = base.replace(/\/+$/, '');
+  return head + (path.startsWith('/') ? path : `/${path}`);
+}
+
 /** repeat 的展开。id 加 `#i` 后缀，让 extract/引用能区分是第几轮。 */
 export function flattenTimes(times: number, steps: Step[]): Step[] {
   const out: Step[] = [];

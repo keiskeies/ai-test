@@ -13,8 +13,8 @@
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import qs from 'node:querystring';
 import { isCycleNode } from '../openapi/refs.js';
-import { styleParam } from '../openapi/style.js';
 import type { OperationSpec, ParsedDoc } from '../openapi/parse.js';
 
 export interface MockOptions {
@@ -23,9 +23,43 @@ export interface MockOptions {
   onUnmatched?: 'reject' | 'empty';
   /** 响应结构 vs schema 的自检结果。传数组则收集问题（不阻断），用于暴露 spec 自身的问题 */
   selfCheckIssues?: string[];
-  /** 未匹配时的状态码，默认 404 */
+  /**
+   * 未匹配时的状态码，默认 404。
+   *
+   * ⚠ 非法值**在起服务时就抛**，而不是留到某一次请求里。理由是这一格是平台侧写的
+   * （测试代码/CLI 传的），不是用例作者临场写的：拼错一次会让**每一个**未匹配的请求
+   * 都在 `res.writeHead` 里炸掉，而那个 throw 同样落进没人接的 `void handle(...)`，
+   * 于是整套测试表现为"每条都挂到超时"，看不出与这个数字有任何关系。
+   * 早报错的代价是一句栈，晚失败的代价是一堆 timeout。
+   */
   unmatchedStatus?: number;
 }
+
+/**
+ * 能被 `res.writeHead` 当**最终响应**送出去的状态码范围。
+ *
+ * 界是逐个量出来的（raw http client，不看 fetch 的脸色），四个点各有各的死法：
+ *  - `0` / `99` / `1000` → `writeHead` **直接抛** `ERR_HTTP_INVALID_STATUS_CODE`。
+ *    在 mock 里抛等于抛进没人接的 `void handle` → 一个字节都不回 → 客户端挂到超时。
+ *  - `100` / `150` / `199` → `writeHead` **不抛**，而客户端**永远等不到响应**
+ *    （实测三个都挂满 700ms 无响应）。1xx 是 informational，它不是"这次请求的结果"，
+ *    所以比抛错更阴：没有任何一层会报错，只有客户端在等。
+ *  - `101` → 实测能把 101 送出去，但那是 switching-protocols 的升级语义，
+ *    同样不是用例能断言的一个响应。整个 1xx 一起排除，而不是只排会挂的那几个。
+ *  - `200` 与 `999` → 原样送达（实测），所以 999 是上界。
+ *
+ * ⚠ 上界**不是**因为"1000 会被截断成 200"—— 我一度这么写过，那是错的：
+ * 实测 `writeHead(1000)` 与 `writeHead(0)` 一样老实抛。真正会让 1000 变成 200 的是
+ * **改前那句 `/^\d{3}$/`**：四位数过不了它，于是 header 被**静默忽略**、
+ * mock 回默认的 2xx。同一条假绿，成因在正则而不在 writeHead ——
+ * 而这正是"看着像类型问题、其实是判据太宽"的那种形状，值得记着别记错地方。
+ */
+function isFinalStatusCode(n: number): boolean {
+  return Number.isInteger(n) && n >= 200 && n <= 999;
+}
+
+/** 用例靠这个 header 指定 mock 回哪个状态码（docs/05 §3 的 notFound 策略要用）。 */
+const MOCK_STATUS_HEADER = 'x-atest-mock-status';
 
 export interface MockServer {
   /** 形如 http://127.0.0.1:54321，直接当环境的 baseUrl 用 */
@@ -40,11 +74,57 @@ export interface MockServer {
  * 绑随机端口才能并行跑多个测试进程；绑 127.0.0.1 才不会被局域网打到。
  */
 export async function startMockServer(doc: ParsedDoc, opts: MockOptions = {}): Promise<MockServer> {
+  if (opts.unmatchedStatus !== undefined && !isFinalStatusCode(opts.unmatchedStatus)) {
+    throw new RangeError(
+      `mock 的 unmatchedStatus 只能是 200..999 的整数，实际是 ${String(opts.unmatchedStatus)}。`
+      + `小于 200 或大于 999 会让 writeHead 直接抛（每个未匹配的请求都变成"挂到超时"），`
+      + `而 1xx 更阴：writeHead 不报错，客户端却永远等不到响应。`,
+    );
+  }
   const routes = buildRoutes(doc, opts);
   const requests: MockServer['requests'] = [];
 
   const server = createServer((req, res) => {
-    void handle(req, res, routes, requests, opts);
+    /*
+     * 这个 `void` 是本轮量出来的第二处"没人接的 throw"的根源：handle 是 async，
+     * 它抛出来的是一个**没人的** Promise。实测两种触发方式
+     * （URL 里带不合法的百分号转义、`x-atest-mock-status` 写了 000）
+     * 的表现完全一样：`unhandledRejection`、**一个字节都不回**，
+     * 客户端一直挂到超时，最后报成 `HTTP 请求失败：timeout`。
+     * 那两处已经各自修了根因（见 parseQuery 与 chooseStatus）。
+     *
+     * ⚠ 我原本在这段注释里写的是"**根因修不完** —— `node:http` 把 request line 原样给
+     * `req.url`，百分号、控制字符、任意长度的 header 都进得来，它自己不校验"。
+     * 本轮实测把这句**打掉了**：拿九种恶意字节打进去（孤立代理项 `%ED%A0%80` 放在
+     * 值上/键上/路径上、空键、`&&&`、`%25`、`%00`、CRLF 注入、3000 键的超长 query），
+     * **一个都抛不出来了**。唯一没走到 handle 的那格是超长 query，而它是 node 自己在
+     * `handle` **之前**回的 431。所以这层兜底此刻真正守得住的入口只有一个，
+     * 而且不是字节层面的：**程序内构造的 ParsedDoc**。`handle` 里有两处 `JSON.stringify`，
+     * 一个自引用的 `example` 就让它抛（实测 22ms 回 500；去掉兜底则 3000ms 读到 timeout）。
+     * 载体是 `mock.test.ts` 的「handle 内部抛异常 -> 500 里带着成因」。
+     *
+     * 这句更正值得留着而不是悄悄改掉：这层兜底的**理由**不依赖"外面打进来的字节
+     * 一定能把 handle 弄崩" —— 那种保证我既给不出也测不出。它的理由是
+     * "**handle 以后还会加代码，而它抛出去的东西现在有人接**"。
+     *
+     * 为什么不 `console.error`：本包 src 里一处 console 都没有（引擎侧连 console
+     * 都不存在），而这是测试夹具、它的 stderr 没人看 —— 真正读到的那个值是**步骤摘要**。
+     * 于是把真相编码进**状态码 + body**：500 一定不是任何用例期望的状态码，
+     * 它必然红，而红出来的那句摘要里带着真正的成因。
+     * 写不进去（连接已断、headers 已发）才算罢休，因为那时已经没有人能读到任何东西。
+     */
+    void handle(req, res, routes, requests, opts).catch((err: unknown) => {
+      const text = JSON.stringify({
+        error: 'mock_internal_error',
+        message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        hint: 'mock 处理这个请求时抛了异常，所以没有产生正常响应。'
+          + '若客户端表现为 timeout，成因在这里而不是网络。',
+      });
+      try {
+        res.writeHead(500, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });
+        res.end(text);
+      } catch { /* 已经写不出去，只能让它挂 */ }
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -239,15 +319,39 @@ async function handle(
   if (!hit) {
     const status = opts.unmatchedStatus ?? 404;
     if (opts.onUnmatched === 'empty') { res.writeHead(status).end(); return; }
-    res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'no_mock_route', method, path, known: routes.map((r) => `${r.op.method} ${r.op.path}`) }));
+    sendJson(res, status, { error: 'no_mock_route', method, path, known: routes.map((r) => `${r.op.method} ${r.op.path}`) });
     return;
   }
-  // 状态码选择：用例可通过 header 指定，默认取第一个 2xx。
-  // 这让"404/400 分支的用例"不必为了 mock 而改代码（docs/05 §3 的 notFound 策略要用）。
-  const want = req.headers['x-atest-mock-status'];
-  const wantCode = typeof want === 'string' && /^\d{3}$/.test(want) ? Number(want) : undefined;
-  const declared = hit.op.responses[String(wantCode)];
+  /*
+   * 状态码选择：用例可通过 header 指定，默认取第一个 2xx。
+   * 这让"404/400 分支的用例"不必为了 mock 而改代码（docs/05 §3 的 notFound 策略要用）。
+   *
+   * ⚠ 这个 header 是**用例作者手写的**，所以它不能只过 `/^\d{3}$/` 就当状态码用 ——
+   * `000` 完全符合那三条数字，而 `writeHead(0)` 抛 `ERR_HTTP_INVALID_STATUS_CODE`
+   * （实测），抛进 `void handle` → 无响应 → 客户端挂死。改前那条路径上，
+   * 一个 header 里的三个零会让整条用例变成一条 timeout。
+   *
+   * 写不出正常响应时**必须回一条 4xx 并说清是哪个值**，理由与 startMockServer 里那层
+   * 兜底相同：这一格的真相是"你的 header 写错了"，而它原本的报错是"网络超时"。
+   * 选 400 而不是让它红成 500：400 是"你给的东西不对"，与 no_mock_route 同一类；
+   * 500 会被读成"mock 自己坏了"，于是人去查平台而不是查那个 header。
+   */
+  const want = req.headers[MOCK_STATUS_HEADER];
+  const wantRaw = typeof want === 'string' ? want : undefined;
+  if (wantRaw !== undefined && !(/^\d{3}$/.test(wantRaw) && isFinalStatusCode(Number(wantRaw)))) {
+    sendJson(res, 400, {
+      error: 'bad_mock_status',
+      header: MOCK_STATUS_HEADER,
+      value: wantRaw,
+      allowed: '200..999 的三位数字',
+      hint: `这个 header 是"让 mock 回指定状态码"用的。"${wantRaw}" 不是可用的最终状态码：`
+        + `小于 200 或大于 999 会让 writeHead 直接抛，1xx 不抛却让客户端永远等不到响应。`
+        + '写不出正常响应时宁可回这一条 400，也不要让用例把它读成一次 timeout 或一次默认 2xx。',
+    });
+    return;
+  }
+  const wantCode = wantRaw === undefined ? undefined : Number(wantRaw);
+  const declared = wantCode === undefined ? undefined : hit.op.responses[String(wantCode)];
   const chosen = wantCode !== undefined
     ? { status: wantCode, body: declared?.schema ? sampleFromSchema(declared.schema) : null }
     : hit.responses[0]!;
@@ -256,42 +360,84 @@ async function handle(
   res.end(payload);
 }
 
+/** 统一一处 writeHead + end，免得两个分支各自的 content-length 算法漂移。 */
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+  res.end(payload);
+}
+
 function matchPath(pat: string[], actual: string[]): boolean {
   if (pat.length !== actual.length) return false;
   return pat.every((p, i) => p === '*' || p === actual[i]);
 }
 
-/** 保留重复键（`?id=1&id=2` 要能看出是两个值），并解 %XX。 */
+/**
+ * 保留重复键（`?id=1&id=2` 要能看出是两个值），并解 %XX。
+ *
+ * 这里原本是自己 `split('&')` + 逐段 `decodeURIComponent`，而 **decodeURIComponent
+ * 对不合法的转义会抛 URIError** —— 一句 `url: '/orders/A1?x=100%'`（`100%` 少两位
+ * 十六进制，手写"百分比"这种值时很容易写出来）就够。而 handle() 是被
+ * `void handle(...)` 调的，抛出去的东西**没有任何人接**：
+ * 实测结果是 `unhandledRejection: URIError`、**一个字节都不回**，
+ * 步骤挂满超时后报成 `HTTP 请求失败：timeout`（实测 30044ms）。
+ * 真相是"你的 URL 写错了一个百分号"，报出来的是"网络超时" ——
+ * 一个错到另一个错的距离是本案的全部代价：人会去查网络和后端，永远不会去查那个 `%`。
+ *
+ * 换成 `node:querystring` 而不是自己 try/catch 兜一层，有两个理由：
+ *  - 它**不抛**（实测 `parse('x=100%')` 给出 `{x:'100%'}`，把不合法的转义按字面留着），
+ *    与真实后端一致（Express 底下的 qs、以及 WHATWG 的 URLSearchParams 都不抛）；
+ *    自己兜一层只能保证不崩，兜出来的值多半仍是"半个值"，而后端给的是字面量。
+ *  - 它把 `+` 解成**空格**，这一点也与所有真实 form 解析器一致。
+ *    原来那一份把 `+` 原样留着 —— 而平台自己发的查询串里**永远不会有裸 `+`**
+ *    （`style.ts` 的 `encQ` 把它编成 `%2B`），所以裸 `+` 只可能来自手写的 url，
+ *    那正是唯一需要跟后端对齐的一格。
+ *
+ * 代价是它把重复键给成 `string | string[]`，要在上面那一层摊回数组；比原实现多一次分配，
+ * 换掉的是"崩与不崩"，值得。
+ */
 function parseQuery(q: string): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   if (!q) return out;
-  for (const pair of q.split('&')) {
-    if (!pair) continue;
-    const eq = pair.indexOf('=');
-    const k = decodeURIComponent(eq < 0 ? pair : pair.slice(0, eq));
-    const v = eq < 0 ? '' : decodeURIComponent(pair.slice(eq + 1));
-    (out[k] ??= []).push(v);
+  for (const [k, v] of Object.entries(qs.parse(q))) {
+    /*
+     * `v` 的类型里有 undefined（`ParsedUrlQuery` 允许），而 `querystring.parse`
+     * 运行时**不会**产出 undefined —— 那是类型与实现不吻合，不是这里会发生的形状。
+     * 所以是 `continue` 而不是 `v ?? ''`：后者会凭空造出一个空值参数，
+     * 于是 mock 报告"收到了一个空值的 k"，而那个 k 压根不在请求里。
+     * 少记一个键最多是断言拿不到东西，多记一个是**谎报收到了**。
+     */
+    if (v === undefined) continue;
+    /*
+     * `out[k] = ...` 看着等价，实际对 `?__proto__=x` 这个键完全不同：
+     * 直接赋值走的是 setter，它**改的是 out 的原型**而不是加一个键
+     * （实测 `Object.keys` 是空的，而 `getPrototypeOf(out)` 变成一个数组）。
+     * 后果不是崩，是**谎报**：请求里明明带了 `__proto__=x`，
+     * 而 `requests[].query` 里那个键不存在 —— 用例断"这个参数没收到"就会绿。
+     * `Object.create(null)` 也能避开，但那样 `deepEqual(seen.query, {...一个普通字面量})`
+     * 会**因为原型不同而红**，把一份好好的判据变成得写 `Object.assign({}, …)`。
+     * defineProperty 两样都避开：键照实记，原型不动（实测过这三点）。
+     */
+    Object.defineProperty(out, k, { value: Array.isArray(v) ? v : [v], enumerable: true, writable: true, configurable: true });
   }
   return out;
 }
 
-/** 把 operation 的参数按 spec 的 style 序列化成 URL（客户端与 mock 共用同一套规则，才不会两边各错一半）。 */
-export function buildUrlFor(baseUrl: string, op: OperationSpec, args: { pathParams?: Record<string, unknown>; queryParams?: Record<string, unknown> }): string {
-  const path = op.path.replace(/\{([^}/]+)\}/g, (_m, name: string) => {
-    const p = op.params.find((x) => x.name === name && x.in === 'path');
-    const v = args.pathParams?.[name];
-    return styleParam({ name, value: v, in: 'path', style: p?.style as never, explode: p?.explode }).text;
-  });
-  const qs: Array<{ name: string; value: unknown; style?: never; explode?: boolean }> = [];
-  for (const [name, value] of Object.entries(args.queryParams ?? {})) {
-    const p = op.params.find((x) => x.name === name && x.in === 'query');
-    qs.push({ name, value, style: p?.style as never, explode: p?.explode });
-  }
-  const base = baseUrl.replace(/\/$/, '');
-  if (!qs.length) return base + path;
-  const parts = qs.map((it) => {
-    const r = styleParam({ name: it.name, value: it.value, in: 'query', style: it.style, explode: it.explode });
-    return r.raw ?? r.pairs.map((p) => `${encodeURIComponent(p.key)}=${encodeURIComponent(p.value)}`).join('&');
-  });
-  return `${base}${path}?${parts.join('&')}`;
-}
+/*
+ * 这里**曾经有一个 `buildUrlFor(baseUrl, op, args)`**：把 operation 的参数组成一个完整
+ * URL。本轮把它删了，理由不是"没人用"这一句就能定的，而是它**看起来在测东西**：
+ * 它带着三条断言（路径编码、非 ASCII、查询分隔符），而 `git log -S` 追到首个提交 ——
+ * 它**从第一天起就没有生产侧调用者**。mock server 收到请求后是按路径段匹配的
+ * （见上面的 `matchPath`），它**从来不组成 URL**；生产侧的组成在 `openapi/compose.ts`，
+ * baseUrl 那一层在 `engine/interpreter.ts` 的 `resolveUrl`。
+ * 于是那三条断言断的是**一个没有生产代码会构造的字符串**：它们会红、会绿，
+ * 而真实链路上的编码没有任何一条测试看过（实测：e2e 里那条 pathParams 用的是
+ * `ORD-77`，纯 ASCII，编不编码看不出来）。
+ *
+ * 这就是 docs/08 §3(e)「有生产者、没有载体」的镜像形态 —— **有载体、没有生产者**：
+ * 判据长得整整齐齐，接的是一根没通电的线。而它比"完全没有测试"更坏，
+ * 因为下一个来查"路径编码有没有人守"的人搜到这三条就会走开。
+ *
+ * 三条断言本身是对的，已经原样搬到真实链路上
+ * （`test/engine-e2e.test.ts` 的「路径参数里的斜杠被编码后仍然路由到同一个 operation」等）。
+ */

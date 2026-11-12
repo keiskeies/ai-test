@@ -233,6 +233,39 @@ test('没有 type 的 schema 不会把 [object Object] 塞进 URL（发往一个
   assert.ok(v.length > 0 && v.length < 40, `path 参数不像个标量：${v}`);
 });
 
+test('spec 写了参数级 example 就用它（两种写法都认），非标量才退回按 schema 造', () => {
+  /*
+   * `ParamSpec.example` 由 parse.ts 的 `pickExample` 认真解出来，字段注释写着
+   * 「mock 与 happyPath 优先生成用」，而**全仓没有一处读它** —— `sampleParams`
+   * 当时只看 `p.schema`，于是那句注释在它写下的整个时间里都是假的：
+   * 作者照文档写了 `example: 'ORD-9'`，用例打出来的却是 `atest_id`。
+   * 危害不是崩，是"我在 spec 里写的这个值在平台上没有任何效果"，
+   * 而用户只能回头怀疑自己的 spec 没被认出来（docs/08 §3「schema 有字段、执行侧没人读」）。
+   *
+   * ⚠ 刻意走 generateScenarios 而不是直接调 `sampleParams`：那条判据的内容是
+   * "**生成出来的用例**用了这个值"，直接调函数就把它降级成对一个内部函数的形状断言，
+   * 而把 example 接进生成链路这件事本身才是被守的东西。
+   */
+  const one = (params: unknown[]) => {
+    const doc = parseOpenApi({
+      openapi: '3.0.0', info: { title: 'w', version: '1' },
+      paths: { '/x/{key}': { get: { operationId: 'getX', responses: { '200': { description: 'ok' } }, parameters: params as never } } },
+    });
+    const s = defineScenario(generateScenarios(doc, { strategies: ['happyPath'], envRef: 'u', docRef: 'w' }).scenarios[0]!.draft);
+    const call = s.body.find((x) => x.kind === 'openapiCall') as { pathParams?: Record<string, unknown> };
+    return String(call.pathParams!.key);
+  };
+  const base = { name: 'key', in: 'path', required: true, schema: { type: 'string' } };
+  assert.equal(one([{ ...base, example: 'ORD-9' }]), 'ORD-9', '参数级 `example: <值>` 这一种写法没被认出来');
+  // OAS3 的第二种写法。parse.ts 注释里记过它自己的同款历史缺陷（在映射本身上找 value），
+  // 所以这一格不能只测第一种 —— 那恰好是当初写错的那一半以外的另一半
+  assert.equal(one([{ ...base, examples: { first: { value: 'ORD-7' } } }]), 'ORD-7', '`examples: {名: {value}}` 这一种写法没被认出来');
+  // 参数级 example 写成对象是合法的（复杂 schema 的文档示例），但它进不了 URL
+  const obj = one([{ name: 'key', in: 'path', required: true, schema: { type: 'string' }, example: { a: 1 } }]);
+  assert.ok(!/object Object/.test(obj), `对象型 example 直接被塞进路径了：${obj}`);
+  assert.equal(obj, 'sample', '对象型 example 要**退回按 schema 造**（有可用值时别扔去用占位符）');
+});
+
 test('happyPath 的断言宽松：不断具体取值（从一份 spec 精确推断响应值就是过拟合）', () => {
   const s = valid(gen({ strategies: ['happyPath'] })).get('createOrder/happyPath')!;
   assert.doesNotMatch(JSON.stringify(s.body), /"exact"/, '生成物里出现 exact 说明在写死字面值');

@@ -30,7 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { deterministicClock, runScenario, type RunReport } from '@atest/engine';
+import { deterministicClock, runScenario, type HttpExec, type RunReport } from '@atest/engine';
 import { defineScenario, type Scenario, type StepDraft } from '@atest/ir';
 import {
   DiskArtifactStore, buildEvidencePackage, writeEvidenceMembers, writeEvidencePackage,
@@ -49,6 +49,58 @@ async function oneRun(): Promise<{ dir: string; evidenceDir: string; runDir: str
   const store = new DiskArtifactStore({ dir: join(evidenceDir, 'artifacts') });
 
   const bodyText = '{"id":7,"note":"hello from the mock"}';
+  /*
+   * http 夹具**写成 HttpExec 而不是外面那个 `as never`**（原先整个 adapters 对象被
+   * cast 掉，端口加必选方法时编译照过、运行时炸在 http 步骤上，
+   * 而本文件的失败会写着"某个证据链接 404"—— 接线错误伪装成路由缺陷）。
+   *
+   * composeUrl **真扫占位符、真算 missing / unknown**，只不做值的序列化。
+   * 本夹具的地址是 `https://api.test/orders`，**此刻**没有占位符，所以眼下
+   * 那两个 `case-stale` 分支不由本文件驱动 —— 但判据是真算的，将来有人写出带
+   * `{id}` 的夹具时它会照常把 missing 报出来（恒空数组的桩做不到这件事，
+   * 而那正是 docs/08 §3(e) 那一格：分支有消费者而供数的人一个都没有）。
+   * 序列化的载体在 `adapter-http/test/engine-e2e.test.ts`。
+   * 之所以不在这里 import engine 那份桩：**服务端不许认识 adapter-http**
+   * （lint-layers 把它列进 forbidPackages，测试目录虽然豁免，
+   * 但一个测试 import 一旦写下去，"服务端只调 CLI 的 main()"这条边界就开始漏）。
+   */
+  const http: HttpExec = {
+    async send() {
+      return { status: 200, headers: {}, body: JSON.parse(bodyText), bodyText, bytes: bodyText.length, truncated: false, durationMs: 3 };
+    },
+    async composeUrl({ urlTemplate, pathParams, queryParams }) {
+      /*
+       * 与 `engine/test/helpers.ts`、`store/test/helpers.ts` 那两份桩**同一条判据**：
+       * 路径那半段与手写的 query 段分开算，手写段里的 `{}` 一律算没填。
+       * 三份桩在这里刻意不一致于"整段一起填"的旧写法 —— 桩比生产宽松的话，
+       * 将来谁在本文件加一个 `url: '/x?tag={t}'` 的夹具，它会在这儿判过、
+       * 在真 adapter 那儿报错，而那条夹具是被用来测**证据落盘**的，
+       * 没人会怀疑是地址形状的问题。
+       */
+      const qAt = urlTemplate.indexOf('?');
+      const pathPart = qAt < 0 ? urlTemplate : urlTemplate.slice(0, qAt);
+      const inlineQuery = qAt < 0 ? '' : urlTemplate.slice(qAt + 1);
+      const given = pathParams ?? {};
+      const missing = [...pathPart.matchAll(/\{([^}/]+)\}/g)].map((m) => m[1]!)
+        .filter((k) => given[k] === undefined || given[k] === null);
+      missing.push(...new Set([...inlineQuery.matchAll(/\{([^}/]+)\}/g)].map((m) => m[1]!)));
+      // known 只扫 path 那半段（与 compose.ts 同）：pathParams 只填路径占位符
+    const known = new Set([...pathPart.matchAll(/\{([^}/]+)\}/g)].map((m) => m[1]!));
+      const filled = pathPart.replace(/\{([^}/]+)\}/g, (_m, k: string) => (given[k] === undefined ? `{${k}}` : String(given[k])));
+      const q = Object.entries(queryParams ?? {}).filter(([, v]) => v !== undefined && v !== null);
+      let path = inlineQuery ? `${filled}?${inlineQuery}` : filled;
+      if (q.length) path += `${path.includes('?') ? '&' : '?'}${q.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&')}`;
+      return { path, missing, unknown: Object.keys(given).filter((k) => !known.has(k)) };
+    },
+    /*
+     * 回声式替身。必选项，而本文件只有 `kind: 'http'` 步骤、压根不走 openapiCall，
+     * 所以它只需要**形状对**：引擎里唯一调它的地方是 openapiCall 分支，
+     * 那条路在本夹具里走不到。
+     */
+    async resolveOperation(ref) {
+      return { method: ref.method ?? 'GET', urlTemplate: ref.path ?? '/x', requiredBodyFields: [], deprecated: false };
+    },
+  };
   // 走 defineScenario（zod 解析 + 补 default）而不是手搓对象再 `as never`：
   // 手搓的那份缺了 schema 补出来的默认值，runScenario 会炸在别处，
   // 而"夹具炸在无关的地方"是这段代码最费人的失败模式。
@@ -62,14 +114,7 @@ async function oneRun(): Promise<{ dir: string; evidenceDir: string; runDir: str
   } as never);
   const report = await runScenario({
     scenario,
-    adapters: {
-      artifactStore: store,
-      http: {
-        async send() {
-          return { status: 200, headers: {}, body: JSON.parse(bodyText), bodyText, bytes: bodyText.length, truncated: false, durationMs: 3 };
-        },
-      },
-    } as never,
+    adapters: { artifactStore: store, http },
     clock: deterministicClock(42),
     env: { baseUrl: 'https://api.test' },
     // runId 由引擎算（`run_<时钟的 36 进制>`），但**目录名是调用方给的** ——

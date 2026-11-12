@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { run, scen, b, getStep, type StepDraft } from './helpers.js';
+import { run, scen, b, getStep, stubComposeUrl, type StepDraft } from './helpers.js';
 import { toJUnitXml, deterministicClock, runScenario, type AdapterRegistry, type HttpExec } from '../src/index.js';
 import { defineScenario, type Scenario, type ScenarioDraft } from '@atest/ir';
 
@@ -56,6 +56,7 @@ function memStore(): { store: AdapterRegistry['artifactStore']; saved: string[] 
 function fakeHttp(send: HttpExec['send']): HttpExec {
   return {
     send,
+    composeUrl: stubComposeUrl(),
     resolveOperation: async (ref) => ({
       method: ref.method ?? 'GET', urlTemplate: ref.path ?? '/x', requiredBodyFields: [], deprecated: false,
     }),

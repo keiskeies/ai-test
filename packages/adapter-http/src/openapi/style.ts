@@ -12,7 +12,15 @@
  */
 
 export type ParamIn = 'path' | 'query' | 'header' | 'cookie';
-export type ParamStyle = 'simple' | 'label' | 'matrix' | 'form' | 'spaceDelimited' | 'pipeDelimited' | 'deepObject';
+
+/**
+ * OAS 3 定义的全部 `style` 取值。**类型从这个数组派生**而不是各写一份：
+ * `styleParam` 的"这个 style 存在吗"判据要用它，而判据与类型若是两份东西，
+ * 加一种 style 时就会出现"类型认得、判据不认得"（新增的合法 style 被自己的守卫拦死）
+ * 或反过来（判据认得、类型不认得）。本仓那条老纪律：一份事实只写一处。
+ */
+export const PARAM_STYLES = ['simple', 'label', 'matrix', 'form', 'spaceDelimited', 'pipeDelimited', 'deepObject'] as const;
+export type ParamStyle = (typeof PARAM_STYLES)[number];
 
 /**
  * 规范规定的默认 style（按参数位置）。
@@ -79,6 +87,31 @@ export function styleParam(i: SerializeInput): Serialized {
   const explode = i.explode ?? DEFAULT_EXPLODE;
   const v = i.value;
 
+  /*
+   * **先挡住"这个 style 根本不存在"。** 下面三个 switch 各自只列自己关心的那几格，
+   * 而 `switch` 落在最后一条 case 之后就是**函数尾** —— 于是未知 style + 数组/对象值
+   * 会让本函数**返回 undefined**，而它声明的返回类型是 `Serialized`（不是
+   * `Serialized | undefined`），所以**编译器一声不响**：`ParamSpec.style` 在
+   * `parse.ts` 里是 `typeof p.style === 'string' ? p.style : undefined`，
+   * **spec 里写错的 style 一路畅通到这里**（OAS 的大小写敏感，
+   * 手写 `style: form` / `space-delimited` 都是常见笔误）。
+   * 实测形状是 `buildQuery` 里 `r.raw` 炸出 `TypeError: Cannot read properties of
+   * undefined (reading 'raw')` —— 一个和"你 spec 里 style 写错了"毫无关系的报错。
+   *
+   * 标量那一支当时**没有**这个问题：它的 `default` 会抛，但抛的那句话在撒谎
+   * （"style=foo 它只适用于数组/对象"—— 不，foo 对谁都不适用，它不是任何一种 style）。
+   *
+   * 判据写成"在名单里就窄化成 ParamStyle"而不是在每个 switch 后补 throw：
+   * 后者要在**三处**各补一条，漏一处就退回今天这个形状；而名单只有一份。
+   */
+  if (!PARAM_STYLES.includes(style as ParamStyle)) {
+    throw new StyleError(
+      `参数 "${i.name}" 的 style="${style}" 不是 OpenAPI 3 定义的任何一种序列化风格（合法值：${PARAM_STYLES.join(' / ')}，大小写敏感）。`
+      + 'spec 里这一格写错了；平台不猜一个"看起来能跑的"，因为猜出来的请求与后端期望的差多少没人知道',
+      style,
+    );
+  }
+
   if (v === null || v === undefined || typeof v !== 'object') {
     switch (style) {
       case 'simple': return txt(asText(v));
@@ -105,7 +138,19 @@ export function styleParam(i: SerializeInput): Serialized {
       case 'pipeDelimited':
         // explode=true 退化成重复键；explode=false 才是分隔符单值
         if (explode) return prs(...v.map((el) => ({ key: i.name, value: asText(el) })));
-        return { pairs: [], text: '', raw: `${i.name}=${v.map(asText).join(style === 'spaceDelimited' ? '%20' : '|')}` };
+        // ⚠ **元素必须逐个编码，只有分隔符是字面量。** 这一格原先直接把 `asText(el)`
+        // 拼起来就交出去，而它上面 `Serialized.raw` 的注释写着"已按规范编码好"——
+        // **注释写着的那个性质的代码，往往正是没有那个性质的那个**（本轮实测：
+        // `['a&b','c']` 在 pipeDelimited 下发成 `q=a&b|c`，服务端解成
+        // `{q:'a', 'b|c':''}` 两个参数 —— 一个参数劈成两个，且第二个键是垃圾。
+        // 用例照样 2xx 照样绿，因为后端多半把不认识的键丢了）。
+        // 编码用 encQ 而不是 enc：`=` 在查询串里是结构字符（规范表那几行的期望
+        // `id=3%204%205` 里也没有裸 `=`）。分隔符**在编码之后**才拼，所以它自己
+        // 不被 encQ 编掉（`|` 与空格都不在 ALLOWED 里，先拼后编会把规范形式编坏）。
+        return {
+          pairs: [], text: '',
+          raw: `${encQ(i.name)}=${v.map((el) => encQ(asText(el))).join(style === 'spaceDelimited' ? '%20' : '|')}`,
+        };
       case 'deepObject':
         throw new StyleError(`参数 "${i.name}" 是数组但用了 style=deepObject（deepObject 只适用于对象）`, style);
     }
@@ -161,13 +206,26 @@ function enc(v: string): string {
   return out;
 }
 /**
- * 编码查询串的**键或值**。比 enc 多编掉 `=`：
- * 路径片段需要字面量 `=`（`;role=admin`），但查询串的键值对里 `=` 是结构字符，
- * 值里出现字面量 `=` 虽然合法可解析（解析器按第一个 `=` 切），
- * 编掉它则在任何解析器下都无歧义 —— 平台发请求不必赌网关的解析习惯。
+ * 编码查询串的**键或值**。比 enc 多编掉两个字符：
+ *
+ *  - `=`：路径片段需要字面量 `=`（`;role=admin`），但查询串的键值对里 `=` 是结构字符，
+ *    值里出现字面量 `=` 虽然合法可解析（解析器按第一个 `=` 切），
+ *    编掉它则在任何解析器下都无歧义 —— 平台发请求不必赌网关的解析习惯。
+ *  - `+`：⚠ **这一条是本轮实测补的，而它原先就错着。** `+` 在 RFC 3986 里确实是
+ *    sub-delim、在 path 片段里该留字面量（所以它留在 ALLOWED 里），
+ *    但**查询串是 application/x-www-form-urlencoded 的地盘，那里 `+` 表示空格**。
+ *    改前 `buildQuery([{name:'q',value:'a+b'}])` 发出 `q=a+b`，
+ *    实测两个主流解析器都把它读回成 `'a b'`：
+ *      `new URLSearchParams('q=a+b').get('q')` → `'a b'`
+ *      `node:querystring.parse('q=a+b').q`      → `'a b'`
+ *    危害方向要认清：**不是"请求发不出去"，是"发出去的不是用户写的那个值"**。
+ *    一个查 `C++` / 日期 `2024+01` / 密码里带 `+` 的用例会打到另一个查询上，
+ *    而后端回 200（查不到也算一次成功响应），用例绿灯。
+ *    这正是 docs/08 §3 那一族"错的表现形式是后端把缺参数当默认值处理"。
+ *    encodeURIComponent 本来就把 `+` 编成 `%2B`，是 ALLOWED 把它又放回字面量了。
  */
 function encQ(v: string): string {
-  return enc(v).replace(/=/g, '%3D');
+  return enc(v).replace(/=/g, '%3D').replace(/\+/g, '%2B');
 }
 
 /**

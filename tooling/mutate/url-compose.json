@@ -1,0 +1,62 @@
+{
+  "_comment": "**这一组判的是『URL 组成收成一处之后，那一处真的被守着』。** 载体：`packages/adapter-http/src/openapi/compose.ts`（本轮新建，全仓唯一一份 URL 组成）与 `packages/engine/src/interpreter.ts` 里那两个 `case-stale` 分支。\n\n为什么这一组要专门立一份：本轮之前序列化有**三份**（引擎 `buildUrl` + `strMap`、`mock.ts` 里内联抄的一份、`style.ts` 里照规范实现而生产侧零调用的一份），三份的字节**实测互不相同**。收成一处之后，『只有一处』这件事本身**不是判据** —— 它只保证不会再分叉，不保证这一处是对的。而这一处的产物是**发出去的请求字节 + 两个决定报不报错的数组**，错的方向基本都是\"请求照发、多半照 200\"，也就是绿着错。所以每一格都要有会让它红的断言。\n\n⚠ `compose.ts` 是**新模块**，而新模块最容易带进一种假覆盖：行为**全都对**，却只被 e2e 间接跑到。间接跑法能钉住\"字节对不对\"，钉不住 `missing` / `unknown` 这两个**数组算得对不对** —— 少算一个名字在 e2e 上的表现是\"报错文案少一个名字\"，不是红。所以本轮补了 `packages/adapter-http/test/compose.test.ts`（直接断返回值），这一组有一半落点在那里。\n\n⚠ 顶层 `build:false` 只是**默认值**，不是结论：驱动按包名机器复核（`mustBuild` 比 `file` 与 `testFile` 的包），最后那条（改 `engine/interpreter.ts`、断在 `adapter-http` 的 e2e 上）是**真跨包**，实测每次都强制重建。我一开始把这句话写成「本组所有文件都在同一个包内」，而它对本组**任何一条**都不成立过 —— 那句假话之所以能留着，是因为驱动每次都替我重建了：代价是慢，不是错，所以没人回头看注释。\n\n⚠ 每条 `_why` 只点名**驱动报出来的那一条红**（驱动只印第一条红的标题），不写『其余各条全绿』。",
+  "build": false,
+  "cases": [
+    {
+      "label": "『手写 query + 参数表 query』接成第二个 ? 而不是 &",
+      "_why": "把三分支里『两个都有』那一格从 `?${inlineQuery}&${query.slice(1)}` 改成 `?${inlineQuery}${query}` —— 正是 compose.ts 那段注释事先点名要避免的那个形状（把四格压成一个嵌套三元时最容易接出来的就是它）。\n\n危害不是发不出去：`/a?x=1?tag=V` 里第二个 `?` 之后的整段会被后端当成**一个键**，于是 `tag` 这个参数**不存在**，而请求多半照 200。这一格在 IR 里是真会写出来的：`http` 步骤的 `url` 允许自带 query（`/a?x=1`），`request.query` 又允许写参数表，两者同时出现完全合法 —— 而改前引擎那边靠 `base.includes('?') ? '&' : '?'` 处理，收敛到 composeUrl 之后**这项能力是继承过来的，不是重新实现的**，所以它得有测试。\n\n四格里另外三格各自也有断言（都没有 / 只有参数表 / 只有手写），因为那三个 `?` 来源各不相同：只有参数表时那个 `?` 是 buildQuery 自带、只有手写时是原样保留，都不是同一句代码给的。\n\n本轮实测：驱动报的第一条红是 compose.test.ts 的「两个都有：用 & 接，且手写的在前」。",
+      "file": "packages/adapter-http/src/openapi/compose.ts",
+      "anchor": "  if (inlineQuery && query) tail = `?${inlineQuery}&${query.slice(1)}`;",
+      "replace": "  if (inlineQuery && query) tail = `?${inlineQuery}${query}`; // 变异：接成第二个 ?",
+      "test": [
+        "--disable-warning=ExperimentalWarning",
+        "--import",
+        "tsx",
+        "--test",
+        "packages/adapter-http/test/compose.test.ts",
+        "packages/adapter-http/test/engine-e2e.test.ts"
+      ],
+      "testFile": "packages/adapter-http/test/compose.test.ts"
+    },
+    {
+      "label": "不再扫手写 query 段里的占位符（本轮补的那个缺陷）",
+      "_why": "把 `missingInline` 算成空数组，等于回到改前那句隐含假设「占位符只可能出现在路径里」。\n\n**这一条是本轮真实补出来的缺陷本体**，而它改前的表现值得原样记下来：不是 error、不是 fail，是 **pass** —— `url: '/orders?tag={t}'` 真发出去的是 `/orders?tag={t}`，mock 回 200，步骤判过（实测）。手写 query 段走的是「作者写的字节原样保留」那条规则，而**那段规则从来没人问过里面有没有占位符**。docs/08 §3 说的『最贵的一种绿』就是这个形状：请求发出去了、状态码对了、结构也对，而它测的是字面量 `{t}` 的查询。\n\n为什么它躲得过 e2e：e2e 断的是 mock 收到的字节，而字节确实是 `/orders?tag={t}` —— 没有任何一条断言会因为『少扫了 query 段』而红。所以载体一半在 compose.test.ts（直接断 `missing` 这个数组），一半在 engine-e2e 新加的那两条（断「一个字节都不该发出去」）。\n\n本轮实测：驱动报的第一条红是 compose.test.ts 的「手写 query 段里的占位符也进 missing」。",
+      "file": "packages/adapter-http/src/openapi/compose.ts",
+      "anchor": "  const missingInline = [...new Set([...inlineQuery.matchAll(/\\{([^}/]+)\\}/g)].map((m) => m[1]!))];",
+      "replace": "  const missingInline: string[] = []; // 变异：手写 query 段不扫占位符",
+      "test": [
+        "--disable-warning=ExperimentalWarning",
+        "--import",
+        "tsx",
+        "--test",
+        "packages/adapter-http/test/compose.test.ts",
+        "packages/adapter-http/test/engine-e2e.test.ts"
+      ],
+      "testFile": "packages/adapter-http/test/compose.test.ts"
+    },
+    {
+      "label": "missing 不去重（重复占位符在报错里数出两个）",
+      "_why": "去掉返回值上那层 `new Set`。`fillPath` 是**按出现次数**记 missing 的，实测 `/a/{id}/b/{id}` 交回 `['id','id']`。\n\n这一格管的是**报错话对不对**，不是行为对不对 —— 请求照旧、missing 非空照旧报错。它仍然要钉，理由是这套文案是本仓反复用到的判据载体（作者照着这句话决定改哪个键）：「URL 里还有未填的参数：{id}、{id}」读起来像有两个不同的东西没填，而人会去找第二个占位符、找不到、然后怀疑平台。\n\n⚠ 刻意**不**在 `fillPath` 里改：那一边「缺在第几处」也许是将来的信息，这一边要的是「缺哪些名字」这一个集合。判据不同就各自算 —— 所以这一条变异顺带也在守「别为了这一格去动共用函数」。",
+      "file": "packages/adapter-http/src/openapi/compose.ts",
+      "anchor": "  return { path: path + tail, missing: [...new Set([...missing, ...missingInline])], unknown };",
+      "replace": "  return { path: path + tail, missing: [...missing, ...missingInline], unknown }; // 变异：不去重",
+      "testFile": "packages/adapter-http/test/compose.test.ts"
+    },
+    {
+      "label": "known 改成扫整段模板（给错位置的 pathParams 不再报 unknown）",
+      "_why": "把 `known` 那一段的扫描对象从 `pathPart` 换成 `template` —— 看着是「更全面」，实际把报错话说反。\n\n`pathParams` 只能填**路径**占位符。`pathParams: {t:'V'}` 配 `url: '/u?tag={t}'` 时那个 `t` 确实没填任何东西：只扫 pathPart 给出的是 `missing:['t'] + unknown:['t']`（实测），话是「你没填 t，而你给的 t 不在占位符里」；扫整段则 unknown 变空，只剩 missing 那句「pathParams 里没给这些」—— 而**作者明明给了**，只是给错了位置。报错话说反会让人照着错的方向改（去补一个本来就存在的键），比不报错更难查。\n\n⚠ 顺带记一句可达性：这个形状在正经 spec 下走不到（`op.path` 来自 spec 的 paths 键，OAS 里 path 不带 `?`），但 `parse.ts` **不拒**带 `?` 的 path 键（实测 `/a?x=1` 会被解析成一个 operation），而纯 `http` 步骤的 `url` 本来就允许自带 query。所以它是可达的，只是入口窄。\n\n本轮实测：驱动报的第一条红是 compose.test.ts 的「known 只扫路径那半段：给错位置的 pathParams 仍然报 unknown」。",
+      "file": "packages/adapter-http/src/openapi/compose.ts",
+      "anchor": "  for (const m of pathPart.matchAll(/\\{([^}/]+)\\}/g)) known.add(m[1]!);",
+      "replace": "  for (const m of template.matchAll(/\\{([^}/]+)\\}/g)) known.add(m[1]!); // 变异：扫整段",
+      "testFile": "packages/adapter-http/test/compose.test.ts"
+    },
+    {
+      "label": "missing 与 unknown 只报先命中的那一个（同一个笔误只说一半）",
+      "_why": "退回改前的形状：两个独立 `if`、先命中先 return（改前那份是「边替换占位符边 return」，所以 unknown 先命中、missing 那条检查**压根走不到**）。统一走 composeUrl 之后两个数组同时算出来，**报不报得全就变成引擎这一栏的判断**，于是它得有人守。\n\n为什么『只报一半』是缺陷而不是风格：`pathParams: {userID:'1'}` 对上模板 `/orders/{id}` 是**同一个笔误的两面**。只报 missing 的人会补一个 `id`（留下一个没人用的键），只报 unknown 的人会删掉 `userID`（留下一个没填的占位符），**两种改法都能让这一步不再报错，而请求照样是坏的**。所以两条一起说，两边同时出现时再点一句「多半是同一个名字写错了两边」。\n\n⚠ 这条变异刻意只动 `both` 而不动那两个 `if`：如果连 `if` 一起改回\"先命中先 return\"，红的是同一句标题而**改动面大一圈**，读日志的人更难看出被抓到的是哪一条判据。`both` 是那句\"两边同时出现\"的唯一开关，最小、最直接。\n\n本轮实测：驱动报的第一条红是 engine-e2e.test.ts 的「pathParams 写了不存在的名字 -> error，不静默忽略」（那条同时断两半句，只报一半就红）。",
+      "file": "packages/engine/src/interpreter.ts",
+      "anchor": "        if (composed.missing.length || composed.unknown.length) {\n          const both = composed.missing.length > 0 && composed.unknown.length > 0;",
+      "replace": "        if (composed.missing.length || composed.unknown.length) {\n          const both = false; // 变异：只报先命中的那一半",
+      "testFile": "packages/adapter-http/test/engine-e2e.test.ts"
+    }
+  ]
+}

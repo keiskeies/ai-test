@@ -16,11 +16,14 @@ import {
   AuthRequiredError,
   MissingCredentialError,
   TokenError,
+  composeUrl,
   scrubSecrets,
   type AppliedAuth,
   type AuthHook,
   type CredentialTable,
 } from '@atest/adapter-http';
+import { joinBaseUrl } from '@atest/engine';
+import { sampleParams } from './gen.js';
 import { secretEnvKey, type DocRegistry } from './wiring.js';
 import { EXIT } from './exit.js';
 
@@ -41,7 +44,15 @@ export interface ProbeTarget {
   docRef: string;
   operationId?: string;
   method: string;
+  /** spec 里的**原始模板**（带 `{id}`），只用于报告里那一行"探的是哪个接口" */
   path: string;
+  /**
+   * 路径占位符的样例值。`path` 保持模板原样是为了报告可读，
+   * 而**发出去**的那个地址由 `path` + 这张表组成（见 probeOne）。
+   * 分成两个字段而不是就地改掉 path：报告里写 `GET /orders/atest_id` 会让人以为
+   * spec 里那个接口就叫这个，而它其实只是造出来的样例值。
+   */
+  pathParams: Record<string, unknown>;
   /** 身份标签。(默认) 表示 env 里没配 identities 时那条路 */
   identityLabel: string;
   /** 传给鉴权层的身份名。undefined = 不指定 */
@@ -164,17 +175,28 @@ export async function checkAuth(i: AuthCheckInput): Promise<AuthCheckResult> {
 }
 
 /**
- * 选探测目标。两条规则，第二条是硬的：
+ * 选探测目标。三条规则，后两条是硬的：
  *
  *  1. 每种 (docRef, 身份) 只探有限几个 —— 目的是验凭证，不是扫接口。
  *  2. **只探只读方法**。手写的 `probe: true` 开关看着更"可控"，
  *     但 CI 里没人读文档就加开关，而 spec 里的 POST 可能是下单、删除、转账。
  *     一条诊断命令在流水线里产生业务副作用，是这一类工具最不能犯的事。
  *     没有只读接口时宁可报"未探测"，并说明原因。
+ *  3. 路径占位符**必须填上一个值**再发（见 `pathParams` 那一段）。
+ *
+ * ⚠ 入参刻意用结构类型而不是 `ParsedDoc`：这一层只该看见"选目标要用的那几个字段"。
+ * 本轮往这个结构里加了 `params`，那是判据要求的（要造样例值得看 schema），
+ * 不是顺手把整个 ParsedDoc 放进来。
  */
 function pickTargets(
   docRef: string,
-  doc: { operations: Array<{ operationId: string; method: string; path: string; security?: Array<Record<string, string[]>> }> },
+  doc: {
+    operations: Array<{
+      operationId: string; method: string; path: string;
+      security?: Array<Record<string, string[]>>;
+      params?: Array<{ name: string; in: string; schema: Record<string, unknown> }>;
+    }>;
+  },
   identities: AuthCheckInput['identities'],
   limit: number,
 ): ProbeTarget[] {
@@ -186,10 +208,28 @@ function pickTargets(
   const out: ProbeTarget[] = [];
   for (const idt of identities) {
     for (const op of pool.slice(0, limit)) {
-      // docRef 必须带上：凭证表按 (docRef, 身份) 查，漏了它就全查进匿名桶，
-      // 于是"shop 与 crm 配了不同凭证"这种最常见的多系统配置会被验成同一个
+      /*
+       * 路径占位符要在这里就填好，而不是留给 probeOne —— 因为只有这一层手里有
+       * **参数的 schema**（`probeOne` 只拿到一个 ProbeTarget）。
+       *
+       * 本轮实测到的形状：spec 里只要有 `GET /orders/{id}` 且声明了鉴权，
+       * 这条命令真发出去的就是 `GET https://api.test/orders/{id}`（花括号原样），
+       * 而后端回 404 或 400，`interpret` 把这**两个**都判成 `ok`
+       * （"过了鉴权这关"），于是报告写「凭证被接受」。
+       * 而那个请求打的是一个**根本不存在的路径**，它连那个 operation 都没进过：
+       * 一次探测的结论完全建立在"网关对任意路径都放行"这种巧合上。
+       *
+       * 取值规则**复用 gen 的那一份**（`sampleParams`）而不是这里再写一遍：
+       * 两处探的是同一批 operation，规则分叉的话"gen 出来的用例打的地址"与
+       * "auth-check 说没问题的那个地址"就不是同一个，而这条命令的全部价值
+       * 恰恰是"不跑用例也能回答鉴权对不对"。
+       */
+      const { pathParams } = sampleParams({ params: op.params ?? [] });
       out.push({
+        // docRef 必须带上：凭证表按 (docRef, 身份) 查，漏了它就全查进匿名桶，
+        // 于是"shop 与 crm 配了不同凭证"这种最常见的多系统配置会被验成同一个
         docRef, operationId: op.operationId, method: op.method, path: op.path,
+        pathParams,
         identityLabel: idt.label, identity: idt.identity,
       });
     }
@@ -205,7 +245,32 @@ function pickTargets(
  */
 async function probeOne(t: ProbeTarget, baseUrl: string, i: AuthCheckInput): Promise<ProbeRow> {
   const target = `${t.method} ${t.path}`;
-  const url = `${baseUrl}${t.path.startsWith('/') ? '' : '/'}${t.path}`;
+  /*
+   * 发出去的地址 = 模板填上样例值 + baseUrl。**走 composeUrl**，不在这里自己 replace：
+   * 本轮补的那族缺陷正是"`{}` 占位符被原样发出去"，而这条命令当时的写法是
+   * `baseUrl + t.path` —— 一个占位符都不填。复用同一份组成逻辑，
+   * 等于让"不许有占位符漏出去"这条判据只存在一处。
+   *
+   * `op` 传 undefined 是有意的，不是偷懒：这一层的样例值**只可能是标量**
+   * （`sampleParams` 只接受标量，非标量换成 `PLACEHOLDER`），
+   * 而 style/explode 只在数组与对象上才改变字节（标量在默认 simple 下就是编码本身）。
+   * 所以拿不到 operation 也不影响这里的正确性 —— 少一根需要维护的管线。
+   *
+   * ⚠ `missing` 必须查。理论上 `parse.ts` 会给模板里每个占位符补一条 `in: path`
+   * 的参数声明（那条补全实测在），于是这里永远不缺；**但那是别的模块的不变量**，
+   * 而它的失效方式恰好就是本轮在修的这个症状（字面量 `{id}` 发出去、多半回 404、
+   * 报告写「凭证被接受」）。宁可多一条 not-probed 分支，也不把"大概不会发生"
+   * 当成可以不判的理由。
+   */
+  const composed = composeUrl(t.path, undefined, { pathParams: t.pathParams });
+  if (composed.missing.length) {
+    return {
+      target, docRef: t.docRef, identity: t.identityLabel, outcome: 'not-probed',
+      detail: `这个接口的路径参数 ${composed.missing.map((m) => `"${m}"`).join('、')} 造不出样例值，本次没有发出请求。`,
+      hint: '给该参数在 spec 里补 example 或 schema.type（string / integer 就够），否则这条命令探不了这个接口',
+    };
+  }
+  const url = joinBaseUrl(baseUrl, composed.path);
   /**
    * **身份回落到默认**必须在结论里看得见。
    *

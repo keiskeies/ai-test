@@ -29,7 +29,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ScenarioSchema, StepSchema, ValueSchema, defineScenario, type ScenarioDraft } from '@atest/ir';
-import { b, run, scen, type StepDraft } from './helpers.js';
+import { b, run, scen, stubHttp, type StepDraft } from './helpers.js';
 import { lintScenario, type AdapterRegistry } from '../src/index.js';
 
 const loc = { intent: '输入框', primary: { by: 'testid', value: 'q' } } as never;
@@ -506,15 +506,20 @@ describe('值形态求值接线的完整性（防止"只修了被测到的那两
 });
 
 describe('http.request.formData：值形态求值 + 真的进请求（本轮查出的第二例同类缺陷）', () => {
-  /** 记下游的 http adapter。只记 send 的入参 —— 判据是"发出去的那份东西里有没有表单" */
+  /**
+   * 记下游的 http adapter。只记 send 的入参 —— 判据是"发出去的那份东西里有没有表单"。
+   *
+   * `satisfies AdapterRegistry['http']` 顶掉原先那个 `as unknown as`：cast 让端口
+   * 加必选方法时这里编译照过，运行时才在 http 步骤上炸成 `composeUrl is not a function`，
+   * 而本文件打印出来的失败读起来像"表单字段没进请求"（本轮就绕了这一圈）。
+   * `send` 的入参写 `unknown` 是合法的（形参更宽可调用于更窄），不必因此放弃类型检查。
+   */
   function spyHttp() {
     const sent: Record<string, unknown>[] = [];
-    const http = {
-      async send(o: unknown) {
-        sent.push(o as Record<string, unknown>);
-        return { status: 200, headers: {}, body: {}, bodyText: '{}', durationMs: 1, bytes: 2, truncated: false };
-      },
-    } as unknown as AdapterRegistry['http'];
+    const http = stubHttp(async (o) => {
+      sent.push(o as unknown as Record<string, unknown>);
+      return { status: 200, headers: {}, body: {}, bodyText: '{}', durationMs: 1, bytes: 2, truncated: false };
+    });
     return { http, sent };
   }
   const req = (over: Record<string, unknown>) => ({ method: 'POST', url: 'http://x/up', ...over });

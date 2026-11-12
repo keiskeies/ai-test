@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import type { HttpExec } from '../src/index.js';
-import { b, getStep, res, run, scen, type RunOverrides, type StepDraft } from './helpers.js';
+import { b, getStep, res, run, scen, stubComposeUrl, type RunOverrides, type StepDraft } from './helpers.js';
 
 /**
  * 直接取接口自己的参数类型，**不在测试里重抄一份字段清单**。
@@ -32,6 +32,13 @@ function fakeHttp(over: Partial<HttpExec> = {}): { http: HttpExec; sent: Sent[] 
       return { status: 200, headers: {}, body: { ok: true }, bodyText: '{"ok":true}', durationMs: 1, bytes: 11, truncated: false };
     },
     /**
+     * URL 组成走共享桩（`helpers.ts` 里那份，理由与"它刻意不序列化值"记在那儿）。
+     * 本文件测的是**鉴权意图怎么交下来**，不是序列化；但桩仍如实扫占位符，
+     * 否则 `unknown`/`missing` 那两个 error 分支会在本文件被绕开 ——
+     * 而那两个分支一绕开，"pathParams 拼错名字"这种用例就变成安静地少发参数。
+     */
+    composeUrl: stubComposeUrl(),
+    /**
      * 真实适配器的行为形状：**从 method+path 反查 operation**，查不到时生成稳定别名
      * （docs/05 §1 的别名算法）。夹具刻意保留这个"会自己算出一个值"的性质 ——
      * 写死一个固定 operationId 的话，"引擎有没有把步骤声明的 operationId 交下来"
@@ -47,10 +54,12 @@ function fakeHttp(over: Partial<HttpExec> = {}): { http: HttpExec; sent: Sent[] 
       operationId: ref.operationId ?? `alias__${(ref.method ?? 'GET').toLowerCase()}_${(ref.path ?? 'x').replace(/\W+/g, '_')}`,
       method: ref.method ?? 'GET',
       // 与真实 parse.ts 一致：**相对**模板（urlTemplate === path，baseUrl 由环境提供，
-      // parse.ts:40 的注释写明了这点）。auth.path 交的也必须是这个相对形态 ——
+      // `OperationSpec.urlTemplate` 那个字段的注释写明了这点）。
+      // auth.path 交的也必须是这个相对形态 ——
       // 适配器按 o.path === ref.path 定位 operation，交绝对 URL 会定位不到
       urlTemplate: ref.path ?? '/o',
       requiredBodyFields: [], deprecated: false,
+
     }),
     ...over,
   };
@@ -122,7 +131,8 @@ describe('useIdentity：要真的改变后续请求携带的身份', () => {
     const byId = fakeHttp();
     await runWith([oid('byId')], {}, { adapters: { http: byId.http } });
     assert.equal(byId.sent[0]?.auth?.method, 'GET', '步骤没写 method 时要用解析结果，否则适配器按 undefined 查');
-    // 真实 parse.ts 里 urlTemplate 就是 path 本身（parse.ts:287），
+    // 真实 parse.ts 里 urlTemplate 就是 path 本身（`buildOperation` 返回的那个
+    // `urlTemplate: path`，不另拼 baseUrl），
     // 而适配器按 o.path === ref.path 匹配 —— 所以这里必须断"能对上"，
     // 而不是断它等于某个具体字符串（那是把实现的巧合钉死）
     assert.equal(byId.sent[0]?.auth?.path, '/o');

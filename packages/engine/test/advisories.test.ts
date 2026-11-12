@@ -28,7 +28,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { b, scen, run, type StepDraft } from './helpers.js';
+import { b, scen, run, stubComposeUrl, type StepDraft } from './helpers.js';
 import {
   toHtmlReport, toJUnitXml, summaryText,
   collectAdvisories, advisoriesText, advisoryItems, advisoriesHidden, advisoriesProperty,
@@ -49,6 +49,10 @@ const store = { async save() { return 'a'.repeat(64); }, async load() { return u
 const httpNoValidate = (over: Record<string, unknown> = {}) => ({
   async resolveOperation() { return { operationId: 'getThing', method: 'GET', urlTemplate: '/t/{id}', requiredBodyFields: [], deprecated: true }; },
   async send() { return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; },
+  // 本文件的夹具全走 `as never`（它要的是"少实现一个方法也能跑"，好让提醒通道单独测），
+  // 所以**编译器不会**提醒我端口加了必选方法 —— 少这一行时症状是 9 条红而报错是
+  // "composeUrl is not a function"，与提醒通道毫无关系。端口改动时这里也要跟着改。
+  composeUrl: stubComposeUrl(),
   ...over,
 });
 
@@ -102,7 +106,7 @@ const CASES: Array<{ code: string; make: () => Promise<RunReport> }> = [
   },
   { code: 'DEPRECATED_OPERATION', make: () => run(scen([{ ...b('o'), kind: 'openapiCall', docRef: 'api', operationId: 'getThing', pathParams: { id: '1' } } as StepDraft]), { adapters: { http: httpNoValidate() as never, artifactStore: store }, env: { baseUrl: 'https://t' } }) },
   { code: 'VALIDATE_REQUEST_UNAVAILABLE', make: () => run(scen([{ ...b('o'), kind: 'openapiCall', docRef: 'api', operationId: 'getThing', pathParams: { id: '1' } } as StepDraft]), { adapters: { http: httpNoValidate() as never, artifactStore: store }, env: { baseUrl: 'https://t' } }) },
-  { code: 'ARTIFACT_STORE_MISSING', make: () => run(scen([{ ...b('h'), kind: 'http', request: { method: 'GET', url: 'http://x/a' } } as StepDraft]), { adapters: { http: { async send() { return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; } } as never } }) },
+  { code: 'ARTIFACT_STORE_MISSING', make: () => run(scen([{ ...b('h'), kind: 'http', request: { method: 'GET', url: 'http://x/a' } } as StepDraft]), { adapters: { http: { async send() { return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; }, composeUrl: stubComposeUrl() } as never } }) },
   {
     code: 'RESPONSE_SCHEMA_MISMATCH',
     make: () => run(scen([{ ...b('o'), kind: 'openapiCall', docRef: 'api', operationId: 'getThing', pathParams: { id: '1' } } as StepDraft]), {
@@ -209,7 +213,7 @@ describe('提醒带的四条形状判据', () => {
     const r = await run(scen([
       { ...b('v1'), kind: 'set', assign: { n: 1 } } as StepDraft,
       { ...b('fe'), kind: 'forEach', items: '$.xs', as: 'x', maxIterations: 2, steps: [{ ...b('body1'), kind: 'noop' }] } as StepDraft,
-    ]), { inputs: { xs: [1, 2, 3] }, adapters: { http: { async send() { return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; } } as never } });
+    ]), { inputs: { xs: [1, 2, 3] }, adapters: { http: { async send() { return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 }; }, composeUrl: stubComposeUrl() } as never } });
     const html = toHtmlReport(r, { suiteId: 'scn.test' });
     const junit = toJUnitXml(r, { suiteName: 'scn.test' });
     const rows = [...html.matchAll(/<tr[^>]*>.*?<code>([A-Za-z0-9_-]+)<\/code>/g)].map((m) => m[1]!);

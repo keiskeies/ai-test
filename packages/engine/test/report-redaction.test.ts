@@ -31,8 +31,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { b, scen, run, type StepDraft } from './helpers.js';
-import { toHtmlReport, toJUnitXml, toTraceJsonl, summaryText, redactSecretText, type EvidenceManifest } from '../src/index.js';
+import { b, scen, run, stubHttp, type StepDraft } from './helpers.js';
+import { toHtmlReport, toJUnitXml, toTraceJsonl, summaryText, redactSecretText, type AdapterRegistry, type EvidenceManifest } from '../src/index.js';
 
 /** 真 AWS access key 形态（值形态规则表里第二条）。不是编的形状：AKIA + 16 位大写 */
 const AKIA = 'AKIAIOSFODNN7EXAMPLE';
@@ -60,15 +60,16 @@ async function leakyRun() {
       { ...b('v'), kind: 'assert', against: '$.step.hit.body', jsonPath: { data: { exact: 'nope' }, note: { exact: 'nope' } } } as StepDraft,
     ]),
     {
+      // `satisfies AdapterRegistry` 而不是两个 `as never`：cast 掉之后，端口加必选方法
+      // 时这里编译照过、运行时才炸，而本文件的失败会写着"产物里有明文"——
+      // 一个形状问题伪装成脱敏问题（本轮 HttpExec 加 composeUrl 时正是这个现象）
       adapters: {
-        http: {
-          async send() {
-            return { status: 200, headers: {}, body: JSON.parse(body), bodyText: body, bytes: body.length, truncated: false, durationMs: 2 };
-          },
-        } as never,
+        http: stubHttp(async () => ({
+          status: 200, headers: {}, body: JSON.parse(body), bodyText: body, bytes: body.length, truncated: false, durationMs: 2,
+        })),
         // 给一个 store，免得 ARTIFACT_STORE_MISSING 那句把"这条 run 正常吗"混进来
-        artifactStore: { async save() { return 'a'.repeat(64); }, async load() { return undefined; } } as never,
-      },
+        artifactStore: { async save() { return 'a'.repeat(64); }, async load() { return undefined; } },
+      } satisfies AdapterRegistry,
     },
   );
   // 夹具自检（三条，缺一条后面那些断言就可能测在假目标上）：

@@ -107,6 +107,26 @@ describe('interpret：状态码到结论', () => {
   });
 });
 
+/**
+ * 带路径占位符的**只读**接口。上面那份 SPEC 故意把 `/orders/{id}` 写成 delete，
+ * 于是"占位符填没填"这件事在这条命令上从来没有被测到 —— 见下面那条测试的说明。
+ */
+const TEMPLATED = {
+  openapi: '3.1.0',
+  info: { title: 'shop', version: '1' },
+  components: { securitySchemes: { apiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-Api-Key' } } },
+  security: [{ apiKeyAuth: [] }],
+  paths: {
+    '/orders/{id}': {
+      get: {
+        operationId: 'getOrder',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' }, example: 'ORD-9' }],
+        responses: { '200': { description: 'ok' } },
+      },
+    },
+  },
+};
+
 describe('checkAuth：结论必须分得开，因为修法分不开', () => {
   test('凭证有效 -> ok，且请求真的带上了 spec 声明的头', async () => {
     const { reg, dir } = await registryWith(SPEC);
@@ -175,6 +195,35 @@ describe('checkAuth：结论必须分得开，因为修法分不开', () => {
       // 报错必须明确说"这不是凭证问题"，否则用户还是会去改凭证
       assert.match(r.rows[0]?.hint ?? '', /不是\*?\*?凭证|不是凭证|不是\*\*/);
       assert.match(r.rows[0]?.detail ?? '', /ECONNREFUSED/);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test('路径模板要**填上样例值**再发，报告里仍写模板（改前真发出 `{id}` 并判"凭证被接受"）', async () => {
+    /*
+     * 本轮实测到的形状：spec 里有 `GET /orders/{id}` 且声明了鉴权时，
+     * 这条命令真发出去的就是 `https://api.test/orders/{id}`（花括号原样）。
+     * 后端回 404 或 400，而 `interpret` 把这两个都判成 `ok`（"过了鉴权这关"），
+     * 于是报告写「凭证被接受」—— 可那个请求连这个 operation 都没进过。
+     * 一次探测的结论建立在"网关对任意路径都放行"这种巧合上。
+     *
+     * 上面那份 SPEC 之所以测不到这件事：它把 `/orders/{id}` 写成了 **delete**，
+     * 而探测只走 GET/HEAD。于是"占位符填没填"这条判据从来没有载体 ——
+     * 一个字段看着有测试文件（authcheck.test.ts），实际那格里没人走过。
+     */
+    const { reg, dir } = await registryWith(TEMPLATED);
+    try {
+      const fs = fakeSend({ status: 200 });
+      const auth = buildAuthLayer({
+        registry: reg, env: envWith({ default: { secret: 'secret:api' } }),
+        environmentRef: 'unit', now: () => 0, envVars: { ATEST_SECRET_API: SECRET },
+      });
+      const r = await checkAuth({ hook: auth.hook, table: auth.table, registry: reg, env: envWith({}), identities: DEFAULT_IDS, send: fs.send });
+      assert.equal(fs.calls.length, 1, '这份 spec 有一个带鉴权的 GET，本该探一次');
+      const url = fs.calls[0]!.url;
+      assert.ok(!url.includes('{') && !url.includes('}'), `地址里还有未填的占位符，那打的是一个不存在的接口：${url}`);
+      assert.equal(url, 'https://api.test/orders/ORD-9', '样例值取自 spec 的 example，与 gen 出来的用例同一个值');
+      // 报告那一行**必须还是模板**：写成 /orders/ORD-9 会让人以为 spec 里那个接口就叫这个
+      assert.equal(r.rows[0]?.target, 'GET /orders/{id}', `报告那一行该写模板，实得 ${String(r.rows[0]?.target)}`);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 

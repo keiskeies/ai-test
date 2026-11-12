@@ -520,7 +520,9 @@ export const RetrySchema = z
      *  `body.0.retry.retryOn.0 "retryOn" 的第 1 项 不是合法值。可取："network" | "timeout"`
      * —— 字段名与合法值都在了。旧实现给的是 `body.0 → Invalid input`
      *  （它把 union 的每分支 issue 整个丢了）。**这条以前写的是"得到一条列出合法值的
-     *  schema 错误"，那是错的**，被 engine/test/retry.test.ts:293 那条测试当场证伪；
+     *  schema 错误"，那是错的**，被 engine/test/retry.test.ts 里那条
+     *  「写 status5xx 直接被拒」的测试当场证伪（刻意按标题引用：这一串测试的
+     *  行号会因为无关夹具而漂移，本仓纪律是注释里不写行号）；
      *  本轮把 humanize 修好，让那句话变成真的（经过与判据见 ir/test/humanize.test.ts
      *  与 docs/14 §4.13）。）
      *

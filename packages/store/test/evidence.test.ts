@@ -20,10 +20,10 @@ import { test } from 'node:test';
 
 import {
   EVIDENCE_FILES, EVIDENCE_MEMBERS, deterministicClock, parseTraceJsonl, redactForDisk, runScenario,
-  toJUnitXml, toTraceJsonl, type RunReport,
+  toJUnitXml, toTraceJsonl, type AdapterRegistry, type RunReport,
 } from '@atest/engine';
 import type { Scenario, StepDraft } from '@atest/ir';
-import { b, scen } from './helpers.js';
+import { b, scen, stubHttp } from './helpers.js';
 import { DiskArtifactStore } from '../src/artifacts.js';
 import { buildEvidencePackage, isEvidenceMember, readRunMember, writeEvidenceMembers, writeEvidencePackage, readEvidenceMember } from '../src/evidence.js';
 import { irShaOf } from '../src/ir-hash.js';
@@ -58,14 +58,15 @@ async function failingRun(
   const scenario = scen(steps);
   const report = await runScenario({
     scenario,
+    // `satisfies AdapterRegistry` + helpers 里的 stubHttp 顶掉原先那个 `as never`：
+    // cast 让端口加必选方法时这里编译照过、运行时才炸，而本文件的失败读起来
+    // 像"证据包里少了东西"（本轮 HttpExec 加 composeUrl 就是这个现象）。
     adapters: {
       artifactStore: store,
-      http: {
-        async send() {
-          return { status: 200, headers: {}, body: JSON.parse(body), bodyText: body, bytes: body.length, truncated: false, durationMs: 3 };
-        },
-      },
-    } as never,
+      http: stubHttp(async () => ({
+        status: 200, headers: {}, body: JSON.parse(body), bodyText: body, bytes: body.length, truncated: false, durationMs: 3,
+      })),
+    } satisfies AdapterRegistry,
     clock: deterministicClock(42),
     env: { baseUrl: 'https://api.test' },
   });

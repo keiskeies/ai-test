@@ -1,0 +1,70 @@
+{
+  "_comment": "**这一组判的是『本轮修的那批 mock / URL 组成的缺陷，改回去会不会有人红』。** 载体：`packages/adapter-http/src/mock/mock.ts`、`packages/engine/src/resolve.ts` 的 `joinBaseUrl`、`packages/cli/src/authcheck.ts`、`packages/cli/src/gen.ts` 的 `sampleParams`。\n\n为什么这一组要专门立一份：本轮修掉的六件事里**没有一件**的症状是\"红\"。它们的症状分别是 **pass**（`?tag={t}` 发出字面量、mock 回 200、步骤判过）、**timeout**（一个 `%` 或一个 `000` 让用例挂满超时，报成网络问题）、以及**恒绿但什么都没发生**（`ParamSpec.example` 全仓没人读）。这三种都恰好落在\"测试墙抓不到\"的那一侧，所以每一格都得单独钉一条**会红的**断言，而不是靠\"实现看起来对了\"。\n\n⚠ 一处**故意没进这一组**的改动：`parseQuery` 里那句 `if (v === undefined) continue;`。它守的是 `node:querystring` 的**类型与实现不吻合**（`ParsedUrlQuery` 允许 undefined，运行时不产），实测打不到 —— 于是任何变异它都\"没被抓到\"。把它写成 `expect:\"equivalent\"` 是**谎报**（行为并不等价：真到了那一格，mock 会凭空多报一个空值参数），把它写成会被抓到又是假结论。所以它连这一组都不该进，理由留在 `mock.ts` 的注释里而不是伪装成一个对照组（pitfall 13 的那一族）。\n\n⚠ 第 6 条（`joinBaseUrl`）是**真跨包**：改 `engine/src`、断在 `adapter-http` 的 e2e 上，驱动每次都强制重建。第 1、2、3、4、5 条都在 `adapter-http` 包内（`mock.test.ts` 经 tsx 直读 src），不重建。\n\n⚠ 每条 `_why` 只点名**驱动报出来的那一条红**（驱动只印第一条红的标题），不写『其余各条全绿』。",
+  "build": false,
+  "cases": [
+    {
+      "label": "parseQuery 退回手写 split + decodeURIComponent（一个百分号让整套用例挂死）",
+      "_why": "回到改前那份实现：`split('&')` + 逐段 `decodeURIComponent`。锚点只能整体换成一个等价形状的 inline 版本（原实现是十几行，逐字搬进来会让这一条变成\"重贴一份代码\"而不是一个变异），关键是 `decodeURIComponent` **回来了**。\n\n危害不是\"这个 URL 解不出来\"，是**错到另一个错的距离**：`url: '/orders/A1?x=100%'`（`100%` 少两位十六进制，手写\"百分比\"这类值时很容易写出来）让 `decodeURIComponent` 抛 URIError，而 `handle` 是 `void handle(...)` 调的 —— 抛出去的东西没有任何人接。实测改前 **30044ms 挂满超时**，报成 `HTTP 请求失败：timeout`。真相是\"你的 URL 写错了一个百分号\"，报出来的是\"网络超时\"，而人会去查网络和后端，永远不会去查那个 `%`。\n\n为什么换 `node:querystring` 而不是自己 try/catch 兜一层：它**不抛**（实测 `parse('x=100%')` 给 `{x:'100%'}`，把不合法转义按字面留着），与真实后端一致（Express 底下的 qs、WHATWG 的 URLSearchParams 都不抛）。自己兜一层只保证不崩，兜出来的值多半是\"半个值\"，而后端给的是字面量 —— 那还是分叉，只是不挂死了。\n\n本轮实测：驱动报的第一条红是 mock.test.ts 的「URL 里带不合法的百分号转义：照旧拿到响应，而不是挂到超时」。",
+      "file": "packages/adapter-http/src/mock/mock.ts",
+      "anchor": "  for (const [k, v] of Object.entries(qs.parse(q))) {",
+      "replace": "  for (const [k, v] of Object.entries(Object.fromEntries(q.split('&').map((kv): [string, string] => { const eq = kv.indexOf('='); return eq < 0 ? [kv, ''] : [kv.slice(0, eq), decodeURIComponent(kv.slice(eq + 1))]; })))) { // 变异：回到改前那份会抛 URIError 的实现",
+      "testFile": "packages/adapter-http/test/mock.test.ts"
+    },
+    {
+      "label": "query 的键用直接赋值写入（`?__proto__=x` 改掉 prototype、那个键就此消失）",
+      "_why": "`out[k] = Array.isArray(v) ? v : [v]` —— 看着与 `Object.defineProperty` 完全等价，而那正是它的危险之处：**这一格是这份文件里唯一一处\"两种写法看起来一样、对某一个键不一样\"**。\n\n`?__proto__=x` 打进来时，直接赋值走的是 `__proto__` 的 **setter**：实测 `Object.keys(out)` 是空的，而 `getPrototypeOf(out)` 变成了一个数组。于是请求里明明带了这个键，而 `requests[].query` 里**那个键不存在**。用例断\"这个参数没收到\"就绿了 —— **谎报\"没收到\"比崩掉糟得多**：崩了有人会查，绿着没人查。\n\n⚠ 改前那一版其实是**第三种**坏法（`out[k].push` 抛 TypeError，又是一次挂死），所以这一条测的从来不是\"改前对不对\"，而是\"修法对不对\"。另一条同样能避开 `__proto__` 的写法是 `Object.create(null)`，而那条被实测否掉了：`deepEqual(seen.query, { q: ['a'] })` 会**因为原型不同而红**，于是全仓被迫改断言写法 —— 所以 mock.test.ts 里专门留了一条\"普通 query 仍然等于一个普通字面量\"来钉住\"别用那招\"。\n\n本轮实测：驱动报的第一条红是 mock.test.ts 的「`?__proto__=x` 要**记成一个键**，而不是改掉那个对象的 prototype」。",
+      "file": "packages/adapter-http/src/mock/mock.ts",
+      "anchor": "    Object.defineProperty(out, k, { value: Array.isArray(v) ? v : [v], enumerable: true, writable: true, configurable: true });",
+      "replace": "    out[k] = Array.isArray(v) ? v : [v]; // 变异：直接赋值",
+      "testFile": "packages/adapter-http/test/mock.test.ts"
+    },
+    {
+      "label": "isFinalStatusCode 只判整数（1xx 与 0 都放过去 → writeHead 抛或客户端永远等不到响应）",
+      "_why": "丢掉 `n >= 200 && n <= 999`，只留 `Number.isInteger`。这一条打的是**那道界本身**，不是 header 正则 —— 两道判据在同一格里 `&&` 在一起，只撤正则的话这一格照样红在别处，两条各撤各的才知道少了哪一道会怎样。\n\n三个数三种死法（逐个用 raw http client 量过，不看 fetch 的脸色）：\n - `0` → `writeHead` **直接抛** `ERR_HTTP_INVALID_STATUS_CODE` → 抛进没人接的 `void handle` → 一个字节都不回 → 客户端挂到超时；\n - `100` / `199` → `writeHead` **不抛**，而客户端**永远等不到最终响应**（实测各挂满 700ms 无响应）。1xx 是 informational，它不是\"这次请求的结果\"，所以比抛错更阴：**没有任何一层会报错，只有客户端在等**；\n - `199` 与 `101` 同理，所以整个 1xx 一起排除，而不是只排会挂的那几个。\n\n⚠ 上界 999 那一半的理由**曾经写错过**，而错法值得留：我写过\"1000 会被静默截断成 200\"。实测 `writeHead(1000)` 与 `writeHead(0)` 一样老实抛。真的让 1000 变成 200 的是**改前那句 `/^\\d{3}$/`** —— 四位数过不了它，header 被**静默忽略**、mock 回默认 2xx。症状是真的、成因记错了地方，而记错的代价是下一个读代码的人会去防 writeHead 而漏掉真正的宽判据。所以 1000 这一格由**另一条**测试单独管（「四位的 header 也拦，而不是当\"没写这个 header\"」），不在这一条的射程里。\n\n本轮实测：驱动报的第一条红是 mock.test.ts 的「header 指定不可用的状态码 000：回 400 说清哪个值，而不是让 writeHead 抛」。",
+      "file": "packages/adapter-http/src/mock/mock.ts",
+      "anchor": "  return Number.isInteger(n) && n >= 200 && n <= 999;",
+      "replace": "  return Number.isInteger(n); // 变异：丢掉 200..999 那道界",
+      "testFile": "packages/adapter-http/test/mock.test.ts"
+    },
+    {
+      "label": "unmatchedStatus 配错的构造期检查删掉（错值留到每个请求里各炸一次）",
+      "_why": "把 `startMockServer` 开头那道 `if` 恒假化（`if (false as boolean)` —— 不是把条件里的某个比较改掉，那个函数里只有这一个判据，恒假才是\"这道闸没装\"的唯一写法）。\n\n这一条钉的是**报错的时机**，不是报错的对错：`unmatchedStatus` 是**平台侧写的**（测试代码与 CLI 传的），不是用例作者临场写的。拼错一次，撤掉构造期那道闸之后，坏味道会散成\"**每一个**未匹配的请求都挂到超时\" —— 一整套测试表现为每条都 timeout，而**看不出与那个数字有任何关系**。\n\n早报错的代价是一句栈，晚失败的代价是一堆 timeout。这也是本组六条里唯一一条\"输入不是用例作者写的\"的一格，所以它的处置与其余五条不同：那五条都是\"外来数据要宽容地回一条可读的错\"，这一条是\"自己人配错了要在起服务时就拦住\"。\n\n本轮实测：驱动报的第一条红是 mock.test.ts 的「unmatchedStatus=0 -> 构造期 RangeError」。",
+      "file": "packages/adapter-http/src/mock/mock.ts",
+      "anchor": "  if (opts.unmatchedStatus !== undefined && !isFinalStatusCode(opts.unmatchedStatus)) {",
+      "replace": "  if (false as boolean) { // 变异：不在构造期拦",
+      "testFile": "packages/adapter-http/test/mock.test.ts"
+    },
+    {
+      "label": "兜底接住了异常但什么都不写（表现与\"没人接\"完全相同：一个字节都不回）",
+      "_why": "把 `.catch` 的函数体清空（只留 `void text;` 让那个变量不算未使用）。**这是本组里唯一一条\"修了而症状完全没变\"的变异** —— 接住 rejection 而不写响应，客户端那边与根本没接住**逐字节相同**：一个字节都不回、挂到超时。所以它防的是那种最像\"已经修了\"的半成品修法：加了 `.catch`、`npm test` 里再没有 unhandledRejection 的红、console 也不脏，而用户读到的一句 `timeout` 一个字都没变。\n\n⚠ **这一条的载体是本轮补出来的，而它补之前我先打错了一次。** 我原先在这段注释里写\"根因修不完 —— `node:http` 把 request line 原样给 `req.url`，任意字节都进得来\"，然后拿**九个 wire 级输入**去验它（孤立代理项 `%ED%A0%80` 分别放在值上/键上/路径上、空键、`&&&`、`%25`、`%00`、CRLF 注入、3000 键的超长 query）：**一个都抛不出来了**。唯一没走到 `handle` 的那格（超长 query 回 431）是 node 自己在 `handle` **之前**拒的，不算这层的载体。**那句注释是假的，已按实测改掉**（原地留了更正）。\n\n这层兜底今天真正守得住的入口只有一个，而且不在字节层面：**程序内构造的 ParsedDoc**。`handle` 里有两处 `JSON.stringify`，一个自引用的 `example` 就让它抛（实测 22ms 回 500 并带着 `Converting circular structure to JSON`；去掉兜底则 3000ms 读到 timeout）。所以载体那条测试写的是\"循环 example\"，**它不是在说循环 example 是正常用法**，它是这层目前唯一可达的入口 —— 而这层存在的理由是\"handle 以后还会加代码，而它抛出去的东西现在有人接\"。\n\n本轮实测：驱动报的第一条红是 mock.test.ts 的「handle 内部抛异常 -> 500 里带着成因，而不是让客户端读到 timeout」。",
+      "file": "packages/adapter-http/src/mock/mock.ts",
+      "anchor": "      try {\n        res.writeHead(500, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });\n        res.end(text);\n      } catch { /* 已经写不出去，只能让它挂 */ }",
+      "replace": "      void text; // 变异：catch 里不写任何东西",
+      "testFile": "packages/adapter-http/test/mock.test.ts"
+    },
+    {
+      "label": "joinBaseUrl 只去一个尾斜杠（两份拼接曾经在此分叉，而单斜杠测不出来）",
+      "_why": "`/\\/+$/` 换成 `/\\/$/` —— 也就是**改前 `interpreter.ts` 里 `resolveUrl` 那一份的原文**。收成一处之后我第一版只补了一条\"baseUrl 带一个尾斜杠\"的 e2e，而那条**对这个变异是绿的** —— 读数不是推的：驱动只印第一条红的标题，它印的是「baseUrl 带**两个**尾斜杠…」，而单斜杠那条在**同一个 describe 里排在它前面**，说明它当时是绿的。分叉只在两个及以上斜杠时现形，所以我回头补了第二条专门喂双斜杠。\n\n这不是洁癖问题，是**两个消费者各自都\"对\"**：一个尾斜杠时大家都一样，两个时引擎打 `http://h//orders/A1`（路径里留一个空段，多数路由下那是**另一个路径**，会 404），而 `auth-check` 打 `http://h/orders/A1`。现象因此是「auth-check 说没问题，跑起来 404」，而这两条命令看起来都没错 —— docs/08 §3 那句「每个消费者都各自正确，而它们对同一件事的假设互不相容」在这一格里是字面意义上的成立。\n\n为什么取\"去全部\"那一侧而不是\"去一个\"：多个尾斜杠本身不是任何合法语义（没有一个后端把 `//orders` 与 `/orders` 当两回事，而我们也不打算支持），而\"少去一个\"会**静默改变路径**，\"多去一个\"最多是把一个本来就该报错的写法悄悄接受 —— 前者错得更难查。这个取舍写在 `joinBaseUrl` 的函数头上。\n\n⚠ 双斜杠还有另一层风险：`//orders/A1` 交给 fetch 是**协议相对 URL**，会打到 `orders` 这个**域名**上（或直接 Invalid URL），而用例里写的明明是自己配好的 baseUrl。\n\n⚠ **验这句话的过程本身踩了一次坑，值得留**：我先用 `npx tsx --test` 手动跑了一遍就当作读数 —— **那是无效的**。`@atest/engine` 经 `node_modules` 软链解析到 `dist/index.js`，没先 `npm run build` 就跑，测的是**改前的产物**，绿不绿都与源改动无关。驱动替我做这件事时是靠 `mustBuild()` 强制重建的；**手动验跨包变异就得自己重建**。（上面那个\"单斜杠是绿的\"的读数取自**驱动那一轮**，不是取自我那次无效的手动跑。）\n\n本轮实测：驱动报的第一条红是 engine-e2e.test.ts 的「baseUrl 带**两个**尾斜杠时也只去掉多余的那些（两个消费者曾经不一致）」。这条是**真跨包**（改 `engine/src`、断在 `adapter-http`），驱动每次都强制重建。",
+      "file": "packages/engine/src/resolve.ts",
+      "anchor": "  const head = base.replace(/\\/+$/, '');",
+      "replace": "  const head = base.replace(/\\/$/, ''); // 变异：只去一个（= 改前 resolveUrl 那一份）",
+      "testFile": "packages/adapter-http/test/engine-e2e.test.ts"
+    },
+    {
+      "label": "auth-check 不组成 URL、直接把模板拼上去（真发出字面量 `{id}` 并判\"凭证被接受\"）",
+      "_why": "把 `composeUrl(...)` 换成 `{ path: t.path, missing: [] }` —— 即改前那句 `baseUrl + t.path` 的等价形状（当时一个占位符都不填）。`missing` 一起给空数组是必须的：只撤组成而留着 `missing` 那套判据，`pathParams` 就成了没人消费的入参，而 `missing` 恒空正是**改前的真实状态**（那时压根没有这道判据）。\n\n**这一条是本轮真实补出来的缺陷本体，而它改前的表现是 pass。** spec 里只要有 `GET /orders/{id}` 且声明了鉴权，这条命令真发出去的就是 `GET https://api.test/orders/{id}`（花括号原样）。后端回 404 或 400，而 `interpret` 把这两个**都**判成 `ok`（\"过了鉴权这关\"）—— 于是报告写「凭证被接受」。而那个请求打的是一个**根本不存在的路径**，它连那个 operation 都没进过：一次探测的结论完全建立在\"网关对任意路径都放行\"这种巧合上。\n\n⚠ **补这条时我先撞上一个\"看起来有测试\"的假象**：`authcheck.test.ts` 本来就有 `/orders/{id}`，我一度以为这一格有载体。它没有 —— 那份 fixture 把它写成了 **delete**，而探测只走 GET/HEAD，所以\"占位符填没填\"从来没有一条断言走到过。这是 docs/08 §3 那一族里很省事的一种假覆盖：**测试文件的名字对上了，判据那格里压根没人走过**。\n\n取值规则**复用 gen 的那一份**（`sampleParams`）而不是这里再写一遍：两处探的是同一批 operation，规则一旦分叉，\"gen 出来的用例打的地址\"与\"auth-check 说没问题的那个地址\"就不是同一个，而这条命令的全部价值恰恰是\"不跑用例也能回答鉴权对不对\"。\n\n本轮实测：驱动报的第一条红是 authcheck.test.ts 的「路径模板要**填上样例值**再发，报告里仍写模板（改前真发出 `{id}` 并判\"凭证被接受\"）」。",
+      "file": "packages/cli/src/authcheck.ts",
+      "anchor": "  const composed = composeUrl(t.path, undefined, { pathParams: t.pathParams });",
+      "replace": "  const composed = { path: t.path, missing: [] as string[] }; // 变异：模板原样发",
+      "testFile": "packages/cli/test/authcheck.test.ts"
+    },
+    {
+      "label": "sampleParams 不读参数级 example（一个字段有生产者、没有消费者）",
+      "_why": "`const v = isScalar(p.example) ? p.example : fromSchema;` 退回成 `const v = fromSchema;` —— 只看 `p.schema`，也就是改前的原文。\n\n**这一条是这一组里唯一一条\"什么都没坏、只是那句话从来没生效\"的。** `ParamSpec.example` 由 `parse.ts` 的 `pickExample` 认真解出来（OAS3 两种写法都支持：`example: <值>` 与 `examples: {名: {value: <值>}}`），字段注释写着「**mock 与 happyPath 优先生成用**」。而**全仓没有任何一处读它**。于是 spec 作者照文档写了 `example: 'ORD-9'`，用例与 `auth-check` 打出去的却是 `atest_id` / `sample`（`sampleFromSchema` 对 `type: string` 的默认产物）—— 那句注释在它写下的整个时间里都是假的。\n\n危害不是崩、不是红：是**\"我明明在 spec 里写了这个值\"这件事在平台上没有任何效果**，而用户只能回头怀疑自己的 spec 没被认出来。docs/08 §3(a)「schema 有字段、执行侧没人读」的**参数级**版本，而且这一例连\"字段\"都不是 zod schema 字段，是一个 interface 字段 —— 所以 `unread-fields.mjs` 与 `dead-iface-fields.mjs` **两道守卫都没报过它**：前者只扫 `packages/ir` 的 zod，后者的判据是\"在整仓代码里除自己声明外出现 0 次\"，而 `example` 这个**名字**在 adapter-http 里到处出现（响应 examples、`pickExample`），词法层面根本判不死。所以这一格**只能靠这一条变异**。\n\n⚠ 载体刻意走 `generateScenarios` 而不是直接调 `sampleParams`：判据的内容是\"**生成出来的用例**用了这个值\"。直接调函数就把它降级成对一个内部函数的形状断言，而\"把 example 接进生成链路\"这件事本身才是被守的东西（同一个理由见第 7 条为什么断在 `checkAuth` 的出口而不是 `composeUrl` 的返回值）。\n\n本轮实测：驱动报的第一条红是 gen.test.ts 的「spec 写了参数级 example 就用它（两种写法都认），非标量才退回按 schema 造」。",
+      "file": "packages/cli/src/gen.ts",
+      "anchor": "    const v = isScalar(p.example) ? p.example : fromSchema;",
+      "replace": "    const v = fromSchema; // 变异：只看 schema",
+      "testFile": "packages/cli/test/gen.test.ts"
+    }
+  ]
+}

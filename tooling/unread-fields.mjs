@@ -45,44 +45,94 @@ const BASELINE_REL = 'tooling/unread-baseline.json';
 /* ------------------------------------------------------------------ 掩码 */
 
 /**
- * 把注释与字符串/模板/正则**内容**换成空格，长度与换行数完全不变。
+ * 两份掩码**共用**的那一个扫描器：走一遍源码，认出注释 / 单双引号字符串 /
+ * 模板串（含任意层 `${…}` 嵌套）/ 正则字面量，每认出一段就交给 `onBlank`。
+ * `keepStrings` 为真时只交注释（字符串与模板仍然要**走过去**，否则
+ * `url.includes('http://x')` 里那个 `//` 会被当注释起点）。
  *
- * 为什么要先掩码再找 `{`：`z.object` 在 ir/src 的**注释里**也出现
- * （locator.ts 的 JSDoc、以及任何一句解释 schema 的注释）。直接对 z.object 计数或
- * 对原文做括号配对，会因为注释里多出来的一对花括号把整个对象的边界配错 ——
- * 配错的后果不是报错，是**静默少抽几个字段**，也就是"这个字段其实没人读但没报出来"。
+ * ## 为什么两份要共用一份（以及这份以前错在哪）
  *
- * 保留长度与换行，是为了让掩码后的下标能直接用在原文上（切片取键名、算行号）。
+ * 以前两份各抄了一遍模板串扫描，而抄的那一份**只认一层 `${…}`**：
+ * 它用一个 `depth` 计数器数花括号，遇到 `${` 加一、`}` 减一，遇到反引号且
+ * `depth === 0` 就认为模板结束 —— 于是 `${…}` 里面那个**内层模板**的收尾反引号
+ * 被当成外层模板的收尾（`` xs.map((x) => `{${x}}`).join('、') `` 是最小形态，
+ * 实测 `tooling/mutate/mask-template-nesting.json`）。外层"提前结束"之后，扫描器
+ * 从字符串**中间**恢复扫描，接着把后面真正的代码一路当成非代码抹掉。
+ *
+ * 抹掉活代码比漏抹严重得多，因为两个守卫都拿"命中数为 0"当结论：
+ * 真仓库里 `interpreter.ts` 从第 1658 行那个嵌套模板开始失步，一路抹到 2243 行
+ * 那句**活着的** `evaluateAssertions(...)`，于是 `dead-exports` 把这个仍在生产侧
+ * 被调用的导出报成"三处零引用"（CI 红线），而 `unread-fields` 把仍在读的字段
+ * 算成没被读。**守卫漏报比没有守卫更坏**（docs/08 §3）在这里反过来同样成立：
+ * 守卫误报一次，人就去放宽判据，而放宽之后真正的缺陷再也没有眼睛看。
+ *
+ * ## 为什么必须是一个栈
+ *
+ * 要正确走出 `` `a${ {k: `b`} }c` `` 这种串，"数花括号"不够：`${…}` 里的代码
+ * 本身还能含字符串、注释、正则和**更深的模板**（内层模板里又有一个 `${`）。
+ * 每一层字面量都是独立的一段状态，所以用栈：
+ *  - `tmpl` —— 在模板串的字面文本里（还没进 `${`）；
+ *  - `interp` + `depth` —— 在某个 `${…}` 的代码里，`depth` 是这层里额外开了几层花括号
+ *    （`{ id: 1 }` 这种对象字面量、以及嵌套的 `${}` 都会加它）。
+ * 深度就是源码里模板嵌套的真实层数（全仓最深 2 层），不会真用到几百层。
  */
-export function maskNonCode(src) {
+function walkMask(src, keepStrings, onBlank) {
   const n = src.length;
-  // 从**原文**出发，只把非代码区间抹成空格。
-  // （这里曾经写成"全部初始化为空格"：结果整份文件被抹平，扫出 0 个字段，
-  //  然后输出一句"全部有豁免"就 exit 0 —— 扫描器抽不到任何东西时不会报错，它只会报告干净。）
-  const out = src.split('');
-  /** 上一个"有意义"的字符，用来判 `/` 是正则还是除号 */
+  /** 上一个"有意义"的代码字符，用来判 `/` 是正则还是除号 */
   let prev = '';
   const regexOkHere = () => prev === '' || '(=,:[!&|?{};+-*%~^<>'.includes(prev);
-
-  const blank = (from, to) => {
-    for (let i = Math.max(from, 0); i < Math.min(to, n); i++) if (src[i] !== '\n') out[i] = ' ';
-  };
+  const stack = [];
 
   let i = 0;
   while (i < n) {
+    const frame = stack[stack.length - 1];
+
+    // ---- 模板串的字面文本：只认 `\` / 反引号 / `${`，别的一律原样走过去 ----
+    if (frame && frame.kind === 'tmpl') {
+      const c = src[i];
+      if (c === '\\') { i += 2; continue; }
+      if (c === '`') {
+        stack.pop();
+        // 整段（含 `${…}` 里的代码）一起交出去：maskNonCode 本来就把模板整段洗掉
+        // —— ir/src 的 schema 体里没有模板串，而消费者里 `${}` 出现标识符是常事，
+        // 宁可少认一个命中（见文件头第 2 条）。内层模板被外层这段包住，不必单独交。
+        if (!keepStrings && stack.length === 0) onBlank(frame.start, i + 1);
+        prev = '`';
+        i++;
+        continue;
+      }
+      if (c === '$' && src[i + 1] === '{') {
+        stack.push({ kind: 'interp', depth: 0 });
+        // `${` 之后允许正则（`(=,:[!&|?{};…` 里那个 `{` 本来就在集合里，这里显式写上）
+        prev = '{';
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    // ---- 代码态：顶层，或某个 `${…}` 里面 ----
     const c = src[i];
     const c2 = src[i + 1];
+    // 与本层 `${` 配平的那个 `}`：交回上一层（模板的字面文本）
+    if (frame && c === '}' && frame.depth === 0) {
+      stack.pop();
+      prev = '}';
+      i++;
+      continue;
+    }
     if (c === '/' && c2 === '/') {
       let j = src.indexOf('\n', i);
       if (j < 0) j = n;
-      blank(i, j);
+      onBlank(i, j);
       i = j;
       continue;
     }
     if (c === '/' && c2 === '*') {
       let j = src.indexOf('*/', i + 2);
       j = j < 0 ? n : j + 2;
-      blank(i, j);
+      onBlank(i, j);
       i = j;
       continue;
     }
@@ -93,26 +143,15 @@ export function maskNonCode(src) {
         if (src[j] === c) { j++; break; }
         j++;
       }
-      blank(i, Math.min(j, n));
+      if (!keepStrings) onBlank(i, Math.min(j, n));
       prev = c;
       i = j;
       continue;
     }
     if (c === '`') {
-      // 模板串整段洗掉（含 ${…}）。ir/src 的 schema 体里没有模板串，
-      // 而消费者里模板串中的 ${} 出现标识符是常事 —— 宁可少认一个命中（见文件头第 2 条）。
-      let j = i + 1;
-      let depth = 0;
-      while (j < n) {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === '`' && depth === 0) { j++; break; }
-        if (src[j] === '$' && src[j + 1] === '{') { depth++; j += 2; continue; }
-        if (src[j] === '}' && depth > 0) { depth--; j++; continue; }
-        j++;
-      }
-      blank(i, Math.min(j, n));
+      stack.push({ kind: 'tmpl', start: i });
       prev = '`';
-      i = j;
+      i++;
       continue;
     }
     if (c === '/' && regexOkHere()) {
@@ -126,15 +165,50 @@ export function maskNonCode(src) {
         j++;
       }
       if (closed > 0) {
-        blank(i, closed + 1);
+        if (!keepStrings) onBlank(i, closed + 1);
         i = closed + 1;
         prev = '/';
         continue;
       }
     }
+    // 花括号配对只在代码态数（字符串/注释/正则里的那些已经在上面整段走过去了）
+    if (frame && (c === '{' || c === '}')) frame.depth += c === '{' ? 1 : -1;
     if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') prev = c;
     i++;
   }
+
+  /*
+   * 文末仍在栈上的模板（源码里那个反引号本来就落单，或者整份文件是截断的片段）：
+   * maskNonCode 仍然要把这一段抹到文末 —— 改前那份是 `blank(i, min(j, n))`，
+   * 不补这一笔的话"未闭合模板"从"整段抹掉"变成"整段留着"，
+   * 于是脏文件里凭空多出一批假命中（假阳方向，会红，但红得没有意义）。
+   * 这里**不抛**：语法脏的文件也要给得出结论，门禁的失败该是"报了某条"，
+   * 不是扫描器自己崩掉之后什么都不报。
+   */
+  if (!keepStrings) {
+    for (const f of stack) if (f.kind === 'tmpl') onBlank(f.start, n);
+  }
+}
+
+/**
+ * 把注释与字符串/模板/正则**内容**换成空格，长度与换行数完全不变。
+ *
+ * 为什么要先掩码再找 `{`：`z.object` 在 ir/src 的**注释里**也出现
+ * （locator.ts 的 JSDoc、以及任何一句解释 schema 的注释）。直接对 z.object 计数或
+ * 对原文做括号配对，会因为注释里多出来的一对花括号把整个对象的边界配错 ——
+ * 配错的后果不是报错，是**静默少抽几个字段**，也就是"这个字段其实没人读但没报出来"。
+ *
+ * 保留长度与换行，是为了让掩码后的下标能直接用在原文上（切片取键名、算行号）。
+ */
+export function maskNonCode(src) {
+  // 从**原文**出发，只把非代码区间抹成空格。
+  // （这里曾经写成"全部初始化为空格"：结果整份文件被抹平，扫出 0 个字段，
+  //  然后输出一句"全部有豁免"就 exit 0 —— 扫描器抽不到任何东西时不会报错，它只会报告干净。）
+  const n = src.length;
+  const out = src.split('');
+  walkMask(src, false, (from, to) => {
+    for (let i = Math.max(from, 0); i < Math.min(to, n); i++) if (src[i] !== '\n') out[i] = ' ';
+  });
   return out.join('');
 }
 
@@ -342,70 +416,9 @@ const STRONG_ROLES = new Set(['member', 'binding']);
 export function maskCommentsOnly(src) {
   const n = src.length;
   const out = src.split('');
-  let prev = '';
-  const regexOkHere = () => prev === '' || '(=,:[!&|?{};+-*%~^<>'.includes(prev);
-  const blank = (from, to) => {
+  walkMask(src, true, (from, to) => {
     for (let i = Math.max(from, 0); i < Math.min(to, n); i++) if (src[i] !== '\n') out[i] = ' ';
-  };
-  let i = 0;
-  while (i < n) {
-    const c = src[i];
-    const c2 = src[i + 1];
-    if (c === '/' && c2 === '/') {
-      let j = src.indexOf('\n', i);
-      if (j < 0) j = n;
-      blank(i, j);
-      i = j;
-      continue;
-    }
-    if (c === '/' && c2 === '*') {
-      let j = src.indexOf('*/', i + 2);
-      j = j < 0 ? n : j + 2;
-      blank(i, j);
-      i = j;
-      continue;
-    }
-    // 字符串/模板/正则：整段**跳过**（不抹），但要走过去，
-    // 否则字符串里出现的 `//` 或 `/*` 会被当注释起点（`url.includes('http://x')` 就是这种）
-    if (c === '"' || c === "'") {
-      let j = i + 1;
-      while (j < n) {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === c) { j++; break; }
-        j++;
-      }
-      prev = c;
-      i = j;
-      continue;
-    }
-    if (c === '`') {
-      let j = i + 1;
-      let depth = 0;
-      while (j < n) {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === '`' && depth === 0) { j++; break; }
-        if (src[j] === '$' && src[j + 1] === '{') { depth++; j += 2; continue; }
-        if (src[j] === '}' && depth > 0) { depth--; j++; continue; }
-        j++;
-      }
-      prev = '`';
-      i = j;
-      continue;
-    }
-    if (c === '/' && regexOkHere()) {
-      let j = i + 1;
-      let closed = -1;
-      while (j < n && src[j] !== '\n') {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === '[') { j++; while (j < n && src[j] !== ']' && src[j] !== '\n') { if (src[j] === '\\') j++; j++; } continue; }
-        if (src[j] === '/') { closed = j; break; }
-        j++;
-      }
-      if (closed > 0) { i = closed + 1; prev = '/'; continue; }
-    }
-    if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') prev = c;
-    i++;
-  }
+  });
   return out.join('');
 }
 

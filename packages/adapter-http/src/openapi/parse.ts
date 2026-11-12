@@ -26,7 +26,23 @@ export interface ParamSpec {
   schema: Record<string, unknown>;
   style?: string;
   explode?: boolean;
-  /** 参数级 examples（mock 与 happyPath 优先生成用） */
+  /**
+   * 参数级 example（OAS3 两种写法都由 `pickExample` 解出来：`example: <值>` 与
+   * `examples: {名: {value: <值>}}`）。
+   *
+   * ⚠ 这句注释**从前写的是「mock 与 happyPath 优先生成用」，而那两个读者一个都没有**：
+   * mock 只读**响应级**的 `examples[状态码]` 与 **schema 级**的 `example`
+   * （见 `mock.ts` 的 `pickResponseBody` / `sampleFromSchema`），参数级这一栏它从不看；
+   * `gen` 那侧当时也只看 `p.schema`。于是这个字段有生产者、没消费者已经挂了很久，
+   * 而两道字段级守卫都看不见它 —— `unread-fields.mjs` 只扫 `packages/ir/src` 的 zod，
+   * `dead-iface-fields.mjs` 的判据是"除声明外零提及"，而 `example` 这个**名字**
+   * 在 adapter-http 源码里出现几十次，词法层面判不死（实测两个守卫都干净退出）。
+   *
+   * 现在的消费者是 `cli/src/gen.ts` 的 `sampleParams`（**优先于**按 schema 造，
+   * 标量才用），`auth-check` 与 `gen` 共用它，所以"用例打的地址"与
+   * "auth-check 探的地址"是同一个。载体：`cli/test/gen.test.ts` 那一条 +
+   * 变异集 `tooling/mutate/mock-bad-input.json` 最后一条。
+   */
   example?: unknown;
   deprecated?: boolean;
 }

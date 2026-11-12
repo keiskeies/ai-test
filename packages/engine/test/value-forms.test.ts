@@ -21,8 +21,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { isValueForm, GEN_KINDS } from '@atest/ir';
-import { resolveValue, generate, GenKindError, VarError, deterministicClock, VarSpace, type ValueScope } from '../src/index.js';
-import { b, run, scen, type StepDraft } from './helpers.js';
+import { resolveValue, generate, GenKindError, VarError, deterministicClock, VarSpace, type AdapterRegistry, type ValueScope } from '../src/index.js';
+import { b, run, scen, stubHttp, type StepDraft } from './helpers.js';
 
 const scope = (): ValueScope => ({ vars: new VarSpace({}), clock: deterministicClock(42) });
 
@@ -186,36 +186,38 @@ describe('两种执行形态同语义（功能回归 ⇄ 预编译压测）', ()
 });
 
 describe('回归护栏：请求体等其它 resolveValue 消费点同判据', () => {
+  /*
+   * 记下游 body 的 http 夹具，两条测试共用（先前是两处各抄一份 + `as never`）。
+   * `satisfies AdapterRegistry` 顶掉那个 cast：cast 之后端口加必选方法编译照过，
+   * 运行时炸在 `composeUrl is not a function`，而这两条测试打印出来的失败是
+   * "请求体被形态判据吞掉"—— 形状问题伪装成求值问题。
+   */
+  function bodySpy(): { adapters: AdapterRegistry; sent: () => unknown } {
+    let sent: unknown = '从没发过';
+    const adapters = {
+      // send 的形参写 unknown 是合法的（形参更宽可调用于更窄），所以不必为此放弃类型检查
+      http: stubHttp(async (req) => {
+        sent = req.body;
+        return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 };
+      }),
+    } satisfies AdapterRegistry;
+    return { adapters, sent: () => sent };
+  }
+
   test('请求体里的业务对象原样发出，业务字段不被形态判据吞掉', async () => {
     // resolveValue 是**所有**值位置的唯一求值入口（headers/query/body/rows/sql vars/args），
     // 所以判据改动的影响面远不止 set 步骤。这里挑最典型的那一处验一遍：
     // 业务请求体里恰好有个键叫 gen 的对象，必须原样出现在发出去的 body 里。
-    let sent: unknown;
-    const adapters = {
-      http: {
-        async send(req: { body: unknown }) {
-          sent = req.body;
-          return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 };
-        },
-      },
-    } as never;
+    const { adapters, sent } = bodySpy();
     const r = await run(
       scen([{ ...b('h'), kind: 'http', request: { method: 'POST', url: 'http://x/a', body: { payload: { gen: 'widget', size: 'L' } } } }]),
       { adapters },
     );
     assert.equal(r.results.find((x) => x.stepId === 'h')!.status, 'pass');
-    assert.deepEqual(sent, { payload: { gen: 'widget', size: 'L' } });
+    assert.deepEqual(sent(), { payload: { gen: 'widget', size: 'L' } });
   });
   test('请求体里真写错种类时也是 error，不会把 undefined 发出去', async () => {
-    let sent: unknown = '从没发过';
-    const adapters = {
-      http: {
-        async send(req: { body: unknown }) {
-          sent = req.body;
-          return { status: 200, headers: {}, body: {}, bodyText: '{}', bytes: 2, truncated: false, durationMs: 1 };
-        },
-      },
-    } as never;
+    const { adapters, sent } = bodySpy();
     const r = await run(
       scen([{ ...b('h'), kind: 'http', request: { method: 'POST', url: 'http://x/a', body: { token: { gen: 'uuidd' } } } }]),
       { adapters },
@@ -223,6 +225,6 @@ describe('回归护栏：请求体等其它 resolveValue 消费点同判据', ()
     assert.equal(r.results.find((x) => x.stepId === 'h')!.status, 'error');
     // 这条是"发出去之前就该停住"的护栏：改动前它会带着一个 undefined 字段真发出去，
     // 被测系统收到什么完全 unpredictable，而平台上看到的是 pass
-    assert.equal(sent, '从没发过', '求值失败的请求不该发出');
+    assert.equal(sent(), '从没发过', '求值失败的请求不该发出');
   });
 });

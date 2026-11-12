@@ -148,6 +148,58 @@ export interface HttpExec {
     method: string; urlTemplate: string; requiredBodyFields: string[]; deprecated: boolean; strategyHint?: string;
   }>;
   /**
+   * **把参数表组成 URL。引擎不做这件事，本方法是唯一的一条路。**
+   *
+   * ## 为什么这条必须在 adapter 层（而不是引擎里一个 `buildUrl`）
+   *
+   * 一个参数怎么序列化**由 spec 决定**：`style` / `explode` 来自 operation 的参数表，
+   * 数组在 `pipeDelimited` 下是 `?q=a|b`、在默认的 `form + explode=true` 下是
+   * `?q=a&q=b`。而"spec 内容不许进引擎"是本文件 `auth` 那一段写明的边界
+   * （`ref`/`docRef` 只传引用不传解析结果，理由原话是"spec 内容进引擎等于把网关语义
+   * 带进引擎"）—— 分层守卫也把 adapter-http 列为"别人不许依赖"，所以引擎**没法**
+   * 自己查那张表，也不该查。
+   *
+   * ## 改动前是什么（三份序列化，实测互相分叉）
+   *
+   * 引擎自己 `urlTemplate.replace('{k}', encodeURIComponent(v))` + 一个
+   * `URLSearchParams` 版的 `buildUrl`；mock 那侧把规范实现的两个结果**内联手抄**一份
+   * （而抄的那份连路径编码都漏了）；真正照 OAS 表实现的那份**生产侧零调用**。
+   * 后果不是编译不过、不是请求失败，是**发出去的值不是用例里写的那个值而用例照绿**：
+   * IR 里 `queryParams: {q: ['a','b']}`（`ValueSchema` 明明白白允许数组）
+   * 实测发出 `?q=%5B%22a%22%2C%22b%22%5D` —— 一个 JSON 文本冒充两个值，
+   * 后端多半把它当一个不认识的键丢掉，回 200，用例绿。
+   * 载体：`adapter-http/test/engine-e2e.test.ts` 那两条数组查询参数的断言
+   * （**改前是红的**，改前那条同名测试喂的是字符串 `'a|b'`，两种实现算出同一个值，
+   * 于是它绿着 —— docs/08 §3 记过的"fixture 让两种不同实现算出同一个值"）。
+   *
+   * ## 为什么是**必选**而不是像 `validateRequest` 那样可选
+   *
+   * `validateRequest` 可选是对的：不实现时**这一步少做一项检查**，
+   * 引擎能靠 emit 一条 `VALIDATE_REQUEST_UNAVAILABLE` 把缺口说给 CI 听。
+   * 这里不实现的话**没有 URL 可发**，请求压根出不了门，"报个事件然后继续"
+   * 无意义。必选另有一条硬收益：端口加必选方法时**编译器把每个实现者都列出来**，
+   * 于是"加了能力而某个 adapter 安静地没有它"这一族（本仓在 `PerformResult`、
+   * `formData` 那两处都记过）从根上不可能发生。代价是七份测试夹具各补一行，
+   * 而那些夹具的 `resolveOperation` 注释里本来写着"它是必选项，所以老实返回形状正确的空解析结果" ——
+   * 同一条理由在这里成立。
+   *
+   * 返回值里 `missing`（模板要而参数表没给）与 `unknown`（参数表给了而模板没这个占位符）
+   * **由引擎决定怎么报**：那是"用例写坏了"（case-stale），而本层不认识步骤。
+   */
+  composeUrl(req: {
+    /** 已解析出的路径模板（`resolveOperation` 给的那个，含 `{id}` 占位符） */
+    urlTemplate: string;
+    /** 用来查 style/explode 的 operation 定位；纯 `http` 步骤没有它，此时按规范默认值序列化 */
+    opRef?: { docRef: string; operationId?: string; method?: string; path?: string };
+    /**
+     * **已求值的原始值**，不是 `Record<string,string>`。
+     * 传字符串会强迫引擎先把数组压成一个值 —— 而"压成什么形状"正是引擎不该知道的事
+     * （`strMap` 那套 JSON.stringify 是为 SQL 的 JSON 列设计的，不是为 URL）。
+     */
+    pathParams?: Record<string, unknown>;
+    queryParams?: Record<string, unknown>;
+  }): Promise<{ path: string; missing: string[]; unknown: string[] }>;
+  /**
    * 请求侧 schema 校验（IR 的 `validateRequest`，M2 的"双向校验"里的请求向）。
    *
    * 为什么在**发出去之前**校验：请求体不符合 spec 时后端的行为是不可预期的 ——

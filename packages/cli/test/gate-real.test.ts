@@ -15,7 +15,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { defineScenario, type Scenario, type ScenarioDraft, type StepDraft } from '@atest/ir';
-import { deterministicClock, runScenario, TransportError } from '@atest/engine';
+import { deterministicClock, runScenario, TransportError, type AdapterRegistry } from '@atest/engine';
+/*
+ * 真的 http 端口，不是桩。本包依赖 `@atest/adapter-http`（e2e / authcheck / gen 三个
+ * 测试文件早就直接 import 它），所以这里用得上真实现 —— 而"用真的"永远比"再抄一份桩"好：
+ * 桩会漂，真的那份漂了本文件当场红。
+ * 本文件的 http 步骤地址是 `http://x/a` 这种完整形态、没有占位符，所以真实现给出的
+ * 路径与改前那个"压根没调 composeUrl"的形态**字符串相同** —— 这条改动不改变任何
+ * 断言的含义，它改变的只是"端口少一个方法时编译拦不拦"。
+ */
+import { asHttpExec, HttpClient } from '@atest/adapter-http';
 
 import { EXIT } from '../src/exit.js';
 import { gateAfterRun } from '../src/gate.js';
@@ -42,8 +51,8 @@ function scen(body: StepDraft[], extra: Partial<ScenarioDraft> = {}): Scenario {
  * 变异集里那条（"orphan 的 error 不加进理由文本"）就是靠它才survived 的。
  * 这正是 docs/08 §3 记的那个缺陷类的又一例：**测试通过的原因与它想验的东西无关**。
  */
-async function run1(s: Scenario, adapters: unknown = {}): Promise<{ code: number; said: string; why: string; attn: string[] }> {
-  const report = await runScenario({ scenario: s, clock: deterministicClock(7), adapters: adapters as never });
+async function run1(s: Scenario, adapters: AdapterRegistry = {}): Promise<{ code: number; said: string; why: string; attn: string[] }> {
+  const report = await runScenario({ scenario: s, clock: deterministicClock(7), adapters });
   const d = gateAfterRun({ scenario: s, report, ci: true, allowUnfrozen: false });
   const said = d.reasons.join(' / ');
   const rows = report.results.map((r) => `${r.stepId}/${r.kind}=${r.status}`).join(' ');
@@ -214,26 +223,34 @@ test('when 守卫与"循环体没跑"同时出现 => 两句都要说，不能只
 const llmAssert = (id: string, gatePolicy?: 'report-only' | 'blocking'): StepDraft =>
   ({ id, kind: 'assertLlm', question: '这个返回值符合业务预期吗', evidenceFrom: '$st', ...(gatePolicy ? { gatePolicy } : {}) }) as unknown as StepDraft;
 
-/** 一律判"是"的 judge —— 模拟"LLM 盖章通过"这个危险方向 */
-const llmYes = { llm: { async judge() { return { passed: true, evidence: 'ok', costUsd: 0 }; } } };
-/** 当 adapters 用时要 cast：AdapterRegistry 其它字段是必填的，这里只给得起 llm */
-const asAdapters = (o: object) => o as never;
+/**
+ * 一律判"是"的 judge —— 模拟"LLM 盖章通过"这个危险方向。
+ *
+ * 它原先外面套着一个 `asAdapters = (o: object) => o as never`，注释写的理由是
+ * 「AdapterRegistry 其它字段是必填的，这里只给得起 llm」—— **那句是假的**：
+ * AdapterRegistry 每一个字段都带 `?`，只给 llm 完全合法，不需要 cast。
+ * cast 的实际作用是**把整张适配器对象从编译器手里拿走**：本轮 HttpExec 加
+ * composeUrl 时本文件编译照过、运行时才炸在 http 步骤上，而打印出来的失败
+ * 说的是门禁退出码不对 —— 一个接线错误伪装成判定错误。改成 `satisfies` 之后
+ * 保留推断（llmYes.llm 仍可直接取用），又让接口变化必须在这里显式补齐。
+ */
+const llmYes = { llm: { async judge() { return { passed: true, evidence: 'ok', costUsd: 0 }; } } } satisfies AdapterRegistry;
 
 test('场景只有 report-only 的 assertLlm（模型判"是"，status=pass）=> 不能当门禁用例拿 0', async () => {
   const s = scen([seed(200), llmAssert('l0')]);
   // 先钉住**前提**：这条 assertLlm 在引擎里确实产 status=pass。
   // 不钉的话，"引擎哪天改成返回 triaged"这条测试会照样绿 —— 而那时它测的已经不是本洞了。
-  const probe = await runScenario({ scenario: s, clock: deterministicClock(7), adapters: asAdapters(llmYes) });
+  const probe = await runScenario({ scenario: s, clock: deterministicClock(7), adapters: llmYes });
   const leaf = probe.results.find((r) => r.stepId === 'l0');
   assert.equal(leaf?.status, 'pass', `前提变了：report-only 的 assertLlm 判"是"时不再是 pass（实际 ${leaf?.status}），本测试的靶子要重找`);
 
-  const g = await run1(s, asAdapters(llmYes));
+  const g = await run1(s, llmYes);
   assert.equal(g.code, EXIT.INVALID, `report-only 断言判"是"不配让 CI 绿。实际：${g.why}`);
   assert.match(g.said, /gatePolicy.*blocking/, '要给出路（显式 blocking 或补确定性断言），否则人只会把断言改成假的硬断言');
 });
 
 test('显式写了 gatePolicy:"blocking" 的 assertLlm 算门禁结论（不能被"按 kind 一律排除"误伤）', async () => {
-  const g = await run1(scen([seed(200), llmAssert('l0', 'blocking')]), asAdapters(llmYes));
+  const g = await run1(scen([seed(200), llmAssert('l0', 'blocking')]), llmYes);
   assert.equal(g.code, EXIT.OK, `人显式要求进门禁，门禁就得认。实际：${g.why}`);
 });
 
@@ -248,7 +265,7 @@ test('显式写了 gatePolicy:"blocking" 的 assertLlm 算门禁结论（不能�
  */
 
 /** 一个只有 call 的父场景 + 把 ref 固定解析到 child 的适配器 */
-function withCall(child: Scenario, extraAdapters: Record<string, unknown> = {}): { parent: Scenario; adapters: unknown } {
+function withCall(child: Scenario, extraAdapters: AdapterRegistry = {}): { parent: Scenario; adapters: AdapterRegistry } {
   const parent = scen([{ id: 'c1', kind: 'call', scenarioRef: 'scn.child', args: { st: 1 } } as unknown as StepDraft]);
   return { parent, adapters: { callScenario: async () => child, ...extraAdapters } };
 }
@@ -266,7 +283,7 @@ const childWith = (steps: StepDraft[]) => scen([seed(200), ...steps], { id: 'scn
 test('call 的子运行会被记进报告（这是新判据唯一的依据，所以先单独钉住它）', async () => {
   const child = childWith([okAssert('childAssert')]);
   const { parent, adapters } = withCall(child);
-  const rep = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as never });
+  const rep = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as AdapterRegistry });
 
   assert.ok(!rep.results.some((r) => r.stepId === 'childAssert'),
     '前提：子结果**仍然不并进**父的 results（并进 JUnit 是另一件事，见 docs/08 那条未闭环）');
@@ -285,7 +302,7 @@ test('子场景只有一条 report-only 的 assertLlm => 不能靠 call 绕过�
   const { parent, adapters } = withCall(childWith([llmAssert('childLlm')]), llmYes);
 
   // 先钉前提：子场景里那条 assertLlm 确实跑成了 pass（否则这条测的就不是洞 3 了）
-  const probe = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as never });
+  const probe = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as AdapterRegistry });
   assert.equal(probe.childRuns?.[0]?.results.find((r) => r.stepId === 'childLlm')?.status, 'pass',
     '前提变了：report-only 的 assertLlm 判"是"时不再是 pass，本测试的靶子要重找');
 
@@ -327,7 +344,7 @@ test('三层嵌套（断言只在最里层）=> 不能被判空场景', async ()
   const parent = scen([{ id: 'c1', kind: 'call', scenarioRef: 'scn.child', args: { st: 1 } } as unknown as StepDraft]);
   const adapters = { callScenario: async (ref: string) => (ref === 'scn.child' ? child : grand) };
 
-  const rep = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as never });
+  const rep = await runScenario({ scenario: parent, clock: deterministicClock(7), adapters: adapters as AdapterRegistry });
   assert.ok(rep.childRuns?.some((c) => c.results.some((r) => r.stepId === 'g1')),
     '孙子层的运行没扁平并进来的话，深层复用的用例会被当成空场景');
 
@@ -398,15 +415,30 @@ test('窄性对照：正常的确定性全绿场景仍然是 0，且理由里不
  * 所以这里钉的是：不改变退出码（重试的存在意义就是吸收抖动，判红等于白重试），
  * 但**必须出现在 reasons 与 attention 里**，点名步骤与"第几次才过"。
  */
-const flakyAdapters = (failUntil: number): unknown => ({
-  http: {
-    async send() {
-      flakySends++;
-      if (flakySends < failUntil) throw new TransportError('network', 'ECONNREFUSED');
-      return { status: 200, headers: {}, body: { st: 200 }, bodyText: '{"st":200}', bytes: 9, truncated: false, durationMs: 2 };
+/*
+ * 会 flake 的 http 适配器。原先返回 `unknown`（调用处再被 `as never` 接走），
+ * 于是端口加必选方法时这里编译照过、运行时炸 —— 而本文件那几条测试的失败信息
+ * 说的是门禁退出码，读起来像门禁判错了。
+ *
+ * 这里**只替 send**，`resolveOperation` / `composeUrl` 用真 adapter 给的那两个：
+ * 本包依赖 `@atest/adapter-http`（e2e / authcheck / gen 三个测试早就直接 import 它），
+ * 所以用得上真实现，而"用真的"永远比"再抄一份桩"好 —— 桩会漂，真的那份漂了本文件当场红。
+ * `new HttpClient()` 不起监听也不发请求（构造只是存配置），send 被我们覆盖掉，
+ * 所以这里不会有任何真实出网。
+ */
+function flakyAdapters(failUntil: number): AdapterRegistry {
+  const real = asHttpExec(new HttpClient());
+  return {
+    http: {
+      ...real,
+      async send() {
+        flakySends++;
+        if (flakySends < failUntil) throw new TransportError('network', 'ECONNREFUSED');
+        return { status: 200, headers: {}, body: { st: 200 }, bodyText: '{"st":200}', bytes: 9, truncated: false, durationMs: 2 };
+      },
     },
-  },
-});
+  };
+}
 let flakySends = 0;
 
 test('一次 flake 之后全绿：退出码仍是 0，但那一步必须被点名', async () => {

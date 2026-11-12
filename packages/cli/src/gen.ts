@@ -250,6 +250,59 @@ function isMutating(method: string): boolean {
   return method === 'POST' || method === 'PATCH' || method === 'PUT' || method === 'DELETE';
 }
 
+/**
+ * 按 spec 给一个 operation 的参数造样例值（path + query 两半）。
+ *
+ * 从 `buildSteps` 里的局部闭包提成导出，不是为了好看：`auth-check` 探的是
+ * **同一个 spec 的同一批 operation**，它也必须给路径占位符造一个值，
+ * 而它当时**一个都不造** —— 实测发出去的是 `GET https://api.test/orders/{id}`，
+ * 后端回 404，而 `interpret(404)` 判成 `ok`，报告写「凭证被接受」。
+ * 一条诊断命令就这样把"字面量花括号发出去了"报成"鉴权没问题"。
+ *
+ * 两处必须共用一份的理由与本仓反复用到的那条相同：各写一份的话，
+ * 将来一边改了取值规则，另一边不会跟着改，
+ * 于是"gen 出来的用例打的 URL"与"auth-check 打的 URL"不是同一个地址，
+ * 而这条命令的全部价值恰恰是"不跑用例也能回答鉴权对不对"。
+ *
+ * ⚠ 取值优先级是 **spec 的参数级 example 优先**，这一点本轮才补上，而它补的
+ * 不是"体验"而是一个**字段没人读**：`ParamSpec.example` 由 `parse.ts` 的
+ * `pickExample` 认真解出来（两种写法都支持：`example: <值>` 与
+ * `examples: {名: {value}}`），字段注释写着「mock 与 happyPath 优先生成用」。
+ * 而**全仓没有任何一处读它** —— 本函数当时只看 `p.schema`。
+ * 于是 spec 作者照文档写了 `example: 'ORD-9'`，用例与探测打的却是
+ * `atest_id` / `sample`（`sampleFromSchema` 对 `type: string` 的默认产物），
+ * 那句话在它写下的整个时间里都是假的。
+ * 危害不是崩：是**"我明明在 spec 里写了这个值"这件事在平台上没有任何效果**，
+ * 而用户只能去猜是不是自己的 spec 没被认出来。
+ *
+ * 只有**标量** example 才用。参数级 example 写成一个对象完全合法（复杂 schema 的
+ * 文档示例），而 path/query 参数上的对象会发出 `[object Object]` —— 与下面
+ * `sampleFromSchema` 那一格是同一个坑，所以走同一道 `isScalar` 闸门，
+ * 不合格就退回按 schema 造，而不是直接换成占位符（有可用值时别扔）。
+ */
+export function sampleParams(op: {
+  params: ReadonlyArray<{ name: string; in: string; schema: Record<string, unknown>; example?: unknown }>;
+}): { pathParams: Record<string, unknown>; queryParams: Record<string, unknown> } {
+  const pathParams: Record<string, unknown> = {};
+  const queryParams: Record<string, unknown> = {};
+  for (const p of op.params) {
+    /*
+     * **只接受标量**。sampleFromSchema 对"没写 type 的 schema"返回 `{}`
+     * （那是它自己的刻意设计：让响应断言不至于全 undefined），
+     * 直接塞进 path 参数就会发出 `/orders/[object Object]` ——
+     * 用例打的是一个根本不存在的 URL，而它可能一直是绿的。
+     * path 参数留 undefined 也不行：URL 里会出现字面量 "{id}"。
+     */
+    const fromSchema = sampleFromSchema(p.schema);
+    const v = isScalar(p.example) ? p.example : fromSchema;
+    const val = isScalar(v) ? v : PLACEHOLDER(p);
+    if (p.in === 'path') pathParams[p.name] = val;
+    else if (p.in === 'query') queryParams[p.name] = val;
+    // header/cookie 交给鉴权层（尚未实现），这里不猜
+  }
+  return { pathParams, queryParams };
+}
+
 /** 各策略的步骤构造。返回 {ok:false} 表示这条不适用于该 operation（会进跳过清单） */
 function buildSteps(
   op: OperationSpec, strategy: string,
@@ -262,23 +315,13 @@ function buildSteps(
     const v = sampleFromSchema(s);
     return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
   };
-  const happyParams = (): { pathParams: Record<string, unknown>; queryParams: Record<string, unknown> } => {
-    const pathParams: Record<string, unknown> = {};
-    const queryParams: Record<string, unknown> = {};
-    for (const p of op.params) {
-      // **只接受标量**。sampleFromSchema 对"没写 type 的 schema"返回 `{}`
-      // （那是它自己的刻意设计：让响应断言不至于全 undefined），
-      // 直接塞进 path 参数就会发出 `/orders/[object Object]` ——
-      // 用例打的是一个根本不存在的 URL，而它可能一直是绿的。
-      // path 参数留 undefined 也不行：URL 里会出现字面量 "{id}"。
-      const v = sampleFromSchema(p.schema);
-      const val = isScalar(v) ? v : PLACEHOLDER(p);
-      if (p.in === 'path') pathParams[p.name] = val;
-      else if (p.in === 'query') queryParams[p.name] = val;
-      // header/cookie 交给鉴权层（尚未实现），这里不猜
-    }
-    return { pathParams, queryParams };
-  };
+  /*
+   * 取值规则不在这里 —— 见 `sampleParams`。它当初就是这个闭包，
+   * 而 `auth-check` 那边需要**一模一样**的规则却拿不到（它不是闭包、也没有 op.params
+   * 之外的上下文），于是那边一个占位符都没填。提成函数是为了让"两处一样"这件事
+   * 由结构保证，而不是靠两边各写一份再靠注释提醒。
+   */
+  const happyParams = () => sampleParams(op);
 
   const pushAssert = (id: string, payload: Record<string, unknown>, note: string): void => {
     assertSteps.push({ id, kind: 'assert', name: `校验 ${id}`, against: '$.step.call.resp', note, ...payload } as StepDraft);

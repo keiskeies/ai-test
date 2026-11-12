@@ -31,9 +31,13 @@ import {
   causeOfError, ERROR_CAUSE_RULES, NotWiredError, EnvMissing,
   VarError, PathError, ExprError, TransportError, LocatorBudgetError,
   GenKindError, NoConditionAdapter, NoNewPageObserver,
-  parseStepResults, toHtmlReport, deterministicClock, runScenario, type RunReport,
+  parseStepResults, toHtmlReport, deterministicClock, runScenario, type AdapterRegistry, type RunReport,
 } from '../src/index.js';
 import { FAILURE_CAUSE, defineScenario, type Scenario, type ScenarioDraft, type StepDraft } from '@atest/ir';
+// 桩只在 http 夹具里用。本文件自带的 run/scen/b 替身不走 helpers（那些替身各有
+// 本文件要的签名），但 composeUrl 那个桩必须是同一份 —— 两份桩会各自漂移，
+// 而漂移的表现是"某个文件的 missing 分支永远走不到"
+import { stubHttp } from './helpers.js';
 // NoNetworkObserver 直接从模块拿而不走 barrel：`responses.ts` 整个文件**没被 barrel 导出**
 // （见下面那条"barrel 看不见的错误类"的护栏 —— 那是一个真实存在的盲区，不是笔误）。
 import { NoNetworkObserver } from '../src/responses.js';
@@ -44,8 +48,16 @@ const scen = (body: StepDraft[]): Scenario =>
     schemaVersion: '1', id: 'scn.test', name: 'test scenario',
     env: { environmentRef: 'unit' }, body,
   } as ScenarioDraft);
-const run = (s: Scenario, adapters: unknown = {}): Promise<RunReport> =>
-  runScenario({ scenario: s, adapters: adapters as never, clock: deterministicClock(42) });
+/*
+ * 这个 run 替身原先是 `adapters: unknown = {}` + 里面一个 `adapters as never`，
+ * 于是**整个适配器对象从编译器手里拿走了**。而 `AdapterRegistry` 的字段本来就是可选的
+ * （`http?:` / `db?:`），"只给一个 http"这件事根本不需要 cast 来表达 ——
+ * 需要 cast 的只有"我给的这个 http 少了接口上的必选方法"，而那**正是编译该拦的**：
+ * 本轮 HttpExec 加 composeUrl 时，这个文件运行时炸成 `composeUrl is not a function`，
+ * 打印出来的失败却写着"传输失败 -> env-unavailable"，形状问题伪装成归因问题。
+ */
+const run = (s: Scenario, adapters: AdapterRegistry = {}): Promise<RunReport> =>
+  runScenario({ scenario: s, adapters, clock: deterministicClock(42) });
 const res = (r: RunReport, id: string): RunReport['results'][number] => {
   const x = r.results.find((y) => y.stepId === id);
   assert.ok(x, `没有步骤 "${id}" 的结果（实际：${r.results.map((y) => y.stepId).join(', ') || '无'}）`);
@@ -83,7 +95,7 @@ describe('不许过度修：真·环境问题必须还是 env-unavailable', () =
   });
   test('http 传输失败 -> env-unavailable，且传输种类另带一个键', async () => {
     const r = await run(scen([{ ...b('a'), kind: 'http', request: { method: 'GET', url: 'http://x/y' } }]), {
-      http: { async send() { throw new TransportError('network', 'ECONNREFUSED'); } },
+      http: stubHttp(async () => { throw new TransportError('network', 'ECONNREFUSED'); }),
     });
     const x = res(r, 'a');
     assert.equal(x.cause, 'env-unavailable');
@@ -282,7 +294,7 @@ describe('cause 落盘与展示：新常态 untriaged 不能变成裸英文词',
   /** 引擎真产出的 untriaged（adapter 抛裸 Error 是它最常见的来源） */
   const untriagedRun = async (): Promise<RunReport> =>
     run(scen([{ ...b('a'), kind: 'http', request: { method: 'GET', url: 'http://x/y' } }]), {
-      http: { async send() { throw new Error('boom'); } },
+      http: stubHttp(async () => { throw new Error('boom'); }),
     });
 
   test('untriaged 能原样读回磁盘（写盘与读盘是同一套值）', async () => {

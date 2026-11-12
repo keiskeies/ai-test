@@ -17,6 +17,7 @@ import { parseJsonKeepBigInt, stringifyBody } from './bigint.js';
 import { setCookiesOf } from './cookies.js';
 import type { CookieJar } from './cookies.js';
 import { compileValidator, isValid, type Validator } from '../openapi/validate.js';
+import { composeUrl } from '../openapi/compose.js';
 import type { OperationSpec, ParsedDoc } from '../openapi/parse.js';
 import { TransportError, type ExecContext, type HttpExec } from '@atest/engine';
 // **type-only**：auth/token.ts 反过来 import 本文件（要 new 一个 HttpClient），
@@ -348,6 +349,17 @@ export function asHttpExec(client: HttpClient, docs?: DocProvider, auth?: AuthHo
         requiredBodyFields: op.requiredBodyFields,
         deprecated: op.deprecated,
       };
+    },
+    async composeUrl(req) {
+      /*
+       * **没有 opRef 就不去查 spec。** 纯 `http` 步骤压根不带 docRef/operationId，
+       * 而 `find` 在"没有文档登记表"时是**抛异常**的（那是 resolveOperation 的语义：
+       * 你要 operation 而我给不出，就该响）。这里照它办就把最常见的那类用例
+       * （只写 http 步骤、没导 spec）打成 error —— 而这一栏的语义是
+       * "查不到声明就按规范默认值序列化"，不是"出错"。
+       */
+      const op = req.opRef && docs ? find(req.opRef.docRef, req.opRef).op : undefined;
+      return composeUrl(req.urlTemplate, op, { pathParams: req.pathParams, queryParams: req.queryParams });
     },
     async validateRequest(ref, body) {
       const { doc, op } = find(ref.docRef, ref);
