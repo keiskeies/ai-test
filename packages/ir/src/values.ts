@@ -67,15 +67,6 @@ export type RefValue = z.infer<typeof RefValue>;
 export type ExprValue = z.infer<typeof ExprValue>;
 export type GenValue = z.infer<typeof GenValue>;
 
-export function isRefValue(v: unknown): v is RefValue {
-  return isValueForm(v) === 'ref';
-}
-export function isExprValue(v: unknown): v is ExprValue {
-  return isValueForm(v) === 'expr';
-}
-export function isGenValue(v: unknown): v is GenValue {
-  return isValueForm(v) === 'gen';
-}
 
 /**
  * 三种"非字面量"值的**键形状表**：保留键是什么、除保留键外还允许什么键。

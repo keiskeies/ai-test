@@ -141,8 +141,3 @@ export class DiskArtifactStore implements ArtifactStore {
 
   get rootDir(): string { return this.dir; }
 }
-
-/** 便捷：把字符串证据直接存一条，返回 sha256（测试与 CLI 常用） */
-export async function putText(store: DiskArtifactStore, kind: string, text: string, stepId: string): Promise<string> {
-  return store.save(kind, text, stepId);
-}

@@ -766,11 +766,6 @@ export function scanSecretRefs(scenario: unknown): string[] {
   return [...out];
 }
 
-/** 证据包与 trace/junit 的落盘位置 */
-export function evidencePaths(dir: string, runId: string): { dir: string; storeDir: string } {
-  return { dir, storeDir: join(dir, 'artifacts') };
-}
-
 export function makeClock(mode: string | undefined, seed: number | undefined): Clock {
   if (mode === undefined || mode === 'live') return liveClock();
   if (mode === 'deterministic') {

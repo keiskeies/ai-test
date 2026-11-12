@@ -50,20 +50,24 @@ const STATUS_LABEL: Record<StepStatus, string> = {
   triaged: '待人工确认',
 };
 
-/**
- * 归因（`RunReport` 里的 `cause`）→ 一句"该查哪儿"。
+/*
+ * 这里**曾经有一份 `CAUSE_HINT`（归因 → 一句"该查哪儿"）加一个 `causeHint()`**，
+ * 本轮删掉 —— 它不是"暂时没接上"，是**一份过期了的第二份真相**：
+ *  ① 零消费者（全仓除声明处外零提及，测试也没提过），页面用的是 report.html 那条路；
+ *  ② 它的键与 `FAILURE_CAUSE` 已经对不上：枚举里是 `locator-stale`，这里写着
+ *     `locator-unstable`，另外 `data-conflict` / `untriaged` 两格压根没有。
+ *     于是 `causeHint('locator-stale')` 会**安静地返回 undefined** ——
+ *     而 `causeHint` 的注释自己写着"取不到时返回 undefined，由调用方决定怎么显示 ——
+ *     不编一句"，所以症状是那一格凭空少一行，不是报错。
+ *     **一份没人读的过期词表，比没有词表更坏**：下一个人会以为归因文案已经统一了。
  *
- * 为什么单列：docs/12 §4.2 要求"每个 fail 必须带归因"，而 `fail` 与 `error`
- * 的区别**只有归因说出来了才有用** —— 否则人会去查产品，而真相是环境。
- * 这一格不做任何判定，只做查表：判定在引擎，这里说什么都不该反过来影响结论。
+ * 活的那一份在 `engine/src/html.ts` 的 `CAUSE_LABEL`（7 格齐全），载体是
+ * `engine/test/error-cause.test.ts` 里那条**逐个枚举值渲染一遍**的测试 ——
+ * 它判的是"渲染出来的那一格文本"，不是"表里有没有这个键"，所以词表与枚举对不上时它会红。
+ * docs/12 §4.2 要的"每个 fail 必须带归因"由 report.html 满足；页面运行记录那一行
+ * 直接链到报告。**如果将来要在页面上自己渲染归因，去复用 CAUSE_LABEL（导出它），
+ * 别再抄一份。**
  */
-const CAUSE_HINT: Record<string, string> = {
-  'product-bug': '被测产品的问题',
-  'env-unavailable': '环境问题（服务/设备/密钥），不是用例失败',
-  'case-stale': '用例可能过期（IR 与被测系统对不上），改用例',
-  'locator-unstable': '定位器不稳，看自愈记录',
-  'flaky': '结论不稳定，看这个场景的历史 run',
-};
 
 export interface StatusView {
   status: StepStatus;
@@ -73,11 +77,6 @@ export interface StatusView {
 
 export function describeStatus(status: StepStatus): StatusView {
   return { status, icon: STATUS_ICON[status], label: STATUS_LABEL[status] };
-}
-
-/** 归因那句提示。取不到时返回 undefined，由调用方决定"不知道"怎么显示 —— 不编一句 */
-export function causeHint(cause: string | undefined): string | undefined {
-  return cause === undefined ? undefined : CAUSE_HINT[cause];
 }
 
 /** 导出给页面用：让页面能遍历"全部六态"而不必自己写那六个字（同一格判据不留第二份） */

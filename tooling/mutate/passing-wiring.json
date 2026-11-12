@@ -1,0 +1,29 @@
+{
+  "_comment": "**这一组判的是『一个函数有没有测试能抵达』，不是『函数算得对不对』。** 载体：`isPassing`（`ir/src/status.ts`）。本轮之前它全仓只有**一处引用 = 它自己那句声明**（`git grep -c isPassing HEAD` 得 1），于是它的函数体对整套测试**完全不可达** —— 下面这两条变异在当时一个红都点不出来，而那不是测试写得差，是没有任何一条路径走到它。本轮把 `ir/trace.ts` 的 `isFlakyPass` 与 `engine/interpreter.ts` 的重试循环两处手抄的 `status === 'pass'` 接回 `isPassing`，它才第一次落到测试能看见的路上。⚠ 每条 `_why` 只点名**驱动报出来的那一条红**（驱动只印第一条红的标题），不写『其余各条全绿』。",
+  "cases": [
+    {
+      "label": "isPassing 恒真（healed / fail / skipped 全被当成通过）",
+      "_why": "改前那个形状下这条**不会红**：`isPassing` 零调用方，改它的函数体等于改一段死代码。接线之后它有两条独立路径可炸 —— ① `interpreter` 重试循环那句 `if (isPassing(last.status) || …)` 恒真 ⇒ 首次尝试后无条件 break，**重试永远不发生**；② `isFlakyPass` 里 `isPassing(r.status) && flakyAttempts(r).length > 0` 的前半被摘掉 ⇒ 「重试用尽仍失败」那一步也会被标成 flaky-recovered。实测**报的是 ①**：驱动印的第一条红是 retry.test.ts 的「一次 flake 只留一行，且整体状态是 pass 而不是 error」。（驱动只印第一条红，所以 ② 有没有跟着一起红本轮**没有证据**，不写『另一条也红了』。）",
+      "file": "packages/ir/src/status.ts",
+      "anchor": "export function isPassing(status: StepStatus | RunStatus): boolean {\n  return status === 'pass';\n}",
+      "replace": "export function isPassing(status: StepStatus | RunStatus): boolean {\n  void status; // 变异：恒真\n  return true;\n}",
+      "testFile": "packages/engine/test/retry.test.ts"
+    },
+    {
+      "label": "isPassing 把 healed 也算通过（未毕业的自愈显示成绿）",
+      "_why": "**这一条第一轮跑出来是『未抓到』**，而那是一条真缺口、不是这条变异该改判成 equivalent。当时它能选的 testFile 只有 `engine/test/junit.test.ts` 与 `engine/test/retry.test.ts`，两者都**不构造 `status: 'healed'` 的步骤** —— 于是改这一行全仓全绿，而 `STEP_STATUS` 里 `healed` 那格注释写着的「**不许显示成绿**」（docs/00 §5.6）在 `isPassing` 这一侧一个断言都没有。危害不是颜色不对：`isFlakyPass` 读这个判据，它三条产出全是『看一眼但不用改』那一类标记（JUnit 那条 `attn=` 的注释就是这么写的），把 healed 混进去 = 一次**还没毕业**的自愈和纯抖动同色同级，而这两件事的处理动作相反。修法不是把这条改成 equivalent，是**补那个缺失的载体**：`packages/ir/test/status.test.ts`（把 `STEP_STATUS` 全集逐个过一遍 `isPassing`），testFile 跟着换过去。补完后实测报的红是「六个状态里只有 pass 算通过（逐个过一遍，漏一格看不出来）」。<br>⚠ 顺序要记准：**是变异检查发现这个断言压根不存在，不是我先想到要补** —— 这条 spec 的价值恰好在这次『先未抓到、补了载体才抓到』的记录上。",
+      "file": "packages/ir/src/status.ts",
+      "anchor": "export function isPassing(status: StepStatus | RunStatus): boolean {\n  return status === 'pass';\n}",
+      "replace": "export function isPassing(status: StepStatus | RunStatus): boolean {\n  return status === 'pass' || status === 'healed';\n}",
+      "testFile": "packages/ir/test/status.test.ts"
+    },
+    {
+      "label": "isFlakyPass 丢掉状态那一半（只看有没有重试记录）",
+      "_why": "这一条**改前也是抓不到的**，但原因和上面两条不同、值得分开记：`isFlakyPass` 自己**有**调用方（gate / junit / html 三处），所以不是死函数；抓不到的是 `r.status === 'pass'` 那半句里的**具体判据被手抄在 `isFlakyPass` 里**，而手抄的这份和 `isPassing` 是两份东西 —— 接线之后两边共用一个判据，改 `isPassing` 与改这里落到同一条判据上。驱动报的红是 junit 那条『重试用尽仍失败的步骤**不**标 flaky』。",
+      "file": "packages/ir/src/trace.ts",
+      "anchor": "  return isPassing(r.status) && flakyAttempts(r).length > 0;",
+      "replace": "  void isPassing; // 变异：只看有没有重试记录\n  return flakyAttempts(r).length > 0;",
+      "testFile": "packages/engine/test/junit.test.ts"
+    }
+  ]
+}

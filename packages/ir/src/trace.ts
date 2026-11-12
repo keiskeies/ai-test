@@ -7,7 +7,7 @@
  *     （crash 后仍可分析）。二者形状相同，故在此定义一次。
  */
 import { z } from 'zod';
-import { FailureCauseSchema, RunStatusSchema, StepStatusSchema, type FailureCause, type StepStatus } from './status.js';
+import { FailureCauseSchema, RunStatusSchema, StepStatusSchema, isPassing, type FailureCause, type StepStatus } from './status.js';
 import { STEP_KINDS } from './steps.js';
 
 export const TraceEventKind = [
@@ -163,5 +163,5 @@ export function flakyAttempts(r: { keyContext?: Record<string, unknown> }): Flak
  * 光看状态一条都拦不住 —— 这与 assertLlm 那个"pass 也拦不住 report-only"是同一个形状。
  */
 export function isFlakyPass(r: { status: StepStatus; keyContext?: Record<string, unknown> }): boolean {
-  return r.status === 'pass' && flakyAttempts(r).length > 0;
+  return isPassing(r.status) && flakyAttempts(r).length > 0;
 }

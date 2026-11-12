@@ -10,7 +10,7 @@
  *     前置不满足 → skipped。红绿可信是平台被不弃用的前提。
  */
 import type { Step, Scenario, Lease, ForEachStep, WhileStep, Retry, FlakyAttempt } from '@atest/ir';
-import { countsTowardPassRate, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parallelHazards, walk, hintOnTimeout, scenarioIdOfRef, scenarioVersionOfRef, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
+import { countsTowardPassRate, isPassing, FLAKY_OF_KEY, LEASE_REQUIRED, STEP_TARGET, parallelHazards, walk, hintOnTimeout, scenarioIdOfRef, scenarioVersionOfRef, type StepResult, type StepStatus, type TraceEvent } from '@atest/ir';
 import { compileExpr, evalBool, truthy } from './expr.js';
 import { queryOne, query, PathError } from './jsonpath.js';
 import { VarError, VarSpace } from './vars.js';
@@ -903,7 +903,7 @@ export async function runScenario(opts: RunOptions): Promise<RunReport> {
     const superseded: Array<{ r: StepResult; waitedMs: number }> = [];
     for (let attempt = 0; attempt <= max; attempt++) {
       last = await fn();
-      if (last.status === 'pass' || !worthRetrying(s, last) || attempt === max) break;
+      if (isPassing(last.status) || !worthRetrying(s, last) || attempt === max) break;
       /*
        * **被取代的尝试必须从 results 里撤掉**。以前它留在数组里，一个步骤就留下
        * N 行（实测 `h:error, h:pass` 两行），四个后果全在"红绿可不可信"这条线上：
