@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1",
+  "id": "scn.demo.load",
+  "name": "演示：压测一条只读接口（看分位数、门禁、以及被取消时画成什么样）",
+  "description": "压测形态的演示用例。施压形状写在下面的 load 块里而不是命令行上 —— 基线要能回答「这次和上次是同一个压法吗」，那个答案就是指纹，而指纹必须有权威出处。跑法：npm run cli -- load scn.demo.load --local --doc demo=specs/demo.json --runner-spec local-1x。打的是 mock 里那个只读接口，所以可以放心并发。",
+  "frozen": true,
+  "tags": ["demo", "load"],
+  "targets": ["api"],
+  "env": { "environmentRef": "demo" },
+  "load": {
+    "vus": 4,
+    "durationMs": 5000,
+    "rampUpMs": 500,
+    "thinkMs": 0,
+    "maxRequests": 0,
+    "failureStatus": [],
+    "maxIterationsPerVu": 0
+  },
+  "body": [
+    {
+      "id": "hit",
+      "name": "读一个订单（负载就是这一个请求）",
+      "kind": "http",
+      "request": { "method": "GET", "url": "/demo/orders/ORD-7" }
+    },
+    {
+      "id": "chk",
+      "name": "看着它：200 才算成功",
+      "kind": "assert",
+      "against": "$.step.hit.resp",
+      "status": 200,
+      "note": "压测形态里的 assert 不是凑数 —— 断言没过就等于该次请求失败，直接进错误率。不演这一步的话，就是「打了一堆请求而没人看响应」，那种曲线谁都能画。"
+    },
+    {
+      "id": "field",
+      "name": "响应里确实有单号（不是只回了个头）",
+      "kind": "assert",
+      "against": "$.step.hit.resp.body.id",
+      "jsonPath": { "$": { "exact": "ORD-7" } }
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import { TargetKindSchema } from './targets.js';
 import type { TargetKind } from './values.js';
 import { STEP_TARGET, walk } from './steps.js';
 import { waitWorldDemand } from './waits.js';
+import { LoadProfileSchema } from './load.js';
 
 export const SCHEMA_VERSION = '1';
 
@@ -99,6 +100,18 @@ export const ScenarioSchema = z
       dirty: false,
     }),
     provenance: ProvenanceSchema.optional(),
+    /**
+     * 压测形状（docs/09 §4.2）。**刻意是 optional 而不是 default**：
+     * 给了默认值等于让每一条用例都"声明自己可压"，而绝大多数用例不该被压
+     * （有写操作、依赖前置数据、带 `manualHandoff`）。 absence 是有意义的状态 ——
+     * `atest load` 遇到没有 `load` 的场景要**拒绝并说明怎么加**，
+     * 而不是拿一套默认并发去打一个没为并发设计过的接口。
+     *
+     * 也不放进 `config`：那一坨管的是**功能回放**的执行约束（超时/重试/并行安全），
+     * 而这里的每一维都进 LoadFingerprint、都参与"两次跑可不可比"的判定。
+     * 混在一起的下场是改个 `retries.baseMs` 就把性能基线判废（或者更坏：不判废）。
+     */
+    load: LoadProfileSchema.optional(),
   })
   .strict();
 export type Scenario = z.infer<typeof ScenarioSchema>;

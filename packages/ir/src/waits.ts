@@ -216,6 +216,21 @@ export function describePredicate(p: WaitPredicate): string {
 }
 
 /**
+ * 复合谓词的三种键。**全仓只有这一份**（`mentionsNewPage`、`iterConditions`、
+ * `load.ts` 的 `LOAD_WAIT_SUPPORT` 三个消费者都读它或在它下面被对撞）。
+ *
+ * 为什么值得单独成一个导出而不是就地写三个字面量：本文件以前在**两个**函数里
+ * 各抄了一遍 `['allOf','anyOf','noneOf']`，而 `ir/src/load.ts` 那份抄成了
+ * `['allOf','anyOf','not']` —— `not` 在 schema 里不存在，于是
+ * `{noneOf:[{type:'dbRow'}]}` 静默走过压测静态闸（探针量出来的，见 load.ts 同段）。
+ * 三个字面量抄三遍，坏的方式永远是"某一遍少一个/错一个"，而不是三遍一起错。
+ *
+ * 加第四种键时的正确做法：在这里加一项，`ir/test/load-wait-keys.test.ts` 会
+ * 因为 `LOAD_WAIT_SUPPORT` 少了那一格而红（它拿本表与 schema 现取的清单对撞）。
+ */
+export const WAIT_COMBINATORS: readonly ['allOf', 'anyOf', 'noneOf'] = ['allOf', 'anyOf', 'noneOf'];
+
+/**
  * 谓词树里**是否**出现了 `newPage` 条件。
  *
  * **为什么这里可以遍历谓词树，而 `wait.ts` 里那句"有没有需要网络的条件"
@@ -232,7 +247,7 @@ function mentionsNewPage(p: unknown): boolean {
   if (!p || typeof p !== 'object') return false;
   const o = p as Record<string, unknown>;
   if (o.type === 'newPage') return true;
-  for (const k of ['allOf', 'anyOf', 'noneOf']) {
+  for (const k of WAIT_COMBINATORS) {
     const kids = o[k];
     if (Array.isArray(kids) && kids.some(mentionsNewPage)) return true;
   }
@@ -335,17 +350,26 @@ export const WAIT_BROWSER_ONLY_CONDITIONS: readonly string[] = BROWSER_ONLY_COND
  * 加一种等待条件与更新这个遍历应当在**同一个文件里**，跨包的"忘了回来加一项"
  * 才是那族缺陷的成因。
  *
- * 与 mentionsNewPage 一样，**它的结果只用于文案与 lint 提示，不用于判据** ——
- * 需要判据的那类"谓词里有没有 X 条件"仍然在求值时判真实走到的分支
- *（见 engine 的 wait.ts 里 NoNetworkObserver 那段）。
- * 强度不同是因为代价不对称：这里漏一种条件类型，最坏是"少提醒一句"。
+ * 与 mentionsNewPage 一样，它**从前**只用于文案与 lint 提示。
+ *
+ * ⚠ 这句现在**不再完全成立**，而更正比留着原话重要：`load.ts` 的
+ * `waitNeedsExternalAdapter` 拿它做**压测静态闸的判据**（"这棵谓词树里有没有要
+ * 外部能力的谓词"）。上面那段"判据和文案该用不同强度的实现"的论证仍然对，
+ * 但它管的是**运行期**那一族判据（漏一种条件类型会把真需求吞成超时，所以那条路
+ * 只能在求值时判真实走到的分支）。压测那一侧不一样：那里问的不是"这条等待在运行期
+ * 满足没有"，而是"这条等待**在压测形态里根本没有能力去判**"——那是**装配事实**，
+ * 与 `waitWorldDemand` 同一个性质，本来就只能在跑之前静态回答，而且答错的后果是
+ * 拒绝执行（看得见），不是把真需求吞成超时（看不见）。
+ * 所以：漏一种条件类型在这里最坏是"放行一条判不了的等待"，那条等待会在运行期
+ * 落到 `applyWaitOnce` 的"判不了 -> 触发 onTimeout"，仍然有人看得见 ——
+ * 而 `load-wait-keys.test.ts` 负责让"漏一种类型"这件事当场红。
  */
 export function iterConditions(p: WaitPredicate): WaitCondition[] {
   if (!p || typeof p !== 'object') return [];
   const o = p as Record<string, unknown>;
   // 三种复合键互斥（WaitPredicateSchema 是 discriminatedUnion 式的三选一），
   // 所以命中任一个就可以直接返回，不需要"再往下看看有没有别的键"。
-  for (const k of ['allOf', 'anyOf', 'noneOf']) {
+  for (const k of WAIT_COMBINATORS) {
     const kids = o[k];
     if (Array.isArray(kids)) return kids.flatMap((kid) => iterConditions(kid as WaitPredicate));
   }

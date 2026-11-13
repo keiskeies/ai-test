@@ -106,9 +106,10 @@
     {
       "label": "P9 cmdRun 结束时不摘处理器（常驻进程里每次 run 留一套，且第二次按键会打死**下一条**命令）",
       "file": "packages/cli/src/commands.ts",
-      "anchor": "    signals.restore();",
+      "anchor": "    restoreSignals();",
       "replace": "",
-      "testFile": "packages/cli/test/signal.test.ts"
+      "testFile": "packages/cli/test/signal.test.ts",
+      "_anchor_moved": "同一处调用的名字变了：cmdRun 现在从 installCommandSignals 的返回值里解构 restore（叫 restoreSignals）。旧锚点 `signals.restore();` 在磁盘上已不存在，那条变异是恒等变换。"
     },
     {
       "label": "P10 异名信号也算「第二次」（CI runner 的「TERM 然后 INT」是同一句话说了两遍，却被当成「别收拾了」=> 每次 CI 取消都丢掉清理）",

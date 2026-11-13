@@ -11,7 +11,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server",
+    "build": "tsc -b packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server && node tooling/build-k6-prelude.mjs",
     "clean": "tsc -b --clean packages/ir packages/engine packages/adapter-http packages/adapter-web packages/store packages/cli packages/web packages/server",
     "lint:layers": "node tooling/lint-layers.mjs",
     "lint:fields": "node tooling/unread-fields.mjs",
@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "26.6.6",
+    "esbuild": "0.28.1",
     "tsx": "4.23.0",
     "typescript": "6.0.3"
   }

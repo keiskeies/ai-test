@@ -783,6 +783,42 @@ export class VarSpace {
     return this.stepExports.get(stepId);
   }
 
+  /**
+   * 「setup 结束时这里有什么」的快照，配 {@link pruneToLocal} 用。
+   *
+   * 只有一个消费者，而那一个消费者必须要它：**压测形态一个 VU 反复跑同一串节点**，
+   * 上一轮的 `$.step.a.resp` 与 `set token = …` 会漏到下一轮，于是"第二轮开始 token
+   * 是上一轮那个"这种状态污染会改变被测形态（真实用户每轮都是新会话）。
+   *
+   * 但**不能整表清** —— setup 里登录那一步的导出正是迭代正文要引用的东西，
+   * 清干净等于把"setup 拿 token、body 用它"这种写法变成
+   * "压测里报变量不存在，而同一条用例功能回归跑得动"（同一份 IR 两种行为，
+   * docs/00 §6.6 记过一整族）。所以判据是**相对 setup 基线的差集**：
+   * setup 留下的原样留着，迭代自己新写的一个不留。
+   *
+   * 快照而不是"清指定的那几个名字"：迭代正文里能写出名字的地方不止 `set`
+   * （extract 的 var、forEach 的 as/indexAs、将来还可能加），列名单必然漏，
+   * 而漏的那一个的症状正好是本轮要修的那个。差集不需要知道有哪几种写法。
+   */
+  localSnapshot(): { vars: string[]; stepIds: string[] } {
+    return { vars: Object.keys(this.visible()), stepIds: [...this.stepExports.keys()] };
+  }
+
+  /** 把帧变量与步骤导出裁回 {@link localSnapshot} 那个样子（见那里的用途说明） */
+  pruneToLocal(snap: { vars: string[]; stepIds: string[] }): void {
+    const keepVars = new Set(snap.vars);
+    // 从栈顶往下删。**每一帧都查**：迭代正文里的 set 可能落到 global 帧（变量已存在时
+    // 写它所在的帧，见 set 的注释），也可能落在没弹干净的子帧里
+    for (const f of this.frames) {
+      for (const name of [...f.vars.keys()]) if (!keepVars.has(name)) f.vars.delete(name);
+    }
+    const keepSteps = new Set(snap.stepIds);
+    for (const id of [...this.stepExports.keys()]) if (!keepSteps.has(id)) this.stepExports.delete(id);
+    // 写入历史同样要裁：它驱动 UI 的「谁改了这个值」，不裁的话压测一万轮的
+    // 同名写入会攒成一条几百万项的数组（而这份东西会被 snapshotForAgent 带出去）
+    this.writes.length = 0;
+  }
+
   /** run.outputs.<name> ← 显式声明的下层输出 */
   setOutput(name: string, value: unknown): void {
     const out = (this.runRoot.outputs ??= {}) as Record<string, unknown>;

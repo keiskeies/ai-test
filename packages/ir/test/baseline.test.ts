@@ -11,7 +11,8 @@ import { test } from 'node:test';
 
 import {
   BaselineSampleSchema, LoadFingerprintSchema, MIN_SAMPLES_MS, PerfGateThresholdsSchema,
-  PerfMetricsSchema, evaluatePerfGate, incomparableReasons, pickBaseline, promoteRefused,
+  PerfMetricsSchema, evaluatePerfGate, incomparableReasons, percentile, pickBaseline, promoteRefused, summarizeObservations,
+  type LoadObservation,
   type BaselineSample, type LoadFingerprint, type PerfMetrics,
 } from '../src/index.js';
 
@@ -215,4 +216,51 @@ test('默认阈值就是文档里那三行数字', () => {
   assert.equal(T.maxP95Regression, 0.2);
   assert.equal(T.maxErrorRate, 0.001);
   assert.equal(T.minRpsRatio, 0.9);
+});
+
+/* ── 分位数与聚合（P7 压测那一侧的唯一一份算法）──────────────────────── */
+
+test('分位数口径是线性插值，且**写死在测试里**（换口径必须同时改这里）', () => {
+  // [10,20,30]：最近秩法给 p95=30（取第 ceil(0.95*3)=3 个），插值给 29。
+  // 这两个数在 n=3 上差 3.4%，在 n=20 上也差到 5% —— 而报告的读者拿它跟 k6 的
+  // p95 并排看。所以口径不是实现细节，是**报告的一部分**，改它等于改历史数字。
+  assert.equal(percentile([10, 20, 30], 95), 29);
+  assert.equal(percentile([10, 20, 30], 50), 20);
+  assert.equal(percentile([10, 20, 30], 0), 10);
+  assert.equal(percentile([10, 20, 30], 100), 30);
+});
+
+test('分位数不要求调用方先排序（少排一次的调用点是静默的错数，不是崩溃）', () => {
+  const shuffled = [30, 10, 20];
+  assert.equal(percentile(shuffled, 95), 29);
+  // 反证：如果本函数改成"不排序直接按下标取"，这里会读到 20（原数组下标 1）
+  assert.notEqual(percentile(shuffled, 50), 30);
+  assert.deepEqual(shuffled, [30, 10, 20], '本函数不许改动入参数组');
+});
+
+test('空样本 -> undefined，不是 0（"没测到 p95" 当成 "p95=0" 会让任何基线都退化）', () => {
+  assert.equal(percentile([], 95), undefined);
+  assert.equal(percentile([NaN, Infinity], 95), undefined, '非有限值不参与，也不许产出一个 NaN');
+});
+
+test('聚合：分位数含失败请求，rps 缺窗口时不填', () => {
+  const obs: LoadObservation[] = [
+    { ms: 10, failed: false }, { ms: 20, failed: false }, { ms: 30, failed: false },
+    { ms: 5000, failed: true },
+  ];
+  const m = summarizeObservations(obs, 1000);
+  // 超时把尾巴拖长这件事必须留在 p99 里。只统计成功的那部分 -> p99=20 左右，
+  // 一次"五分之一的请求超时 5 秒"的跑会报出很好看的分位数。
+  assert.ok((m.p99Ms ?? 0) > 1000, `p99 应当被那条 5s 的失败拖长，实得 ${String(m.p99Ms)}`);
+  assert.equal(m.samples, 4);
+  assert.equal(m.errorRate, 0.25);
+  assert.equal(m.rps, 4);
+  const noWindow = summarizeObservations(obs);
+  assert.equal(noWindow.rps, undefined, '窗口未知时 rps 必须缺测：按 1ms 算会得出一个永不触发的 warn 判据');
+});
+
+test('聚合 0 条观测要抛，不许产出"错误率 0、样本 0"那种漂亮对象', () => {
+  // evaluatePerfGate 对 samples<1 判 fail。如果这里返回一个对象，
+  // "施压脚本启动即崩"就能带着 errorRate:0 走进报告，那条 fail 判据永远轮不到说话。
+  assert.throws(() => summarizeObservations([]), /0 条观测/);
 });

@@ -74,6 +74,81 @@ export const PerfMetricsSchema = z
 export type PerfMetrics = z.infer<typeof PerfMetricsSchema>;
 
 /**
+ * 分位数。**全仓只有这一处**算它。
+ *
+ * ## 为什么要在 P0/P7 这一轮就落成函数
+ * 门禁（本文件 `evaluatePerfGate`）、断言（`engine/src/assertions.ts` 的 `assertPerf`）、
+ * 看板、压测输出四处都要问"这次的 p95 是多少"。各算一遍就正是本文件头上那段
+ * 批评过的形状 —— 看板说退化 8%、门禁说退化 24%，最后门禁被人关掉。
+ *
+ * ## 取法：线性插值（不是"取第 ceil(p·n) 个样本"）
+ * 两种取法在 n 小的时候差别很大，而**压测报告的读者默认看到的是插值口径**
+ * （k6 / JMeter / Grafana 的 p95 都是）。用最近秩会在 n=20 时报出"样本里真有那个值"
+ * 的数，读的人拿它跟 k6 的 p95 比就永远差一截。差别是量出来的，不是推的：
+ * `[10,20,30]` 的 p95 最近秩给 30、插值给 29。所以这里选插值，并把口径写死在测试里
+ * （`ir/test/baseline.test.ts` 「分位数口径」那组），换口径必须同时改测试。
+ *
+ * 约定：**入参不必预先排序**（本函数自己排，免得每个调用点各排一遍而其中一处忘了），
+ * 空数组返回 `undefined` 而不是 0 —— 与 PerfMetrics 那条"缺测不等于 0"同一条原则。
+ */
+export function percentile(valuesMs: readonly number[], p: number): number | undefined {
+  const xs = valuesMs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!xs.length) return undefined;
+  if (xs.length === 1) return xs[0];
+  const t = Math.min(1, Math.max(0, p / 100)) * (xs.length - 1);
+  const lo = Math.floor(t);
+  const hi = Math.ceil(t);
+  return lo === hi ? xs[lo] : xs[lo]! + (xs[hi]! - xs[lo]!) * (t - lo);
+}
+
+/** 一次压测的原始观测：每条请求的耗时 + 它是不是失败。 */
+export interface LoadObservation {
+  /** 该请求的端到端耗时（毫秒） */
+  ms: number;
+  /**
+   * 失败：传输层失败（连不上/超时/被重置），或状态码 <200 / ≥400，
+   * 或命中 `LoadProfile.failureStatus` 里显式声明的码（那一栏用来捞落在成功区间的那些，
+   * 例如过载时的 302）。判据只在 `adapter-http` 的 `requestFailed` 一处。
+   * ⚠ 这一句从前写的是"连接错误/超时/5xx"，那会让 4xx 看起来算成功 ——
+   * 与 `LoadProfile.failureStatus` 上那句一起错着，两处都在本轮改掉。
+   */
+  failed: boolean;
+}
+
+/**
+ * 观测 -> PerfMetrics。**唯一的一份聚合**，理由同 `percentile`。
+ *
+ * `windowMs` 缺席时 **rps 不填**（而不是按 1ms 算出一个天文数字）。
+ * 这是本文件那条"缺测不当 0"的镜像：缺测也不当无穷大 —— rps 是门禁里 warn 档的
+ * 判据，填一个假的巨大值会让"吞吐低于容量目标"这一条永远不响。
+ *
+ * `errorRate` 在 0 条观测时**不返回对象**而是抛：0 条时 errorRate 该是 0 还是 NaN
+ * 说不清，而 `evaluatePerfGate` 对 `samples<1` 的判据是 fail ——
+ * 让聚合层产出一个"错误率 0、样本 0"的漂亮对象，等于把"施压脚本启动即崩"
+ * 打扮成一次健康的跑（那条判据就永远轮不到说话）。
+ */
+export function summarizeObservations(obs: readonly LoadObservation[], windowMs?: number): PerfMetrics {
+  if (!obs.length) throw new Error('聚合 0 条观测：这次压根没打出请求，任何指标都无从谈起（不是错误率 0）');
+  const ms = obs.map((o) => o.ms).filter((v) => Number.isFinite(v) && v >= 0);
+  const failed = obs.filter((o) => o.failed).length;
+  const out: PerfMetrics = {
+    errorRate: failed / obs.length,
+    samples: obs.length,
+  };
+  // 分位数用**全部**观测（含失败的），与 k6 的 http_req_duration 同口径：
+  // 只统计成功的那部分会把"超时把尾巴拖长"这件事从 p99 里抹掉，
+  // 而超时恰恰是压测最想抓到那一类。
+  const p50 = percentile(ms, 50);
+  const p95 = percentile(ms, 95);
+  const p99 = percentile(ms, 99);
+  if (p50 !== undefined) out.p50Ms = p50;
+  if (p95 !== undefined) out.p95Ms = p95;
+  if (p99 !== undefined) out.p99Ms = p99;
+  if (windowMs !== undefined && windowMs > 0) out.rps = (obs.length / windowMs) * 1000;
+  return PerfMetricsSchema.parse(out);
+}
+
+/**
  * 有资格成为基线的样本。
  * 注意 `runId` / `scenarioVersionId` 这些是**外键**，本包不知道数据库存在，
  * 只声明形状；落库由 P1 的 store 层做（docs/01 §表结构：runs 表旁加一张）。

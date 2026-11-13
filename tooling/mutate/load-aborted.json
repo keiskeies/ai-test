@@ -1,0 +1,83 @@
+{
+ "_comment": [
+  "压测产物的两维分离：status（被测对不对）与 aborted（这一场完整吗）。",
+  "",
+  "这一份管的是**一次改动引入的那一格**：`atest load` 被取消时，从前把两件事压成",
+  "一个词写进 manifest.status，而那个词不在前端徽章白名单（web 的 STEP_OK）里 ->",
+  "落进兜底 -> 画成**红色'执行异常'**。一场'人按 Ctrl-C 停下来'的压测与'引擎崩了'",
+  "在运行记录列表里长得一模一样，而功能那条路上同一件事画的是 `pass 已中断`。",
+  "",
+  "为什么值得单独立一份而不是并进 cancel-http.json：那边测的是**功能 run** 那条链",
+  "（信号 -> RunReport.aborted -> 退出码 10 -> 租约归还），压测这一条**压根不走解释器**",
+  "（bypass 掉 interpreter 与 HttpExec，直接 press()）。同一条设计约定在两条互不重叠的",
+  "代码路径上各落一次，只钉一边等于另一边随时可以漂回去。",
+  "",
+  "L1 是这一轮最贵的一格：**测试里断的是字符串字面量 'aborted'，而屏幕上的徽章是红的**。",
+  "单元测试全绿而渲染结果错，这是 docs/08 §3 那一族里最难发现的一种 —— 判据对了,",
+  "载体错了，而没有任何一层负责看两边对上。所以 L1 的抓它的那条断言读的是",
+  "**磁盘上那份 manifest 的 status 在不在 IR 的六态里**（`STEP_STATUS`），",
+  "不是'它等于我抄的那个词' —— 抄的那种写法换成任何一个新的非法词都照样过。",
+  "",
+  "L2/L3 是一对：两维必须**同时**存在且**各自独立**。只留一维的两种写法各自都看着",
+  "合理（'反正取消就是失败' / '反正结论就是 pass'），而它们分别造出两种假：",
+  "被砍断的一场当上完整压测（基线基准变成半场耗时），以及取消那半里的 8% 失败率",
+  "被'这半场不算'抹掉（产品坏了而报告说一切正常）。",
+  "",
+  "L4 管的是**落盘那一份**上的话：summary.txt 是会被下载、贴进工单的东西，",
+  "那里没有 status 字段可读，只有文字。终端上说了而摘要里没说 = 对一半的读者没说。",
+  "",
+  "L5 是这一族里唯一一个**跨包**的：web 前端那一行该不该链 report.html。",
+  "`manifest.kind === 'load'` 这个字段从前是'有生产者、没有消费者'（docs/08 §3 反向版）,",
+  "写侧的文件注释写着'让它与功能 run 区分开'，而**那份承诺从没被执行过一次** ——",
+  "每个压测 run 那一行都挂着一个 report 链接，点进去 404（压测压根不产 report.html：",
+  "它一条响应体都不落）。L5 把承诺兑现，并且是唯一一条能抓住'改了写侧、忘了改前端'",
+  "的守卫（web 不许依赖 cli，那份 kind 抄不成同一个常量）。"
+ ],
+ "cases": [
+  {
+   "label": "L1 status 里又写那个六态之外的词（被取消的压测在列表里画成红色'执行异常'，与'引擎崩了'同形）",
+   "_why": "改动前的原样。当时单元测试全绿 —— 它们断的是 `loadRunStatus(...)` 返回 'aborted' 这个字符串，判据本身没错；错的是**这个值会直接写进 manifest.status**，而徽章白名单只有 IR 的六态。",
+   "_measured": "施加后第一条红的是纯判据那条（loadRunStatus 那个），报的是 `\"aborted\" 不在 IR 的六态里 —— 徽章会把它画成 error`。抓它的断言判的是'在不在 STEP_STATUS 里'，不是'等不等于我抄的那个词' —— 这条是驱动的第一红，比我原先预计的 e2e 那条更早，而它的含义一样：判据层就在拦，不用等到落盘。e2e 那条（中途取消）随后也红。",
+   "file": "packages/cli/src/load.ts",
+   "anchor": "  const aborted = o.cancelled;\n  if (o.threw) return { product: 'error', aborted };\n  if (o.errorRate > 0 || o.failureReasons.length) return { product: 'fail', aborted };\n  return { product: 'pass', aborted };",
+   "replace": "  if (o.cancelled) return { product: 'aborted' as never, aborted: true };\n  if (o.threw) return { product: 'error', aborted: false };\n  if (o.errorRate > 0 || o.failureReasons.length) return { product: 'fail', aborted: false };\n  return { product: 'pass', aborted: false };",
+   "testFile": "packages/cli/test/load.test.ts"
+  },
+  {
+   "label": "L2 '完整吗'那一栏不看取消，恒为 false（那半场的分位数会被当一次完整施压写进基线）",
+   "_why": "两维分开之后最容易犯的错：把 aborted 变成一个装饰字段。这一格假的时候 status 仍然对、屏幕上的徽章仍然对，唯一坏掉的是'这场能不能当基线'—— 而那是整个性能门禁的地基。",
+   "_measured": "驱动的第一红是 `loadOutcome 的 vus 来自**实测**那份…` 那条里对 `half.aborted` 的断言（那一条断的是「两维各归各位地从同一个入参来」）。驱动只打第一条失败，所以「还红了别处」是推断不是读数 —— 纯判据那条与 promoteLoadRefused 那条、以及取消那条 e2e 依赖的是同一个字段，逻辑上跑不掉，但这里只登记量到的那一条。",
+   "file": "packages/cli/src/load.ts",
+   "anchor": "    aborted: i.status.aborted,",
+   "replace": "    aborted: false,",
+   "testFile": "packages/cli/test/load.test.ts"
+  },
+  {
+   "label": "L3 '被取消'那条基线判据读回 status（两维分开后它读不到东西，一场半场压测直接当上基线）",
+   "_why": "L1 的**近邻**而不是同一条：判据本体（promoteRefused）永远看不见'这不是一次完整施压'—— 它只看 runStatus / durationMs / samples，而一场'取消了 45 秒'的跑躲得过全部三条（pass、>30s、有样本）。这一条只能由 CLI 这一层补，而补的那一条读的是 aborted 那一栏。",
+   "_measured": "施加后红在 promoteLoadRefused 那条新增的用例（pass + 被取消 + 45s 的长跑必须被拒）。",
+   "file": "packages/cli/src/load.ts",
+   "anchor": "  if (outcome.aborted) out.push('这场压测被取消了：它不是一次完整的施压，实测窗口由取消时刻决定');",
+   "replace": "  if ((outcome.runStatus as string) === 'aborted') out.push('这场压测被取消了：它不是一次完整的施压，实测窗口由取消时刻决定');",
+   "testFile": "packages/cli/test/load.test.ts"
+  },
+  {
+   "label": "L4 落盘的摘要里不说'被中断'（只有终端说了；而摘要是会被下载与贴进工单的那一份）",
+   "_why": "与功能那侧 summaryText 首行同一条理由。status 现在按两维分开写，所以文字那一侧必须自己补上那句 —— 否则一份写着'结论 pass'的摘要会被读成'这是一次完整的压测'。",
+   "_measured": "施加后红在取消那条 e2e 对 summary.txt 的断言（`assert.match(summary, /被中断/)`）。注意它**不红**在任何终端输出的断言上 —— 两处文字各有各的载体，少一处就少一条守卫。",
+   "file": "packages/cli/src/commands.ts",
+   "anchor": "    `结论 ${o.outcome.runStatus}${aborted ? '（**被中断**：压测期间收到取消请求，这是部分观测）' : ''}`",
+   "replace": "    `结论 ${o.outcome.runStatus}`",
+   "testFile": "packages/cli/test/load.test.ts"
+  },
+  {
+   "label": "L5 前端读回 manifest.kind 来决定链不链 report（跨包：写侧改了、前端那半永远不改）",
+   "_why": "`kind` 这个字段从前只有生产者没有消费者，而它带着'让它与功能 run 区分开'这句承诺。这一条测的是**那份承诺真的被执行了**：把消费点删掉，压测那一行就回到'挂着一个 404 的 report 链接'。",
+   "_measured": "跨包 -> 驱动强制重建。施加后红在 packages/web/test/run-lines.test.ts 那条'压测那一行不链 report'。",
+   "file": "packages/web/src/run-lines.ts",
+   "anchor": "    hasReport: !isLoad,",
+   "replace": "    hasReport: true,",
+   "testFile": "packages/web/test/run-lines.test.ts"
+  }
+ ]
+}

@@ -18,16 +18,14 @@ import {
 import {
   parseOpenApi, HttpClient, asHttpExec, startMockServer, CookieJar,
   AuthHook, CredentialTable, TokenSource, normalizeSecuritySchemes,
-  type AuthConfigRaw, type ParsedDoc, type MockServer,
+  compileValidator,
+  type AuthConfigRaw, type LoadDocLookup, type ParsedDoc, type MockServer, type Validator,
 } from '@atest/adapter-http';
 import { createWebAdapter, type WebAdapter } from '@atest/adapter-web';
 import { DiskArtifactStore } from '@atest/store';
-import { parseScenario, targetSources, type Scenario, type ScenarioDraft, type TargetSource } from '@atest/ir';
+import { parseScenario, secretEnvKey, secretFromEnv, normalizeSecretRef, targetSources, type Scenario, type ScenarioDraft, type TargetSource } from '@atest/ir';
 
 import { EXIT } from './exit.js';
-
-/** CLI 的密钥前缀。真实值只从环境变量取，永远不出现在命令行里 */
-export const SECRET_ENV_PREFIX = 'ATEST_SECRET_';
 
 export class CliError extends Error {
   constructor(message: string, readonly code: number, readonly hint?: string) {
@@ -43,43 +41,40 @@ export class CliError extends Error {
  * CI 的"打印完整命令行"日志、以及 core dump 全部记录下来。
  * 用环境变量则至少躲开前三条（这也是为什么这里连报错都不回显值）。
  * 报错只说"哪个 ref 没解析到、去设哪个变量" —— 报错信息本身也可能进日志。
- */
-/**
- * 把 IR 里三种密钥写法归一成同一个 ref。
  *
- * IR 侧确实存在多种形态（不是历史包袱，是两种字段类型）：
- *   `auth: 'secret:db_pw'`          —— SecretRefSchema，纯字符串
- *   `{ path: '$secret.db_pw' }`     —— ValueSchema 的引用形态（引擎按变量根解析）
- *   `{ path: '$.secret.db_pw' }`    —— 同一个根的显式写法
- * 引擎**最终都会**调 secretResolver('secret:db_pw')（见 vars.ts 的 root==='secret' 分支），
- * 所以归一必须与之对齐。早先这里只认 `^secret[:.]`，于是 `$secret.db_pw`
- * 一路 replace 成 `_secret_db_pw` -> 环境变量名变成 ATEST_SECRET__SECRET_DB_PW，
- * 用户照着报错去设变量，设了也不生效 —— **报错本身是错的**，比不报错更坏。
+ * `secretEnvKey` / `normalizeSecretRef` / `SECRET_ENV_PREFIX` 的**定义已经搬到 @atest/ir**
+ * （`secrets.ts` 的头上记了理由：压测那条路的两个后端也要按同一个规矩取变量，
+ * 而它们不许 import cli）。这里 re-export 是为了报错文案与取值仍然同源。
  */
-export function normalizeSecretRef(ref: string): string {
-  const t = ref.trim().replace(/^\$?\.?/, '');
-  // 必须真的带 `secret[:.]` 前缀才归一。不加这个检查的话 `$secret`（写漏了 ref 名）
-  // 会变成 secret:secret，而引擎对它的调用是 secretResolver('secret:') ——
-  // 两边名字不同，"按报错去设变量"就会设一个永远读不到的变量
-  const m = /^secret[:.]([\w.-]+)$/.exec(t);
-  return m ? `secret:${m[1]}` : '';
-}
-
-/** 密钥 ref → 环境变量名。导出以便报错文案与实现同源（两处各拼一份迟早不一致） */
-export function secretEnvKey(ref: string): string {
-  const name = normalizeSecretRef(ref).replace(/^secret:/, '').replace(/[^A-Za-z0-9_]/g, '_').toUpperCase();
-  return name ? SECRET_ENV_PREFIX + name : '';
-}
+export { SECRET_ENV_PREFIX, normalizeSecretRef, secretEnvKey } from '@atest/ir';
 
 export function secretResolverFromEnv(
   env: Record<string, string | undefined> = process.env,
   onMissing?: (ref: string) => void,
 ): (ref: string) => string {
   return (ref: string): string => {
-    const key = secretEnvKey(ref);
-    // key 为空说明 ref 本身不构成一个可用引用（比如 `$secret.`），
-    // 当成"没配到"处理：交回占位符并记进 onMissing，而不是去查一个空变量名
-    const v = key ? env[key] : undefined;
+    /*
+     * 取值这一步**调 @atest/ir 那份**，不在这里重抄一遍"按名字去 env 里拿"。
+     *
+     * 从前这里是手写的两行（`secretEnvKey(ref)` + `env[key]`），而 `secretFromEnv`
+     * 判的是同一件事，只在**空串算不算配到了**上不一样：手写那两行只判
+     * `v === undefined`，而 `ATEST_SECRET_DB_PW=""`（CI 里 `set -a; . ./.env`
+     * 摊开一个空赋值就是这个形状）在它眼里是"取到了"。
+     *
+     * 我先给这一格写的理由是"于是发出 `Bearer `" —— **那句是错的，实测过**：
+     * `apply.ts` 的 `need()` 判的是 `!v || v.startsWith('«')`，空串照样被它挡下，
+     * 两条路最后都是抛 `MissingCredentialError`。真正的差别只在**报错的来路**：
+     * 走旧那两行时 `onMissing` 不会被调，于是 `missingSecrets` 是空的，
+     * 屏幕上就没有 commands.ts 那句「· secret:db_pw → 设环境变量 ATEST_SECRET_DB_PW」。
+     * 读到的是 apply.ts 那句通用的"凭证解析不到值"，而它**不知道要去设哪个变量名**
+     * （那段文案连变量名都没提）。两种下场都拦下了请求，但只有一个是可执行的。
+     *
+     * 所以这一处不是"修了一个泄漏"，是**去掉一个事实的两个答案**：
+     * "什么算没配到"从此只有一个人回答（undefined 与空串都算），
+     * 压测那条路（`load-k6.test.ts` 钉的是"缺密钥不发鉴权头"）与功能回归这条路的
+     * 缺口径，靠的是同一个函数而不是两份长得像的代码。
+     */
+    const v = secretFromEnv(ref, env);
     if (v === undefined) {
       // **交回引擎既有的占位符**，而不是自己造一个：
       // 磁盘脱敏规则里有一条是"看起来像占位符的值不再重复脱敏"，
@@ -361,6 +356,115 @@ export class DocRegistry {
       return d;
     };
   }
+
+  /**
+   * 给**压测编译器**（`compileLoadPlan`）的 spec 查找线。
+   *
+   * ## 为什么不是复用 `provider()`
+   * 那一个返回整份 `ParsedDoc`，签名与返回形状都不同（编译器只要一个 operation，
+   * 且要的是"查不到返回 undefined"而不是抛）。
+   *
+   * ## 为什么"查不到"这里也抛，而编译器那一侧返回 undefined 就够
+   * IR 里写了 `docRef: "shop.yaml"` 而本次没导入它 —— 这不是"这个 operation 不存在"，
+   * 是**用户少敲了一个开关**（与 `provider()` 那条同一个理由）。让它落到
+   * "计划里退成没有 operation"会得到一条**照样能压**的用例：URL 模板取 IR 里那个
+   * （openapiCall 不带 url），组出来是空地址，每个请求都算一条传输失败观测 ——
+   * 于是产出一份"错误率 100%"的性能报告，而真相是命令行少了一个 `--doc`。
+   * 配置缺失必须在装配期就说清（`requireAdapters` 那段记过同一族）。
+   */
+  loadLookup(): LoadDocLookup {
+    return {
+      operation: async (ref) => {
+        const doc = this.docs.get(ref.docRef);
+        if (!doc) {
+          throw new CliError(
+            `压测场景引用了 docRef="${ref.docRef}"，但本次运行没有导入它（已导入：${this.names().join(', ') || '无'}）`,
+            EXIT.ENV,
+            `加一个 --doc ${ref.docRef}=<openapi.json>`,
+          );
+        }
+        const op = ref.operationId
+          ? doc.byId.get(ref.operationId)
+          : doc.operations.find((o) => o.method === ref.method?.toUpperCase() && o.path === ref.path);
+        if (!op) {
+          // 这一条**不是**配置缺失而是 IR 写坏了（docRef 对得上、operation 找不到），
+          // 所以照常返回 undefined，让编译器按"没有 operation"处理并把它自己的
+          // 报错说完整（它在 plan.ts 里，那里看得见 stepId）。
+          return undefined;
+        }
+        return {
+          method: op.method,
+          urlTemplate: op.path,
+          // 只带 path/query 两个来源。`LoadOperation.params` 的 `in` 就是这两类
+          // （composeUrl 只组地址），header/cookie 参数不属于它，塞进去会被静默忽略
+          params: op.params
+            .filter((p) => p.in === 'path' || p.in === 'query')
+            .map((p) => ({
+              name: p.name, in: p.in as 'path' | 'query',
+              ...(p.style !== undefined ? { style: p.style } : {}),
+              ...(p.explode !== undefined ? { explode: p.explode } : {}),
+            })),
+          ...(op.operationId !== undefined ? { operationId: op.operationId } : {}),
+          ...(op.deprecated !== undefined ? { deprecated: op.deprecated } : {}),
+          ...(op.requiredBodyFields !== undefined ? { requiredBodyFields: op.requiredBodyFields } : {}),
+        };
+      },
+    };
+  }
+
+  /**
+   * 给**压测后端**的请求体校验器（`LoadDeps.validate` 那个口）。
+   *
+   * ## 为什么 CLI 要自己搭一份，而不是用 `asHttpExec` 里那个
+   * 压测那条路**整个绕开解释器与 HttpExec**（docs/09 §4.2：IR 子集 ──▶ 编译器 ──▶ 计划
+   * ──▶ 直接 fetch）。所以功能形态那份请求侧校验（在 `asHttpExec.validateRequest` 里）
+   * 在压测里天然不存在 —— 而 `plan.ts` 明确把 `validate` 目标带进了计划、
+   * `runtime.ts` 也确实调 `deps.validate`，只是**没人给它**。
+   * 不接的后果不是"少一次校验"那么中性：负向策略以外的那些用例，
+   * 请求体写坏了也照样打出去，被测系统返回 400，于是错误率里那一格
+   * 会被读成"产品在高并发下拒绝请求"，而真相是我们自己发了坏请求。
+   *
+   * ## 只按 operationId 找
+   * 计划里的 `validate` 只带 `{docRef, operationId}`（编译期就只带了这些）。
+   * 编译器不会凭空造 id，所以这里"找不到 operation"只可能是"那份 spec 里没有这个 id"，
+   * 那时**跳过校验**而不是抛：压测中途抛一次会让整场停住（`press.ts` 的 allSettled 那条），
+   * 而"这个接口的体我没 schema 可查"绝不该值一场压测 —— 缺校验是**弱一点的证据**，
+   * 停掉则是**没有证据**。（这一条与 `validateAgainstSchema` 对空 schema
+   * 直接返回 ok 的处置同向：宁缺毋误。）
+   */
+  loadBodyValidator(): (node: { validate?: { docRef: string; operationId?: string } | null; id: string }, body: unknown) => string[] | undefined {
+    // validator 编译不便宜（每份 schema 都要 new 一个 Ajv），按 operationId 缓存。
+    // 缓存键这里用字符串而不是 client.ts 那个 WeakMap：本函数每次命令调一遍、
+    // 生命周期就是一次压测，闭包里的 Map 跟着它一起没，不会跨 spec 重载拿旧校验器
+    // （那正是 WeakMap 那一处要避免的漂移，成因在这里不存在）。
+    const cache = new Map<string, Validator | null>();
+    return (node, body) => {
+      const target = node.validate;
+      if (!target) return undefined; // 负向策略在编译期已置 null：那些**故意**发坏请求
+      const doc = this.docs.get(target.docRef);
+      const opId = target.operationId;
+      if (!doc || !opId) return undefined;
+      const op = doc.byId.get(opId);
+      if (!op) return undefined;
+      const key = `${target.docRef}|${opId}`;
+      let v = cache.get(key);
+      if (v === undefined) {
+        v = !op.requestBodySchema || !Object.keys(op.requestBodySchema).length ? null : compileValidator(op.requestBodySchema);
+        cache.set(key, v);
+      }
+      if (!v) return undefined;
+      // schema 自己读不出时 compileValidator 给一个"什么都不判"的校验器，
+      // 这一格与 client.ts 同一处置：不拿一个坏 schema 去判用例有罪
+      if (v.schemaIssues.length) return undefined;
+      const out = v(body);
+      if (out.ok) return undefined;
+      // 只有 hard 参与失败判定（contract 那档是 format 层面的契约发现，
+      // 功能形态也只记事件不拦），口径必须与 `asHttpExec` 那边一致
+      const hard = out.violations.filter((x) => x.severity === 'hard');
+      if (!hard.length) return undefined;
+      return hard.map((x) => `${x.path}: ${x.message}`);
+    };
+  }
 }
 
 function baseName(p: string): string {
@@ -534,6 +638,13 @@ export interface AssembleOptions {
 export interface Assembled {
   runOptions: RunOptions;
   store: DiskArtifactStore;
+  /**
+   * 鉴权钩子。**压测那条路要从这里拿**（`press({ auth })`），因为压测绕开解释器与
+   * HttpExec，而它必须用**同一个** hook 实例：token 缓存、凭证表、缺凭证就抛那条路径
+   * 都只有一份。自己 new 一个的话就有两个 token 缓存 —— 压测里每个 VU 各取一次 token
+   * 是它自己该记的账，而"同一个身份取两次 token"是我们的装配分叉了。
+   */
+  auth: AuthHook;
   /** 起了 mock 才有；调用方必须在结束时关掉 */
   mock?: MockServer;
   /** 场景用到 Web 步骤时才建。**调用方必须在结束时 close** ——
@@ -715,7 +826,7 @@ export async function assemble(o: AssembleOptions): Promise<Assembled> {
     );
   }
 
-  return { runOptions, store, warnings, missingSecrets, ...(builtWeb ? { web: builtWeb } : {}) };
+  return { runOptions, store, auth: auth.hook, warnings, missingSecrets, ...(builtWeb ? { web: builtWeb } : {}) };
 }
 
 /**

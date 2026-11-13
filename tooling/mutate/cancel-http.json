@@ -50,21 +50,23 @@
     {
       "label": "C2 两条取消来源的合成退化成「只认注入的那个」（常驻服务上 Ctrl-C 静默失效）",
       "_why": "cli/src/commands.ts 把信号与 io.abortSignal 合成一个标志。写成只认注入的那份，症状是服务端宿主里按 Ctrl-C 没反应，而 CLI 自己的测试永远不注入那个字段 —— 一条都不红。",
-      "file": "packages/cli/src/commands.ts",
+      "file": "packages/cli/src/signals.ts",
       "anchor": "      get aborted() { return signals.signal.aborted || injected.aborted; },",
       "replace": "      get aborted() { return injected.aborted; },",
       "testFile": "packages/server/test/cancel-http.test.ts",
       "build": true,
-      "_measured": "抓到（「宿主注入了取消位时，Ctrl-C 仍然砍得动」）。跨包变异，所以要 build（cli 的 src 改坏后 server 的测试吃的是 dist）。"
+      "_measured": "抓到（「宿主注入了取消位时，Ctrl-C 仍然砍得动」）。跨包变异，所以要 build（cli 的 src 改坏后 server 的测试吃的是 dist）。",
+      "_anchor_moved": "本轮把两条取消来源的合成从 commands.ts 搬进 installCommandSignals（load 那条路要同一套合成，抄第二份会漂）。锚点因此离开 commands.ts —— 而旧锚点在磁盘上找不到时 split().join() 是恒等变换，那两条会永远\"未被抓到\"却白占名额。锚点跟着搬，判据不变。"
     },
     {
       "label": "C3 合成退化成「只认信号」（/api/cancel 置的标志下游看不见，端点成为纯装饰）",
-      "file": "packages/cli/src/commands.ts",
+      "file": "packages/cli/src/signals.ts",
       "anchor": "      get aborted() { return signals.signal.aborted || injected.aborted; },",
       "replace": "      get aborted() { return signals.signal.aborted; },",
       "testFile": "packages/server/test/cancel-http.test.ts",
       "build": true,
-      "_measured": "抓到，而且一次红掉四条：排队那条与在跑那条都变成「跑完了」，409 那条也红（它等的是被取消的码 10）。**这就是为什么这一格值得单独一条测试**：C2 只红一条、C3 红四条，两个方向的坏法不对称。"
+      "_measured": "抓到，而且一次红掉四条：排队那条与在跑那条都变成「跑完了」，409 那条也红（它等的是被取消的码 10）。**这就是为什么这一格值得单独一条测试**：C2 只红一条、C3 红四条，两个方向的坏法不对称。",
+      "_anchor_moved": "本轮把两条取消来源的合成从 commands.ts 搬进 installCommandSignals（load 那条路要同一套合成，抄第二份会漂）。锚点因此离开 commands.ts —— 而旧锚点在磁盘上找不到时 split().join() 是恒等变换，那两条会永远\"未被抓到\"却白占名额。锚点跟着搬，判据不变。"
     },
     {
       "label": "C4 同名 job 静默覆盖（前一个人点取消，砍掉的是后一个人的 run）",

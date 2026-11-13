@@ -6,14 +6,27 @@
  * 因为 CI 里经常有人 `atest run ... > result.txt` 只留结论；
  * 告警混进 stdout 会让那份文件变成没法机器解析的东西。
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, appendFile, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
-  EVIDENCE_FILES, lintScenario, runScenario, toJUnitXml, toReport, summaryText,
+  EVIDENCE_FILES, lintScenario, liveClock, runScenario, toJUnitXml, toReport, summaryText,
   type AdapterRegistry, type RunReport, type ScenarioGraph, type ScenarioGraphGapCause, EVIDENCE_MEMBERS
 } from '@atest/engine';
-import { callSites, defineScenario, scenarioIdOfRef, type Scenario, type ScenarioDraft } from '@atest/ir';
+import {
+  BaselineSampleSchema, callSites, defineScenario, scenarioIdOfRef,
+  type BaselineSample, type LoadProfile, type PerfGateResult, type Scenario, type ScenarioDraft,
+} from '@atest/ir';
+import {
+  BACKEND_INCOMPARABLE, LOAD_BACKENDS,
+  loadClockOrRefuse, loadGate, loadOutcome, loadRunStatus, overrideNotice, pickLoadBaseline,
+  promoteLoadRefused, runnerSpecHint, runnerSpecOrRefuse, toBaselineSample, withSutDims,
+  type LoadBackend, type LoadRunOutcome,
+} from './load.js';
+import {
+  compileLoadPlan, measuredLoad, press, renderK6Script, PRELUDE_FILE,
+  type LoadPlan, type MockServer, type PressResult,
+} from '@atest/adapter-http';
 import { buildEvidencePackage, readEvidenceMember, readZipEntries, writeEvidenceMembers, writeEvidencePackage } from '@atest/store';
 
 import { formatErrors, type ParsedArgs } from './args.js';
@@ -25,9 +38,10 @@ import { generateScenarios, renderScenarioJson, strategyOf, STRATEGIES, GENERATE
 import { findConfig, resolveEnvFile, resolveScenarioPath, writeConfig, DEFAULT_CONFIG, CONFIG_FILE, type ProjectConfig } from './paths.js';
 import {
   assemble, buildAuthLayer, CliError, DocRegistry, loadScenarioFile, makeClock, startLocalMock, buildEnv, secretEnvKey,
+  type Assembled,
 } from './wiring.js';
 import { authCheckExit, checkAuth } from './authcheck.js';
-import { installSignalHandlers, type AbortFlag } from './signals.js';
+import { installCommandSignals, type AbortFlag } from './signals.js';
 
 export interface Io {
   out(s: string): void;
@@ -359,12 +373,17 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
    * 这样在第 1 个场景上按的 Ctrl-C 会跳过第 2、3 个（runOne 里装的话，
    * 每个场景都会重新"允许被取消"，而人按的那一下只作用于当时那个场景 ——
    * 那恰好是人在取消一批用例时最不想要的行为）。
+   *
+   * 合成与归因那两件事现在在 `installCommandSignals` 里 —— **不是**因为这段长，
+   * 而是因为 `load` 要同一套（它更需要：一场几千 rps 的压测必须真能停下来）。
+   * 留在这里的只有措辞。
    */
-  const signals = installSignalHandlers({
-    onAbort: ({ sig, sameSignal }) => {
+  const cancel = installCommandSignals({
+    injected: io.abortSignal,
+    onAbort: ({ sig, second }) => {
       // 同步一句、立刻打。信号栈里不能 await，而**什么都不打**的表现是
       // "按了没反应，还得多等几秒才知道有没有生效" —— 于是人会再按一次。
-      if (sameSignal) {
+      if (second) {
         // 第二次同名：signals.ts 马上要把进程打死。这里**只说已经发生的事**，
         // 不说"正在收尾"那种假进度（进程不会活到收尾）。
         io.err(`再次收到 ${sig}：立即终止，**放弃**证据包、teardown 与设备归还。`);
@@ -374,28 +393,7 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
       io.err('  再按一次同样的键**立刻终止**，代价是：没有证据包、没有 teardown、设备租约不归还。');
     },
   });
-
-  /**
-   * 取消的**两条来源合成一个**再交给下游。
-   *
-   * 合成而不是二选一：宿主注入了 `io.abortSignal` 时仍然装信号处理器，
-   * 否则 Ctrl-C 在服务端那种宿主里就失效了（比不能取消更坏）；反过来只认信号，
-   * 那注入的那个字段就是"有字段、没人读"这一族缺陷的新实例。
-   *
-   * `sig()` 只可能来自信号那一份（注入的那个恒 undefined，见 createAbortFlag），
-   * 所以归因这句话要自己拼 —— 直接读 `signal.sig()` 会把 HTTP 取消说成"被信号取消"，
-   * 那是把人引向"谁 kill 了进程"的假归因。
-   */
-  const injected = io.abortSignal;
-  const abortedBy = (): string =>
-    signals.signal.sig() ?? (injected?.aborted ? '外部请求' : '信号');
-  const abortSignal: AbortFlag = injected
-    ? {
-      get aborted() { return signals.signal.aborted || injected.aborted; },
-      sig: () => signals.signal.sig(),
-      count: () => signals.signal.count() + injected.count(),
-    }
-    : signals.signal;
+  const { signal: abortSignal, abortedBy, restore: restoreSignals } = cancel;
 
   const results: CommandResult[] = [];
   // 显式类型：EXIT.OK 是字面量 0，不标注的话 worst 被推成 0，后面赋别的码就报
@@ -423,7 +421,7 @@ export async function cmdRun(a: ParsedArgs, io: Io): Promise<CommandResult> {
     // **必须摘**（三条理由见 InstalledSignals.restore 的注释：处理器累加、
     // 同进程后续用例会被误中断、进程期间对 Ctrl-C 免疫）。
     // 放 finally：runOne 抛异常（配置缺失那几条 CliError）时也要摘。
-    signals.restore();
+    restoreSignals();
   }
   /*
    * **被取消挡掉的场景必须进退出码**。走现成的 `worseExit` 而不是新写一条比较：
@@ -731,7 +729,7 @@ function safeRunId(s: string): string {
  * 退出码的"更坏"顺序。按语义而不是数值：
  * USAGE/INVALID 要盖过 TEST_FAILED —— 配置不对时先说配置不对。
  */
-const WORSE_ORDER: number[] = [EXIT.OK, EXIT.TEST_FAILED, EXIT.ABORTED, EXIT.RUNTIME, EXIT.ENV, EXIT.INVALID, EXIT.USAGE];
+const WORSE_ORDER: number[] = [EXIT.OK, EXIT.VERDICT_UNKNOWN, EXIT.TEST_FAILED, EXIT.ABORTED, EXIT.RUNTIME, EXIT.ENV, EXIT.INVALID, EXIT.USAGE];
 export function worseExit(a: number, b: number): number {
   const ra = WORSE_ORDER.indexOf(a);
   const rb = WORSE_ORDER.indexOf(b);
@@ -1184,6 +1182,702 @@ export async function cmdAuthCheck(a: ParsedArgs, io: Io): Promise<CommandResult
   io.err('');
   io.err(CI_HINT);
   return { code: authCheckExit(result), summary: result.summary };
+}
+
+// ── atest load ────────────────────────────────────────────────────────────
+
+/**
+ * `atest load` —— 把一条带 `load` 块的场景压一遍，出分位数、过门禁、可选写基线。
+ *
+ * ## 这条命令补的是哪一格
+ * `packages/adapter-http/src/load/` 那四个模块（编译器 / 内置后端 / k6 生成器 / 语义核）
+ * 早就写完了，而**没有任何一个入口调用过它们** —— `press`、`measuredLoad`、
+ * `compileLoadPlan`、`renderK6Script` 全是 dead export（`npm run lint` 的 dead-exports
+ * 当场点名）。docs/08 §3(f) 那一族里"有载体、没有生产者"在这一处反了过来：
+ * **有生产者，没有消费者**，所以"这条链路能不能跑"这件事在本仓一次都没成立过。
+ * `load-press.test.ts` 已经用真 mock 把 press 跑过并当场抓出四个缺陷，
+ * 这条命令是把同一批事实接到人敲的那一行上。
+ *
+ * ## 三条与 `run` 不同的地方，每条都有理由
+ *  1. **不另跑一次功能回归**。压测形态自己会跑 setup 与断言（`assert` 在
+ *     `LOAD_STEP_SUPPORT` 里是 `flow`，"必须演"），再跑一遍等于把 setup 的副作用做两遍
+ *     —— docs/02 §5 的不可逆动作纪律管的正是这个。所以 `runStatus` 是**从压测结果推的**
+ *     （见 `loadRunStatus`），这句话也随产物打印，别让人以为它是功能结论。
+ *  2. **时钟只认 live**。性能数字要的是墙上时间；冻结时钟的 `mono()` 只在 `sleep()`
+ *     时前进，用它测出来的 p50/p95 恒等于 0（`press` 那边拒的是"没上限会死循环"，
+ *     是另一个问题：加了上限的冻结时钟不死循环但照样量不出时间）。
+ *  3. **施压机规格必须由人给**（`--runner-spec`）。见 `runnerSpecOrRefuse`：
+ *     猜出来的规格会让两次不同的压测**看起来可比**，那正是性能门禁最常见的死法。
+ */
+export async function cmdLoad(a: ParsedArgs, io: Io): Promise<CommandResult> {
+  const target = a.positionals[0];
+  if (!target) throw new CliError('load 需要一个场景：atest load <场景 id 或 IR 文件路径>', EXIT.USAGE);
+  const cfg = await findConfig(io.cwd);
+  const path = await resolveScenarioPath(cfg, target, io.cwd);
+  const { scenario } = await loadScenarioFile(path);
+  const ci = flag(a, 'ci');
+
+  /*
+   * 静态闸**必须跑**，而且不看 `--strict`。
+   *
+   * `run` 那边 lint 是可选的（本地手跑不带 --strict 是常态），这里不行：
+   * LOAD_* 那一组的判据表（`ir/src/load.ts` 的 LOAD_STEP_SUPPORT）与编译器
+   * （`adapter-http/src/load/plan.ts`）读的是同一张表，而这一组规则存在的全部理由是
+   * "静态闸放行、编译器演化出一条其实不同的用例"。跳过静态闸，
+   * LOAD_NOT_CONCURRENCY_SAFE（作者自己声明过这条用例不能并发）就没人看了 ——
+   * 而压测**就是**并发。编译器那边只挡 `refuse` 那一档，管不到这一条。
+   */
+  const rep = toReport(lintScenario(scenario, await lintCtxFor(scenario, cfg, io.cwd, dirname(path), {})));
+  for (const w of rep.warnings) io.err(`  （警告，不拦压测）[${w.code}] ${w.stepId ?? ''} ${w.message}`);
+  if (!rep.ok) {
+    io.err(`压测前的静态闸没过（${rep.errors.length} 个 error）：`);
+    for (const e of rep.errors.slice(0, 10)) io.err(`  [${e.code}] ${e.stepId ?? ''} ${e.message}`);
+    return { code: EXIT.INVALID, summary: `${scenario.id}: 静态闸拒绝` };
+  }
+
+  // 执行前的闸。压测的 setup 里通常是 POST/登录/建数据，CI 没冻结就不该打
+  const gate0 = gateBeforeRun({ scenario, ci, allowUnfrozen: flag(a, 'allow-unfrozen') });
+  for (const r of gate0.reasons) io.err(r);
+  if (gate0.refused) return { code: gate0.code, summary: `${scenario.id}: 拒绝执行` };
+
+  if (!scenario.load) {
+    // 编译器里也有这一句（并且带着"为什么必须在 IR 里"的完整理由）。这里先拦一次
+    // 不是为了判据，是为了**退出码**：让它走到编译器就是 EXIT.INVALID 之外的运行异常码，
+    // 而"这条场景不是压测场景"是用法问题，该是 USAGE。
+    throw new CliError(
+      `场景 ${scenario.id} 没有 load 块，不是一条压测场景`, EXIT.USAGE,
+      '压测形状（VU 数、时长、思考时间）写在 IR 的 load 块里 —— 它是用例的一部分，'
+      + '命令行只作临时覆盖。理由见 ir/src/load.ts 文件头：基线要能回答"这次和上次是同一个压法吗"',
+    );
+  }
+
+  const clock = loadClockOrRefuse(str(a, 'clock'));
+  if ('why' in clock) throw new CliError(clock.why, EXIT.USAGE);
+
+  const specJudgment = runnerSpecOrRefuse(str(a, 'runner-spec'));
+  if ('why' in specJudgment) throw new CliError(`${specJudgment.why}\n  ${runnerSpecHint()}`, EXIT.USAGE);
+  const runnerSpec = specJudgment.spec;
+
+  const backend = str(a, 'backend') ?? 'builtin';
+  if (!LOAD_BACKENDS.includes(backend as LoadBackend)) {
+    throw new CliError(`--backend 只认 ${LOAD_BACKENDS.join(' / ')}，实际是 "${backend}"`, EXIT.USAGE);
+  }
+
+  const envName = str(a, 'env') ?? cfg?.defaultEnv;
+  const envFile = envName ? await resolveEnvFile(cfg, envName, io.cwd) : undefined;
+  const env = buildEnv(envFile, a.multi['env-var'] ?? []);
+  const registry = await DocRegistry.load(a.multi.doc ?? []);
+  warnSpecIssues(registry, io);
+  const evidenceDir = str(a, 'evidence-dir') ?? cfg?.evidenceDir ?? join(io.cwd, DEFAULT_CONFIG.evidenceDir);
+
+  /*
+   * 装配走 `run` 那条**同一个**函数，不复制一份。
+   *
+   * 要的是它里面的凭证表 / token 缓存 / 密钥缺失告警 —— 那些只要分叉成第二份，
+   * 表现就是"功能回归不 401，压测全 401"（同一份 IR 两种行为，本仓记过多次的那一族）。
+   * 顺带把 Web/浏览器那条装配也带上：压测场景里有 Web 步骤会在装配期就报"没配浏览器"，
+   * 而 LOAD_STEP_SUPPORT 那边也会在静态闸报它 —— 两道都响是故意的，
+   * 装配那道管"就算你绕过 lint 也别起个半吊子"。
+   */
+  /*
+   * envRevision 与 inputs **各算一次**，装配与指纹两处共用同一个值。
+   * 与 cmdRun 同一条理由（那边文件里记着）：各算一遍的话，将来某处加了"从环境文件读默认修订"
+   * 而另一处没加，run 记录里是 7、指纹里是 0，而指纹唯一的用途就是两次跑对比 ——
+   * 表现是"基线永远判环境不同"，离这两行很远。压测这一路更糟：那一格直接判不可比。
+   *
+   * ⚠ 这两行**必须在起 mock 之前**：`parseInputs` 会抛（`--input` 少个等号），
+   * 而抛在 mock 之后就是端口泄漏 —— 命令行用法错是最常发生的一条失败路径，
+   * 测试里一个还活着的 server 会让 `node --test` 的进程根本不退出。
+   */
+  const envRevision = str(a, 'env-revision') ? Number(a.flags['env-revision']) : undefined;
+  const inputs = parseInputs(a.multi.input ?? []);
+  requireAdapters(scenario, registry, flag(a, 'local'));
+  let mock;
+  if (flag(a, 'local')) {
+    if (backend === 'k6') {
+      // 这条不是保守，是**指错方向**：--local 起的 mock 跟着本命令一起退出，
+      // 生成出来的脚本里那个 baseUrl 到 k6 跑的时候已经没人监听了。
+      // 症状是"k6 报一连串 connection refused"，而人会去查 k6 装没装好。
+      throw new CliError('--backend k6 不能配 --local：本地 mock 会跟着这条命令一起退出，'
+        + '生成的脚本要跑的地址届时已经没人监听。给一个真的 --env-var baseUrl=… 再导出', EXIT.USAGE);
+    }
+    if (registry.empty()) throw new CliError('--local 需要先导入 spec：--local --doc shop=<openapi.json>', EXIT.USAGE);
+    const localWarnings: string[] = [];
+    mock = await startLocalMock(registry, localWarnings);
+    env.baseUrl = mock.addr;
+    for (const w of localWarnings) io.err(w);
+  }
+  const baseUrl = typeof env.baseUrl === 'string' ? env.baseUrl : undefined;
+  if (!baseUrl) {
+    throw new CliError('没有 baseUrl。用 --env staging 或 --env-var baseUrl=http://…（--local 会自己起 mock）', EXIT.USAGE);
+  }
+
+  /*
+   * **从这里开始整块进 try/finally。** 形状是"起一个、装一个、编译一个、压一场"，
+   * 四段里任何一段抛（编译失败是真会抛的：编译器拒 while/parallel/table）
+   * 都得把前三段留下的东西还掉。
+   *
+   * 我先前只把**最后一段**放进 try，于是编译失败那条路上：
+   *  - mock 的端口一直听到进程该退的时候 —— 测试里更糟，`node --test` 的进程
+   *    因为一个还活着的 server 而**不退出**，表现是"这个测试文件挂住了"，
+   *    而挂住的原因在两百里外的一条 IR 写了 while；
+   *  - 信号处理器留在原地，带着"第二次同名按键就 process.kill(self)"那套逻辑
+   *    （见 signals.ts 的 restore 那条：泄漏的那一份**还会咬人**）。
+   *
+   * 三个要还的东西装进**一个** holder 而不是三个 `let`：三个 let 会带上
+   * "用了还没赋值的那个"这种编译错误，而绕过它的写法（`!` 或非空断言）
+   * 恰好把"到底起来没有"这件事从类型里抹掉 —— 而那正是 finally 里要知道的事。
+   */
+  const open: { assembled?: Assembled; cancel?: { signal: AbortFlag; restore: () => void } } = {};
+  try {
+    const assembled = await assemble({
+      scenario, env, registry,
+      evidenceDir: join(evidenceDir, 'artifacts'),
+      // 上面 `loadClockOrRefuse` 只放行 live，所以这里就是 liveClock()。
+      // **不写成 `clock`**：那个变量是"开关的取值"（一个字符串），不是时钟对象，
+      // 让它俩同名会让人以为这里在用开关给的那个（而开关只可能是 live，等价）——
+      // 名字对上不上，是下一个读的人要不要去查两处的区别
+      clock: liveClock(),
+      envRevision,
+      inputs,
+    });
+    open.assembled = assembled;
+    for (const w of assembled.warnings) io.err(w);
+
+    /*
+     * **接信号**。压测是最需要正确取消的一条路：一场几千 rps 的施压，
+     * "Ctrl-C 没反应"的代价是按下之后那段时间一直在打被测系统。
+     * 合成与归因的判据在 `installCommandSignals`（与 run 共用，见那里的注释），
+     * 这里只有措辞 —— 以及"第二次按键放弃的是分位数与 mock"这一句真话。
+     */
+    const cancel = installCommandSignals({
+      injected: io.abortSignal,
+      onAbort: ({ sig, second }) => {
+        if (second) {
+          io.err(`再次收到 ${sig}：立即终止，**放弃**这份压测的全部观测（没有分位数、没有基线）。`);
+          return;
+        }
+        io.err(`收到 ${sig}：正在收尾（已发出的请求仍会计进观测，teardown 也要跑完）。`);
+        io.err('  再按一次同样的键**立刻终止**，代价是：这一场的观测全部作废。');
+      },
+    });
+    open.cancel = cancel;
+
+    let plan: LoadPlan;
+    try {
+      plan = await compileLoadPlan(scenario, registry.loadLookup());
+    } catch (e) {
+      // 编译器拒的那些（while/parallel/带文件的 http…）静态闸**本来也会报**，
+      // 所以上面的 lint 已经把绝大多数挡住了。走到这里说明有漂移 —— 报 INVALID 并说清
+      // 是哪一个 kind，别让人以为压测跑过了。
+      throw new CliError(`编译压测计划失败：${(e as Error).message}`, EXIT.INVALID,
+        '判据表：ir/src/load.ts 的 LOAD_STEP_SUPPORT。要支持它，改那张表并让 plan.ts 跟上，别绕过');
+    }
+
+    const load = scenario.load;
+    const vus = str(a, 'vus') ? Number(a.flags['vus']) : load.vus;
+    const durationMs = str(a, 'duration') ? Number(a.flags['duration']) : load.durationMs;
+    for (const n of [vus, durationMs]) {
+      if (!Number.isInteger(n) || n < 1) throw new CliError(`--vus/--duration 要是正整数，实际是 vus=${vus} duration=${durationMs}`, EXIT.USAGE);
+    }
+    // 覆盖要说出来，而且**分两类**：进指纹的那两维与不进指纹的那两维。
+    // 后一类是已登记的能力缺口（LoadFingerprint 没有 maxRequests 那一维），
+    // 所以这里只能说"它没进指纹"，不能假装可比性判据看过了它。
+    for (const n of overrideNotice(load, { vus, durationMs })) io.err(`  ${n}`);
+    const maxRequests = str(a, 'max-requests') ? Number(a.flags['max-requests']) : load.maxRequests;
+    const maxIterations = str(a, 'max-iterations') ? Number(a.flags['max-iterations']) : load.maxIterationsPerVu;
+    if (maxRequests !== load.maxRequests || maxIterations !== load.maxIterationsPerVu) {
+      io.err(`  请求/迭代上限被覆盖：maxRequests ${load.maxRequests}→${maxRequests}、maxIterationsPerVu ${load.maxIterationsPerVu}→${maxIterations}。`);
+      io.err('    ⚠ 这两维**不在 LoadFingerprint 里**，所以门禁看不出它们不同（已登记的缺口）。'
+        + '要拿这次的结果与历史基线比，请把这两个值一起写进 --runner-spec。');
+    }
+
+    if (backend === 'k6') {
+      return emitK6({ plan, scenarioId: scenario.id, baseUrl, load, inputs, vus, durationMs, out: str(a, 'out'), io });
+    }
+    return await pressBuiltin({
+      a, io, plan, scenario, env, registry, assembled, mock, baseUrl, runnerSpec,
+      inputs, envRevision,
+      vus, durationMs, maxRequests, maxIterations, signal: cancel.signal, evidenceDir,
+    });
+  } finally {
+    // **三样**都要还：mock 的端口、信号处理器、可能起来的浏览器。
+    // 压测失败/被取消时更要还（人往往正连着敲 Ctrl-C）
+    await mock?.close();
+    open.cancel?.restore();
+    await open.assembled?.web?.close();
+  }
+}
+
+/** `--backend k6`：只生成脚本，不施压。生成的字节里不许出现绝对路径（emit-k6 那边有断言） */
+async function emitK6(o: {
+  plan: LoadPlan; scenarioId: string; baseUrl: string;
+  load: LoadProfile; inputs: Record<string, unknown>;
+  vus: number; durationMs: number; out: string | undefined; io: Io;
+}): Promise<CommandResult> {
+  const script = renderK6Script(o.plan, {
+    baseUrl: o.baseUrl,
+    // 场景 inputs 进脚本正文。密钥不会是 input（docs/02 §5），所以这里没有泄漏面；
+    // `load-k6.test.ts` 里"把真密钥喂进去再在生成的字节里搜它"那条负责逼这一点
+    ...(Object.keys(o.inputs).length ? { inputs: o.inputs } : {}),
+    vus: o.vus, durationMs: o.durationMs,
+    ...(o.load.rampUpMs ? { rampUpMs: o.load.rampUpMs } : {}),
+    thinkMs: o.load.thinkMs,
+  });
+  const where = o.out ?? `${o.scenarioId}.k6.mjs`;
+  if (o.out) {
+    // **说了路径就要真写**。这一句在改前是假的：屏幕上打"脚本：<路径>"，
+    // 而磁盘上什么都没有（脚本只进了 stdout）。人照着一行 `k6 run <路径>` 去跑，
+    // 得到的是"文件不存在"，然后去查自己是不是 cd 错了目录。
+    // 现在给了 --out 就写盘，没给才只打 stdout（`>` 重定向仍然成立）。
+    await mkdir(dirname(where), { recursive: true });
+    await writeFile(where, script, 'utf8');
+    // 预lude 与脚本必须在同一目录，否则脚本里那句 `import './atest-load-prelude.mjs'` 指空。
+    // 这一句不检查也行（k6 会报 module not found），但那时人是拿着一份已经写盘的文件去查，
+    // 而这里一句话就能说清"还要把 dist 里那个预lude 复制到同一目录"。
+    //
+    // **为什么不由我们把预lude 复制过来**：那是另一个包的 dist 文件，而 cli 只能按包名
+    // import（`exports` 只暴露 index），拿不到它的磁盘路径。造一个"猜相对路径"的复制
+    // 会产出第二份**没人维护的**预lude 副本 —— docs 里那条"不许有散装 k6 包副本"
+    // 管的就是这个。所以这里只给命令，不代做。
+    o.io.err(`  注意：脚本 import 的是同目录的 ${PRELUDE_FILE}，跑之前要把它复制过来（在 packages/adapter-http/dist/ 下）。`);
+  } else {
+    o.io.out(script);
+  }
+  if (o.plan.teardown.length) {
+    // 这句话在生成脚本的头注释里也有一份。**这里必须有第二份**：脚本头部那段是
+    // 给"打开文件的人"看的，而命令行这一句是给"刚敲完命令、只看终端的人"看的，
+    // 后者才是第一次用这条路的人。两处措辞同源（都指向 emit-k6 的文件头）。
+    o.io.err('  ⚠ 这条场景有 teardown：k6 侧整个压测只跑**一次**收尾，而内置后端是每个 VU 一次。');
+    o.io.err('    被测系统挨的写请求数量因此不同 —— 换后端时这一项不可比（详见两个后端的文件头）。');
+  }
+  o.io.err('');
+  o.io.err(`脚本：${where}${o.out ? '' : '（只打到 stdout，没写盘 —— 要写盘加 --out）'}`);
+  if (o.out) o.io.err(`  本机没跑过它 —— k6 装不上，登记在 docs/14。要在有 k6 的机器上验的那三样也在那里`);
+  if (o.out) o.io.err(`  跑法：k6 run ${where}`);
+  o.io.err('  这份产物**不进基线**：基线要的是同一口径的实测指纹，而 k6 那一侧的指纹本机没有来源。');
+  return { code: EXIT.OK, summary: `${o.scenarioId}: 已生成 k6 脚本` };
+}
+
+/** 内置后端：真发请求，产出 PerfMetrics，然后过门禁、可选写基线 */
+async function pressBuiltin(o: {
+  a: ParsedArgs; io: Io; plan: LoadPlan; scenario: Scenario;
+  env: Record<string, unknown>; registry: DocRegistry;
+  assembled: Awaited<ReturnType<typeof assemble>>;
+  mock?: MockServer; baseUrl: string; runnerSpec: string;
+  inputs: Record<string, unknown>; envRevision: number | undefined;
+  vus: number; durationMs: number; maxRequests: number; maxIterations: number;
+  signal: AbortFlag; evidenceDir: string;
+}): Promise<CommandResult> {
+  const { io, a } = o;
+  /*
+   * 传给 press 的那一份入参**原样留着**，因为 `measuredLoad(pressOpts, …)` 要从同一份
+   * 对象里读 vus —— 指纹的并发那一维必须是"实际打出去的那个并发"。
+   * 这里如果另拼一份（哪怕值相同），下一个改 `--vus` 默认值的人就会只改一处，
+   * 于是"报告里的并发"与"指纹里的并发"分叉，而那正是 incomparableReasons 的第一维。
+   */
+  const pressOpts = {
+    plan: o.plan,
+    vus: o.vus, durationMs: o.durationMs,
+    // 这三样**不给命令行覆盖**（--vus/--duration 才覆盖）：它们改的是负载形状而不是规模，
+    // 想临时改就改用例。留一个 `--think 0` 的快捷出口，换来的是一场"hammer 形态"的跑
+    // 与一场稳态跑拥有同一个指纹 —— 那是本文件从头到尾在防的那件事
+    rampUpMs: o.scenario.load?.rampUpMs, thinkMs: o.scenario.load?.thinkMs,
+    maxRequests: o.maxRequests, maxIterationsPerVu: o.maxIterations,
+    failureStatus: o.scenario.load?.failureStatus ?? [],
+    baseUrl: o.baseUrl,
+    inputs: o.inputs,
+    env: o.env,
+    clock: liveClock(),
+    // 装配那一份，不 new 第二个（两个 token 缓存 = 装配分叉，见 Assembled.auth 的注释）
+    auth: o.assembled.auth,
+    // 请求体按 spec 校验。**接不上它的话**，负向之外的用例发出错 body 只会得到 400，
+    // 而 400 在压测报告里的意思是"产品扛不住" —— 那是把我们的 bug 报成产品的
+    validate: o.registry.loadBodyValidator(),
+    signal: o.signal,
+  };
+  const started = Date.now();
+  io.err(`施压：${o.vus} VU × ${o.durationMs}ms → ${o.baseUrl}（后端 builtin，闭合模型）`);
+  let result;
+  try {
+    result = await press(pressOpts);
+  } catch (e) {
+    /*
+     * press 抛的三种：setup 没过、迭代里用例报错、**一个请求都没发出去**。
+     * 加上"被取消时一个请求都没发出去"那一种（它也是抛）。
+     *
+     * 被取消**必须先判**：那一场的 cause 也是"0 个观测"，
+     * 但它的成因是有人按了 Ctrl-C，报成"用例坏了"会把人指向错的方向。
+     */
+    if (o.signal.aborted) {
+      io.err(`压测被取消：${(e as Error).message}`);
+      io.err('  这一场**没有任何观测**（取消发生在第一个请求之前），所以没有分位数、没有门禁结论。');
+      io.err('');
+      io.err(CI_HINT);
+      return { code: EXIT.ABORTED, summary: `${o.scenario.id}: 压测被取消` };
+    }
+    io.err(`压测没过：${(e as Error).message}`);
+    io.err('');
+    io.err(CI_HINT);
+    /*
+     * TEST_FAILED 而不是 RUNTIME(5)。CI_HINT 教 CI 对 5 **重试一次**，
+     * 而重跑一场"setup 404"或"用例里 extract 取不到"的压测不会变好，
+     * 只会把 setup 的副作用（登录、建数据）**再做一遍** —— 与"409 不许换新 id 重发"
+     * 那条是同一条理由。压测里"没过"就是用例结论，不是平台故障。
+     */
+    return { code: EXIT.TEST_FAILED, summary: `${o.scenario.id}: 压测没过` };
+  }
+
+  const measured = measuredLoad(pressOpts, result, o.runnerSpec);
+  const outcome = loadOutcome({
+    identity: {
+      scenarioId: o.scenario.id,
+      // 压测这一场也要有 runId，否则基线样本的 sourceRunId 无处可指。
+      // 命名上带 load 前缀，让人在 runs 列表里一眼看出这不是功能 run
+      runId: str(a, 'run-id') ?? `load_${new Date().toISOString().replace(/[:.]/g, '-')}`,
+      env: buildEnvFingerprint({
+        environmentRef: o.scenario.env.environmentRef,
+        env: o.env,
+        envRevision: o.envRevision,
+        clock: liveClock(),
+      }),
+      runnerSpec: o.runnerSpec,
+      now: () => Date.now(),
+    },
+    backend: 'builtin',
+    metrics: result.metrics,
+    load: withSutDims(measured, {
+      ...(str(a, 'data-volume') !== undefined ? { dataVolume: Number(a.flags['data-volume']) } : {}),
+      ...(str(a, 'sut-instances') !== undefined ? { sutInstances: Number(a.flags['sut-instances']) } : {}),
+      ...(str(a, 'sut-spec') ? { sutSpec: str(a, 'sut-spec') as string } : {}),
+    }),
+    status: loadRunStatus({
+      cancelled: result.cancelled,
+      // press 没抛就是"施压本身过了"。setup 没过那条它是抛的（两个后端同处置），
+      // 所以这里不需要再判一次 —— 判了就是第二个答案
+      threw: false,
+      errorRate: result.metrics.errorRate,
+      failureReasons: result.failureReasons,
+    }),
+    iterationsPerVu: result.iterationsPerVu,
+    failureReasons: result.failureReasons,
+  });
+
+  printPressReport(io, outcome, result, Date.now() - started, o.scenario);
+
+  // 基线：**先按场景 + targetKey 筛池**，再交给 pickBaseline（筛池那一刀必须在调用侧）
+  const baselinePath = str(a, 'baseline') ?? join(o.evidenceDir, 'baselines.jsonl');
+  const samples = await readBaselines(baselinePath, io);
+  const base = pickLoadBaseline(samples, { scenarioId: o.scenario.id, targetKey: '' });
+  const gate = loadGate(outcome, base, {
+    ...(str(a, 'max-p95-regression') !== undefined ? { maxP95Regression: Number(a.flags['max-p95-regression']) } : {}),
+    ...(str(a, 'max-error-rate') !== undefined ? { maxErrorRate: Number(a.flags['max-error-rate']) } : {}),
+    ...(str(a, 'min-rps-ratio') !== undefined ? { minRpsRatio: Number(a.flags['min-rps-ratio']) } : {}),
+    ...(str(a, 'max-p50-regression') !== undefined ? { maxP50Regression: Number(a.flags['max-p50-regression']) } : {}),
+  });
+  io.err('');
+  io.err(`性能门禁（基线 ${base ? `${base.sourceRunId} @ ${new Date(base.takenAt).toISOString()}` : '无'}）：${gate.verdict}`);
+  for (const r of gate.reasons) io.err(`  · ${r}`);
+  if (gate.unknownWhy) io.err(`  （unknown 的原因：${gate.unknownWhy}）`);
+
+  const products = await writeLoadProducts({
+    evidenceDir: o.evidenceDir, outcome, gate, result, scenario: o.scenario,
+    startedAt: started, wallMs: Date.now() - started,
+  });
+  io.out('');
+  io.out(`产物：\n${products.map((p) => `  ${p}`).join('\n')}`);
+
+  if (flag(a, 'promote-baseline')) {
+    const sample = toBaselineSample(outcome);
+    const why = promoteLoadRefused(outcome, sample);
+    if (why.length) {
+      io.err('');
+      io.err(`不写基线（${why.length} 条理由）：`);
+      for (const w of why) io.err(`  · ${w}`);
+      io.err('  想强行钉一个基线，目前没有 --force：**故意不提供**。手写那一行 JSONL 是可以的，'
+        + '但要让人明确知道自己在绕开哪几条判据。');
+    } else {
+      await mkdir(dirname(baselinePath), { recursive: true });
+      await appendFile(baselinePath, `${JSON.stringify(sample)}\n`, 'utf8');
+      io.err(`已把这一场写进基线：${baselinePath}`);
+      // 写了就要说"它什么时候会被读到"：下一次跑同一条命令时按 scenarioId+targetKey 筛到
+      io.err('  下一次的判据：同场景 + 同 targetKey（这里是整场景聚合那一格）的合格样本里最新的一个。');
+    }
+  }
+
+  if (flag(a, 'json')) io.out(JSON.stringify({ outcome, gate }, null, 2));
+
+  /*
+   * 退出码 = **"压测自己有没有测出产品问题"** 与 **"性能门禁怎么说"** 里更坏的那个。
+   *
+   * 从前这里只看门禁，而那是错的，实测过一次：一场 100% 请求 404 的压测、没有基线，
+   * 屏幕上明明写着"错误率 100.00%"，退出码是 11 —— CI 读 11 的动作是"先去建一条基线"，
+   * 而那场跑真正要人说的是"产品坏了"。门禁判不了**不抹掉**已经拿到的产品结论：
+   * 错误率是从那 4 个请求里数出来的，它不需要基线就成立。
+   *
+   * 所以两件事各出一个码，再由 `worseExit` 定序（那张表的顺序本来就写好了：
+   *  ABORTED 盖过 TEST_FAILED 盖过 VERDICT_UNKNOWN 盖过 OK）——
+   * "被取消"仍然盖过一切，因为一场不完整的跑读不出任何结论。
+   */
+  if (o.signal.aborted) {
+    io.err('');
+    io.err('这场压测被取消了：上面的性能数字是**部分观测**，不要当基线、不要拿去判退化。');
+  }
+  const verdictCode = gate.verdict === 'fail' ? EXIT.TEST_FAILED
+    : gate.verdict === 'unknown' ? EXIT.VERDICT_UNKNOWN
+    : EXIT.OK;
+  /*
+   * 产品结论那一格。**只读 runStatus（= 被测对不对），不读 aborted**：
+   * 取消的码由下面那一支单独给，理由是那里读的是另一个问题（见 abortCode 的注释）。
+   *
+   * `error` 这一支**今天到不了**：上面 `loadRunStatus` 传的 `threw: false`
+   * （press 没抛就是施压本身过了），而 error 只在 threw 时出。留着是因为
+   * `runStatus` 的类型是 IR 的 StepStatus，映射该是**全**的 ——
+   * 只列今天可能的三个值就等于在这里第二次抄一遍状态机（那份会跟着漂）。
+   * `healed` / `skipped` / `triaged` 落进"不是失败"那一格，同一条理由：不重述引擎的名单，
+   * 只说这一路的实情（压测形态产不出那三态），真到的那天它们该按"没测出产品问题"处理，
+   * 因为产品结论由各步状态自己带着。
+   */
+  const productCode = outcome.runStatus === 'fail' || outcome.runStatus === 'error' ? EXIT.TEST_FAILED : EXIT.OK;
+  if (productCode === EXIT.TEST_FAILED && gate.verdict === 'unknown') {
+    io.err('');
+    io.err('⚠ 退出码取的是**产品结论**（有请求失败），不是门禁那一格：门禁这次判不了（缺基线/不可比），'
+      + '但"有请求失败"这件事不需要基线就成立。两件事别混着修。');
+  }
+  const abortCode = o.signal.aborted ? EXIT.ABORTED : EXIT.OK;
+  const code = worseExit(worseExit(productCode, verdictCode), abortCode);
+  io.err('');
+  io.err(CI_HINT);
+  return { code, summary: `${o.scenario.id}: 压测 ${outcome.metrics.samples} 个请求，门禁 ${gate.verdict}` };
+}
+
+/**
+ * 压测产物落盘。
+ *
+ * ## 为什么是 `manifest.json` 这个名字
+ * 不叫 `load.json` 是有原因的，而且是实测过的原因：`GET /api/runs`（服务端运行记录列表）
+ * 逐目录找的就是 `EVIDENCE_FILES.manifest`，读不到就 `continue` ——
+ * 名字起错的那一格**在页面上根本不存在**。压测的 run 与功能的 run 混在同一份列表里
+ * 是想要的行为（同一目录、同一条时间线），所以清单也叫这个名字。
+ *
+ * ## 为什么**不**装 evidence.zip
+ * 包里装的是脱敏后的响应体，而压测形态**一条响应体都不留**（每 VU 每轮都存的话，
+ * 一场十万请求的跑 produces 几十 GB 未脱敏副本）。没有成员就没有包 ——
+ * 空包会让人以为"证据丢了"，所以这里宁可不写。
+ * `manifest.artifacts` 因此是空数组，并且 load 那一格里写着"压测形态不产响应体证据"。
+ *
+ * ## 为什么这一格只写**两份**产物，而第三份 `load.json` 被删掉了
+ * 从前这里写三份：manifest / summary / `load.json`（后者是 `{outcome, gate}`）。
+ * 逐键量过一次（真实 run，脚本比对键路径）：
+ *  - `gate` 与 `manifest.perfGate` **逐字节相同**；
+ *  - `outcome.metrics` 与 `manifest.load.metrics` 相同，`outcome.load`（指纹）同理；
+ *  - 整份文件里**只有一个键**是清单没有的：`takenAt`。
+ * 所以它是一份**漂着的副本**：今天同源，改天一边改了另一边没改，
+ * 而"这一次压测的门禁结论是什么"就有了两个答案 —— 本仓从头到尾在修的就是这个形状。
+ *
+ * 更糟的是那个名字**取不回来**：`load.json` 不在 `EVIDENCE_MEMBERS` 里，
+ * 而那份名单是读侧唯一的白名单（`isEvidenceMember` -> `readRunMember` -> 服务端
+ * `/evidence/<run>/<成员>`）。于是它在磁盘上、在"产物："那行里、**在 404 那一栏里**。
+ * 把它加进白名单也不是修法：那张表决定的是"包里的成员"，而压测压根没有包
+ * （`writeEvidenceMembers` 按它筛散装副本、html 页脚按它做链接），
+ * 为一个不存在的包加一格成员，换来的是另外三处各自要解释"这一格为什么是例外"。
+ *
+ * 所以正确的修法是**不产这一份**：唯一的独有键 `takenAt` 并进 `manifest.load`，
+ * 机器要完整结构走 `--json`（stdout，同一个进程、同一份内存对象，不存在副本问题）。
+ * 留下的两份都在白名单里，都在页面上点得开 —— "写了个取不回来的文件"这一格就此不存在。
+ */
+async function writeLoadProducts(o: {
+  evidenceDir: string; outcome: LoadRunOutcome; gate: PerfGateResult; result: PressResult;
+  startedAt: number; wallMs: number; scenario: Scenario;
+}): Promise<string[]> {
+  const dir = join(o.evidenceDir, safeRunId(o.outcome.runId));
+  await mkdir(dir, { recursive: true });
+  // 读的是 `outcome.aborted`，**不是**在这里再看一次 `result.cancelled`：
+  // 那两个字段同一次判断给出（`loadRunStatus`），这里第二次读就是给"这场完整吗"第二个答案
+  const aborted = o.outcome.aborted;
+  const manifest = {
+    runId: o.outcome.runId,
+    // `aborted` **不进 status**。RunReport 那边同样的道理：被中断那次里已完成的几步
+    // 结论各自成立，改成 error 会伪装成"某一步坏了"。前端徽章读的是 aborted 那一栏
+    status: o.outcome.runStatus,
+    ...(aborted ? { aborted: { kind: 'cancelled', reason: '压测期间收到取消请求（信号或宿主）' } } : {}),
+    /** 这一栏让它与功能 run 区分开，而**不必新造一套列表**（前端的 status 徽章照用） */
+    kind: 'load',
+    startedAt: new Date(o.startedAt).toISOString(),
+    durMs: o.wallMs,
+    /*
+     * `scenario` 那一栏**读真实的场景**，不抄常量。
+     *
+     * 这一格从前写的是 `{ id: …Id, name: …Id, frozen: false, irSha: undefined }`：
+     * 名字取 id（于是页面上「演示：压测一条只读接口」变成 `scn.demo.load`），
+     * 而 `frozen` 是**写死的 false**。写死的那一格在页面上的读法是
+     * 「场景名 (未冻结)」—— 而那份 IR 自己写着 `frozen: true`。
+     * 这不是"少显示一个字段"：`frozen` 决定的是**这份证据能不能当 CI 门禁依据**
+     * （store 那边同一格的注释就这么写的），一条冻结的压测被读成没冻结，
+     * 读的人就会去查"为什么这条没冻结"，而真相在两百行外的一处常量里。
+     * 更糟的方向反过来也成立：一份**没冻结**的压测被读成冻结，
+     * 那条假话正好盖在"这次能不能进 CI"那一格上。
+     *
+     * 为什么这一格会写成常量：写它的时候手上只有 `LoadRunOutcome`
+     * （跑完之后的那份产物），而 `frozen` 不在里面 —— 于是"从对象里拿"退化成
+     * "写一个看着合理的值"。修法是把**场景本身**传进来（`o.scenario`），
+     * 与功能那条路 `evidenceManifest` 拿的是同一个对象、同一句 `scenario.frozen`。
+     *
+     * `irSha` **不写这一格**（而不是写 `undefined`）：算它要 `node:crypto`，
+     * 只有 store 那一侧算得出，而压测这条路没走 store 的清单生成器。
+     * 缺这一格是**真实缺口**（登记在 docs/14），不是"这场的 IR 没有版本"。
+     * 在 CLI 里另起一个 sha256 就是把同一件事做第二遍（两个算法两个值），
+     * 而那两个值一旦不一致，"这份证据出自哪一版 IR"就没有答案了。
+     */
+    scenario: { id: o.scenario.id, name: o.scenario.name, frozen: o.scenario.frozen },
+    /*
+     * 压测没有步骤级 tally，所以这里**只有一个桶**，而且是整场压测的那一个结论。
+     *
+     * 从前这里写的是"六个 0 + 结论那一格 1"，而注释同时写着"所以只有一个桶" ——
+     * 屏幕上是 `pass:0 fail:1 error:0 healed:0 skipped:0 triaged:0`。
+     * 那六个 0 不是信息，是**假信息**：读的人会以为"这条用例有六个步骤、五个没跑"，
+     * 而压测形态压根没有步骤级 tally（skipped / triaged 在压测里**不可能出现**，
+     * 出现就说明这一栏在撒谎）。功能那一列同一格是"六个桶各有各的数"，
+     * 两列摆在一起时，六个 0 与"六个桶各有数"看起来是同一口径的两种结果 —— 它不是。
+     */
+    tally: { [o.outcome.runStatus]: 1 },
+    costUsd: 0,
+    artifacts: [],
+    redaction: { keyRules: 'applied', valueRules: 'applied', rawArtifacts: 'unmodified', note: '压测形态不落响应体，没有需要脱敏的正文' },
+    versions: { engine: '0.0.0', ir: '0.0.0' },
+    envFingerprint: o.outcome.env,
+    load: {
+      backend: o.outcome.backend,
+      metrics: o.outcome.metrics,
+      fingerprint: o.outcome.load,
+      model: o.outcome.modelNote,
+      iterationsPerVu: o.outcome.iterationsPerVu,
+      setupRequests: o.result.setupRequests,
+      teardownRequests: o.result.teardownRequests,
+      windowMs: o.result.windowMs,
+      stoppedEarly: o.result.stoppedEarly,
+      failureReasons: o.outcome.failureReasons,
+      /*
+       * 基线样本的 `takenAt` 原来只活在 `load.json` 里（那份已删，见文件头）。
+       * 它是这一场**被采进基线的那个时刻**，与上面的 `startedAt`（开跑时刻）不同量：
+       * 一场压测跑三十秒，两个数差三十秒，而"基线是哪天定的"读的是前者。
+       * 少了这一格，清单就回答不了"这条记录对应基线文件里哪一行"。
+       */
+      takenAt: o.outcome.takenAt,
+      note: '压测形态不产响应体证据（每 VU 每轮都存会把一场十万请求的跑变成几十 GB 未脱敏副本）',
+    },
+    perfGate: { verdict: o.gate.verdict, reasons: o.gate.reasons, regressions: o.gate.regressions, ...(o.gate.unknownWhy ? { unknownWhy: o.gate.unknownWhy } : {}) },
+  };
+  const summary = [
+    /*
+     * 第一行带上**冻结状态**，与功能那条路 `summaryText` 的第二行同一件事、同一套措辞
+     * （「已冻结」/「未冻结（CI 不应执行）」）。措辞不许各写一份：同一个事实在两条路上
+     * 有两种写法，读的人就要先确认"这两句是不是在说同一件事"。
+     *
+     * 为什么落盘的那一份要说而终端上不说：终端那一屏人就在现场，而这份文件是
+     * 被下载、被贴进工单的那一份，它的读者不在现场，读不到 `--allow-unfrozen`
+     * 当时有没有敲过 —— 那里没有 status 字段可读，只有文字。
+     */
+    `压测 ${o.scenario.id} · ${o.scenario.frozen ? '已冻结' : '未冻结（CI 不应执行）'} · ${o.outcome.runId}`,
+    /*
+     * 被取消时**第一屏第二行就要说出来**，与功能那侧 `summaryText` 的首行同一条理由：
+     * 这个文件是"下载给别人看的东西"，那里没有 status 字段可读，只有文字。
+     * 而 `status` 现在按两维分开写（结论照实、取消在 aborted 那一栏），
+     * 所以文字这一侧**必须**自己补上那句 —— 否则一份写着 `结论 pass` 的摘要
+     * 会被读成"这是一次完整的压测"，而它可能只压了三十秒里的一半。
+     * 措辞沿用 summaryText 的「被中断」，不用「已取消」（前端那条纪律：取消不写成完成）。
+     */
+    `结论 ${o.outcome.runStatus}${aborted ? '（**被中断**：压测期间收到取消请求，这是部分观测）' : ''}`
+    + ` · 门禁 ${o.gate.verdict}`,
+    `观测 ${o.outcome.metrics.samples} 个请求 · p50 ${o.outcome.metrics.p50Ms?.toFixed(1) ?? '缺测'}ms`
+    + ` · p95 ${o.outcome.metrics.p95Ms?.toFixed(1) ?? '缺测'}ms · p99 ${o.outcome.metrics.p99Ms?.toFixed(1) ?? '缺测'}ms`
+    + ` · rps ${o.outcome.metrics.rps?.toFixed(1) ?? '缺测'}`,
+    `错误率 ${(o.outcome.metrics.errorRate * 100).toFixed(2)}% · 实测窗口 ${o.result.windowMs}ms`,
+    `指纹 ${o.outcome.load.runnerSpec} / ${o.outcome.load.vus} VU / ${o.outcome.load.connections ?? o.outcome.load.vus} 连接 / ${o.outcome.load.durationMs}ms`,
+    /*
+     * 闭合模型与"换后端不可比"那两句话**也在这份文件里**，不只是在终端上。
+     * 依据与上面那句「被中断」同一条：summary.txt 是"下载给别人看"的东西，
+     * 拿到它的人看不到终端，而这两句拦住的正是最常见的两种误读
+     * （拿我们的 rps 与开环工具比、把两次不同后端的跑放在一起比）。
+     * 一份写着 p95 与 rps 而**没说施压模型**的摘要，本身就是一条错误的邀请函。
+     */
+    `施压模型 ${o.outcome.modelNote}`,
+    `后端 ${o.outcome.backend}：${BACKEND_INCOMPARABLE}`,
+    o.gate.reasons.map((r) => `  · ${r}`).join('\n'),
+  ].join('\n');
+  await writeFile(join(dir, EVIDENCE_FILES.manifest), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  await writeFile(join(dir, EVIDENCE_FILES.summary), `${summary}\n`, 'utf8');
+  /*
+   * **只返回真的写到磁盘的那两份**，而这个返回值是屏幕上「产物：」那一行的唯一来源。
+   * 这条对应关系由 `test/load.test.ts` 双向钉住（报出的 == 磁盘上的）。
+   * 从前这里第三项是 `load.json`，删掉文件的同时必须删掉这一项 ——
+   * 只删写盘不删清单，症状是屏幕上让人去 cd 找一个不存在的文件。
+   */
+  return [join(dir, EVIDENCE_FILES.manifest), join(dir, EVIDENCE_FILES.summary)];
+}
+
+/** 压测结论的**人话版**。数字一律带上"分母"与"口径"，孤零零一个 p95 是没法读的 */
+function printPressReport(io: Io, outcome: LoadRunOutcome, r: PressResult, wallMs: number, scenario: Scenario): void {
+  const m = outcome.metrics;
+  const fmt = (v: number | undefined, unit = 'ms') => (v === undefined ? '缺测' : `${v.toFixed(1)}${unit}`);
+  io.out('');
+  io.out(`观测：${m.samples} 个请求（每 VU 迭代数 ${r.iterationsPerVu.join('/') || '无'}）`);
+  io.out(`  p50 ${fmt(m.p50Ms)} | p95 ${fmt(m.p95Ms)} | p99 ${fmt(m.p99Ms)} | rps ${m.rps === undefined ? '缺测' : m.rps.toFixed(1)}`);
+  io.out(`  错误率 ${(m.errorRate * 100).toFixed(2)}%（${Math.round(m.errorRate * m.samples)}/${m.samples}）`);
+  // setup/teardown 单独报，因为"登录有没有每轮重跑"就是看这一格
+  io.out(`  setup 打了 ${r.setupRequests} 个请求、teardown ${r.teardownRequests} 个（都不计进上面的分位数）`);
+  if (r.stoppedEarly) io.out(`  ${r.stoppedEarly} 个 VU 是被上限提前收工的（不是到点），迭代数少看它们`);
+  io.out(`  实测窗口 ${r.windowMs}ms（命令行到返回共 ${wallMs}ms —— 差的这部分是 VU 起来与收尾）`);
+  io.out('');
+  io.out(`  ${outcome.modelNote}`);
+  io.out(`  ${BACKEND_INCOMPARABLE}`);
+  /*
+   * "这一场的功能结论是从压测形态推的"必须自己说一句。
+   * 理由不是信息更全：`healed`/`triaged` 这两态在压测形态**压根不存在**，
+   * 于是基线的 runStatus 永远不可能是它们，`promoteRefused` 那两条判据在这里空转。
+   * 不写这一句，读的人会以为"这条压测的基线保证过功能回归是绿的" —— 它没有。
+   */
+  io.out('  这次的结论来自**压测形态本身**（只含 load 子集里的步骤），不是另跑一次功能回归；'
+    + '它不含 healed/triaged 那两态，所以不能当"功能已过"的证据。');
+  if (scenario.load?.maxIterationsPerVu === 0 && r.iterationsPerVu.some((n) => n === 0)) {
+    io.err('  ⚠ 有 VU 一个迭代都没跑完（并发数大于处理能力，或第一个请求就失败了）。'
+      + '这时 p95 数的是"跑起来的那几个 VU"，负载比看起来的小');
+  }
+  if (r.failureReasons.length) {
+    io.err('');
+    io.err('失败原因（去重后）：');
+    for (const f of r.failureReasons.slice(0, 10)) io.err(`  · ${f}`);
+    if (r.failureReasons.length > 10) io.err(`  …另有 ${r.failureReasons.length - 10} 类`);
+  }
+}
+
+/**
+ * 读基线文件（一行一个 JSON）。
+ *
+ * 坏行**报出来并跳过**，不整批失败。理由：这是一份会被人手改的 JSONL
+ * （没有项目表之前它就是个文本文件），一处编辑事故让**所有**历史基线读不出，
+ * 表现是"门禁突然说没有基线"，于是那次发布悄悄没有门禁 —— 与 unread-fields
+ * 那条"删掉豁免等于拆闸"同一族（这里没人删，但效果一样）。
+ */
+async function readBaselines(path: string, io: Io): Promise<BaselineSample[]> {
+  const text = await readIfExists(path);
+  if (text === undefined) return [];
+  const out: BaselineSample[] = [];
+  const lines = text.split('\n');
+  let bad = 0;
+  let firstBad = '';
+  for (const [i, line] of lines.entries()) {
+    if (!line.trim()) continue;
+    try {
+      out.push(BaselineSampleSchema.parse(JSON.parse(line)));
+    } catch (e) {
+      bad++;
+      if (!firstBad) firstBad = `第 ${i + 1} 行：${(e as Error).message.split('\n')[0] ?? ''}`;
+    }
+  }
+  if (bad) io.err(`  ⚠ ${path} 里有 ${bad} 行读不出来（${firstBad}），已跳过 —— 它们不参与判退化。`
+    + '基线文件是给人改的，改坏时只跳过坏行而不是整批失效，但那一格就此没有门禁了。');
+  return out;
 }
 
 // ── 开关取值的统一入口 ─────────────────────────────────────────────────────

@@ -86,3 +86,25 @@ export { AuthHook, AuthRequiredError, type AuthHookOptions, type AuthApplyInput,
 
 // —— Mock ——
 export { startMockServer, sampleFromSchema, type MockServer, type MockOptions } from './mock/mock.js';
+
+/*
+ * —— 压测那条路（docs/09 §4.2）——
+ *
+ * 这四个是**唯一的出口**：`packages/cli` 是仓里唯一被允许把 engine 与 adapter 拼起来的包，
+ * 而它只能经包名 import（相对路径跨包会被 lint-layers 拦）。
+ * 之前它们只在 `src/index.ts` 里缺席、被测试用相对路径直接抓 —— 于是
+ * "CLI 能不能接上"这件事本身没法成立，四个导出全是 dead export。
+ *
+ * 只导**这层之外用得上的**：`walkSyncK6` / `walkAsyncBuiltin` / `newLoadState` 这些
+ * 是两个后端的内部调度，导出去等于邀请第三个人写第三个后端而绕开
+ * `LOAD_STEP_SUPPORT` 那张表（判据只该有一处）。
+ */
+export {
+  compileLoadPlan, LoadCompileError, type LoadPlan, type LoadNode, type LoadDocLookup, type LoadOperation,
+} from './load/plan.js';
+export {
+  press, measuredLoad, requestFailed, LoadPressFailure,
+  type PressOptions, type PressResult,
+} from './load/press.js';
+export { renderK6Script, type EmitOptions } from './load/emit-k6.js';
+export { PRELUDE_FILE } from './load/prelude.js';

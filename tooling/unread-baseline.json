@@ -41,22 +41,7 @@
       "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
     },
     {
-      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.scenarioId",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
       "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.sourceRunId",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.takenAt",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#BaselineSampleSchema.targetKey",
       "milestone": "P7",
       "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
     },
@@ -66,52 +51,12 @@
       "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
     },
     {
-      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.dataVolume",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
       "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.runnerCount",
       "milestone": "P7",
       "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
     },
     {
-      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.runnerSpec",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.sutInstances",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.sutSpec",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
       "id": "packages/ir/src/baseline.ts#LoadFingerprintSchema.vus",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.maxErrorRate",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.maxP50Regression",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.maxP95Regression",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#PerfGateThresholdsSchema.minRpsRatio",
       "milestone": "P7",
       "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
     },
@@ -132,11 +77,6 @@
     },
     {
       "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.rps",
-      "milestone": "P7",
-      "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
-    },
-    {
-      "id": "packages/ir/src/baseline.ts#PerfMetricsSchema.samples",
       "milestone": "P7",
       "reason": "压测与 perfSmoke 未开工。基线表今天只有**写入侧**（模型、lint、指纹），比较逻辑要等 assertPerf 真跑压测才有消费者"
     },
@@ -451,6 +391,6 @@
       "reason": "运行环境画像。消费者是服务端的 run 表，store 今天只落证据不建表"
     }
   ],
-  "inconclusiveCeiling": 233,
-  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它 normally 靠让字段名不再撞上高频标识符（as -> rowVariable 那种）；**另一种正当情形是扫描器本身修好了**（这次从 233 降到 229 就是：collectTokens 原先在原文上取字符串词，注释里的引号词也算命中，堵掉之后 5 条字段回到 unread/已豁免，其中 4 条是**真·没人读**却被遮住的，见 unread-fields.test.mjs 里那条同名测试）。但这种情况**必须写明是哪次修复、动了哪几条** —— 因为'测量变准了'和'测量变瞎了'在数字上长得一模一样，只有抽不到字段的扫描器会报告干净。抬高它要在旁边写清理由。 229->230 这一格是 wait{response}/expectResponse 接线带来的，具体三条：进两条 steps.ts#ActStepSchema.expectResponse 与 #NavigateStepSchema.expectResponse（解释器确实读了，但同名字段在两个 step schema 里各声明一次 -> declCount>1 -> 只能判不出；  对应的豁免**保留**，理由已改成\"归不出\"而不是\"没人读\"），出一条 waits.ts#WaitConditionSchema.urlPattern（以前没人读、现在 wait.ts 真的用它匹配）。净 +1。**这条涨格不是因为代码变差，是因为\"没人读\"变成了\"读了但扫描器归不出\"** —— 两者在数字上都算判不出，只有把三条 id 列出来才分得清。 230->233 这一格是 dbRow/dataSource 的 SQL 绑定（docs/15 §3.2）带来的，三条 id 全部点名： 两条是新增字段 waits.ts#WaitConditionSchema.vars 与 steps.ts#DataSourceStepSchema.vars（引擎真的读，但 vars 这个名字现在在三个 schema 里各声明一次 -> declCount>1 -> 扫描器只能判不出）； 第三条 steps.ts#DbStepSchema.vars 是**归因变差**而不是新增 —— 它先前算「读过」，被我这次加的两个同名兄弟挤成判不出。三条都有测试守着语义（lang.test.ts 里 dbRow.vars / dataSource vars / null 不落键那三条）。 **刻意没有为了扫描器好看而改名**（比如叫 sqlVars / bindVars）：这三个字段的名字一致性是设计的一部分 —— 同一个 IR 概念在三处必须同名，改名能让扫描器归得出，代价是「三处是同一件事」这件事又得靠人记。扫描器的能力边界不该反过来决定 IR 的命名。"
+  "inconclusiveCeiling": 258,
+  "_ceiling_comment": "判不出的字段数上限。**必须写死一个数**，不能省 —— 早先写成 `?? 当前值`，那等于永远不超标，这条检查就白加了。收紧它 normally 靠让字段名不再撞上高频标识符（as -> rowVariable 那种）；**另一种正当情形是扫描器本身修好了**（这次从 233 降到 229 就是：collectTokens 原先在原文上取字符串词，注释里的引号词也算命中，堵掉之后 5 条字段回到 unread/已豁免，其中 4 条是**真·没人读**却被遮住的，见 unread-fields.test.mjs 里那条同名测试）。但这种情况**必须写明是哪次修复、动了哪几条** —— 因为'测量变准了'和'测量变瞎了'在数字上长得一模一样，只有抽不到字段的扫描器会报告干净。抬高它要在旁边写清理由。 229->230 这一格是 wait{response}/expectResponse 接线带来的，具体三条：进两条 steps.ts#ActStepSchema.expectResponse 与 #NavigateStepSchema.expectResponse（解释器确实读了，但同名字段在两个 step schema 里各声明一次 -> declCount>1 -> 只能判不出；  对应的豁免**保留**，理由已改成\"归不出\"而不是\"没人读\"），出一条 waits.ts#WaitConditionSchema.urlPattern（以前没人读、现在 wait.ts 真的用它匹配）。净 +1。**这条涨格不是因为代码变差，是因为\"没人读\"变成了\"读了但扫描器归不出\"** —— 两者在数字上都算判不出，只有把三条 id 列出来才分得清。 230->233 这一格是 dbRow/dataSource 的 SQL 绑定（docs/15 §3.2）带来的，三条 id 全部点名： 两条是新增字段 waits.ts#WaitConditionSchema.vars 与 steps.ts#DataSourceStepSchema.vars（引擎真的读，但 vars 这个名字现在在三个 schema 里各声明一次 -> declCount>1 -> 扫描器只能判不出）； 第三条 steps.ts#DbStepSchema.vars 是**归因变差**而不是新增 —— 它先前算「读过」，被我这次加的两个同名兄弟挤成判不出。三条都有测试守着语义（lang.test.ts 里 dbRow.vars / dataSource vars / null 不落键那三条）。 **刻意没有为了扫描器好看而改名**（比如叫 sqlVars / bindVars）：这三个字段的名字一致性是设计的一部分 —— 同一个 IR 概念在三处必须同名，改名能让扫描器归得出，代价是「三处是同一件事」这件事又得靠人记。扫描器的能力边界不该反过来决定 IR 的命名。\n 233->253 这一格是「压测那条路开工」+「扫描器自己修好」两件事叠在一起，21 进 1 出，全部点名。\n【一、扫描器修好：16 条】roleOf 原先把 `{ foo: 1 }`（往键上放值）与 `const { foo } = s`（解构）算成同一种强证据，于是「生产一个 IR 形状的对象」被当成「消费这个字段」。写压测时 press.ts 的 `{ runnerCount: 1, connections: o.vus }`、`{ model: 'closed' }` 与 plan.ts 的 `scenarioId: scenario.id` 一共把 6 条仍然没人读的字段判成读过，它们身上的 P7 豁免被报成「已过期、删掉吧」—— 而本工具防的缺陷类正是「有载体、没有生产者」，把生产者当消费者等于让这一族缺陷自己给自己作证。分开两种角色（新的 writeKey 不算强证据）后，这 16 条从读过回到判不出：baseline.ts 的 BaselineSampleSchema.scenarioId 与 LoadFingerprintSchema.connections / .runnerCount / .runnerSpec；targets.ts 的 DeviceRequirementSchema.model、LeaseSchema.acquiredAt；trace.ts 的 EnvFingerprintSchema.appSha / .clockMode / .platform；scenario.ts 的 ProvenanceSchema.sourceSystem / .specHash、ScenarioConfigSchema.dirty、ScenarioSchema.schemaVersion、ScenarioVersionMetaSchema.irSha；locator.ts 的 LocatorRuleSchema.index / .side。逐条核过：这 16 条丢掉的命中全部是 writeKey，一条真解构都没丢（全仓 `const { k: v }` 这种改名解构只有个位数，且与 IR 字段名零重叠 —— 量法与这条性质钉在 unread-fields.test.mjs 里）。\n【二、本轮新代码的生产者命中：5 条】load.ts#LoadProfileSchema.vus 与 .durationMs、scenario.ts#ScenarioSchema.load、baseline.ts#BaselineSampleSchema.load 与 LoadFingerprintSchema.vus —— 都是压测那条路新写的读 IR 的代码（lint / 编译器 / 指纹），但读法是从已 parse 的对象上拿整个 load 块或 `load.vus`，命中的是同名裸词或别的 schema 里的同名字段，归不到具体某一条。\n【出的一条】scenario.ts#ScenarioConfigSchema.concurrencySafe 现在被 engine/src/lint.ts 以 `scenario.config.concurrencySafe` 成员访问真读了（压测 lint 里「你自己声明它不能并发」那条判据），回到读过。\n【另外两处改名，不影响本数字】press.ts 的入参改叫 runnerSpecLabel、emit-k6 的阈值入参改叫 maxFailRate：它们与 IR 字段名撞名时，扫描器会把「本层自己的入参」当成 IR 字段被读，与 html.ts 的 suiteId 是同一条理由。IR 字段名一个没改 —— 扫描器的能力边界不该反过来决定 IR 的命名（本注释末段那条老纪律）。 233->258 这一格（本轮 `atest load` 那条路开工，26 进 1 出）。**先记一笔流程账**：这一轮中途我把这格写成过 253，而那句话是**没复测就写下的**。量不出来（现成工作区里怎么量都是 258），因为它对应的是本轮中间某个改动之后、又被后续改动改掉的临时状态。本注释上面那句『测量变准了和测量变瞎了在数字上长得一模一样，只有抽不到字段的扫描器会报告干净』讲的正是这种事，而这次动手让数字对不上的人是我。所以这一格只与 **HEAD 上那份可复现的 233** 对（`git worktree add /tmp/x HEAD && cd /tmp/x && node tooling/unread-fields.mjs` -> 463 字段、未读 84、判不出 233，与登记值一致）。**中途那个 253 没有对应提交、复现不出来，因此不当基线。**\n　258 这个数由**两个独立原因**叠成，各自单独量过（同一份代码换扫描器、同一份扫描器换代码，各跑一次）：\n【原因一：本轮新代码，233 -> 240，净 +7】进 9 条：本轮新声明的 4 条字段 load.ts#LoadProfileSchema.vus 与 .durationMs、baseline.ts#BaselineSampleSchema.load、scenario.ts#ScenarioSchema.load（这四条**有真生产者** —— lint / 编译器 / 指纹都在读 load 块，但读法是『从已 parse 的对象上拿整个 load 块』或 `load.vus` 这种与别处撞名的成员访问 -> declCount>1 -> 只能判不出；**刻意不为扫描器改名**，『这三处是同一件事』靠名字一致来表达，改名能让扫描器归得出的代价是那句一致性又得靠人记）；另有 5 条从『未读+豁免』搬进『判不出+仍豁免』：LoadFingerprintSchema.vus、PerfMetricsSchema.p50Ms / .p95Ms / .p99Ms / .rps —— 本轮新写的 press.ts / load.ts / commands.ts 里有这些**同名的本层变量与参数**，词法层面归不到具体 schema。**豁免保留**，『判不出』不等于『有人读』，删豁免等于把没人读的字段伪装成有人管。出 2 条：scenario.ts#ScenarioConfigSchema.concurrencySafe 被 engine/src/lint.ts 以成员访问真读了（『你自己声明它不能并发』那条判据）-> 回到读过；locator.ts#LocatorSpecSchema.fingerprint 同理但**又回来了**（见原因二）。\n【原因二：本轮同时改的扫描器自己，240 -> 258，净 +18】`roleOf` 从前把『生产一个 IR 形状的对象』（`{ runnerCount: 1 }` 这种 writeKey）与『读它』（成员访问 / 解构）算成**同一种强证据**，于是『写出这个字段』被当成『消费这个字段』。这在本工具里不是精度问题而是**方向性**问题：本工具防的缺陷类正是『有载体、没有生产者』，把生产者当消费者等于让这一族缺陷自己给自己作证。分开两种角色后，12 条从『读过』退回『判不出』（HEAD 上它们被那份松的判据算成读过，所以既不在未读桶也不在判不出桶 —— 这是我把它们误判成『新字段』的原因，也是这份账我第一版写错的地方）：locator.ts#LocatorRuleSchema.index / .side、LocatorSpecSchema.fingerprint、scenario.ts#ProvenanceSchema.sourceSystem / .specHash、ScenarioConfigSchema.dirty、ScenarioSchema.schemaVersion、ScenarioVersionMetaSchema.irSha、targets.ts#LeaseSchema.acquiredAt、trace.ts#EnvFingerprintSchema.appSha / .clockMode / .platform；另有 6 条从『未读+豁免』进『判不出+仍豁免』：BaselineSampleSchema.pinned / .projectId / .sourceRunId、LoadFingerprintSchema.connections / .runnerCount、targets.ts#DeviceRequirementSchema.model（豁免同样**保留**）。12 + 6 = 18，与\"只换扫描器\"那一格量出来的增数一致。逐条核过：这 18 条丢掉的命中全部是 writeKey，一条真解构都没丢 —— 量法与这条性质钉在 unread-fields.test.mjs 里。\n【另一侧的账：豁免少了 12 条，不进这个数字】同一轮删掉 12 条 P7 豁免：baseline.ts 的 BaselineSampleSchema.scenarioId / .takenAt / .targetKey、LoadFingerprintSchema.dataVolume / .runnerSpec / .sutInstances / .sutSpec、PerfGateThresholdsSchema 全四条、PerfMetricsSchema.samples。它们在 HEAD 上全部是『未读 + 带豁免』，登记理由是『压测未开工，基线表只有写入侧』。这句话本轮**过期了**：packages/cli/src/load.ts 与 commands.ts 现在真的读它们（拼指纹、补 sut 三维、补齐门禁阈值默认值、拿 samples 当错误率分母）。**这正是那条豁免的用途**：它登记的不是『这个字段可以永远没人管』，而是『这一天没人读，读的那天来把这条删掉』。删掉即生效。\n"
 }

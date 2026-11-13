@@ -15,6 +15,8 @@ export * from './steps.js';
 export * from './scenario.js';
 export * from './trace.js';
 export * from './baseline.js';
+export * from './load.js';
+export * from './secrets.js';
 export * from './humanize.js';
 
 import { ScenarioSchema, deriveTargets, type Scenario } from './scenario.js';

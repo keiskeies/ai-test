@@ -243,8 +243,36 @@ describe('证据分级', () => {
     assert.equal(role('return s?.as;', 'as'), 'strong', '可选链同样是成员访问');
   });
 
-  test('解构算强证据', () => {
-    assert.equal(role('const { maxIterations } = s;', 'maxIterations'), 'strong');
+  /*
+   * 下面两条是本轮加的，起因是**具体的**：写压测那条路时，`press.ts` 里
+   * `{ runnerCount: 1, connections: o.vus }` 与 `plan.ts` 里 `scenarioId: scenario.id`
+   * 让 6 条**仍然没人读**的字段被判成"读过"，它们身上的 P7 豁免被报成"已过期、删掉吧"。
+   * 照做就等于自己拆闸（下一次落回未读时报的是"新增未读字段"，没人知道自己删过什么）。
+   * 本工具防的缺陷类是"有载体、没有生产者" —— 把**生产者**当**消费者**，
+   * 等于让那一族缺陷自己给自己作证。
+   */
+  test('对象字面量的键**不算**读过（往键上放值是生产，不是消费）', () => {
+    assert.equal(role('return { maxIterations: 3 };', 'maxIterations'), 'bare');
+    // 嵌套一层也是写
+    assert.equal(role('fp = { load: { vus: 10 } };', 'vus'), 'bare');
+    // 带类型标注的形参名同理：`f(vus: number)` 里那个 vus 是"我要收这个值"，不是"我读了 IR 那个字段"
+    // （press.ts 的旧入参名 runnerSpec 就是被这一格判成"指纹字段有人读了"的）
+    assert.equal(role('export function g(runnerSpec: string) { return 1; }', 'runnerSpec'), 'bare');
+    // **已知的反面**：简写解构 / 简写形参 `{ vus }` 与简写对象字面量 `{ vus }`
+    // （ shorthand 时它是"往外读"）在词法上同形，所以简写一律算强证据。
+    // 这就是为什么 press.ts 那处要把入参改名成 runnerSpecLabel 并写成
+    // `runnerSpec: runnerSpecLabel` —— 留着 `{ runnerSpec }` 那种简写，这一格仍然认不出。
+    assert.equal(role('function g({ vus }) { return 1; }', 'vus'), 'strong', '简写形参算强证据（这一格的边界，写在这是为了别以为已经分干净了）');
+  });
+
+  test('简写解构仍算读过（改名解构不再算，见下一条 —— 那是这一格改过头的代价）', () => {
+    assert.equal(role('const { maxIterations } = s;', 'maxIterations'), 'strong', '简写解构');
+    assert.equal(role('for (const { stepId } of list) void stepId;', 'stepId'), 'strong');
+    // 改名解构 `const { timeoutMs: t } = s` 里 timeoutMs 后面跟的是 `:`，
+    // 与 `{ timeoutMs: 3 }` **在词法上完全同形** —— 分不出就只能两个都不算强证据。
+    // 选"都不算"而不是"都算"的理由见 roleOf 里那段：把生产者当消费者的代价
+    // （把还需要的豁免报成过期）比少认一个读者的代价大。
+    assert.equal(role('const { timeoutMs: t } = s;', 'timeoutMs'), 'bare');
   });
 
   test('数组下标不算证据（掩码后 `[x]` 只可能是 arr[i]，读的是下标变量）', () => {

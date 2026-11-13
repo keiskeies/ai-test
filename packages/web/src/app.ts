@@ -23,6 +23,7 @@
 import { CSS } from './styles.js';
 import { checkIr, GRAPH_NOT_AVAILABLE, type CheckResult } from './check.js';
 import { checkStatusLines, EMPTY_STATIC_GATE, missingInputHint, SECRET_ROUTE_HINT, staticGateCardTitle } from './check-lines.js';
+import { runRow } from './run-lines.js';
 import { describeStatus, STATUS_ICON } from './status.js';
 import { newJobId, requestCancel, submitRun } from './run-job.js';
 import type { LintIssue } from '@atest/engine';
@@ -375,9 +376,19 @@ async function pageRuns(): Promise<void> {
         const sc = (m.scenario ?? {}) as Record<string, unknown>;
         const st = String(m.status ?? 'error') as StepStatus;
         const aborted = m.aborted !== undefined;
+        /*
+         * 压测的 run 与功能的 run 躺在**同一份列表**里（这是想要的：同一目录、同一条时间线），
+         * 但它们的产物**不是同一套**，所以那一行不能照同一个样子画。
+         * 判据与那句原因在 `run-lines.ts`（纯函数、node 可测，理由写在那儿的文件头），
+         * 这里只负责画 —— 与 `check-lines.ts` / `status.ts` 同一个分工。
+         */
+        const row = runRow(m);
         return h('tr', { status: st, children: [
           h('td', { class: 'mono dim', text: it.dir }),
-          h('td', { children: [txt(String(sc.id ?? '?')), ...(sc.frozen === false ? [h('span', { class: 'dim', text: ' (未冻结)' })] : [])] }),
+          h('td', { children: [
+            txt(String(sc.id ?? '?')),
+            ...row.tags.map((t) => h('span', { class: 'dim', text: ` (${t})` })),
+          ] }),
           // 被中断的 run：manifest.status 可能仍是 pass（那是已完成步骤的结论），
           // 而 aborted 才是"这一次没跑完"。两个都要显示，只显一个就是骗人。
           h('td', { children: [badge(STEP_OK.includes(st) ? st : 'error'), ...(aborted ? [txt(' 已中断')] : [])] }),
@@ -385,7 +396,9 @@ async function pageRuns(): Promise<void> {
           h('td', { class: 'num mono', text: typeof m.durMs === 'number' ? `${m.durMs}ms` : '—' }),
           h('td', { class: 'num mono', text: typeof m.costUsd === 'number' ? `$${m.costUsd.toFixed(4)}` : '—' }),
           h('td', { children: [
-            h('a', { href: `/evidence/${encodeURIComponent(it.dir)}/report.html`, text: 'report', }),
+            ...(row.hasReport
+              ? [h('a', { href: `/evidence/${encodeURIComponent(it.dir)}/report.html`, text: 'report' })]
+              : [h('span', { class: 'dim', text: row.reportWhy })]),
             txt(' · '), h('a', { href: `/evidence/${encodeURIComponent(it.dir)}/summary.txt`, text: 'summary' }),
           ] }),
         ] });

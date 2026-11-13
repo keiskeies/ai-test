@@ -8,7 +8,7 @@
  * 已知没有任何竞品做「无断言用例 lint」（docs/00 §4.4）。
  */
 import type { ParallelHazard, Scenario, Step, StepResult, WaitPredicate } from '@atest/ir';
-import { CONTAINER_KINDS, LEASE_REQUIRED, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveNeedsDevice, deriveTargets, eachValuePosition, hasUndeclaredUiWorld, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, walk } from '@atest/ir';
+import { CONTAINER_KINDS, LEASE_REQUIRED, LOAD_STEP_SUPPORT, LOAD_WAIT_SUPPORT, MIN_SAMPLES_MS, STATE_MUTATING, STEP_TARGET, ScenarioSchema, deriveNeedsDevice, deriveTargets, eachValuePosition, hasUndeclaredUiWorld, isExprConditionField, isExprField, iterConditions, parallelHazards, scenarioIdOfRef, waitNeedsExternalAdapter, walk } from '@atest/ir';
 import { parsePath, parseRef, PathError } from './jsonpath.js';
 import { validateExpr } from './expr.js';
 import { redactSecretText } from './redact.js';
@@ -37,7 +37,9 @@ export type LintCode =
   | 'SELF_REFERENCING_CALL' | 'INPUT_UNUSED' | 'PARALLEL_VAR_RACE' | 'RETRY_ON_CONTAINER'
   | 'HOVER_THEN_NOT_IMPLEMENTED' | 'SQL_PLACEHOLDER_UNBOUND' | 'RESERVED_KEY_REWRITE'
   | 'REQUEST_PART_NOT_IMPLEMENTED' | 'CALL_GRAPH_INCOMPLETE' | 'REF_PATH_SYNTAX'
-  | 'WAIT_WORLD_UNDECLARED';
+  | 'WAIT_WORLD_UNDECLARED'
+  | 'LOAD_STEP_UNSUPPORTED' | 'LOAD_STEP_DEGRADED' | 'LOAD_RETRY_IGNORED'
+  | 'LOAD_NO_PRESS_STEP' | 'LOAD_NOT_CONCURRENCY_SAFE' | 'LOAD_SHORT_RUN';
 
 /**
  * `call` 调用图，给 `DEPENDENCY_CYCLE` 用。
@@ -379,6 +381,14 @@ export const LINT_DOCS: Record<LintCode, string> = {
   REQUEST_PART_NOT_IMPLEMENTED: 'docs/02 §2、docs/14 §5',  // fixture 仓库是 P1；本轮只保证它不再静默发一个少附件的请求
   SQL_PLACEHOLDER_UNBOUND: 'docs/15 §3.2',
   WAIT_WORLD_UNDECLARED: 'docs/02 §3、docs/15 §3.6',
+  // 压测那一组（docs/09 §4.2/§4.3）。判据表在 ir/src/load.ts 的 LOAD_STEP_SUPPORT，
+  // 编译器在 adapter-http/src/load/plan.ts —— 两处问同一张表，所以这里只给出处。
+  LOAD_STEP_UNSUPPORTED: 'docs/09 §4.2',
+  LOAD_STEP_DEGRADED: 'docs/04 §M0.6',
+  LOAD_RETRY_IGNORED: 'docs/04 §M0.6、docs/05 §4',
+  LOAD_NO_PRESS_STEP: 'docs/09 §4.2',
+  LOAD_NOT_CONCURRENCY_SAFE: 'docs/05 §5、docs/09 §4.2',
+  LOAD_SHORT_RUN: 'docs/09 §4.3',
   RESERVED_KEY_REWRITE: 'docs/02 §5、docs/14 §5',
   VAR_UNDEFINED: 'docs/02 §5',
   DEPENDENCY_CYCLE: 'docs/02 §2',
@@ -1086,7 +1096,29 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
       const keeps = allSteps.some((a) => a.kind === 'useIdentity' && a.preserveSession);
       if (keeps) push({ code: 'CLEARDATA_VS_PRESERVE_SESSION', level: 'error', stepId: s.id, message: 'app.clearData 与会话复用（preserveSession）互斥：清数据会踢掉登录态，后续步骤必然卡在登录页', fix: '要么不清数据，要么在 setup 里显式登录后再清' });
     }
-    if (STATE_MUTATING.includes(s.kind)) { mutating = true; mutatingSteps.push(s); }
+    if (STATE_MUTATING.includes(s.kind)) {
+      /*
+       * **写操作的判据是方法，不是 kind**（STATE_MUTATING 那张表说"这些 kind **能**改状态"，
+       * 这里要的是"这条**真的**改了"）：
+       *  - http / openapiCall：只有 POST / PUT / PATCH / DELETE 动状态。
+       *    判成 kind 的话，一份只打 GET 的压测场景（压测的主场景就是只读接口的读）
+       *    会被报 TEARDOWN_DIRTY（"有写操作但无 teardown"），而它的 fix 让人去
+       *    `config.dirty=true` —— 那个开关读侧没人读（量过：全仓只有这一处判据提它），
+       *    于是读者按 fix 改了也照样告警。那条 fix 的措辞按 docs/05 §5 是给**真有**写
+       *    的场景的，不该出现在一条没有写的场景上。
+       *  - db：那张表把它列进来是按"默认是写"（docs/05 §5「无 DB 权限则标记该场景 dirty」），
+       *    而它的 schema 里**有** readOnly 那一栏（默认 true），于是判它读的是作者自己写的
+       *    `s.readOnly`。注意���不是"读 schema 的默认值"：默认值在 parse 时已经填好，
+       *    作者写 false 的那条才进写集合。
+       *  - app / act：没有能区分读写的那一栏，判 kind（维持原判据）。
+       */
+      const isWrite =
+        s.kind === 'http' ? ['POST', 'PUT', 'PATCH', 'DELETE'].includes(s.request.method)
+        : s.kind === 'openapiCall' ? true
+        : s.kind === 'db' ? s.readOnly !== true
+        : true;
+      if (isWrite) { mutating = true; mutatingSteps.push(s); }
+    }
     if (s.kind === 'openapiCall' && s.strategy === 'contract') {
       // 符合性检查必须走独立车道（docs/00 §6.2）
     }
@@ -1354,7 +1386,25 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
     push({ code: 'LLM_ASSERT_RATIO_HIGH', level: 'warning', message: `语义断言占比 ${Math.round((llmAsserts / totalAsserts) * 100)}% —— 该场景红绿含义与结构化场景完全不同`, fix: '报告需标注此事实；能结构化的断言（DB 行、接口响应、ARIA）优先', doc: 'docs/10 §4' });
   }
   if (mutating && scenario.teardown.length === 0) {
-    push({ code: 'TEARDOWN_DIRTY', level: 'warning', message: '有写操作但无 teardown —— 会留脏数据，且数据驱动迭代会互踩', fix: '加 teardown（调用删除接口或 db 清理），或显式设 config.dirty=true 并接受独占并行组', doc: 'docs/05 §5' });
+    /*
+     * `mutatingSteps` 从上面那格**只留写步骤**（判据见那里），这里用它把同一句
+     * "有写操作"落到**是哪几步**上：
+     *  - 一条会留脏数据的警告没有指路，读者的动作是"回去翻全场景找哪里有写"；
+     *  - 而 `app.clearData` 与 `CLEARDATA_VS_PRESERVE_SESSION` 那条 error 共用
+     *    "改状态"这个概念时，两条消息各说各的（一条说"有写操作"、一条说"清数据"），
+     *    同一件事两个措辞 = 读者先怀疑是不是两回事。
+     * 只报第一个不够（"还有 N 处"不说是哪 N 处），全列又会在长场景里刷屏，
+     * 上限 5 与上面错误列表的口径一致。
+     */
+    const writes = mutatingSteps.map((s) => s.id).slice(0, 5);
+    const more = mutatingSteps.length > writes.length ? ` 等 ${mutatingSteps.length} 处` : '';
+    push({ code: 'TEARDOWN_DIRTY', level: 'warning', stepId: mutatingSteps[0]?.id,
+      message: `写操作（${writes.join('、')}${more}）没��� teardown —— 会留脏数据，且数据驱动迭代会互踩`,
+      // fix 那条"config.dirty=true"的开关**读侧没人读**（量过：全仓只在这一处判据
+      // 提到它，判据也不看它）。留着是因为 docs/05 §5 把"独占并行组"那一套登记
+      // 在那个键上，把整条 fix 删掉等于把那格也删了；但读者按了它也不会让告警消失，
+      // 于是这里不再让人去做一件做了也没用的事，只说加 teardown
+      fix: '加 teardown（调用删除接口或 db 清理）', doc: 'docs/05 §5' });
   }
   if (!hasSleep) { /* 无 sleep 是好事，不需要提示 */ }
 
@@ -1666,6 +1716,104 @@ export function lintScenario(scenario: Scenario, ctx: LintContext = {}): LintIss
         : '把其中一条的 default 改成不引用组内其它输入（字面量 / 环境变量 / 独立生成器），或者把它们改成必填、由调用方传',
       doc: 'docs/02 §2',
     });
+  }
+
+  /*
+   * ── 压测场景专用的一组规则（docs/09 §4.2「IR 压测子集校验」）──────────────
+   *
+   * 判据表在 `ir/src/load.ts` 的 `LOAD_STEP_SUPPORT`，**不在这里**。
+   * 这一条分工是本组规则存在的全部理由：如果"哪些 kind 能压"写在这份 lint 里，
+   * 而编译器 `adapter-http/src/load/plan.ts` 里另写一份，坏法不是编译不过，是这两份漂移成
+   *  - 静态闸放行、编译器当场拒绝 → 用户被挡在"跑"之后（还能忍）；
+   *  - **编译器演化了、静态闸不知道 → 压测跑的其实是另一条用例，而曲线长得一模一样**。
+   * 后者是 docs/08 §3(e)「有载体、没有生产者」的反向版本，也是最贵的那种：
+   * 一份没人怀疑的性能报告。所以两处 `import` 同一张表，测试
+   * （`engine/test/load-lint.test.ts`）直接**遍历表**断两边同判。
+   *
+   * 只在 `scenario.load` 存在时生效：没有 load 块的场景压根不是压测场景，
+   * 对它报 LOAD_* 等于对一条正常用例说"你这一步不能压测"（那正是 lint 反复踩的
+   * 告警刷屏 ⇒ 用户把整个告警区关掉）。
+   */
+  if (scenario.load) {
+    const load = scenario.load;
+    // 「有没有打请求」这件事必须遍历**整棵树**看 kind，而不是看场景顶层。
+    // 一条 happyPath 用例最常见的形状就是 sequence 包着 openapiCall，
+    // 只看顶层会得到"这条压测场景一个请求也不打"（假阳性），
+    // 而反过来一个只含 dataSource 的场景会被当成合法压测（假阴性，更贵）。
+    let pressSteps = 0;
+    const degraded: Array<{ step: Step; why: string }> = [];
+    for (const s of allSteps) {
+      const t = LOAD_STEP_SUPPORT[s.kind];
+      if (t.support === 'press') pressSteps++;
+      // wait 的 kind 级判据是"降级演化"，但那一格只说"不轮询"。
+      // 真正决定能不能演的是**谓词要不要外部能力**（dbRow 要连库、uiPredicate 要开浏览器，
+      // 而压测那条路上两者都没有）。所以这一条按谓词类型再判一次，判据在
+      // LOAD_WAIT_SUPPORT + waitNeedsExternalAdapter —— 它走整棵条件树，
+      // `allOf:[{expr},{dbRow}]` 那种嵌套写法看不见就等于放行。
+      if (s.kind === 'wait') {
+        const need = waitNeedsExternalAdapter((s as { condition?: unknown }).condition);
+        if (need) {
+          push({
+            code: 'LOAD_STEP_UNSUPPORTED', level: 'error', stepId: s.id,
+            message: `压测场景里这条 wait 的条件用不了：${LOAD_WAIT_SUPPORT[need]?.support === 'refuse' ? LOAD_WAIT_SUPPORT[need]!.why : `谓词类型 ${need} 不在压测支持名单里`}（原话：wait 在压测形态只判一次、不轮询，而这一条压根判不了）`,
+            fix: '把这类等待挪到压测**之前**的准备场景里（setup 那条走功能形态，能连库/开浏览器）；被压的那条只留 wait{expr} 或干脆不等，数据提前预置好',
+          });
+        }
+      }
+      if (t.support === 'refuse') {
+        push({
+          code: 'LOAD_STEP_UNSUPPORTED', level: 'error', stepId: s.id,
+          message: `压测场景里的 ${s.kind} 步骤不能被编译：${t.why}`,
+          fix: `这一步在功能回归里是正当的，只是不能进压测那条路。判据表：ir/src/load.ts 的 LOAD_STEP_SUPPORT.${s.kind}；要支持它请改那张表并让编译器（adapter-http/src/load/plan.ts）跟上，别绕过这条规则`,
+        });
+      } else if (t.support === 'once') degraded.push({ step: s, why: t.why });
+      // 压测形态**不重试**（docs/04 那张"两条刻意的不一致"表：压测里重试会把一次故障
+      // 算成两次负载，吞吐与错误率曲线就假了）。所以写了 retry 是**写了个不生效的配置**，
+      // 与 RETRY_ON_CONTAINER 同一族：静默失效的配置比没有配置坏，
+      // 因为用户以为自己有容错。步骤级与场景级两处都要看，只看一处会漏另一处。
+      if ((s.retry?.count ?? 0) > 0) {
+        push({
+          code: 'LOAD_RETRY_IGNORED', level: 'error', stepId: s.id,
+          message: `${s.kind} 上写了 retry.count=${s.retry?.count}，而压测形态**完全不重试**：重试会把一次故障算成两次负载，吞吐与错误率曲线就不真了`,
+          fix: '把 retry 留给功能回归那条场景；压测场景里失败就是错误率的一部分（这正是你要测的东西）',
+        });
+      }
+    }
+    if ((scenario.config.retries.count ?? 0) > 0) {
+      push({
+        code: 'LOAD_RETRY_IGNORED', level: 'error',
+        message: `config.retries.count=${scenario.config.retries.count}，而压测形态**完全不重试**：重试会把一次故障算成两次负载，吞吐与错误率曲线就不真了`,
+        fix: '把 retry 留给功能回归那条场景；压测场景里失败就是错误率的一部分（这正是你要测的东西）',
+      });
+    }
+    for (const d of degraded) {
+      push({
+        code: 'LOAD_STEP_DEGRADED', level: 'warning', stepId: d.step.id,
+        message: `压测形态里这一步的语义与功能回归**不同**：${d.why}`,
+        fix: '不是错误，但读压测报告时要记得这一条：两种形态测的不是同一件事（docs/04 §M0.6 那张表）',
+      });
+    }
+    if (pressSteps === 0) {
+      push({
+        code: 'LOAD_NO_PRESS_STEP', level: 'error',
+        message: `场景声明了 load（${load.vus} VU × ${load.durationMs}ms），但整棵树里没有一个 http / openapiCall 步骤 —— 这次压测一个请求也不会打`,
+        fix: '把要打并发的那段放进 setup/body 并让它带一个 openapiCall 或 http；若只想压数据库/浏览器，本平台不支持（见 LOAD_STEP_SUPPORT）',
+      });
+    }
+    if (!scenario.config.concurrencySafe) {
+      push({
+        code: 'LOAD_NOT_CONCURRENCY_SAFE', level: 'error',
+        message: '场景写了 config.concurrencySafe=false，而压测的本质就是同一份用例并发跑 N 份 —— 你自己声明过它不能并发',
+        fix: '要么修可并发性的根因（共享数据/独占资源），要么这条用例不该被压',
+      });
+    }
+    if (load.durationMs < MIN_SAMPLES_MS) {
+      push({
+        code: 'LOAD_SHORT_RUN', level: 'warning',
+        message: `load.durationMs=${load.durationMs} 短于判退化的统计下限 ${MIN_SAMPLES_MS}ms：这次的 p95 由个位数样本决定，抖动就能"退化 30%"`,
+        fix: `开发时快速看一眼可以，但这份数据不参与性能门禁（evaluatePerfGate 会因 promoteRefused 拒绝它当基线）。要过门禁请 ≥ ${MIN_SAMPLES_MS}ms`,
+      });
+    }
   }
 
   return dedupe(issues);

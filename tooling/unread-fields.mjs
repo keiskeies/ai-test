@@ -387,8 +387,28 @@ export function roleOf(masked, start, end) {
   let n = end;
   while (n < masked.length && /\s/.test(masked[n])) n++;
   const next = n < masked.length ? masked[n] : '';
-  // `{ foo` / `, foo` 后面跟 `,` `}` `:` —— 解构或对象字面量的键
-  if ((prev === '{' || prev === ',' || prev === '(') && (next === ',' || next === '}' || next === ':' || next === ')')) return 'binding';
+  // `{ foo` / `, foo` 后面跟 `,` `}` `)` —— **解构**，是在读
+  if ((prev === '{' || prev === ',' || prev === '(') && (next === ',' || next === '}' || next === ')')) return 'binding';
+  /*
+   * 后面跟 `:` 是**另一件事**：那是"往一个键上放值"（对象字面量、interface/type 里的
+   * 成员声明、函数形参名），读的是**冒号右边**，不是这个标识符。
+   *
+   * 这一格从前算强证据，于是**"生产一个 IR 形状的对象"被当成了"消费这个字段"**。
+   * 本轮实测（写压测那条路时撞出来的）：`press.ts` 里 `{ runnerCount: 1, connections: o.vus }`
+   * 与 `{ model: 'closed' }`、`plan.ts` 里 `scenarioId: scenario.id` 一共把
+   * **六条仍然没人读的字段**判成"读过"，于是它们身上那些写着 P7 的豁免被报成
+   * "已过期、删掉吧"。照做的话下一次这些字段落回未读时门禁直接红，
+   * 而人看到的报错是"新增未读字段"—— 与下面那条"裸词不算读过"是同一个方向的漏：
+   * **只在消费侧守、在生产侧漏**。本工具防的缺陷类正是"有载体、没有生产者"，
+   * 把生产者当消费者等于让这一族缺陷自己给自己作证。
+   *
+   * 代价要说清：`const { id: _id } = s` 这种**改名的解构**会跟着落到这一格，
+   * 于是它不再算读过。全仓这种写法只有个位数（`grep -c 'const { \w*: '`），
+   * 而现存那几处恰恰是 `plan.ts` 里**故意丢掉字段**的用法，本来就不是读。
+   * 反过来若保守地保留它，"写了个同名键"与"读了个字段"就永远分不开 ——
+   * 那正是这一版坏掉的方式。
+   */
+  if ((prev === '{' || prev === ',' || prev === '(') && next === ':') return 'writeKey';
   return 'bare';
 }
 

@@ -289,3 +289,44 @@ export function installSignalHandlers(o: SignalOptions = {}): InstalledSignals {
   for (const name of HANDLED_SIGNALS) process.addListener(name, handler);
   return { signal, restore };
 }
+
+/**
+ * 命令侧那一段"信号 + 宿主注入的合成"，**从 cmdRun 里搬出来的**（不是重写一遍）。
+ *
+ * ## 为什么要搬出来
+ * cmdRun 里原来有二十行做三件事：装处理器、与 `io.abortSignal` 合成一个、
+ * 给出"是谁取消的"那句话。`atest load` 需要**一模一样**的三件事，而它是最需要
+ * 正确取消的一条路（一场压测正在以几千 rps 打被测系统，"停下"必须真停下）。
+ * 抄第二份的后果本仓记过很多次，这一处的具体坏法是：改了合成逻辑（比如将来
+ * 注入那份也带 sig）而 load 那份没改，于是 load 把 HTTP 取消说成"被信号取消"。
+ *
+ * ## 留在调用方的只有**措辞**
+ * 那两句话在 run 与 load 里确实该不一样（一条丢的是证据包与设备租约，
+ * 一条丢的是分位数与没收掉的 mock），所以打印由调用方的 `onAbort` 负责。
+ * **判据（合成、归因）一条都不在调用方** —— 那才是会漂的东西。
+ */
+export function installCommandSignals(o: {
+  /** 宿主注入的那一份（服务端 `POST /api/cancel`）。CLI 自己**永远不给** */
+  injected?: AbortFlag;
+  /** 每次信号都调，只许同步输出。措辞归命令侧，见上 */
+  onAbort: (info: { sig: HandledSignal; second: boolean }) => void;
+}): { signal: AbortFlag; abortedBy: () => string; restore: () => void } {
+  const signals = installSignalHandlers({
+    onAbort: ({ sig, sameSignal }) => o.onAbort({ sig, second: sameSignal }),
+  });
+  const injected = o.injected;
+  /*
+   * `sig()` 只可能来自信号那一份（注入的那个恒 undefined，见 createAbortFlag），
+   * 所以归因这句话要自己拼 —— 直接读 `signal.sig()` 会把 HTTP 取消说成"被信号取消"，
+   * 那是把人引向"谁 kill 了进程"的假归因。
+   */
+  const abortedBy = (): string => signals.signal.sig() ?? (injected?.aborted ? '外部请求' : '信号');
+  const signal: AbortFlag = injected
+    ? {
+      get aborted() { return signals.signal.aborted || injected.aborted; },
+      sig: () => signals.signal.sig(),
+      count: () => signals.signal.count() + injected.count(),
+    }
+    : signals.signal;
+  return { signal, abortedBy, restore: signals.restore };
+}

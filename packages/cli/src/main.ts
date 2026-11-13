@@ -11,7 +11,7 @@
  * 本文件不做任何业务判断 —— 判断全在 gate.ts / gen.ts 这类纯模块里，
  * 这样"流水线为什么红"这件事可以被直接调用测试，不需要起子进程。
  */
-import { cmdAgent, cmdAuthCheck, cmdEvidence, cmdGen, cmdInit, cmdLint, cmdRun, type CommandResult, type Io } from './commands.js';
+import { cmdAgent, cmdAuthCheck, cmdEvidence, cmdGen, cmdInit, cmdLint, cmdLoad, cmdRun, type CommandResult, type Io } from './commands.js';
 import { formatErrors, parseArgv, type CommandSpec } from './args.js';
 import { CI_HINT, EXIT } from './exit.js';
 import { GENERATED_STRATEGY_IDS, STRATEGIES } from './gen.js';
@@ -44,6 +44,48 @@ export const COMMANDS: CommandSpec[] = [
       { name: 'max-cost', value: true, metavar: '0.5', desc: '本次运行的成本上限（美元）。超出即中断并落盘已有证据' },
       { name: 'version-id', value: true, metavar: 'v12', desc: '场景版本号，记进证据包清单' },
       { name: 'print-junit', desc: '把 JUnit XML 也打到 stdout（有些 CI 用 --judge 方式直接吃 stdout）' },
+    ],
+  },
+  {
+    name: 'load',
+    summary: '压测一条带 load 块的场景：内置后端真发请求，出分位数、过性能门禁',
+    usage: 'atest load <场景 id 或 IR 文件路径> --runner-spec 8c16g [开关]',
+    detail: [
+      '施压形状（VU 数、时长、思考时间）**写在 IR 的 load 块里**，命令行只作临时覆盖，覆盖会被大声报出来并记进指纹。',
+      '--runner-spec 必填且不自动探测：它进环境指纹的第一维，猜出来的值会让两次不同机器上的压测**看起来可比**。',
+      '时钟只认 live：确定性时钟量出来的 p50/p95 是 0 或"用例里写的那个 sleep 秒数"，而 0 是合法值，门禁只会一直绿。',
+      '结论是从**压测形态本身**推的，不另跑一次功能回归（那会把 setup 的副作用做两遍）。它不含 healed/triaged 两态。',
+      '--backend k6 只生成脚本不施压（本机装不上 k6，登记在 docs/14）；生成的脚本要跑还需同目录放 atest-load-prelude.mjs。',
+    ].join('\n'),
+    flags: [
+      { name: 'env', alias: 'e', value: true, metavar: 'staging', desc: '环境名（读 <envDir>/<名字>.json）或环境文件路径' },
+      { name: 'env-var', value: true, repeatable: true, metavar: 'k=v', desc: '覆盖单个环境值，可重复。baseUrl 从这里给' },
+      { name: 'env-revision', value: true, metavar: '7', desc: '固定环境修订号。进指纹，两次压测不同就判不可比' },
+      { name: 'doc', value: true, repeatable: true, metavar: 'name=path', desc: '导入 OpenAPI。压测计划的 URL 模板与请求体校验都靠它' },
+      { name: 'input', value: true, repeatable: true, metavar: 'name=value', desc: '场景输入。先按 JSON 解析，解析不了才当字符串' },
+      { name: 'vus', value: true, metavar: '10', desc: '覆盖 IR 里的并发数。**会大声报出来并进指纹**，与历史基线不可比' },
+      { name: 'duration', value: true, metavar: '30000', desc: '覆盖 IR 里的时长。低于 30000ms 的实测窗口不参与判退化' },
+      { name: 'max-requests', value: true, metavar: '5000', desc: '请求总数上限。⚠ 不在指纹维度里，覆盖后门禁看不出差别' },
+      { name: 'max-iterations', value: true, metavar: '50', desc: '每 VU 迭代上限（资源保护）。同样不在指纹里' },
+      { name: 'local', desc: '对本地 mock（由 spec 生成）施压。**只证明这条链路通**，数字与被测产品无关' },
+      { name: 'backend', value: true, metavar: 'builtin|k6', desc: '施压后端。两者在 teardown 次数与响应上限上**故意**不同，读数不可比' },
+      { name: 'out', value: true, metavar: 'case.k6.mjs', desc: '--backend k6 时写盘的路径。不给只打到 stdout' },
+      { name: 'baseline', value: true, metavar: 'baselines.jsonl', desc: '基线文件。默认 <evidenceDir>/baselines.jsonl，按场景 + targetKey 筛' },
+      { name: 'promote-baseline', desc: '把这一场写进基线。不合格的会被拒绝并列出理由（**没有 --force**，故意的）' },
+      { name: 'runner-spec', value: true, metavar: '8c16g', desc: '**必填**。施压机规格，要与历史基线同口径。工具不猜' },
+      { name: 'data-volume', value: true, metavar: '1000000', desc: '被测库的数据量。填了就和历史基线比这一维（一边填一边没填 = 不可比）' },
+      { name: 'sut-instances', value: true, metavar: '3', desc: '被测实例数' },
+      { name: 'sut-spec', value: true, metavar: '4c8g', desc: '被测实例规格' },
+      { name: 'max-p95-regression', value: true, metavar: '0.2', desc: 'p95 退化上限（默认 0.2）' },
+      { name: 'max-p50-regression', value: true, metavar: '0.1', desc: 'p50 退化上限（默认 0.1，比 p95 严）' },
+      { name: 'max-error-rate', value: true, metavar: '0.001', desc: '错误率绝对上限（默认 0.001）' },
+      { name: 'min-rps-ratio', value: true, metavar: '0.9', desc: '吞吐低于基线这个比例就 warn（默认 0.9）' },
+      { name: 'ci', desc: 'CI 模式：frozen=false 或缺 provenance 时**拒绝执行**（一个请求都不发）' },
+      { name: 'allow-unfrozen', desc: '配合 --ci：允许压未冻结场景。会显式告警' },
+      { name: 'evidence-dir', value: true, metavar: 'dir', desc: '产物目录。默认取 atest.json 的 evidenceDir' },
+      { name: 'run-id', value: true, metavar: 'id', desc: '指定 runId（CI 里用构建号）' },
+      { name: 'clock', value: true, metavar: 'live', desc: '时钟。**只有 live 被接受**，其它值直接拒绝并说明原因' },
+      { name: 'json', desc: '把完整结论（含指纹与门禁明细）以 JSON 打到 stdout' },
     ],
   },
   {
@@ -176,6 +218,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
 async function dispatch(a: Parameters<typeof cmdRun>[0], io: Io): Promise<CommandResult> {
   switch (a.command) {
     case 'run': return cmdRun(a, io);
+    case 'load': return cmdLoad(a, io);
     case 'lint': return cmdLint(a, io);
     case 'gen': return cmdGen(a, io);
     case 'agent': return cmdAgent(a, io);

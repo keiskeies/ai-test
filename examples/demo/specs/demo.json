@@ -1,0 +1,34 @@
+{
+  "openapi": "3.0.0",
+  "info": { "title": "demo", "version": "1", "description": "演示用的最小 spec：mock server 由它生成（atest run/load --local 打的就是这里）" },
+  "paths": {
+    "/demo/orders/{id}": {
+      "get": {
+        "operationId": "getDemoOrdersId",
+        "summary": "读一个订单（只读，所以可以并发压）",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "example": { "id": "ORD-7", "amount": 12800, "currency": "CNY" },
+                "schema": {
+                  "type": "object",
+                  "required": ["id", "amount", "currency"],
+                  "properties": {
+                    "id": { "type": "string" },
+                    "amount": { "type": "integer" },
+                    "currency": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
