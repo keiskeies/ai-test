@@ -1,0 +1,7 @@
+{"type":"thinking_delta","text":"先建接口定义，再挂一条已支付订单用例，最后用用例直接调试。"}
+{"type":"tool_call","id":"c1","name":"api_definition_create","args":{"project_id":"{{PID}}","name":"查询订单1号","method":"GET","path":"/order/1","request":{"method":"GET","url":"${base_url}/order/1","headers":[["Authorization","Bearer ${token}"]],"params":[],"body":{"type":"none"},"timeout_ms":5000,"assertions":[{"type":"status_code","expected":200}]}}}
+{"type":"tool_call","id":"c2","name":"api_case_create","args":{"project_id":"{{PID}}","definition_id":"{{TR:api_definition_create:content.id}}","name":"已支付订单","priority":"P1","assertions":[{"type":"body_contains","expected":"PAID"}]}}
+{"type":"tool_call","id":"c3","name":"api_debug","args":{"project_id":"{{PID}}","case_id":"{{TR:api_case_create:content.id}}"}}
+{"type":"text_delta","text":"接口与用例已建好，用例调试通过（状态码 200，响应含 PAID）。"}
+{"type":"usage","input_tokens":666,"output_tokens":88}
+{"type":"done","stop_reason":"stop"}

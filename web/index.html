@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TestPilot · 自托管智能测试平台</title>
+    <meta name="color-scheme" content="light dark" />
+    <!-- 首帧主题：必须在 CSS/React 之前落 data-theme，否则深色用户会看到一帧白闪。
+         口径与 src/ui/themeMode.ts 的 resolveInitialMode 一致（存储键 tp_theme，
+         缺省跟随 prefers-color-scheme）；两边任一处改动都要同步另一处。 -->
+    <script>
+      (function () {
+        var mode;
+        try {
+          var pref = localStorage.getItem("tp_theme");
+          mode = pref === "light" || pref === "dark" ? pref
+            : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        } catch (e) {
+          mode = "light";
+        }
+        document.documentElement.dataset.theme = mode;
+        document.documentElement.style.colorScheme = mode;
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

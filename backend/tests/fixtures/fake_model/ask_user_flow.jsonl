@@ -1,0 +1,5 @@
+{"type":"thinking_delta","text":"环境信息缺失，先向用户提问，本轮照常收敛不挂起（D32）。"}
+{"type":"tool_call","id":"au1","name":"ask_user","args":{"question":"这次回归跑哪个环境？","options":["本地","日常"]}}
+{"type":"text_delta","text":"已发出提问卡，本轮先收尾；你的选择会作为新用户消息回到本会话。"}
+{"type":"usage","input_tokens":80,"output_tokens":30}
+{"type":"done","stop_reason":"stop"}

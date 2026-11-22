@@ -1,0 +1,6 @@
+{"type":"thinking_delta","text":"直接创建接口。"}
+{"type":"tool_call","id":"bad_1","name":"api_definition_create","args":{"project_id":"{{PID}}"}}
+{"type":"tool_call","id":"fix_2","name":"api_definition_create","args":{"project_id":"{{PID}}","name":"修正后的接口","method":"POST","path":"/fix","request":{"method":"POST","url":"http://127.0.0.1:9999/fix","headers":[],"params":[],"body":{"type":"none"},"timeout_ms":5000,"assertions":[{"type":"status_code","expected":200}]}}}
+{"type":"text_delta","text":"参数已修正，接口创建成功。"}
+{"type":"usage","input_tokens":100,"output_tokens":20}
+{"type":"done","stop_reason":"stop"}

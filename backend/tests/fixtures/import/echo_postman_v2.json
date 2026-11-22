@@ -1,0 +1,50 @@
+{
+  "info": {
+    "_postman_id": "b6f1f0d2-0000-4000-8000-abcdefabcdef",
+    "name": "Echo Collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "健康检查",
+      "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] } },
+      "response": []
+    },
+    {
+      "name": "订单",
+      "item": [
+        {
+          "name": "创建订单",
+          "item": [
+            {
+              "name": "创建订单-JSON",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": { "mode": "raw", "raw": "{\"sku\": \"A-1\", \"count\": 2}", "options": { "raw": { "language": "json" } } },
+                "url": { "raw": "{{baseUrl}}/order?src=postman", "host": ["{{baseUrl}}"], "path": ["order"], "query": [{ "key": "src", "value": "postman" }] }
+              }
+            },
+            {
+              "name": "坏条目没有请求",
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "查询订单",
+          "request": { "method": "GET", "url": "{{baseUrl}}/order/:id" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "表单提交",
+      "request": {
+        "method": "PUT",
+        "body": { "mode": "urlencoded", "urlencoded": [{ "key": "status", "value": "paid" }] },
+        "url": "https://api.example.com/order/1/status"
+      }
+    }
+  ]
+}

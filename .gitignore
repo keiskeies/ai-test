@@ -1,0 +1,50 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+backend/data/
+web/node_modules/
+web/dist/
+.superpowers/
+*.log
+
+# ---- 本机配置与密钥：一律不入库，只入库 .env.example 模板 ----
+# `.env` 无斜杠 = 任意层级都命中（根、backend/、web/ 都盖住）；`.env.*` 再盖住
+# `.env.local` / `.env.dev` / `backend/.env.prod` 这一族分环境副本。
+# 两条 `!` 是必需的：没有它们，模板本身也会被 `.env.*` 吃掉，
+# 于是「照抄 .env.example 就能跑」这条口径失去可复制的源头。
+.env
+.env.*
+!.env.example
+
+# 证书/私钥/密钥环：形状比 .env 杂，按扩展名兜住。
+# （`*.key` 只匹配以 .key 结尾的文件名，不会误伤 i18n 之类的 xxx.keys.ts）
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.npmrc
+.netrc
+
+# 取证/变异/门禁的散件一律不进步：工作根与 web/、backend/ 下的点前缀临时产物
+# （.g2x 门禁快照、.mut-* 变异记录、.v*.json、.r*-*.txt 等）+ 三处 .tmp/ 草稿区。
+# 新临时文件请继续写进 backend/.tmp 或 web/.tmp——那里天然被盖住。
+**/.tmp/
+/.?*.json
+/.?*.txt
+/.?*.mjs
+/.?*.cjs
+/.?*.py
+/.?*.bak
+web/.?*.json
+web/.?*.txt
+web/.?*.mjs
+backend/.?*.json
+backend/.?*.txt

@@ -1,0 +1,424 @@
+/* 全局样式表：三层职责，别混写。
+   ① --tp-* 变量：色与尺寸的唯一 CSS 侧声明（值必须与 theme.ts 同值，由
+      theme.drift.test.ts 抠来源码对表）。深色只换映射，变量名一样。
+   ② .tp-* 骨架类：TopBar/侧栏/内容区/页头的盒子模型。**滚动权只给一处**——
+      内容区自己滚，侧栏内部滚，页面本身不滚（旧版侧栏随整页滚走、页头不吸顶，
+      底部的菜单项永远在首屏之外，这是本轮修的第一件事）。
+   ③ antd 预设色名校准：Tag 的 green/blue/… 是调用点写死的 35 处，不去逐处改造，
+      而是把 .ant-tag-<preset> 的色相映射到 theme.ts 的 tag 组（浅底深字同相描边）。 */
+
+:root {
+  /* ── 尺寸（TS 侧单数真相在 theme.ts 的 metrics，这里逐项同值） ── */
+  --tp-metric-topbar-h: 56px;
+  --tp-metric-sider-w: 208px;
+  --tp-metric-sider-collapsed-w: 56px;
+  --tp-metric-page-max: 1600px;
+  --tp-metric-page-pad: 24px;
+  --tp-metric-page-head-h: 56px;
+  --tp-metric-control-h: 32px;
+
+  /* ── 品牌 / 功能 / 域 ── */
+  --tp-primary-50: #EAF6F1;
+  --tp-primary-100: #D6ECE2;
+  --tp-primary-200: #ABD9C7;
+  --tp-primary-300: #7CC3A6;
+  --tp-primary-400: #52B391;
+  --tp-primary-500: #2BA47D;
+  --tp-primary-600: #1D7257;
+  --tp-primary-700: #175A45;
+  --tp-func-processing: #4C86E8;
+  --tp-func-success: #1D7257;
+  --tp-func-warning: #9A6404;
+  --tp-func-error: #B03A33;
+  --tp-domain-api: #5B8FF9;
+  --tp-domain-ui: #9270CA;
+  --tp-domain-adb: #47A861;
+  --tp-domain-logic: #8B8E94;
+  --tp-domain-pilot: #13A8A8;
+
+  /* ── 文字 / 底 / 线 ── */
+  --tp-text-1: #1F2833;
+  --tp-text-2: #5F6B76;
+  --tp-text-3: #667079;
+  --tp-text-4: #B4BBC2;
+  --tp-bg-layout: #F6F8F7;
+  --tp-bg-container: #FFFFFF;
+  --tp-bg-elevated: #FFFFFF;
+  --tp-bg-table-head: #FAFBFB;
+  --tp-bg-hover: #F2F6F4;
+  --tp-bg-selected: #EAF6F1;
+  --tp-split: #DCE1E6;
+  --tp-border: #CDD5DB;
+  --tp-border-hover: #B9C2CA;
+  --tp-mask: rgba(31,40,51,.45);
+
+  /* ── 阴影 ── */
+  --tp-shadow-s1: 0 1px 2px rgba(16,24,40,.05);
+  --tp-shadow-s2: 0 4px 12px rgba(16,24,40,.08);
+  --tp-shadow-s3: 0 12px 32px rgba(16,24,40,.14);
+
+  /* ── 圆角 / 字号 ── */
+  --tp-radius-xs: 2px;
+  --tp-radius-sm: 4px;
+  --tp-radius-md: 6px;
+  --tp-radius-lg: 8px;
+  --tp-radius-xl: 10px;
+  --tp-radius-xxl: 12px;
+  --tp-radius-pill: 999px;
+  --tp-fs-xs: 11px;
+  --tp-fs-sm: 12px;
+  --tp-fs-md: 13px;
+  --tp-fs-base: 14px;
+  --tp-fs-lg: 16px;
+  --tp-fs-xl: 20px;
+  --tp-fs-xxl: 24px;
+
+  --tp-font: -apple-system, PingFang SC, HarmonyOS Sans SC, Microsoft YaHei, sans-serif;
+  --tp-mono: JetBrains Mono, Consolas, monospace;
+  color-scheme: light;
+}
+
+/* 深色映射：只换值。任何一处漏换都会在暗底上露出白块，所以宁多勿少。 */
+:root[data-theme="dark"] {
+  --tp-primary-50: #122A23;
+  --tp-primary-100: #1E3D32;
+  --tp-primary-200: #2C5443;
+  --tp-primary-300: #6FD3AC;
+  --tp-primary-400: #52B391;
+  --tp-primary-500: #3FBF95;
+  --tp-primary-600: #5BC49C;
+  --tp-primary-700: #8ADBB9;
+  --tp-func-processing: #7FA8F5;
+  --tp-func-success: #5BC49C;
+  --tp-func-warning: #E8B44A;
+  --tp-func-error: #F08B84;
+  --tp-domain-api: #7FA8F5;
+  --tp-domain-ui: #BBA3E8;
+  --tp-domain-adb: #6FC98A;
+  --tp-domain-logic: #9AA6AF;
+  --tp-domain-pilot: #4FC9C9;
+
+  --tp-text-1: #E6EAED;
+  --tp-text-2: #A7B2BA;
+  --tp-text-3: #8C99A4;
+  --tp-text-4: #5A646C;
+  --tp-bg-layout: #0F1418;
+  --tp-bg-container: #161C21;
+  --tp-bg-elevated: #1B232A;
+  --tp-bg-table-head: #1B232A;
+  --tp-bg-hover: #1C242A;
+  --tp-bg-selected: #122A23;
+  --tp-split: #2C3740;
+  --tp-border: #39464F;
+  --tp-border-hover: #4C5B66;
+  --tp-mask: rgba(4,8,10,.62);
+
+  --tp-shadow-s1: 0 1px 2px rgba(0,0,0,.40);
+  --tp-shadow-s2: 0 4px 12px rgba(0,0,0,.45);
+  --tp-shadow-s3: 0 12px 32px rgba(0,0,0,.55);
+  color-scheme: dark;
+}
+
+html, body, #root { height: 100%; margin: 0; }
+/* 滚动条：Windows 默认 17px，粗且亮，是「侧栏滚动条太粗」的来源。
+   统一细滚动条（10px 主区 / 侧栏 6px），thumb 走 token；`scrollbar-gutter: stable`
+   预先保留槽位，内容高度在视口附近抖动时（tooltip/popover 进出）不再出现「滚动条忽隐忽现」的闪动。
+   `overflow-x: clip` 不产生滚动容器、不影响 sticky，但能挡住浮层越界产生的横向滚动条。 */
+html { scrollbar-gutter: stable; }
+html, body { overflow-x: clip; }
+* { scrollbar-width: thin; scrollbar-color: var(--tp-border-hover) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--tp-border);
+  border-radius: var(--tp-radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--tp-border-hover); background-clip: content-box; }
+*::-webkit-scrollbar-corner { background: transparent; }
+body {
+  font-family: var(--tp-font);
+  background: var(--tp-bg-layout);
+  color: var(--tp-text-1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ───────────── 骨架（ProLayout 接管） ───────────── */
+/* 布局结构、侧栏滚动、菜单展开/折叠、固定头部/侧栏全部由 antd ProLayout 负责。
+   这里只做三件事：把颜色接到我们的 CSS 变量、把折叠宽度钉到 56、给选中项加 3px 竖条。 */
+.ant-pro-layout .ant-pro-sider {
+  background: var(--tp-bg-container);
+  border-right: 1px solid var(--tp-split);
+}
+.ant-pro-layout .ant-pro-sider .ant-menu { background: transparent; }
+/* ProLayout 侧栏的滚动容器是 children 下的一个无类名 div；单独压到 6px */
+.ant-pro-layout .ant-pro-sider .ant-layout-sider-children > div {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+.ant-pro-layout .ant-pro-sider .ant-menu-item,
+.ant-pro-layout .ant-pro-sider .ant-menu-submenu-title { height: 36px; line-height: 36px; }
+.ant-pro-layout .ant-pro-sider .ant-menu-submenu-title {
+  font-size: var(--tp-fs-sm);
+  font-weight: 500;
+  color: var(--tp-text-2);
+  letter-spacing: .02em;
+}
+.ant-pro-layout .ant-pro-sider .ant-menu-submenu-title:hover { color: var(--tp-text-2); }
+/* ProLayout 菜单项字色来自它自己的 token（navTheme=light 时是黑色）。
+   深色主题下选中项会变成「黑字压黑底」(1.13:1)——这里统一接管：
+   普通项 text-2，选中项浅色 primary-600 / 深色 primary-300。 */
+.ant-pro-layout .ant-pro-sider .ant-menu .ant-menu-item {
+  color: var(--tp-text-2);
+}
+.ant-pro-layout .ant-pro-sider .ant-menu .ant-menu-item-selected {
+  color: var(--tp-primary-600);
+}
+:root[data-theme="dark"] .ant-pro-layout .ant-pro-sider .ant-menu .ant-menu-item-selected {
+  color: var(--tp-primary-300);
+}
+.ant-pro-layout .ant-pro-sider .ant-menu .ant-menu-item .anticon {
+  color: inherit;
+}
+.ant-pro-layout .ant-pro-sider .ant-menu-item-selected::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 3px; height: 18px;
+  border-radius: 0 2px 2px 0;
+  background: var(--tp-primary-600);
+}
+.ant-pro-layout .ant-pro-sider.ant-layout-sider-collapsed {
+  flex: 0 0 56px !important;
+  width: 56px !important;
+  min-width: 56px !important;
+  max-width: 56px !important;
+}
+/* ProLayout 的头部默认是半透明+模糊（实测 rgba(...,0.6)）；这里钉回实色容器底，
+   否则深色下会出现「内容透过头栏」的糊感。 */
+.ant-pro-layout .ant-pro-global-header,
+.ant-pro-layout .ant-pro-top-nav-header {
+  background: var(--tp-bg-container) !important;
+  border-bottom: 1px solid var(--tp-split);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.ant-pro-layout .ant-pro-layout-content { background: var(--tp-bg-layout); }
+.ant-pro-layout .ant-pro-global-header-header-actions-item { align-items: center; }
+.ant-pro-layout .ant-layout-header { height: 56px; line-height: 56px; }
+
+/* 品牌块（ProLayout 的 logo/title 槽） */
+.tp-logo-mark {
+  width: 26px; height: 26px;
+  border-radius: var(--tp-radius-lg);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--tp-primary-500), var(--tp-primary-700));
+  color: #fff;
+  flex: 0 0 auto;
+}
+
+/* 顶栏图标钮（主题开关 / 侧栏折叠）：无文字按钮，hover 才显底 */
+.tp-iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  border: none; border-radius: var(--tp-radius-md);
+  background: transparent; color: var(--tp-text-2);
+  cursor: pointer; padding: 0;
+  transition: background .12s ease, color .12s ease;
+}
+.tp-iconbtn:hover { background: var(--tp-bg-hover); color: var(--tp-text-1); }
+.tp-iconbtn:focus-visible { outline: 2px solid var(--tp-primary-500); outline-offset: 1px; }
+
+.tp-avatar {
+  width: 26px; height: 26px; border-radius: var(--tp-radius-pill);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--tp-primary-50); color: var(--tp-primary-600);
+  /* 描边用 200 而不是 100：头像常落在 selected/hover 同相底上，100 在那种底里 1.12:1 等于没有边 */
+  border: 1px solid var(--tp-primary-200);
+  flex: 0 0 auto;
+}
+:root[data-theme="dark"] .tp-avatar { color: var(--tp-primary-300); }
+
+/* 内容容器：ProLayout contentStyle 已置 0，这里负责页边距与最大宽度 */
+.tp-content {
+  padding: var(--tp-metric-page-pad);
+  max-width: var(--tp-metric-page-max);
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 浮层不许把视口撑宽（右缘按钮的 tooltip/popover 越界时会出现横向滚动条） */
+.ant-tooltip, .ant-popover, .ant-dropdown, .ant-select-dropdown { max-width: calc(100vw - 16px); }
+
+/* ───────────── 页头 ───────────── */
+/* 吸顶：内容区滚动时标题与操作常驻。底衬用 layout 色 + 模糊，两侧的卡片不会从缝里透出来。 */
+.tp-page-head {
+  position: sticky;
+  top: var(--tp-metric-topbar-h);
+  z-index: 10;
+  min-height: var(--tp-metric-page-head-h);
+  padding-bottom: 8px;
+  margin: -4px 0 0;
+  /* 实色底：吸顶时正文从下面滚过，渐隐会让文字透出来像重影（2026-11-22 截图实测）。 */
+  background: var(--tp-bg-layout);
+}
+/* PageHeader 自身的容器不额外留白：外边距归 .tp-page-head 管 */
+.tp-page-head .ant-page-header-heading { margin-top: 2px; }
+.tp-page-head .tp-page-title {
+  font-size: var(--tp-fs-xl);
+  font-weight: 600;
+  color: var(--tp-text-1);
+  line-height: 28px;
+  letter-spacing: -0.01em;
+}
+.tp-page-desc { font-size: var(--tp-fs-sm); color: var(--tp-text-2); line-height: 20px; }
+.tp-page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.tp-breadcrumb { font-size: var(--tp-fs-sm); color: var(--tp-text-3); line-height: 20px; }
+
+/* ───────────── 通用小件 ───────────── */
+.tp-mono { font-family: var(--tp-mono); font-variant-numeric: tabular-nums; }
+.tp-num { font-variant-numeric: tabular-nums; }
+
+/* 文字阶梯：内联 fontSize: 12 的替代，逐页替换为类名 */
+.tp-text-xs { font-size: var(--tp-fs-xs); line-height: 16px; }
+.tp-text-sm { font-size: var(--tp-fs-sm); line-height: 18px; }
+.tp-text-md { font-size: var(--tp-fs-md); line-height: 20px; }
+.tp-text-base { font-size: var(--tp-fs-base); line-height: 22px; }
+.tp-secondary { color: var(--tp-text-2); }
+.tp-tertiary { color: var(--tp-text-3); }
+
+/* 区块卡：页面里成组的内容统一用它，别再用裸 Card + 内联 margin */
+.tp-block { margin-top: 16px; }
+.tp-card { background: var(--tp-bg-container); border: 1px solid var(--tp-border); border-radius: var(--tp-radius-lg); }
+
+/* 列表页：筛选条与表格卡之间不再手写 margin */
+.tp-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.tp-filterbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 列表页表格的统一外壳：白卡 + 细边 + 8 圆角，表头 40 / 行 48 由 antd token 给。
+   类名直接挂在 <Table className="tp-tablecard"> 上（落在 .ant-table-wrapper），
+   不需要每页再包一层 Card——此前接口页裸铺、报告页套 Card，两种模板并存。 */
+.tp-tablecard {
+  background: var(--tp-bg-container);
+  border: 1px solid var(--tp-border);
+  border-radius: var(--tp-radius-lg);
+  overflow: hidden;
+}
+.tp-tablecard .ant-table { background: transparent; }
+.tp-tablecard .ant-table-thead > tr > th {
+  font-size: var(--tp-fs-sm);
+  font-weight: 500;
+  color: var(--tp-text-3);
+  text-transform: none;
+}
+.tp-tablecard .ant-table-tbody > tr > td { font-size: var(--tp-fs-md); }
+.tp-tablecard .ant-table-thead > tr > th::before { display: none; }
+.tp-tablecard .ant-pagination { margin: 0; }
+
+/* 工具栏按钮：同屏只允许一个主按钮（§11.6.6 红线），其余为次级——这里只统一高度与间距 */
+.tp-page-actions .ant-btn { font-size: var(--tp-fs-md); }
+
+/* 空表提示行：antd 用 colorTextDisabled（text-4，浅底 1.9:1）直接画在 td 上，且 Table 没有
+   对应的组件 token 可映射；在 td 上声明即压过 antd 的 tr 继承——空态文案是让人读的原因，
+   不是装饰。 */
+.tp-tablecard .ant-table-tbody > tr.ant-table-placeholder > td { color: var(--tp-text-3); }
+
+/* ───────────── Markdown 与代码块 ───────────── */
+.tp-md p { margin: 0 0 8px; }
+.tp-md p:last-child { margin-bottom: 0; }
+.tp-md code { background: var(--tp-bg-hover); padding: 1px 5px; border-radius: var(--tp-radius-sm); font-size: var(--tp-fs-sm); }
+.tp-md pre { background: var(--tp-bg-layout); padding: 10px; border-radius: var(--tp-radius-md); overflow: auto; }
+
+/* Tag 三段色的变量声明：浅/深各一套。放在规则之前，读的时候先见值再见用法。 */
+:root {
+  --tp-tag-green-fg: #1D7257;    --tp-tag-green-bg: #EAF6F1;    --tp-tag-green-bd: #C5DCD4;
+  --tp-tag-cyan-fg: #0F7C7C;     --tp-tag-cyan-bg: #E6F7F7;     --tp-tag-cyan-bd: #BFDDDD;
+  --tp-tag-blue-fg: #3568C9;     --tp-tag-blue-bg: #EDF3FE;     --tp-tag-blue-bd: #CAD7EF;
+  --tp-tag-geekblue-fg: #3F5FD0; --tp-tag-geekblue-bg: #EEF1FD; --tp-tag-geekblue-bd: #CED4ED;
+  --tp-tag-purple-fg: #7A55B5;   --tp-tag-purple-bg: #F3EEFB;   --tp-tag-purple-bd: #D9D0E9;
+  --tp-tag-magenta-fg: #B03B8F;  --tp-tag-magenta-bg: #FBEFF7;  --tp-tag-magenta-bd: #E9CEE1;
+  --tp-tag-gold-fg: #9A6404;     --tp-tag-gold-bg: #FDF4E3;     --tp-tag-gold-bd: #E9D6B5;
+  --tp-tag-orange-fg: #9A4B00;   --tp-tag-orange-bg: #FDF0E3;   --tp-tag-orange-bd: #EBD1B9;
+  --tp-tag-volcano-fg: #98362F;  --tp-tag-volcano-bg: #FBEBEA;  --tp-tag-volcano-bd: #EACCC9;
+  --tp-tag-red-fg: #B03A33;      --tp-tag-red-bg: #FBEBEA;      --tp-tag-red-bd: #ECCBCA;
+  --tp-tag-default-fg: #5F6B76;  --tp-tag-default-bg: #F2F3F4;  --tp-tag-default-bd: #D4D7D9;
+}
+:root[data-theme="dark"] {
+  --tp-tag-green-fg: #6FD3AC;    --tp-tag-green-bg: #112A22;    --tp-tag-green-bd: #1C3F33;
+  --tp-tag-cyan-fg: #59D3D3;     --tp-tag-cyan-bg: #0E2A2A;     --tp-tag-cyan-bd: #173F3F;
+  --tp-tag-blue-fg: #8AB0F2;     --tp-tag-blue-bg: #15233A;     --tp-tag-blue-bd: #253753;
+  --tp-tag-geekblue-fg: #93A8F0; --tp-tag-geekblue-bg: #1A2140; --tp-tag-geekblue-bd: #2B3459;
+  --tp-tag-purple-fg: #BBA3E8;   --tp-tag-purple-bg: #231B33;   --tp-tag-purple-bd: #382E4C;
+  --tp-tag-magenta-fg: #E58FC8;  --tp-tag-magenta-bg: #2B1626;  --tp-tag-magenta-bd: #46283D;
+  --tp-tag-gold-fg: #E8B44A;     --tp-tag-gold-bg: #2A2110;     --tp-tag-gold-bd: #423417;
+  --tp-tag-orange-fg: #EE9A55;   --tp-tag-orange-bg: #2B1C10;   --tp-tag-orange-bd: #462E1A;
+  --tp-tag-volcano-fg: #EF7F72;  --tp-tag-volcano-bg: #2D1817;  --tp-tag-volcano-bd: #4C2825;
+  --tp-tag-red-fg: #F08B84;      --tp-tag-red-bg: #2C1716;      --tp-tag-red-bd: #492826;
+  --tp-tag-default-fg: #9AA6AF;  --tp-tag-default-bg: #1E262C;  --tp-tag-default-bd: #30393F;
+}
+
+/* ───────────── antd 预设 Tag 色相校准 ───────────── */
+/* 选择器写成 `:root[data-theme] .ant-tag.ant-tag-x`（特异性 0,4,0）而不是 `.ant-tag-x`：
+   antd 5 的预设色规则是 `:where(.css-hash).ant-tag.ant-tag-green`——`:where()` 归零后
+   特异性只有 0,2,0，普通覆盖能赢，但**样式表注入顺序在构建产物里不稳定**（antd 的
+   CSS-in-JS 样式表可能挂在我们之后）。多写一个 .ant-tag 把特异性抬到 0,4,0，顺序就不再是变量。
+   调用点写的是 color="green" 这类预设名（35 处，语义稳定）；色相收在这里统一成
+   「浅底 + 深字 + 同相描边」。深色由变量跟着换，不必写第二套选择器。
+   例外：color 传 hex 的调用点不受影响（antd 自己按 hex 铺底），这是刻意的——
+   那些是画布/报表里的域色标注，不是状态徽标。 */
+.ant-tag { border-radius: var(--tp-radius-sm); font-size: var(--tp-fs-sm); line-height: 18px; padding-inline: 7px; margin-inline-end: 6px; }
+:root[data-theme] .ant-tag.ant-tag-green     { color: var(--tp-tag-green-fg);     background: var(--tp-tag-green-bg);     border-color: var(--tp-tag-green-bd); }
+:root[data-theme] .ant-tag.ant-tag-cyan      { color: var(--tp-tag-cyan-fg);      background: var(--tp-tag-cyan-bg);      border-color: var(--tp-tag-cyan-bd); }
+:root[data-theme] .ant-tag.ant-tag-blue      { color: var(--tp-tag-blue-fg);      background: var(--tp-tag-blue-bg);      border-color: var(--tp-tag-blue-bd); }
+:root[data-theme] .ant-tag.ant-tag-geekblue  { color: var(--tp-tag-geekblue-fg);  background: var(--tp-tag-geekblue-bg);  border-color: var(--tp-tag-geekblue-bd); }
+:root[data-theme] .ant-tag.ant-tag-purple    { color: var(--tp-tag-purple-fg);    background: var(--tp-tag-purple-bg);    border-color: var(--tp-tag-purple-bd); }
+:root[data-theme] .ant-tag.ant-tag-magenta   { color: var(--tp-tag-magenta-fg);   background: var(--tp-tag-magenta-bg);   border-color: var(--tp-tag-magenta-bd); }
+:root[data-theme] .ant-tag.ant-tag-gold      { color: var(--tp-tag-gold-fg);      background: var(--tp-tag-gold-bg);      border-color: var(--tp-tag-gold-bd); }
+:root[data-theme] .ant-tag.ant-tag-orange    { color: var(--tp-tag-orange-fg);    background: var(--tp-tag-orange-bg);    border-color: var(--tp-tag-orange-bd); }
+:root[data-theme] .ant-tag.ant-tag-volcano   { color: var(--tp-tag-volcano-fg);   background: var(--tp-tag-volcano-bg);   border-color: var(--tp-tag-volcano-bd); }
+:root[data-theme] .ant-tag.ant-tag-red       { color: var(--tp-tag-red-fg);       background: var(--tp-tag-red-bg);       border-color: var(--tp-tag-red-bd); }
+:root[data-theme] .ant-tag.ant-tag-default, :root[data-theme] .ant-tag:not([class*="ant-tag-"]) { color: var(--tp-tag-default-fg); background: var(--tp-tag-default-bg); border-color: var(--tp-tag-default-bd); }
+/* processing = 运行中：浅蓝底 + 深蓝字，与呼吸光环同相 */
+:root[data-theme] .ant-tag.ant-tag-processing { color: var(--tp-tag-blue-fg); background: var(--tp-tag-blue-bg); border-color: var(--tp-tag-blue-bd); }
+
+/* ───────────── 动效 ───────────── */
+/* T21 画布呼吸高亮（§12.2）：running 节点 1.2s 扩散光环。
+   无障碍：prefers-reduced-motion 下不闪动，改静态描边——状态仍可辨，只是不动。 */
+@keyframes tp-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(76 134 232 / 45%); }
+  50% { box-shadow: 0 0 0 6px rgb(76 134 232 / 0%); }
+}
+.tp-node-running { animation: tp-breathe 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .tp-node-running { animation: none; outline: 2px solid var(--tp-func-processing); }
+  *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+
+/* Ctrl+K 直达元素库（R121）：?q=<元素id> 落点的那一行标出来。
+   静态描边不闪——这行的意思是「这就是你搜的那条」，要一直看得见。 */
+.tp-row-hit > td { background: var(--tp-primary-50) !important; }
+.tp-row-hit > td:first-child { box-shadow: inset 3px 0 0 var(--tp-primary-500); }
+
+/* antd Empty 的全局校准：测试把 .ant-empty-description 当把手（runs/api/EnvSelect 等），
+   所以不替换组件，只统一观感——插画收小调灰、描述用辅助色，深浅两套都成立。 */
+.ant-empty { padding: 20px 0; }
+.ant-empty .ant-empty-image { height: 56px; margin-bottom: 8px; }
+.ant-empty .ant-empty-image svg { filter: grayscale(1); opacity: .5; }
+:root[data-theme="dark"] .ant-empty .ant-empty-image svg { opacity: .55; }
+.ant-empty .ant-empty-description { color: var(--tp-text-3); font-size: var(--tp-fs-md); }
+
+/* 空态：线稿插画容器（内容由 StateView 组件画） */
+.tp-empty { padding: 40px 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--tp-text-3); }
+.tp-empty-icon { color: var(--tp-border-hover); }
+.tp-empty-title { font-size: var(--tp-fs-md); color: var(--tp-text-2); }
+.tp-empty-desc { font-size: var(--tp-fs-sm); color: var(--tp-text-3); max-width: 460px; text-align: center; line-height: 20px; }

@@ -1,0 +1,152 @@
+[project]
+name = "testpilot-backend"
+version = "0.1.0"
+description = "TestPilot 测试平台后端（S0 金线纵切）"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.8",
+  "pydantic-settings>=2.4",
+  "sqlalchemy[asyncio]>=2.0.30",
+  "asyncmy>=0.2.9",
+  "alembic>=1.13",
+  "httpx>=0.27",
+  "openai>=1.40",
+  "redis>=5.0",
+  "celery>=5.4",
+  "bcrypt>=4.1",
+  "pyjwt>=2.9",
+  "cryptography>=42.0",
+  # 1C UI 执行（§6.3）。**精确等号不是保守，是功能要求**：playwright 自带的
+  # chromium revision 必须与前端 playwright-core 的那份相等，否则 CI 与业主机器
+  # 要下两份浏览器（几百 MB / 离线演示直接失败）。tests/test_ui_deps.py 把两份
+  # browsers.json 的 revision 相等钉成了测试，改了 pin 对不上就会红。
+  # 当前配对：playwright 1.65.2 → chromium 1255 ← playwright-core 1.65.1（web/）。
+  # import 是惰性的（execution/ui_core.py 里才 import），所以没装浏览器也能起后端。
+  "playwright==1.65.2",
+  # 1D ADB 测试（§5.4 点名，蓝图唯一新增依赖）。import 惰性（execution/adb_core.py 里才
+  # import，同 playwright 的 R95 教训），import-linter 契约 4 保证 execution 零 app.modules。
+  "uiautomator2>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+  "fakeredis>=2.24",
+  "import-linter>=2.0",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E","F","I","UP","B"]
+ignore = ["B008","E501"]
+
+[tool.mypy]
+python_version = "3.12"
+# 口径与 ruff 一致：**全局不开** ignore_missing_imports——那样等于让 mypy 对任何
+# 拼错的 import 闭嘴（`from app.core.errros import X` 也能过）。唯一豁免是 celery：
+# 它装了但没有 py.typed 标记，属"库自己没声明类型"，不是我们引用错了东西。
+[[tool.mypy.overrides]]
+module = ["celery.*"]
+ignore_missing_imports = true
+
+# uiautomator2 装上但没有 py.typed，同 celery 口径（库自己没声明类型，不是我们引用错了）。
+# 实测 1 条报错落在 import 行（Skipping analyzing "uiautomator2": missing library stubs）。
+# 只豁免它自身的包，`uiautomator2.ext.*` 之类同源；绝不宽松到全局。
+[[tool.mypy.overrides]]
+module = ["uiautomator2.*"]
+ignore_missing_imports = true
+
+[tool.importlinter]
+root_packages = ["app"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "modules 之间只经 service/事件总线互调"
+type = "independence"
+modules = [
+  "app.modules.iam",
+  "app.modules.env",
+  "app.modules.api_test",
+  "app.modules.audit",
+  "app.modules.model_cfg",
+  # 1B：新模块必须显式登记，否则「4 kept」是漏数撑出来的假绿（计划风险 #7 点名过）。
+  # scenario 只正向依赖 core/shared/execution，与其余领域模块零横向 import（已实测）。
+  "app.modules.scenario",
+  # 1C：ui_test 是领域模块（元素库 / UI 用例），与 scenario 同族——只正向依赖
+  # core/shared/execution，跨模块取数据走 REGISTRY（ui_case_resolve），零横向 import。
+  "app.modules.ui_test",
+  # 1D：adb_test 是领域模块（设备 / 模块树 / ADB 用例），同款——只正向依赖
+  # core/shared/execution，跨模块取数据走 REGISTRY（adb_case_resolve），零横向 import。
+  "app.modules.adb_test",
+  # 1E T0：schedule/notify 是领域模块，同款——必须显式登记，漏登记 = 契约 1 静默不扫
+  # （R64 假绿坑）。schedule 到点触发经 send_task 按名字投递（R42），不认识 scenario/execution；
+  # notify 是纯出站 I/O，零横向 import 由本契约守着（T1/T2 落地时继续有效）。
+  "app.modules.schedule",
+  "app.modules.notify",
+  # D183 步 1：testplan 是领域模块（计划本体，后续步加关联/报告），同款登记。
+  "app.modules.testplan",
+  # D187 步 1：defect 是领域模块（缺陷本体 + 关联用例），同款登记。
+  # 漏登记 = 本契约对它零扫描而清单照样「kept」（R64 假绿坑），不是「少一条约束」那么轻。
+  "app.modules.defect",
+]
+
+[[tool.importlinter.contracts]]
+name = "core 不得依赖 modules"
+type = "forbidden"
+source_modules = ["app.core"]
+forbidden_modules = ["app.modules"]
+
+[[tool.importlinter.contracts]]
+name = "领域模块不得反向依赖 agent"
+type = "forbidden"
+source_modules = [
+  "app.modules.iam",
+  "app.modules.env",
+  "app.modules.api_test",
+  "app.modules.audit",
+  "app.modules.model_cfg",
+  # 1B 登记：场景引擎不得认识 agent（agent 是编排层，业务模块要能被 agent 之外的一切复用）
+  "app.modules.scenario",
+  # 1B T22：search 是 composition 模块（与 agent 同类，可正向读领域模型），
+  # 不进契约 1 的独立清单（它按设计 import api_test/scenario），但必须进本清单——
+  # 「组合层也不许认识 agent」与 T23⑥ 同源：登记了才被扫，漏登记就是假绿。
+  "app.modules.search",
+  # 工作台统计（§11.5.2）：composition 模块，与 search 同类（正向读领域模型），
+  # 同理必须登记——「组合层也不许认识 agent」，漏登记就是假绿。
+  "app.modules.workbench",
+  # 1C：ui_test 是领域模块（不是 composition 层），必须进本清单——登记了才被扫。
+  "app.modules.ui_test",
+  # 1D：adb_test 是领域模块（不是 composition 层），同款——登记了才被扫。
+  "app.modules.adb_test",
+  # 1E T0：schedule/notify 是领域模块（不是 composition 层），同款——登记了才被扫，
+  # 漏登记就是假绿（R64）。
+  "app.modules.schedule",
+  "app.modules.notify",
+  # D183 步 1：testplan 是领域模块（不是 composition 层），同款登记。
+  "app.modules.testplan",
+  # D187 步 1：defect 是领域模块（不是 composition 层），同款登记（漏登记 = 不扫）。
+  "app.modules.defect",
+]
+forbidden_modules = ["app.modules.agent"]
+[[tool.importlinter.contracts]]
+name = "execution 执行核依赖闭包最小（可被一切复用）"
+type = "forbidden"
+source_modules = ["app.modules.execution"]
+forbidden_modules = ["app.modules"]
+# ledger R28：执行核 = shared + stdlib + httpx；服务层需要跨模块信息时用 SQL 表名 join，
+# 不 import 领域模块。api_test → execution 的正向依赖不受本契约影响（execution 是底层）。
+# ledger R26：agent 是编排模块（与 main.py 装配层同类），可正向读取领域模块；
+# 反向（领域模块认识 agent）禁止 —— 保证业务模块可被 agent 之外的一切复用。

@@ -1,0 +1,6 @@
+{"type":"thinking_delta","text":"先盘点登录用例，再基于它出两个候选方案。"}
+{"type":"tool_call","id":"tc_1","name":"search_test_assets","args":{"project_id":"{{PID}}","keyword":"登录","kind":"api_case"}}
+{"type":"tool_call","id":"tc_2","name":"propose_scenario_plans","args":{"project_id":"{{PID}}","plans":[{"name":"登录冒烟（方案A）","intent":"覆盖登录成功主链路","est_steps":["调登录接口","断言返回码"],"env_hint":"本地环境","risks":["依赖造数"],"graph":{"version":1,"nodes":[{"key":"s1","kind":"api_case","ref":"{{TR:search_test_assets:content.items.0.id}}","name":"登录"}]}},{"name":"登录重试（方案B）","intent":"覆盖登录抖动重试","est_steps":["while 重试登录","断言最终成功"],"graph":{"version":1,"nodes":[{"key":"l1","kind":"loop","name":"重试","config":{"mode":"while","cond":"ctx.vars.get('ok') != '1'","max_iter":3},"children":[{"key":"l1.1","kind":"api_case","ref":"{{TR:search_test_assets:content.items.0.id}}","name":"登录"}]}]}}]}}
+{"type":"text_delta","text":"已给出 2 个候选方案，请选择。"}
+{"type":"usage","input_tokens":100,"output_tokens":50}
+{"type":"done","stop_reason":"stop"}

@@ -1,0 +1,9 @@
+{"type":"thinking_delta","text":"先看看项目里有哪些环境，"}
+{"type":"thinking_delta","text":"再创建查询订单接口。"}
+{"type":"tool_call","id":"tc_1","name":"env_list","args":{"project_id":"{{PID}}"}}
+{"type":"thinking_delta","text":"环境确认了，直接建接口。"}
+{"type":"tool_call","id":"tc_2","name":"api_definition_create","args":{"project_id":"{{PID}}","name":"查询订单","method":"GET","path":"/order/{id}","request":{"method":"GET","url":"http://127.0.0.1:9999/order/1","headers":[],"params":[],"body":{"type":"none"},"timeout_ms":5000,"assertions":[{"type":"status_code","expected":200}]}}}
+{"type":"text_delta","text":"已完成：查询到 1 个环境，"}
+{"type":"text_delta","text":"并创建了接口「查询订单」。"}
+{"type":"usage","input_tokens":1234,"output_tokens":456}
+{"type":"done","stop_reason":"stop"}

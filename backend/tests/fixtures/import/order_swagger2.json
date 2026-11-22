@@ -1,0 +1,44 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Order Legacy", "version": "1.0.0" },
+  "host": "api.old.example.com",
+  "basePath": "/api",
+  "schemes": ["https"],
+  "paths": {
+    "/order/{id}": {
+      "get": {
+        "operationId": "getOrder",
+        "summary": "查询订单",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "type": "string" },
+          { "name": "trace", "in": "query", "type": "string", "default": "on" }
+        ],
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/order": {
+      "post": {
+        "operationId": "createOrder",
+        "summary": "创建订单",
+        "parameters": [
+          {
+            "name": "body", "in": "body", "required": true,
+            "schema": {
+              "type": "object",
+              "properties": { "sku": { "type": "string", "example": "A-1" }, "count": { "type": "integer", "example": 2 } }
+            }
+          }
+        ],
+        "responses": { "201": { "description": "created" } }
+      },
+      "patch": {
+        "operationId": "updateOrderForm",
+        "summary": "表单改单",
+        "parameters": [
+          { "name": "status", "in": "formData", "type": "string", "default": "paid" }
+        ],
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}

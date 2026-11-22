@@ -1,0 +1,57 @@
+{
+  "name": "testpilot-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "build:e2e": "tsc -b && vite build --mode e2e",
+    "preview": "vite preview",
+    "gen:api": "node scripts/gen-api.mjs",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "audit:debt": "node scripts/audit-test-debt.mjs --check",
+    "e2e": "pnpm build:e2e && playwright test"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.5.0",
+    "@ant-design/pro-components": "^2.8.10",
+    "@xyflow/react": "^12.12.1",
+    "antd": "^5.22.0",
+    "echarts": "^5.6.0",
+    "elkjs": "^0.12.1",
+    "lucide-react": "^1.77.0",
+    "monaco-editor": "^0.57.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "react-router-dom": "^6.28.0",
+    "vitest": "^2.1.9",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.49.0",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^26.6.6",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
+    "jsdom": "^31.0.1",
+    "openapi-typescript": "^7.4.3",
+    "terser": "^5.51.2",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.72.2",
+    "vite": "^5.4.11"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+{"type":"thinking_delta","text":"直接调试看看。"}
+{"type":"tool_call","id":"pd1","name":"api_debug","args":{"project_id":"{{PID}}"}}
+{"type":"text_delta","text":"PLAN 模式下调试被拒绝。"}
+{"type":"done"}

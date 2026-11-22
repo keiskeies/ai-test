@@ -1,0 +1,117 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pci"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      TP_DB_URL: mysql+asyncmy://root:ci@127.0.0.1:3306/testpilot_test?charset=utf8mb4
+      TP_REDIS_URL: redis://127.0.0.1:6379/0
+      TP_SECRET_KEY: ci-secret-key-please-change-0123456789
+      TP_FERNET_KEY: ""
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # 后端 job **不装浏览器**：tests/test_ui_deps.py 只验依赖与版本配对，不启动浏览器
+      # （真浏览器的金线在 backend/tests/test_golden_1c.py，无浏览器时大声 skip）。
+      # migrations 也在检查范围内：README 一直写四目录口径，而这条实际只跑了
+      # app/scripts/tests——migrations 的 ruff 漂移因此没人拦（本轮对齐）。
+      - run: ruff check app tests migrations scripts
+      # 蓝图 §14 写了 ruff+mypy+pytest，但这条一直缺：mypy 只写在 pyproject 的 dev extras，
+      # 而 CI 装的是 requirements.txt，所以 1A–1C 从未跑过类型检查。补上当天量到 87 处，
+      # 现已清零（口径见 pyproject 的 [tool.mypy]：只豁免 celery，不做全局宽松）。
+      - run: mypy app
+      - run: lint-imports
+      # CI 不起 Celery worker（计划 T25 裁定）：pytest 全量走 TP_EXEC_MODE=inline
+      # （conftest 默认，跑的是与 worker 同一份 run_graph，R42）。celery 端到端由
+      # test_golden_1b.py 里的 verify_worker 子进程钉——它在 CI 大声跳过，
+      # 留给本地/夜间任务跑（脚本自建自删一次性 schema，Windows --pool=solo）。
+      - run: python -m pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    needs: backend   # 前端 e2e 依赖后端健康：先过全量后端门
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pci"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # e2e 后端由 playwright webServer 自拉（8321）：需要 python 依赖 + 预建库
+      - run: pip install -r requirements.txt
+        working-directory: backend
+      - name: e2e database ready
+        working-directory: backend
+        env:
+          TP_DB_URL: mysql+asyncmy://root:ci@127.0.0.1:3306/testpilot_e2e?charset=utf8mb4
+        run: python scripts/e2e_db.py
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      # §14 的「前端 lint」此前没有对应步骤，1A–1C 的代码从未被 lint 过（连配置文件
+      # 都不存在）。同一轮补的 eslint.config.js 里，react-hooks/exhaustive-deps 定为
+      # warn 而非 error——所以这条现在红只会被真问题（未用变量、危险写法、rules-of-hooks）绊住。
+      - run: pnpm lint
+        working-directory: web
+      # vitest 单测（graphOps / sse / client / workbench 等纯逻辑与组件）：比 e2e 快两个
+      # 数量级，且不需要 MySQL/Redis/浏览器，挂在 e2e 之前先挡住便宜的问题。
+      - run: pnpm test
+        working-directory: web
+      # build:e2e 而不是 build：editor.spec 的夹具页 probe.html 只在 e2e 模式下进构建入口，
+      # 生产构建（pnpm build）不带它——见 web/vite.config.ts 与 web/e2e/globalSetup.mjs
+      - run: pnpm build:e2e
+        working-directory: web
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: web
+      - name: e2e
+        working-directory: web
+        env:
+          TP_PYTHON: python
+          TP_E2E_DB_URL: mysql+asyncmy://root:ci@127.0.0.1:3306/testpilot_e2e?charset=utf8mb4
+          TP_E2E_REDIS_URL: redis://127.0.0.1:6379/0
+        run: pnpm exec playwright test

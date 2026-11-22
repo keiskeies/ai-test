@@ -1,0 +1,4 @@
+{"type":"thinking_delta","text":"直接创建接口。"}
+{"type":"tool_call","id":"tp_1","name":"api_definition_create","args":{"project_id":"{{PID}}","name":"不该出现","method":"GET","path":"/nope"}}
+{"type":"text_delta","text":"写操作被模式门拒绝。"}
+{"type":"done"}
