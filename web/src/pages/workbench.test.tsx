@@ -317,17 +317,15 @@ const statValue = (cardTestid: string) =>
   screen.getByTestId(cardTestid).querySelector(".ant-statistic-content-value")!.textContent;
 
 describe("零引用 testid 补账：wb-stats / wb-trend / wb-stats-section", () => {
-  it("wb-stats：四卡按 资产→执行→通过率→TOP1 序排在行内且 gutter=[16,16] 落成 -8px 负边距+16px rowGap；读数 FULL=54/7/85.7%/支付场景·失败3次，EMPTY=0/0/-/无", async () => {
-    // 变异靶：gutter 改 [8,8]（行内联样式变 -4px/8px 红）· 两卡 Col 换序（cards 数组红）·
-    // Statistic 值硬编码不随 fixture 变（第二侧 0/0/-/无 红）
+  it("wb-stats：四卡按 资产→执行→通过率→TOP1 序排在 tp-wall 容器内；读数 FULL=54/7/85.7%/支付场景·失败3次，EMPTY=0/0/-/无", async () => {
+    // 变异靶：两卡换序（cards 数组红）· Statistic 值硬编码不随 fixture 变（第二侧 0/0/-/无 红）
+    // 几何侧原钉 Row gutter=[16,16] 的 -8px 负边距 + rowGap=16px——那是视口断点时代的
+    // 旧几何，随 Row→tp-wall（容器宽决定列数，gap 走 --tp-gap-md 类）一起退役，改钉容器类名。
     mockFetch(FULL_STATS);
     renderPage();
     await waitFor(() => expect(screen.getByTestId("wb-trend-chart")).not.toBeNull());
     const row = screen.getByTestId("wb-stats");
-    // Row gutter=[h,v]：antd 把横向 gutter 折成左右负半 margin、纵向写成 rowGap（行 104 的直接产物）
-    expect(row.style.marginLeft).toBe("-8px");
-    expect(row.style.marginRight).toBe("-8px");
-    expect(row.style.rowGap).toBe("16px");
+    expect(row.classList.contains("tp-wall")).toBe(true);
     const cards = Array.from(row.querySelectorAll('[data-testid^="wb-card-"]'))
       .map((n) => n.getAttribute("data-testid"));
     expect(cards).toEqual(["wb-card-assets", "wb-card-runs", "wb-card-rate", "wb-card-topfail"]);

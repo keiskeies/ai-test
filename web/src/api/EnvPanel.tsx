@@ -204,7 +204,7 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
       // 的形状，而 D139 起被引用的环境根本删不掉（409 in_use）。文案不许承诺一个系统
       // 已经不会发生的行为（第十道差集：文案承诺 → 兑现）。
       content: `「${e.name}」的变量与请求头会一并删除，不可恢复。被场景 / UI 用例 / 定时任务引用时删不掉，届时会列出是谁在引用。`,
-      okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
+      okText: "删除", okButtonProps: { danger: true }, cancelText: "取消", centered: true,
       onOk: async () => {
         try {
           await del("/envs/" + e.id, { project_id: projectId });
@@ -225,13 +225,14 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
 
   return (
     <>
-    <Modal open={open} onCancel={onClose} width={920} destroyOnHidden title="环境与全局配置"
+    {/* 960 = 浮层五档的向导/主从档（920 不在档上，且动作行自然宽 612 > 920 下的右列内容宽 565，「保存环境」被挤换行）。 */}
+    <Modal open={open} onCancel={onClose} width={960} centered destroyOnHidden title="环境与全局配置"
       footer={<Button type="primary" data-testid="env-close" onClick={onClose}>完成</Button>}
     >
       <Tabs activeKey={tab} onChange={setTab} items={[
         { key: "env", label: "环境", children: (
           <Row gutter={16}>
-            <Col span={8}>
+            <Col flex="1 1 0" style={{ minWidth: 0 }}>
               <Space direction="vertical" style={{ width: "100%" }} size={8}>
                 <List size="small" bordered
                   dataSource={envs}
@@ -272,11 +273,14 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
                 )}
               </Space>
             </Col>
-            <Col span={16}>
+            {/* 656 = 动作行自然宽 612（名输入 220 + 序号 110 + 超时 170 + 保存钮 88 + 3×gap8）
+                + 保存钮 loading 图标 22（按下瞬间钮变宽，不许在那一秒换行）+ 列左右 gutter 垫 16
+                = 650 → 8 倍数取 656；左列 flex 吃余量（960 浮层下内容宽 912 − 656 = 256）。 */}
+            <Col flex="656px">
               {!draft ? (
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择左侧环境进行编辑" />
               ) : (
-                <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                <Space direction="vertical" style={{ width: "100%" }} size={12}>
                   <Space wrap>
                     <Input data-testid="env-name" style={{ width: 220 }} maxLength={200}
                       placeholder="环境名，如 测试环境" value={draft.name}
@@ -308,7 +312,7 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
                         ro={false} kPh="Header 名，如 Authorization" vPh="值，可写 Bearer ${token}" />
                     ) },
                   ]} />
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <Typography.Text type="secondary" className="tp-text-sm">
                     在 URL、参数、请求头、断言里用 `${"{"}变量名{"}"}` 引用；同名时这里覆盖全局配置。
                   </Typography.Text>
                 </Space>
@@ -323,7 +327,7 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
          own→列名字，foreign→只报条数（跨项目的名字在这屏够不着，点了只会让人在本项目里找它），
          details_hidden→缺哪把权限；details_truncated→被上限截了几条。 */}
     {inUse && (
-      <Modal open title="删除被拦截：该环境正被引用" width={600} okText="知道了"
+      <Modal open title="删除被拦截：该环境正被引用" width={640} centered okText="知道了"
         cancelButtonProps={{ style: { display: "none" } }}
         okButtonProps={{ "data-testid": "env-inuse-close" }}
         onOk={() => setInUse(null)} onCancel={() => setInUse(null)}>
@@ -340,12 +344,12 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
             // **有权限**的人看「需要 xxx 权限」——正是后端 test_..._cross_project_reference
             // 刚钉死不许出现的那句假话。权限判断的权威在后端，前端只负责把 true 说成人话。
             return (
-              <div key={k} data-testid={"env-inuse-" + k} style={{ marginBottom: 10 }}>
+              <div key={k} data-testid={"env-inuse-" + k} style={{ marginBottom: 12 }}>
                 <Typography.Text strong>{d.label}</Typography.Text>
                 <Typography.Text>：{d.count} 条</Typography.Text>
                 {d.details_hidden ? (
                   // 空的原因说成「缺权限」——这一格是真的（后端按调用者权限咽掉了明细）
-                  <Typography.Paragraph type="secondary" style={{ marginBottom: 0, fontSize: 12 }}>
+                  <Typography.Paragraph type="secondary" className="tp-text-sm" style={{ marginBottom: 0 }}>
                     明细需要 {ENV_REF_PERM[k]} 权限，当前不可见。
                   </Typography.Paragraph>
                 ) : (
@@ -357,7 +361,7 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
                     )}
                     {d.details_truncated && (
                       <Typography.Paragraph type="secondary" data-testid="env-inuse-truncated"
-                        style={{ marginBottom: 0, fontSize: 12 }}>
+                        className="tp-text-sm" style={{ marginBottom: 0 }}>
                         仅列前 {d.items.length} 条，另有 {d.own - d.items.length} 条本项目内的引用未列出。
                       </Typography.Paragraph>
                     )}
@@ -365,7 +369,7 @@ function EnvManager({ open, onClose, projectId, envs, failed, onReload, canManag
                         （那会让人去申请一个申请了也没用的权限）。 */}
                     {d.foreign > 0 && (
                       <Typography.Paragraph type="secondary" data-testid="env-inuse-foreign"
-                        style={{ marginBottom: 0, fontSize: 12 }}>
+                        className="tp-text-sm" style={{ marginBottom: 0 }}>
                         另有 {d.foreign} 条在其它项目，不在此列出；它们同样拦住这次删除，请到对应项目解绑。
                       </Typography.Paragraph>
                     )}
@@ -443,7 +447,7 @@ export function GlobalConfig({ projectId, canManage }: { projectId: string; canM
   // 没读到现状时不报条数：「全局变量（0）」在读失败的那一格同样是句假话。
   const cnt = (n: number) => (scopesState === "ok" ? `（${n}）` : "");
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size={10}>
+    <Space direction="vertical" style={{ width: "100%" }} size={12}>
       {scopesState === "failed" && (
         // 空表 + 覆盖式保存 = 一次点击就能把已有配置写没，所以这里要占满注意力：
         // 说清「是没取到、不是没有」，并给出不用整页刷新的出路（本页切 Tab 不会重拉）。
@@ -477,7 +481,7 @@ export function GlobalConfig({ projectId, canManage }: { projectId: string; canM
           </Space>
         ) },
       ]} />
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      <Typography.Text type="secondary" className="tp-text-sm">
         引用写法：`${"{"}base_url{"}"}` —— 缺失变量时调试会直接报错并指出变量名，不会静默发半个 URL。
       </Typography.Text>
     </Space>

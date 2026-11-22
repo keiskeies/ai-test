@@ -27,8 +27,8 @@ function pretty(x: unknown): string {
 function CodeBlock({ label, value }: { label: string; value: unknown }) {
   return (
     <div data-testid="tool-json" style={{ background: tp.code.bg, border: `1px solid ${tp.code.border}`, borderRadius: 6, padding: "8px 10px", margin: 0 }}>
-      <div className="tp-mono" style={{ color: tp.code.subtle, fontSize: 11, marginBottom: 4 }}>{label}</div>
-      <pre className="tp-mono" style={{ color: tp.code.text, fontSize: 12, margin: 0, overflow: "auto", maxHeight: 260, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+      <div className="tp-text-xs tp-mono" style={{ color: tp.code.subtle, marginBottom: 4 }}>{label}</div>
+      <pre className="tp-text-sm tp-mono" style={{ color: tp.code.text, margin: 0, overflow: "auto", maxHeight: 260, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
         {pretty(value)}
       </pre>
     </div>
@@ -82,14 +82,14 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
           items={[{
             key: "t",
             label: (
-              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+              <Typography.Text className="tp-text-md" type="secondary">
                 {/* 禁止 emoji 混入 UI（§11.6.6 红线）：💭 是彩色象形 emoji */}
                 <BulbOutlined aria-label="思考" style={{ marginRight: 6, color: tpv.text[3] }} />
                 思考中
               </Typography.Text>
             ),
             children: (
-              <Typography.Text type="secondary" italic style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>
+              <Typography.Text className="tp-text-md" type="secondary" italic style={{ whiteSpace: "pre-wrap" }}>
                 {String(p.text ?? "")}
               </Typography.Text>
             ),
@@ -102,7 +102,7 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
   if (kind === "TEXT") {
     return (
       <div data-testid="event-card" style={{ margin: "10px 0" }}>
-        <div className="tp-md" style={{ fontSize: 14 }}>
+        <div className="tp-md tp-text-base">
           <ReactMarkdown>{String(p.text ?? "")}</ReactMarkdown>
         </div>
       </div>
@@ -124,7 +124,7 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
     }
     return (
       <div data-testid="event-card" style={{ margin: "10px 0", ...chipBase }}>
-        <Typography.Text type="secondary" style={{ display: "block", fontSize: 13 }}>
+        <Typography.Text className="tp-text-md" type="secondary" style={{ display: "block" }}>
           暂不支持的卡片类型（{String(card.kind)}{typeof card.form === "string" ? " / " + card.form : ""}），原始数据如下：
         </Typography.Text>
         <div style={{ marginTop: 4 }}>
@@ -156,8 +156,8 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
       <div data-testid="event-card" style={{ ...chipBase, borderColor: tone.border, borderLeft: `3px solid ${tone.color}` }}>
         <div data-testid="tool-chip" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <ApiOutlined style={{ color: tone.color }} />
-          <Typography.Text strong style={{ fontSize: 13 }}>调用工具</Typography.Text>
-          <Typography.Text className="tp-mono" style={{ fontSize: 13, color: tone.color }}>{name}</Typography.Text>
+          <Typography.Text className="tp-text-md" strong>调用工具</Typography.Text>
+          <Typography.Text className="tp-text-md tp-mono" style={{ color: tone.color }}>{name}</Typography.Text>
           <Tag color={eff === "read" ? "blue" : eff === undefined ? "default" : "orange"} style={{ marginInlineStart: 4 }}>
             {eff === "read" ? "只读" : eff === "write" ? "写入" : eff === "destructive" ? "破坏性" : "效果未知"}
           </Tag>
@@ -166,13 +166,13 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
               {ok ? "成功" : "失败"}
             </Tag>
           )}
-          {!done && <Typography.Text data-testid="tool-pending" type="secondary" style={{ fontSize: 12 }}>执行中…</Typography.Text>}
+          {!done && <Typography.Text className="tp-text-sm" data-testid="tool-pending" type="secondary">执行中…</Typography.Text>}
           {done && Array.isArray(produced) && produced.length > 0 && (
-            <Typography.Text data-testid="tool-produced" type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" data-testid="tool-produced" type="secondary">
               产出 {produced.length} 个资源
             </Typography.Text>
           )}
-          {ev.ts && <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: "auto" }}>{fmtTime(ev.ts, { seconds: false })}</Typography.Text>}
+          {ev.ts && <Typography.Text className="tp-text-sm" type="secondary" style={{ marginLeft: "auto" }}>{fmtTime(ev.ts, { seconds: false })}</Typography.Text>}
         </div>
         {/* 卡片分支在上面已提前返回，所以这里的返回永远走代码块——参数与返回各一块，默认折叠。
             折叠头只写「参数」「返回结果」，不再写事件名。 */}
@@ -210,7 +210,7 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
           <div style={{ marginTop: 6 }}>
             <CodeBlock label={String(p.tool_name ?? "") + " 将要执行的参数"} value={p.args ?? {}} />
           </div>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             暂不支持在页面上批准（审批门按蓝图 §13 属二期）。先点「中断」结束本轮——此刻「重新开始」是灰的，
             中断后它才可点；要换 FULL 模式，也只能走这条两步路另起会话，没有当场切换的入口。
           </Typography.Text>
@@ -222,7 +222,7 @@ export default function EventCard({ ev, result, effects, cardCtx }: {
   if (kind === "USAGE") {
     return (
       <div data-testid="event-card" style={{ margin: "6px 0" }}>
-        <div data-testid="usage-bar" className="tp-mono" style={{ background: tpv.bg.layout, borderRadius: 6, padding: "3px 10px", display: "inline-flex", gap: 12, fontSize: 12, color: tpv.text[2] }}>
+        <div data-testid="usage-bar" className="tp-text-sm tp-mono" style={{ background: tpv.bg.layout, borderRadius: 6, padding: "3px 10px", display: "inline-flex", gap: 12, color: tpv.text[2] }}>
           <span>输入 {String(p.input_tokens ?? 0)} tokens</span>
           <span>输出 {String(p.output_tokens ?? 0)} tokens</span>
         </div>

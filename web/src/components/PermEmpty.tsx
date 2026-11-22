@@ -76,6 +76,9 @@ export default function PermEmpty({ error, projectName, context, children }: {
       <Card style={{ marginTop: 8 }}>
         <Empty
           image={<LockArt />}
+          // 全局把插画高度收在 56（styles.css 的 antd Empty 校准），但这里的线稿是 72 的
+          // 圆章——被封顶会切掉下缘。自带 art 的场合按 art 的实际高度给。
+          imageStyle={{ height: 72 }}
           description={
             <Typography.Text data-testid="perm-empty-desc">
               {perm ? <>当前账号缺少访问权限，需要权限位 <Typography.Text code>{perm}</Typography.Text></>
@@ -84,7 +87,7 @@ export default function PermEmpty({ error, projectName, context, children }: {
           }
         >
           <div>
-            <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Paragraph className="tp-text-sm" type="secondary">
               权限门禁在后端，这里只如实转述它的答复{perm ? "" : "（后端未说明具体权限位，请管理员确认）"}。
             </Typography.Paragraph>
             <Button type="primary" data-testid="perm-empty-copy" onClick={copy}>复制申请文案</Button>
@@ -93,8 +96,9 @@ export default function PermEmpty({ error, projectName, context, children }: {
               // 之类选不中的地方），剪贴板不可用时它就是那条给得出的出路。
               <Typography.Paragraph
                 data-testid="perm-empty-fallback"
-                style={{ marginTop: 12, marginBottom: 0, padding: "8px 10px", fontSize: 12,
-                  background: "#f7f8fa", borderRadius: 6, userSelect: "text" }}
+                className="tp-text-sm"
+                style={{ marginTop: 12, marginBottom: 0, padding: "8px 12px",
+                  background: "var(--tp-bg-layout)", borderRadius: "var(--tp-radius-lg)", userSelect: "text" }}
               >
                 {text}
               </Typography.Paragraph>

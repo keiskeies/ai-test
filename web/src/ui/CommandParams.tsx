@@ -70,7 +70,7 @@ export default function CommandParams({ cmd, onChange, onElementNames, readOnly,
           }} />
         {cmd.id && (
           <Tooltip title="从变量/其它来源改命令 id 会让历史步骤明细指向错的行（R102），这里只读">
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>id 不可改</Typography.Text>
+            <Typography.Text className="tp-text-sm" type="secondary">id 不可改</Typography.Text>
           </Tooltip>
         )}
       </Space>
@@ -148,13 +148,13 @@ export default function CommandParams({ cmd, onChange, onElementNames, readOnly,
           {/* 执行核只吃一段表达式（page.evaluate(input)），没有键值参数注入位——
               所以这里**不放** PairTable：放了就是一个写了也不生效的假控件（§13 纪律 1）。
               需要变量就存进 save_var，下一步用 ${var} 引。 */}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             执行核按整段表达式运行；要传值请先存变量再用 ${'{'}var{'}'} 引用。
           </Typography.Text>
         </div>
       )}
       {t === "screenshot" && (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary">
           截图命令无参数：制品会出现在运行详情的制品区（失败命令另有自动截图）。
         </Typography.Text>
       )}

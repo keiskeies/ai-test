@@ -74,6 +74,7 @@ export default function ModuleTree(p: Props) {
 
   function remove(id: string, label: string) {
     Modal.confirm({
+      centered: true,
       title: "模块进回收站？",
       content: "「" + label + "」连子孙一起进回收站；" + noun + "不会被删，恢复后原样回归。",
       okText: "放入回收站", okButtonProps: { danger: true }, cancelText: "取消",
@@ -189,7 +190,7 @@ export default function ModuleTree(p: Props) {
         // 失败不摊成空栏（CaseList.tsx:360「回收站没取到」同尺）：首屏就挂时 recycled
         // 停在初始 []，只画一句「回收站是空的」等于把故障演成实测零条；刷新才挂时下面
         // 还是上次取到的行，那更得说清这一栏现在不作数。
-        <Typography.Text type="secondary" data-testid="module-tree-load-error" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid="module-tree-load-error">
           {p.inRecycled ? "回收站" : "模块树"}没取到（最近一次加载失败）——这一栏现在不作数
           {nodes.length ? "，下面是上次取到的" : "，空着不等于真的没有"}
         </Typography.Text>
@@ -212,7 +213,7 @@ export default function ModuleTree(p: Props) {
           }}
         />
       )}
-      <Modal open={prompt !== null} title={
+      <Modal centered open={prompt !== null} title={
         prompt?.kind === "rename" ? "重命名模块" : prompt?.kind === "child" ? "新建子模块" : "新建模块"
       } okText="保存" cancelText="取消" confirmLoading={saving}
       onOk={() => void submitPrompt()} onCancel={() => { setPrompt(null); setName(""); }}>
@@ -222,7 +223,7 @@ export default function ModuleTree(p: Props) {
       </Modal>
 
       {/* 彻底删除：§11.4.18 要求「输名称确认」；服务端同样硬校验，不靠前端拦 */}
-      <Modal
+      <Modal centered
         open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         destroyOnHidden width={520}
         title="彻底删除模块？" okText="我已确认，彻底删除" cancelText="取消"

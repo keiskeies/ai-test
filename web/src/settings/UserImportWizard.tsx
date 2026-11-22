@@ -10,7 +10,6 @@ import {
 } from "antd";
 import { downloadErrorReport, FileTextPicker } from "../api/ImportWizard";
 import { userImportCommit, userImportPreview } from "../api/userImport";
-import { tp } from "../theme";
 import type { UserImportCommitOut, UserImportPreviewItem, UserImportPreviewOut } from "../api/userImport";
 
 export default function UserImportWizard({ open, onClose, onImported }: {
@@ -88,7 +87,8 @@ export default function UserImportWizard({ open, onClose, onImported }: {
   }, [preview, receipt]);
 
   return (
-    <Modal title="批量导入用户" open={open} width={880} onCancel={() => { reset(); onClose(); }}
+    // 960 = 浮层五档里的向导档（880 不在档上）；centered 防 768 高屏底部顶出视口。
+    <Modal title="批量导入用户" open={open} width={960} centered onCancel={() => { reset(); onClose(); }}
       data-testid="uiw-modal"
       footer={step === 2 ? [
         <Button key="dl" data-testid="uiw-download" disabled={reportLines.length === 0}
@@ -162,7 +162,7 @@ export default function UserImportWizard({ open, onClose, onImported }: {
 
       {step === 2 && receipt && (
         <Space direction="vertical" style={{ width: "100%" }} size={12}>
-          <Typography.Text data-testid="uiw-receipt" style={{ fontSize: tp.fontSize.lg }}>
+          <Typography.Text className="tp-text-lg" data-testid="uiw-receipt">
             {receipt.ok
               ? <>成功 {receipt.created} · 跳过 {receipt.skipped} · 失败 {receipt.failed}</>
               : <>成功 0 · 失败 {receipt.failed}——落库故障，整批已回滚，一个用户都没建</>}

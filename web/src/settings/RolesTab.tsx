@@ -5,7 +5,7 @@
 // 内置卡上永远没有 [编辑]/[删除]（门禁在后端 403，前端只是不给门把手）。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert, Button, Card, Col, Drawer, Input, Row, Space, Tag, Tree, Typography, message,
+  Alert, Button, Card, Drawer, Input, Space, Tag, Tree, Typography, message,
 } from "antd";
 import type { DataNode } from "antd/es/tree";
 import { get, patch, post } from "../api/client";
@@ -132,31 +132,33 @@ export default function RolesTab({ projectId, canCreate, canUpdate, canDelete }:
   }, [load, projectId]);
 
   return (
-    <div data-testid="tab-roles">
+    <div data-testid="tab-roles" className="tp-fill-tab">
       {failed && (
         <Alert type="warning" showIcon style={{ marginBottom: 12 }}
           message="角色数据没取到（权限树/自定义角色列表请求失败）" data-testid="roles-load-failed" />
       )}
       <Typography.Title level={5} style={{ marginTop: 0 }}>内置模板（只读）</Typography.Title>
-      <Row gutter={[12, 12]}>
+      {/* 容器断点卡片墙（2026-11-22 实测：xl={6} 在 1200 视口下卡宽 216，标题内容盒只剩
+          104 < 自然宽 135，三张内置卡全裁）。--tp-wall-min=300：标题盒 ≥135 + extra 钮
+          实测 86 + 卡片左右内边距 40 ≈ 280 是下限，抬到 300 给「项目管理员」这类 6 字
+          模板名留冗余；944 容器出 3×304、1552 封顶容器出 4×368，两种都不裁。 */}
+      <div className="tp-wall" style={{ "--tp-wall-min": "300px" } as React.CSSProperties}>
         {templates.map((t) => (
-          <Col key={t.code} xs={24} md={12} xl={6}>
-            <Card size="small" data-testid="role-tpl-card" data-tpl={t.code}
-              title={<Space size={6}><span>{t.name}</span><Tag>内置</Tag></Space>}
-              extra={canCreate && (
-                <Button size="small" type="primary" data-testid="role-clone-btn"
-                  onClick={() => openDrawer({ mode: "create", template: t.code,
-                    initName: t.name + "（副本）", initPerms: toCheckedKeys(t.perms, nodes) })}>
-                  从模板复制
-                </Button>
-              )}>
-              <Typography.Text type="secondary" className="tp-mono tp-text-sm">
-                {t.perms.join(" · ")}
-              </Typography.Text>
-            </Card>
-          </Col>
+          <Card key={t.code} size="small" data-testid="role-tpl-card" data-tpl={t.code}
+            title={<Space size={8}><span>{t.name}</span><Tag>内置</Tag></Space>}
+            extra={canCreate && (
+              <Button size="small" type="primary" data-testid="role-clone-btn"
+                onClick={() => openDrawer({ mode: "create", template: t.code,
+                  initName: t.name + "（副本）", initPerms: toCheckedKeys(t.perms, nodes) })}>
+                从模板复制
+              </Button>
+            )}>
+            <Typography.Text type="secondary" className="tp-mono tp-text-sm">
+              {t.perms.join(" · ")}
+            </Typography.Text>
+          </Card>
         ))}
-      </Row>
+      </div>
       <FilterBar>
         <Typography.Title level={5} style={{ margin: 0 }}>自定义角色</Typography.Title>
         {canCreate && (
@@ -166,30 +168,30 @@ export default function RolesTab({ projectId, canCreate, canUpdate, canDelete }:
           </Button>
         )}
       </FilterBar>
-      <Row gutter={[12, 12]}>
+      <div className="tp-wall" style={{ "--tp-wall-min": "300px" } as React.CSSProperties}>
         {roles.map((r) => (
-          <Col key={r.code} xs={24} md={12} xl={8}>
-            <Card size="small" data-testid="role-custom-card" data-role-code={r.code}
-              title={<Space size={6}><span>{r.name}</span><Tag color="blue">{r.template_code} 复制</Tag></Space>}>
-              <Typography.Paragraph type="secondary" className="tp-mono tp-text-sm" style={{ minHeight: 34 }}>
-                {r.perms.join(" · ")}
-              </Typography.Paragraph>
-              <Toolbar compact>
-                {canUpdate && (
-                  <Button size="small" data-testid="role-edit-btn"
-                    onClick={() => openDrawer({ mode: "edit", code: r.code, initName: r.name, initPerms: r.perms })}>
-                    编辑
-                  </Button>
-                )}
-                {canDelete && (
-                  <Button size="small" danger loading={busy} data-testid="role-delete-btn"
-                    onClick={() => void remove(r.code)}>删除</Button>
-                )}
-              </Toolbar>
-            </Card>
-          </Col>
+          <Card key={r.code} size="small" data-testid="role-custom-card" data-role-code={r.code}
+            title={<Space size={8}><span>{r.name}</span><Tag color="blue">{r.template_code} 复制</Tag></Space>}>
+            {/* 36 = 12 号字行高 18 × 两行：预置两行高度让同排卡片的按钮行对齐；
+                原 34 是行高没算对的两行半吊子值。 */}
+            <Typography.Paragraph type="secondary" className="tp-mono tp-text-sm" style={{ minHeight: 36 }}>
+              {r.perms.join(" · ")}
+            </Typography.Paragraph>
+            <Toolbar compact>
+              {canUpdate && (
+                <Button size="small" data-testid="role-edit-btn"
+                  onClick={() => openDrawer({ mode: "edit", code: r.code, initName: r.name, initPerms: r.perms })}>
+                  编辑
+                </Button>
+              )}
+              {canDelete && (
+                <Button size="small" danger loading={busy} data-testid="role-delete-btn"
+                  onClick={() => void remove(r.code)}>删除</Button>
+              )}
+            </Toolbar>
+          </Card>
         ))}
-      </Row>
+      </div>
       {roles.length === 0 && !failed && (
         <StateView title={canCreate
           ? "还没有自定义角色——从上方模板复制一个开始裁剪"
@@ -209,7 +211,7 @@ export default function RolesTab({ projectId, canCreate, canUpdate, canDelete }:
             <Input addonBefore="名称" value={name} data-testid="role-f-name"
               onChange={(e) => setName(e.target.value)} placeholder="如：接口测试专员" />
             {drawer.mode === "create" && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Text className="tp-text-sm" type="secondary">
                 模板 {drawer.template} · 勾选即裁剪（任意裁剪 + 任意勾选，计划 D37 假设 4）
               </Typography.Text>
             )}

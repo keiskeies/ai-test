@@ -13,9 +13,13 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ProLayout } from "@ant-design/pro-components";
 import { Dropdown, Input, Select, Space, Tooltip, Typography } from "antd";
 import {
-  AndroidOutlined, ApiOutlined, DesktopOutlined, MoonOutlined, PanelLeftCloseOutlined,
-  PanelLeftOpenOutlined, ProfileOutlined, RobotOutlined, SearchOutlined, SettingOutlined,
-  SunOutlined, TeamOutlined, UserOutlined,
+  AndroidOutlined, ApiOutlined, BellOutlined, ClockCircleOutlined, CodeOutlined,
+  DatabaseOutlined, DesktopOutlined, ExperimentOutlined, FileTextOutlined,
+  HddOutlined, LayersOutlined, MoonOutlined, NodeIndexOutlined,
+  OrderedListOutlined, PanelLeftCloseOutlined, PanelLeftOpenOutlined,
+  ProfileOutlined, ProjectOutlined, RobotOutlined, ScheduleOutlined, SearchOutlined,
+  SettingOutlined, SparklesOutlined, SunOutlined, TableOutlined, TeamOutlined,
+  TerminalOutlined, ToolOutlined, UsergroupOutlined, UserOutlined,
 } from "../ui/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/store";
@@ -26,20 +30,22 @@ import ChangePasswordModal from "./ChangePasswordModal";
 import { useTheme } from "../ui/themeMode";
 import type { ThemePref } from "../ui/themeMode";
 
-type Leaf = { key: string; label: string; testid: string; to?: string; note?: string };
+type Leaf = { key: string; label: string; testid: string; to?: string; note?: string; icon: ReactNode };
 type Group = { key: string; label: string; icon: ReactNode; children: Leaf[] };
 /** ProLayout 的 route 项（只写我们用到的字段）。 */
 type RouteItem = { path: string; name: ReactNode; icon?: ReactNode; children?: RouteItem[] };
 
 // §11.1 模块树。图标语义按各自域挑（旧版：工作台=人、任务中心=文档、ADB=品牌标）。
+// 叶子一律带图标：无图标项 ProLayout 只留一个 display:none 的占位槽，17 个叶子的
+// 文字因此全贴在同一根左轨上，与分组标题只差字号（2026-11-22 审计实测）。
 const MENU: Group[] = [
   {
     key: "g-work",
     label: "工作台",
     icon: <TeamOutlined />,
     children: [
-      { key: "home", label: "项目与工作台", testid: "nav-home", to: "/" },
-      { key: "bench", label: "Pilot 试验台", testid: "nav-bench", to: "/bench" },
+      { key: "home", label: "项目与工作台", testid: "nav-home", to: "/", icon: <ProjectOutlined /> },
+      { key: "bench", label: "Pilot 试验台", testid: "nav-bench", to: "/bench", icon: <ExperimentOutlined /> },
     ],
   },
   {
@@ -47,9 +53,9 @@ const MENU: Group[] = [
     label: "API 测试",
     icon: <ApiOutlined />,
     children: [
-      { key: "api", label: "接口管理", testid: "nav-api", to: "/api" },
-      { key: "scene", label: "场景编排", testid: "nav-scene", to: "/scene" },
-      { key: "datasets", label: "数据集", testid: "nav-datasets", to: "/datasets" },
+      { key: "api", label: "接口管理", testid: "nav-api", to: "/api", icon: <CodeOutlined /> },
+      { key: "scene", label: "场景编排", testid: "nav-scene", to: "/scene", icon: <NodeIndexOutlined /> },
+      { key: "datasets", label: "数据集", testid: "nav-datasets", to: "/datasets", icon: <DatabaseOutlined /> },
     ],
   },
   {
@@ -57,8 +63,8 @@ const MENU: Group[] = [
     label: "UI 测试",
     icon: <DesktopOutlined />,
     children: [
-      { key: "ui-elements", label: "元素库", testid: "nav-ui-elements", to: "/ui/elements" },
-      { key: "ui-cases", label: "UI 用例", testid: "nav-ui-cases", to: "/ui/cases" },
+      { key: "ui-elements", label: "元素库", testid: "nav-ui-elements", to: "/ui/elements", icon: <LayersOutlined /> },
+      { key: "ui-cases", label: "UI 用例", testid: "nav-ui-cases", to: "/ui/cases", icon: <OrderedListOutlined /> },
     ],
   },
   {
@@ -66,8 +72,8 @@ const MENU: Group[] = [
     label: "ADB 测试",
     icon: <AndroidOutlined />,
     children: [
-      { key: "adb-devices", label: "设备管理", testid: "nav-adb-devices", to: "/adb/devices" },
-      { key: "adb-cases", label: "ADB 用例", testid: "nav-adb-cases", to: "/adb/cases" },
+      { key: "adb-devices", label: "设备管理", testid: "nav-adb-devices", to: "/adb/devices", icon: <HddOutlined /> },
+      { key: "adb-cases", label: "ADB 用例", testid: "nav-adb-cases", to: "/adb/cases", icon: <TerminalOutlined /> },
     ],
   },
   {
@@ -75,10 +81,10 @@ const MENU: Group[] = [
     label: "任务中心",
     icon: <ProfileOutlined />,
     children: [
-      { key: "runs", label: "运行记录", testid: "nav-runs", to: "/runs" },
-      { key: "plans", label: "测试计划", testid: "nav-plans", to: "/plans" },
-      { key: "reports", label: "报告中心", testid: "nav-reports", to: "/reports" },
-      { key: "cron", label: "定时任务", testid: "nav-cron", to: "/schedules" },
+      { key: "runs", label: "运行记录", testid: "nav-runs", to: "/runs", icon: <ClockCircleOutlined /> },
+      { key: "plans", label: "测试计划", testid: "nav-plans", to: "/plans", icon: <TableOutlined /> },
+      { key: "reports", label: "报告中心", testid: "nav-reports", to: "/reports", icon: <FileTextOutlined /> },
+      { key: "cron", label: "定时任务", testid: "nav-cron", to: "/schedules", icon: <ScheduleOutlined /> },
     ],
   },
   {
@@ -86,10 +92,10 @@ const MENU: Group[] = [
     label: "系统设置",
     icon: <SettingOutlined />,
     children: [
-      { key: "settings", label: "项目与成员", testid: "nav-settings", to: "/settings" },
-      { key: "mcp", label: "MCP 服务", testid: "nav-mcp", note: "未开放（计划二期）" },
-      { key: "skills", label: "Skills", testid: "nav-skills", note: "未开放（计划二期）" },
-      { key: "notify", label: "通知渠道", testid: "nav-notify", to: "/notify/channels" },
+      { key: "settings", label: "项目与成员", testid: "nav-settings", to: "/settings", icon: <UsergroupOutlined /> },
+      { key: "mcp", label: "MCP 服务", testid: "nav-mcp", note: "未开放（计划二期）", icon: <ToolOutlined /> },
+      { key: "skills", label: "Skills", testid: "nav-skills", note: "未开放（计划二期）", icon: <SparklesOutlined /> },
+      { key: "notify", label: "通知渠道", testid: "nav-notify", to: "/notify/channels", icon: <BellOutlined /> },
     ],
   },
 ];
@@ -123,6 +129,11 @@ function menuRoutes(isSysAdmin: boolean): RouteItem[] {
       .filter((l) => l.key !== "notify" || isSysAdmin)
       .map((l) => ({
         path: l.to ?? "/_disabled/" + l.key,
+        icon: l.icon,
+        // 未开放项走 antd 原生 disabled：整行（图标+文字）降到 disabled 态、光标 not-allowed，
+        // 不靠 hover 才知道它点不动（2026-11-22 审计：此前 text-2/opacity1 与可用项无差别）。
+        // 诚实口径不变：note 文案仍在 name 的 Tooltip 上，且 disabled 项 onClick 不进路由。
+        disabled: Boolean(l.note),
         name: (
           <span data-testid={l.testid}>
             {l.note ? <Tooltip title={l.note}><span>{l.label}</span></Tooltip> : l.label}
@@ -230,7 +241,7 @@ export default function Shell() {
         },
       }}
     >
-      <Space data-testid="user-menu" size={8} style={{ cursor: "pointer", paddingTop: 2 }}>
+      <Space data-testid="user-menu" size={8} style={{ cursor: "pointer" }}>
         <span className="tp-avatar" aria-hidden><UserOutlined size={14} /></span>
         <Typography.Text className="tp-text-md" strong>{user?.name}</Typography.Text>
       </Space>
@@ -258,7 +269,15 @@ export default function Shell() {
         // 顶栏已有 logo/title，侧栏不再重复一份。
         menuHeaderRender={false}
         // 菜单：默认全展开（诚实标注一眼可见）、不自动收起其它分组。
-        menu={{ defaultOpenAll: true, autoClose: false, locale: false }}
+        // type=group：一级节点画成「分组标签 + 分隔线」（非可折叠 submenu）——
+        // ① ProLayout 的叶子图标只在 group 模式渲染（BaseMenu: hasIcon = level===0
+        //    || isGroup && level===1），普通 submenu 下叶子图标槽恒 display:none；
+        //    ② 全展开布局里 submenu 的折叠箭头是冗余 affordance（默认永远展开）；
+        //    ③ 折叠态组间留 4px 分隔。
+        // collapsedShowGroupTitle 在 group 模式下**不生效**（2026-11-22 复测）：折叠轨 6 个
+        // .ant-menu-item-group-title 实测 display:none、宽高 0——没有分组图标也没有悬浮飞层，
+        // 17 个叶子平铺成一条 56px 图标轨。它只作用于 submenu，别再指望它撑折叠态分组语义。
+        menu={{ type: "group", defaultOpenAll: true, autoClose: false, locale: false, collapsedShowGroupTitle: true }}
         // 顶部面包屑与页面标题重复，关掉（页面标题由 PageHeader 负责）。
         breadcrumbRender={false}
         location={{ pathname: ROUTES[selectedKey] ?? loc.pathname }}
@@ -284,8 +303,11 @@ export default function Shell() {
             <Input data-testid="shell-search" prefix={<SearchOutlined />}
               placeholder="搜索接口 / 场景 / 用例"
               readOnly variant="filled"
-              suffix={<span className="tp-mono" style={{ color: "var(--tp-text-3)", fontSize: 11 }}>Ctrl K</span>}
-              style={{ width: 260, cursor: "pointer" }}
+              suffix={<span className="tp-text-xs tp-mono" style={{ color: "var(--tp-text-3)" }}>Ctrl K</span>}
+              // flex 0 1 260：顶栏是 flex 行，此前只有 width:260 而 shrink 默认 1，
+              // 1366 视口实测被挤到 187.7——写了宽度却从不生效。显式给出基准与地板，
+              // 挤到 168（只读触发框，占位文案截断不影响点击）为止。
+              style={{ flex: "0 1 260px", minWidth: 168, cursor: "pointer" }}
               onClick={() => setPalette((p) => ({ open: true, nonce: p.nonce + 1 }))}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {

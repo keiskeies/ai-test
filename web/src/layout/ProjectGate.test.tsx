@@ -214,4 +214,29 @@ describe("PageHead（同文件的具名外壳件）", () => {
     expect(head!.querySelector(".tp-page-title")!.textContent).toBe("接口管理");
     expect(screen.getByTestId("head-extra")).not.toBeNull();
   });
+
+  it("descHover：页头按单行收，说明整句还在（挂悬停，不是删掉）", () => {
+    render(
+      <ConfigProvider theme={{ token: { motion: false } }}>
+        <PageHead title="接口管理" descHover desc="左侧模块树、右侧列表。" />
+      </ConfigProvider>,
+    );
+    const head = document.querySelector(".tp-page-head");
+    expect(head!.className).toContain("tp-page-head--compact");
+    expect(head!.querySelector(".tp-page-desc")).toBeNull();
+    expect(head!.querySelector(".tp-page-title")!.textContent).toBe("接口管理");
+    // 悬停内容在 antd 里是懒建的（未触发不入 DOM），这里钉的是「触发器带说明」这件事。
+    expect(screen.getByTestId("page-head-desc")).not.toBeNull();
+  });
+
+  it("不开 descHover 时说明照旧占标题下方一行（其余 16 页不受影响）", () => {
+    render(
+      <ConfigProvider theme={{ token: { motion: false } }}>
+        <PageHead title="接口管理" desc="左侧模块树、右侧列表。" />
+      </ConfigProvider>,
+    );
+    const head = document.querySelector(".tp-page-head");
+    expect(head!.className).not.toContain("tp-page-head--compact");
+    expect(head!.querySelector(".tp-page-desc")!.textContent).toBe("左侧模块树、右侧列表。");
+  });
 });

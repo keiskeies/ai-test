@@ -68,6 +68,15 @@ export const tp = {
   radius: { xs: 2, sm: 4, md: 6, lg: 8, xl: 10, xxl: 12, pill: 999 },
   /** 字号阶梯（§11.6.6）：11 角标 / 12 辅助 / 13 表格控件 / 14 正文 / 16 区块 / 20 页标题 / 24 数值。 */
   fontSize: { xs: 11, sm: 12, md: 13, base: 14, lg: 16, xl: 20, xxl: 24 },
+  /**
+   * 间距阶梯：4 的倍数，只有四档。
+   *
+   * 为什么单独设一组：改版前同屏能凑齐 0/4/6/10/12/14/16/28 八种间距（Tabs 内 0、
+   * antd content-holder 自带 12、Paragraph 默认 1em≈14、壳层 padding 4），
+   * 观感就是「哪儿都在差一点点」。12 是唯一的「非 16 的常规档」——它服务
+   * 筛选条/表单这类中等密度的行内间距；再细的 6/10 一律并进 8 或 12。
+   */
+  gap: { xs: 8, sm: 12, md: 16, lg: 24 },
   shadow: {
     s1: "0 1px 2px rgba(16,24,40,.05)",
     s2: "0 4px 12px rgba(16,24,40,.08)",
@@ -176,6 +185,7 @@ export const tpv = {
   split: "var(--tp-split)", border: "var(--tp-border)", borderHover: "var(--tp-border-hover)", mask: "var(--tp-mask)",
   radius: tp.radius,
   fontSize: tp.fontSize,
+  gap: tp.gap,
   shadow: {
     s1: "var(--tp-shadow-s1)", s2: "var(--tp-shadow-s2)", s3: "var(--tp-shadow-s3)",
   },

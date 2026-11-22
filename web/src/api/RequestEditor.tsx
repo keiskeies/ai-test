@@ -139,10 +139,14 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
   };
   return (
     <div>
-      <Space style={{ marginBottom: 8 }} wrap>
-        <Select data-testid={testIdPrefix + "-method"} style={{ width: 110 }} value={value.method} disabled={readOnly}
+      {/* 不用 Space：Space 的 .ant-space-item 包层让 Input 的 flex 失效，改为手写弹性行。
+          URL 格 260 起、随容器长、560 封顶（960 档浮层内容宽 912 − 方法 110 − 超时 120 − 2×gap8 = 666，
+          封顶仍留 100 余量）；minWidth 0 保证窄容器收缩而非溢出。 */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+        <Select data-testid={testIdPrefix + "-method"} style={{ width: 110, flex: "none" }} value={value.method} disabled={readOnly}
           options={METHODS.map((m) => ({ value: m, label: m }))} onChange={(m) => patch({ method: m })} />
-        <Input data-testid={testIdPrefix + "-url"} style={{ width: 460 }} value={value.url} disabled={readOnly}
+        <Input data-testid={testIdPrefix + "-url"} style={{ flex: "1 1 260px", maxWidth: 560, minWidth: 0 }}
+          value={value.url} disabled={readOnly}
           placeholder="URL，支持 ${var}，如 ${base_url}/order/1"
           onChange={(e) => patch({ url: e.target.value })} />
         <Tooltip title="毫秒">
@@ -150,7 +154,7 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
             value={value.timeout_ms} disabled={readOnly}
             addonAfter="ms" onChange={(v) => patch({ timeout_ms: Number(v ?? 10000) })} />
         </Tooltip>
-      </Space>
+      </div>
       <Tabs size="small" items={[
         { key: "params", label: `参数(${used(value.params)})`, children: (
           <PairTable idPrefix={testIdPrefix + "-param"} kPh="参数名" vPh="参数值" rows={value.params} ro={readOnly}
@@ -168,7 +172,7 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
             {value.body.type !== "none" && (
               <div data-testid={testIdPrefix + "-body-content"}>
                 <Suspense fallback={editorFallback}>
-                  <CodeEditor height={140} language={value.body.type === "json" ? "json" : "plaintext"}
+                  <CodeEditor height={152} language={value.body.type === "json" ? "json" : "plaintext"}
                     readOnly={!!readOnly} value={value.body.content ?? ""}
                     onChange={(v) => patch({ body: { ...value.body, content: v } })} />
                 </Suspense>
@@ -197,7 +201,7 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
                 onChange={(e) => patch({ auth: { ...value.auth, token: e.target.value } })} />
             )}
             {value.auth.type !== "none" && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Text type="secondary" className="tp-text-sm">
                 Auth 配置发出的 Authorization 头会覆盖「请求头」页签里手写的同名头。
               </Typography.Text>
             )}
@@ -222,7 +226,7 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
                 {a.type === "script" && (
                   <div data-testid={testIdPrefix + "-assert-code-" + i} style={{ width: 520 }}>
                     <Suspense fallback={editorFallback}>
-                      <CodeEditor height={140} language="python"
+                      <CodeEditor height={152} language="python"
                         readOnly={!!readOnly} value={a.code ?? ""}
                         onChange={(v) => setAssertion(i, { code: v })} />
                     </Suspense>

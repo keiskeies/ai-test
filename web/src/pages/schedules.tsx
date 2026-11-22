@@ -134,7 +134,7 @@ function LastRunCell({ lastRun, testid }: { lastRun: TaskRow["last_run"]; testid
     .filter((c): c is Record<string, unknown> =>
       c !== null && typeof c === "object" && !Array.isArray(c) && (c as Record<string, unknown>).ok === false);
   return (
-    <div data-testid={testid} style={{ fontSize: 12 }}>
+    <div className="tp-text-sm" data-testid={testid}>
       {ok !== null ? (
         <div>
           <Tag color={ok ? "green" : "red"} data-testid="schedule-result-tag">
@@ -471,7 +471,7 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
             data-testid="schedule-field-env_id" loading={envs === null} options={envs?.options ?? []}
             onChange={(v) => setEnvId(v ?? null)} />
           {editing && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" type="secondary">
               后端 PATCH 把 env_id=null 视为「未改动」——清空再保存不会解绑环境，换环境请直接选另一个。
             </Typography.Text>
           )}
@@ -507,7 +507,7 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
                   options={MINUTE_OPTIONS} onChange={(v) => setMinute(v)} />
               </Space>
               {planCron === null && (
-                <Typography.Text type="danger" style={{ fontSize: 12, display: "block", marginTop: 4 }}
+                <Typography.Text className="tp-text-sm" type="danger" style={{ display: "block", marginTop: 4 }}
                   data-testid="schedule-plan-empty">至少勾选一个星期，否则拼不出 cron。</Typography.Text>
               )}
             </div>
@@ -516,7 +516,7 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
             <div data-testid="schedule-plan-custom" style={{ marginTop: 6 }}>
               <Input data-testid="schedule-field-cron" value={customCron} placeholder="0 2 * * *"
                 onChange={(e) => setCustomCron(e.target.value)} />
-              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
+              <Typography.Text className="tp-text-sm" type="secondary" style={{ display: "block", marginTop: 4 }}>
                 前端不校验 cron——合法与否唯一裁判是后端，非法会 422 并把原话回显在这里。
               </Typography.Text>
             </div>
@@ -524,13 +524,13 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
           {/* 将写入的 cron 永远同屏：三态只是拼串的外壳，落库串本身不许藏在用户看不见处。
               空态分两种说清：每周态是「没勾星期拼不出」，自定义态是「框还空着」——
               合成一个空白是在用户问「我到底会存什么」时装没看见。 */}
-          <Typography.Text data-testid="schedule-plan-derived" code style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+          <Typography.Text className="tp-text-sm" data-testid="schedule-plan-derived" code style={{ display: "block", marginTop: 6 }}>
             将写入：{planCron === null ? "（未拼出：星期一天没勾）" : planCron === "" ? "（未填 cron）" : planCron}
           </Typography.Text>
         </div>
         <Space>
           <Button data-testid="schedule-preview-btn" onClick={() => void previewNext5()}>预览未来 5 次</Button>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>按当前输入（未保存的草稿）计算</Typography.Text>
+          <Typography.Text className="tp-text-sm" type="secondary">按当前输入（未保存的草稿）计算</Typography.Text>
         </Space>
         {preview.kind !== "idle" && (
           <div data-testid="schedule-preview-out">
@@ -559,7 +559,7 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
               <Alert type="warning" showIcon
                 message={channels.is403 ? "无渠道读取权限，无法展示渠道名称" : "渠道列表加载失败，无法展示渠道名称"}
                 description={channels.error} />
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Text className="tp-text-sm" type="secondary">
                 当前已挂渠道 ID：{channelIds.length ? channelIds.join("、") : "（无）"}（保存时原样保留，不做改动）
               </Typography.Text>
             </div>
@@ -703,6 +703,7 @@ function TasksPanel() {
 
   function removeOne(row: TaskRow): void {
     Modal.confirm({
+      centered: true,
       title: `删除定时任务「${row.name}」？`,
       content: "调度真相在读表侧：删行即停排，错过的触发不补（D22）。不可恢复。",
       okText: "删除", okButtonProps: { danger: true, "data-testid": "schedule-delete-ok" }, cancelText: "取消",
@@ -727,9 +728,9 @@ function TasksPanel() {
           <span data-testid={"schedule-subject-" + r.id}>
             <Tag>{r.subject_type}</Tag>
             {name ? (
-              <Typography.Text style={{ fontSize: 12 }} title={r.subject_id}>{name}</Typography.Text>
+              <Typography.Text className="tp-text-sm" title={r.subject_id}>{name}</Typography.Text>
             ) : (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }} title={r.subject_id}>
+              <Typography.Text className="tp-text-sm" type="secondary" title={r.subject_id}>
                 {shortId(r.subject_id)}
               </Typography.Text>
             )}
@@ -744,7 +745,7 @@ function TasksPanel() {
           <Tooltip title={h ? "cron 原文：" + v : undefined}>
             <span data-testid="schedule-cron">
               {h ? <div>{h}</div> : null}
-              <Typography.Text code style={{ fontSize: 12 }}>{v}</Typography.Text>
+              <Typography.Text className="tp-text-sm" code>{v}</Typography.Text>
             </span>
           </Tooltip>
         );
@@ -785,7 +786,8 @@ function TasksPanel() {
   }
 
   return (
-    <>
+    <div className="tp-fill tp-fill-body">
+      <div style={{ flex: "0 0 auto" }}>
       <Space style={{ marginBottom: 12 }} wrap>
         <Select allowClear placeholder="按启停筛选" style={{ width: 150 }} value={enabledFilter}
           data-testid="schedule-filter-enabled" onChange={(v) => applyEnabledFilter(v)}
@@ -811,37 +813,39 @@ function TasksPanel() {
           description="这条是 Ctrl+K 直达带过来的：URL 里带着任务 id，页面把它认出来并高亮那一行。"
           onClose={() => setHitId(null)} />
       )}
-      <div data-testid="schedules-table">
+      </div>
+      <div data-testid="schedules-table" className="tp-fill-body">
         <AdminTable rowKey="id" loading={loading} dataSource={rows} columns={columns}
-          rowClassName={(r: TaskRow) => (r.id === hitId ? "tp-row-hit" : "")} />
+          rowClassName={(r: TaskRow) => (r.id === hitId ? "tp-row-hit" : "")}
+          cardFooter={(
+            // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+            <div className="tp-cardfoot">
+              <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+              「最近结果」是后端回执原样：配色只认 run_final（run 终态后才合并进 last_run），
+              没 run_final 有 run_id 只画触发时间与「执行结果未回」，没 run_id（未投递/投递失败）画
+              「未产生执行，不会回结果」；连续失败计数到达阈值后的告警由后端投递，本页只如实展示计数。
+              </Typography.Text>
+              <ListPager
+                current={current}
+                pageSize={pageSize}
+                total={total}
+                onPage={setCurrent}
+                onPageSize={setPageSize}
+              />
+            </div>
+          )} />
       </div>
-      {/* D47-b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-          不挂假「共 0 条」；「加载更多」随游标语义一起退场（一页两把尺子的老账）。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
-      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
-        「最近结果」是后端回执原样：配色只认 run_final（run 终态后才合并进 last_run），
-        没 run_final 有 run_id 只画触发时间与「执行结果未回」，没 run_id（未投递/投递失败）画
-        「未产生执行，不会回结果」；连续失败计数到达阈值后的告警由后端投递，本页只如实展示计数。
-      </Typography.Text>
 
       <TaskDrawer open={drawer !== null} editing={drawer?.editing ?? null} projectId={projectId}
         canWrite={canUpdate} scenarios={scenarios} onClose={() => setDrawer(null)} onSaved={upsert} />
-    </>
+    </div>
   );
 }
 
 export default function SchedulesPage() {
   return (
-    <div data-testid="page-schedules">
-      <PageHead title="定时任务"
+    <div data-testid="page-schedules" className="tp-fill-stack">
+      <PageHead title="定时任务" descHover
         desc="按 cron 周期触发场景执行；停用不影响历史运行与报告。" />
       <ProjectGate><TasksPanel /></ProjectGate>
     </div>

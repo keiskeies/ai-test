@@ -9,7 +9,7 @@ export default function QuestionCard({ payload, ctx }: { payload: QuestionPayloa
   const options = Array.isArray(payload.options) ? payload.options : [];
   return (
     <div data-testid="question-card" style={{ border: "1px solid #D6E4FF", borderRadius: 8, padding: "10px 12px", background: "#F7FAFF" }}>
-      <Typography.Text strong style={{ fontSize: 13 }}>
+      <Typography.Text className="tp-text-md" strong>
         {/* 禁止 emoji 混入 UI（§11.6.6 红线）：原来的 <span role="img">❓</span> 是彩色象形 emoji，
             role="img" 就是「我在充当图标」的自供——换成同职责的线性图标，读屏文案不变。 */}
         <QuestionCircleOutlined aria-label="提问" style={{ marginRight: 4 }} />
@@ -31,7 +31,7 @@ export default function QuestionCard({ payload, ctx }: { payload: QuestionPayloa
         </Space>
       </div>
       {ctx.busy && (
-        <Typography.Text type="secondary" data-testid="card-busy-note" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid="card-busy-note" style={{ display: "block", marginTop: 6 }}>
           等本轮结束
         </Typography.Text>
       )}

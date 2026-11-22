@@ -374,7 +374,7 @@ function ChannelsPanel() {
     Modal.confirm({
       title: `删除渠道「${row.name}」？`,
       content: "硬删除，不可恢复。被定时任务引用时后端会拦下（409）并列出引用，先解绑再删。",
-      okText: "删除", okButtonProps: { danger: true, "data-testid": "notify-channel-delete-ok" }, cancelText: "取消",
+      okText: "删除", okButtonProps: { danger: true, "data-testid": "notify-channel-delete-ok" }, cancelText: "取消", centered: true,
       onOk: async () => {
         try {
           await post("/notify-channels/" + encodeURIComponent(row.id) + "/delete", {});
@@ -429,7 +429,8 @@ function ChannelsPanel() {
   ];
 
   return (
-    <>
+    <div className="tp-fill tp-fill-body">
+      <div style={{ flex: "0 0 auto" }}>
       <FilterBar actions={(
         <Toolbar>
           {/* 刷新 = 重发当前页（load() 读 current），不回第 1 页：把用户从第 3 页弹回
@@ -441,7 +442,7 @@ function ChannelsPanel() {
           )}
         </Toolbar>
       )}>
-        <Select allowClear placeholder="按类型筛选" style={{ width: 170 }} value={typeFilter}
+        <Select allowClear placeholder="按类型筛选" style={{ width: 176 }} value={typeFilter}
           data-testid="notify-channel-filter" onChange={(v) => applyTypeFilter(v)}
           options={CHANNEL_TYPES.map((t) => ({ value: t, label: `${TYPE_META[t].label}（${t}）` }))} />
       </FilterBar>
@@ -457,6 +458,7 @@ function ChannelsPanel() {
           description="这条是 Ctrl+K 直达带过来的：URL 里带着渠道 id，页面把它认出来并高亮那一行。"
           onClose={() => setHitId(null)} />
       )}
+      </div>
       <AdminTable rowKey="id" loading={loading} dataSource={rows} columns={columns}
           rowClassName={(r: Row) => (r.id === hitId ? "tp-row-hit" : "")}
           pagination={false}
@@ -474,27 +476,28 @@ function ChannelsPanel() {
                 </div>
               );
             },
-          }} />
-      {/* D47-b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-          不挂假「共 0 条」；「加载更多」随游标语义一起退场（一页两把尺子的老账）。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
-      <Typography.Text type="secondary" className="tp-text-sm" style={{ display: "block", marginTop: 8 }}>
-        渠道是平台级配置（全项目共用，无项目归属）；密钥列显示的是后端打码回显，前端不加工。
-      </Typography.Text>
+          }}
+          cardFooter={(
+            // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+            <div className="tp-cardfoot">
+              <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+              渠道是平台级配置（全项目共用，无项目归属）；密钥列显示的是后端打码回显，前端不加工。
+              </Typography.Text>
+              <ListPager
+                current={current}
+                pageSize={pageSize}
+                total={total}
+                onPage={setCurrent}
+                onPageSize={setPageSize}
+              />
+            </div>
+          )} />
 
       <ChannelDrawer open={drawer !== null} editing={drawer?.editing ?? null}
         onClose={() => setDrawer(null)} onSaved={upsert} />
 
       {testRes && (
-        <Modal open title={`发送测试：${testRes.name}`} width={620} okText="关闭"
+        <Modal open title={`发送测试：${testRes.name}`} width={640} centered okText="关闭"
           cancelButtonProps={{ style: { display: "none" } }}
           okButtonProps={{ "data-testid": "notify-test-close" }}
           onOk={() => setTestRes(null)} onCancel={() => setTestRes(null)}>
@@ -517,7 +520,7 @@ function ChannelsPanel() {
       )}
 
       {inUse && (
-        <Modal open title="删除被拦截：该渠道被定时任务引用" width={560} okText="知道了"
+        <Modal open title="删除被拦截：该渠道被定时任务引用" width={560} centered okText="知道了"
           cancelButtonProps={{ style: { display: "none" } }}
           okButtonProps={{ "data-testid": "notify-inuse-close" }}
           onOk={() => setInUse(null)} onCancel={() => setInUse(null)}>
@@ -544,7 +547,7 @@ function ChannelsPanel() {
           </div>
         </Modal>
       )}
-    </>
+    </div>
   );
 }
 
@@ -560,8 +563,8 @@ export default function NotifyChannelsPage() {
   const perms = patternsForProject(project, user?.is_system_admin);
   const mayEnter = Boolean(user?.is_system_admin) && can(perms, "notify:channel:read");
   return (
-    <div data-testid="page-notify-channels">
-      <PageHead title="通知渠道"
+    <div data-testid="page-notify-channels" className="tp-fill-stack">
+      <PageHead title="通知渠道" descHover
         desc="执行结果的通知出口（平台级配置）；发送回执落库，刷新不回退。" />
       <ProjectGate>
         {mayEnter ? <ChannelsPanel /> : (

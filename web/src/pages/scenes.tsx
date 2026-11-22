@@ -58,7 +58,7 @@ const RUN_DOT: Record<string, { color: string; label: string }> = {
 // flatten / ownModuleIds 已抽到 shared/moduleTree.ts（R99：api.tsx 与 scenes.tsx 曾逐字重复两份）。
 
 function RunDot({ status }: { status: string | null | undefined }) {
-  if (!status) return <Typography.Text type="secondary" style={{ fontSize: 12 }}>未运行</Typography.Text>;
+  if (!status) return <Typography.Text className="tp-text-sm" type="secondary">未运行</Typography.Text>;
   const d = RUN_DOT[status] ?? { color: tpv.func.skip, label: status };
   return (
     <Space size={6}>
@@ -293,6 +293,7 @@ function ScenesWorkbench() {
 
   function removeOne(r: Row) {
     Modal.confirm({
+      centered: true,
       title: "场景放入回收站？",
       content: "「" + r.name + "」进入回收站，可随时恢复；报告与运行记录不受影响。",
       okText: "放入回收站", okButtonProps: { danger: true, "data-testid": "scene-del-ok" }, cancelText: "取消",
@@ -446,8 +447,13 @@ function ScenesWorkbench() {
   };
 
   return (
-    <Row gutter={16} align="top">
-      <Col flex="208px">
+    /* 满高页 + 主从（master–detail）两栏：口径同 api.tsx，两栏各一张吃满列高的面板卡，
+       共用上下两条边。此前两栏是两套容器语义——左卡按内容长（1 个模块时实测一小截浮在
+       视口里），右栏的筛选条/表/页码是列的裸子项，卡比列矮一截，页底再空一大片。 */
+    <div className="tp-fill">
+      {/* wrap={false}：多行弹性容器的行高按内容算，交叉轴就没有确定高度可解（api.tsx 同判）。 */}
+      <Row gutter={16} wrap={false} style={{ flex: "1 1 auto", minHeight: 0 }}>
+      <Col flex="288px" className="tp-fill-side">
         <Card size="small">
           <ModuleTree
             projectId={pid} tree={tree} recycled={recycledTree}
@@ -462,10 +468,14 @@ function ScenesWorkbench() {
           />
         </Card>
       </Col>
-      {/* flex 基准必须是 0：`auto` 会拿表格内容的 max-content 当基准，208+宽表 > 行宽，
+      {/* flex 基准必须是 0：`auto` 会拿表格内容的 max-content 当基准，288+宽表 > 行宽，
           antd Row 的 flex-wrap 就把右列整块折到下一行、横跨全宽（2026-11-22 截图实测）。 */}
-      <Col flex="1 1 0" style={{ minWidth: 0 }}>
-        <Space style={{ marginBottom: 12 }} wrap>
+      <Col flex="1 1 0" className="tp-fill-body tp-fill-side" style={{ minWidth: 0 }}>
+        {/* 与左栏同构的一张面板卡：筛选条 / 表 / 页码三段都住进卡体，左右两栏因此共用
+            上下两条边。卡体 padding 归零，内部分段自己留白（口径同 api.tsx）。 */}
+        <Card size="small" styles={{ body: { padding: 0 } }}>
+        <div style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
+        <Space wrap>
           {/* 关键词是服务端契约（D47-b 步5b）：打字只动 qText（受控现值），提交才进 load
               依赖（kw）。提交口恰好三个：Enter、放大镜钮、allowClear 清空——antd 5.29 的
               Input.Search 把三条路径都汇进 onSearch（clear 图标点击也以 source:'clear' 触发它）。
@@ -507,6 +517,7 @@ function ScenesWorkbench() {
               {canDelete && (
                 <Button size="small" danger data-testid="scene-batch-del" onClick={() => {
                   Modal.confirm({
+      centered: true,
                     title: "把选中的 " + sel.length + " 个场景放入回收站？",
                     content: "进入回收站后可恢复；报告与运行记录不受影响。",
                     okText: "放入回收站", okButtonProps: { danger: true, "data-testid": "scene-del-ok" }, cancelText: "取消",
@@ -529,7 +540,9 @@ function ScenesWorkbench() {
           <Alert type="error" showIcon style={{ marginBottom: 12 }} data-testid="scene-load-error"
             message="场景列表加载失败" description={loadError} />
         )}
+        </div>
         <AdminTable<Row> rowKey="id" loading={loading} dataSource={rows}
+          className="tp-inpanel"
           rowSelection={inRecycled ? undefined : {
             selectedRowKeys: sel, onChange: (ks) => setSel(ks as string[]),
             columnWidth: 36,
@@ -568,7 +581,7 @@ function ScenesWorkbench() {
                 // 换算走 shared/timefmt（§3.4-6：UTC 存 / Asia/Shanghai 展示）；回收行的
                 // updated_at 就是回收那次的落库时刻。非回收行不画（同删除人列）
                 r.status === "recycled" ? (
-                  <Typography.Text type="secondary" data-testid="scene-recycled-at" style={{ fontSize: 12 }}>
+                  <Typography.Text className="tp-text-sm" type="secondary" data-testid="scene-recycled-at">
                     {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
                   </Typography.Text>) : <span>—</span>) },
             ] : []),
@@ -594,7 +607,7 @@ function ScenesWorkbench() {
             { title: "更新时间", key: "upd", width: 150, render: (_, r) => (
               // 分钟级（列宽 150 装不下秒），换算走 shared/timefmt：
               // 上一版在这里 slice(0,16)，显示的是 UTC 钟点，比真实时间早 8 小时（R68）。
-              <Typography.Text type="secondary" data-testid="scene-updated" style={{ fontSize: 12 }}>
+              <Typography.Text className="tp-text-sm" type="secondary" data-testid="scene-updated">
                 {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
               </Typography.Text>) },
             { title: "", key: "ops", width: 150, render: (_, r) => (
@@ -633,10 +646,22 @@ function ScenesWorkbench() {
           ]}
         />
         {/* D47-b 步5b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-            这里垫在 Table 之下（runs.tsx:247-255 的居中垫法）；「共 N 条」从此只有服务端
-            这一张嘴——旧脚注拿本地 visible.length / rows.length 现攒「共」的日子随本地过滤
-            一起退役了。 */}
-        <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
+            这里垫在 Table 之下；「共 N 条」从此只有服务端这一张嘴——旧脚注拿本地
+            visible.length / rows.length 现攒「共」的日子随本地过滤一起退役了。
+            版式：脚注与页码同排三列 grid（左注 / 中页码 / 右空），页码仍精确居中，
+            表下方少一整行（口径同 api.tsx 的页码行）。 */}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto minmax(0, 1fr)", alignItems: "center", gap: 8, padding: "12px 12px", flex: "0 0 auto" }}>
+          <Typography.Text className="tp-text-sm" type="secondary"
+            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {/* D47-b 步5b：hasMore 那句「本页取到 N 条（单页上限 200，后面还有没取的）」随游标
+                世界退役——页码模式下下一页永远点得到，「还有没取的」不再是脚注能说的事；
+                「上次取到 N 条」那句随「失败不清行」一起退役（api.tsx 同款），失败清行清 total
+                后这句只剩「计数不作数」一条腿。
+                「选中模块」四个字的口径（R120）：本页徽标与列表都是**直属**口径（见文件头），
+                这句只说「你选了哪个模块」，不承诺直属/子树——两个口径下它都是真话。 */}
+            {loadError ? "本次列表加载失败，本行计数不作数" : ""}
+            {moduleId ? "（选中模块）" : ""}{shownRecycled ? " · 回收站视图" : ""}
+          </Typography.Text>
           <ListPager
             current={current}
             pageSize={pageSize}
@@ -645,19 +670,10 @@ function ScenesWorkbench() {
             onPageSize={setPageSize}
           />
         </div>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {/* D47-b 步5b：hasMore 那句「本页取到 N 条（单页上限 200，后面还有没取的）」随游标
-              世界退役——页码模式下下一页永远点得到，「还有没取的」不再是脚注能说的事；
-              「上次取到 N 条」那句随「失败不清行」一起退役（api.tsx 同款），失败清行清 total
-              后这句只剩「计数不作数」一条腿。
-              「选中模块」四个字的口径（R120）：本页徽标与列表都是**直属**口径（见文件头），
-              这句只说「你选了哪个模块」，不承诺直属/子树——两个口径下它都是真话。 */}
-          {loadError ? "本次列表加载失败，本行计数不作数" : ""}
-          {moduleId ? "（选中模块）" : ""}{shownRecycled ? " · 回收站视图" : ""}
-        </Typography.Text>
+        </Card>
       </Col>
       {/* 新建空白场景 */}
-      <Modal open={blank} title="新建空白场景" okText="创建" cancelText="取消"
+      <Modal centered open={blank} title="新建空白场景" okText="创建" cancelText="取消"
         confirmLoading={busy} data-testid="scene-blank-modal"
         okButtonProps={{ "data-testid": "scene-blank-ok" }}
         onOk={() => void createBlank()} onCancel={() => setBlank(false)}>
@@ -672,14 +688,17 @@ function ScenesWorkbench() {
       </Modal>
 
       {/* 从用例生成：勾 N 个 api_case → 顺序步骤骨架（真调后端建场景） */}
-      <Modal open={gen} title="从用例生成场景" width={640} okText="生成" cancelText="取消"
+      <Modal open={gen} title="从用例生成场景" width={640} centered okText="生成" cancelText="取消"
         confirmLoading={busy} data-testid="scene-gen-modal"
         okButtonProps={{ "data-testid": "scene-gen-ok", disabled: caseSel.length === 0 }}
         onOk={() => void createFromCases()} onCancel={() => setGen(false)}>
         <Space direction="vertical" style={{ width: "100%" }}>
           <Input data-testid="scene-gen-name" maxLength={200} value={genName} autoFocus
             placeholder="场景名" onChange={(e) => setGenName(e.target.value)} />
+          {/* 候选最多 200 条：不内滚会把弹窗顶出视口（centered 也救不了）。
+              320 ≈ small 表 8 行（行高约 39px 含分隔线）：够扫一眼，又留出确定/取消按钮区。 */}
           <Table<CaseRow> size="small" rowKey="id" dataSource={cases} pagination={false}
+            scroll={{ y: 320 }}
             rowSelection={{
               selectedRowKeys: caseSel,
               onChange: (ks) => setCaseSel(ks as string[]),
@@ -704,14 +723,14 @@ function ScenesWorkbench() {
               { title: "优先级", dataIndex: "priority", width: 80 },
             ]}
           />
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             勾选的用例按列表顺序生成 api_case 步骤骨架，生成后可在画布上调整（画布 T19 交付）。
           </Typography.Text>
         </Space>
       </Modal>
 
       {/* 批量移动到模块 */}
-      <Modal open={move} title={"移动 " + sel.length + " 个场景到模块"} okText="移动" cancelText="取消"
+      <Modal centered open={move} title={"移动 " + sel.length + " 个场景到模块"} okText="移动" cancelText="取消"
         confirmLoading={busy} data-testid="scene-move-modal"
         okButtonProps={{ "data-testid": "scene-move-ok" }}
         onOk={() => void batchMove()} onCancel={() => setMove(false)}>
@@ -723,7 +742,7 @@ function ScenesWorkbench() {
       {/* 批量执行（D70）：选环境 → 逐个 enqueue。不选 = 各自用场景配置的环境（与编辑器
           scene-env 的 allowClear 同一语义，后端 scenario_run 的 env_id or s.env_id）；
           「无环境可跑」在前端点名拦下，不投递注定失败的 run。 */}
-      <Modal open={runOpen} title={"执行 " + sel.length + " 个场景"} okText="入队执行" cancelText="取消"
+      <Modal centered open={runOpen} title={"执行 " + sel.length + " 个场景"} okText="入队执行" cancelText="取消"
         confirmLoading={busy} data-testid="scene-run-modal"
         okButtonProps={{ "data-testid": "scene-run-ok", disabled: runBlocked !== null }}
         onOk={() => void submitBatchRun()} onCancel={() => setRunOpen(false)}>
@@ -746,14 +765,14 @@ function ScenesWorkbench() {
                 : "其中 " + runBlocked.length + " 个场景没有配置环境：选一个覆写环境，或取消勾选它们"}
             </Typography.Text>
           )}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             执行跑库里已保存的场景，逐个投递入队（trigger=manual），进度与结果见报告中心。
           </Typography.Text>
         </Space>
       </Modal>
 
       {/* 彻底删除：不可逆，输名确认（与 1A 回收站手感一致；服务端同样硬校验） */}
-      <Modal
+      <Modal centered
         open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         destroyOnHidden width={520}
         title="彻底删除场景？" okText="我已确认，彻底删除" cancelText="取消"
@@ -772,14 +791,15 @@ function ScenesWorkbench() {
           placeholder={purge?.name} onChange={(e) => setPurgeName(e.target.value)} />
       </Modal>
     </Row>
+    </div>
   );
 }
 
 export default function ScenesPage() {
   const { project } = useAuth();
   return (
-    <div data-testid="page-scene">
-      <PageHead title="场景编排"
+    <div data-testid="page-scene" className="tp-fill-stack">
+      <PageHead title="场景编排" descHover
         desc="多步骤场景的画布与列表双模式；步骤可调试草稿，也可执行已保存版本。" />
       <ProjectGate>{project ? <ScenesWorkbench /> : null}</ProjectGate>
     </div>

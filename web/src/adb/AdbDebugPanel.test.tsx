@@ -25,7 +25,7 @@
 // ⑨ 截图内联（:180-190 + ShotImg :33-56）：只有 SCREENSHOT 进 <img>（VIDEO/LOG 拒收），
 //   取字节必须带 projectId（fetchArtifactBlob 的 ?project_id=，:41）；加载中/失败
 //   （后端 message 逐字）两态可见；卸载必 revokeObjectURL（:48）；
-// ⑩ 拖把手（:104-115）：120 ~ round(0.6·innerHeight) 双向夹紧，pointerUp 收尾后
+// ⑩ 拖把手（:104-115）：120 ~ round(0.45·innerHeight) 双向夹紧，pointerUp 收尾后
 //   pointerMove 不再改高度。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -88,8 +88,9 @@ function renderPanel(props: Partial<Parameters<typeof AdbDebugPanel>[0]> = {}) {
 const panel = () => screen.getByTestId("adb-debug-panel");
 const badge = () => screen.getByTestId("adb-debug-badge");
 
-/** jsdom 默认 innerHeight=768 → :94 maxH=round(768*0.6)；夹紧断言按同一公式量，不写死。 */
-const MAX_H = Math.round(window.innerHeight * 0.6);
+/** jsdom 默认 innerHeight=768；夹紧断言按同一 clamp 公式量，不写死数字。 */
+const MAX_H = Math.round(window.innerHeight * 0.45);
+const DEFAULT_H = Math.min(300, Math.max(120, Math.round(window.innerHeight * 0.35))); // DebugDrawer 同款
 
 beforeEach(() => {
   cleanup();
@@ -314,17 +315,17 @@ describe("⑨ 截图内联：只有 SCREENSHOT 进 <img>，projectId 必须跟�
   });
 });
 
-describe("⑩ 拖把手：120 ~ round(0.6·innerHeight) 双向夹紧", () => {
-  it("默认 300px；上拖 +100 → 400px；越界夹到 maxH；pointerUp 后再移动不改高；下拖夹到 120px", () => {
+describe("⑩ 拖把手：120 ~ round(0.45·innerHeight) 双向夹紧", () => {
+  it("默认 clamp(35vh,120,300)；上拖 +50；越界夹到 maxH；pointerUp 后再移动不改高；下拖夹到 120px", () => {
     renderPanel();
-    expect(panel().style.height).toBe("300px"); // DEFAULT_H（:22）
+    expect(panel().style.height).toBe(DEFAULT_H + "px"); // clamp 公式（UiDebugPanel/DebugDrawer 同款）
     expect(panel().style.minHeight).toBe("120px");
     expect(panel().style.maxHeight).toBe(MAX_H + "px");
     const handle = screen.getByTestId("adb-debug-resize");
     fireEvent.pointerDown(handle, { clientY: 400, pointerId: 1 });
-    fireEvent.pointerMove(handle, { clientY: 300, pointerId: 1 }); // dh = 300 + (400-300)
-    expect(panel().style.height).toBe("400px");
-    fireEvent.pointerMove(handle, { clientY: 100, pointerId: 1 }); // dh = 600 → 夹到 maxH
+    fireEvent.pointerMove(handle, { clientY: 350, pointerId: 1 }); // dh = 269+50=319 < MAX_H，未撞顶
+    expect(panel().style.height).toBe(DEFAULT_H + 50 + "px");
+    fireEvent.pointerMove(handle, { clientY: 100, pointerId: 1 }); // dh = 569 → 夹到 maxH
     expect(panel().style.height).toBe(MAX_H + "px");
     fireEvent.pointerUp(handle, { pointerId: 1 });
     fireEvent.pointerMove(handle, { clientY: 10, pointerId: 1 }); // :114 收尾后再动无效

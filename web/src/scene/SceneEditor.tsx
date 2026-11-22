@@ -156,7 +156,9 @@ function Editor() {
   }
 
   return (
-    <div data-testid="page-scene-editor" style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 104px)", minHeight: 560 }}>
+    // .tp-fill 的扣减（topbar 56 + pagepad 24×2）与原 calc(100vh−104px) 同值，改用 token 体系；
+    // min-height 覆写回 560：画布 + 右栏 + 底部面板的最低可用高度比通用 480 更高
+    <div data-testid="page-scene-editor" className="tp-fill" style={{ minHeight: 560 }}>
       {readOnly && (
         <Alert type="info" showIcon data-testid="scene-readonly-banner" style={{ marginBottom: 8 }}
           message="当前项目没有 scenario:update 权限，本场景为只读——可查看画布与配置，不能编辑、保存或执行。" />
@@ -170,8 +172,8 @@ function Editor() {
       <Space style={{ marginBottom: 8 }} wrap>
         <Button data-testid="scene-back" icon={<ArrowLeftOutlined />}
           onClick={() => nav("/scene")}>返回</Button>
-        <Typography.Text strong style={{ fontSize: 15 }}>{scenario.name}</Typography.Text>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>v{scenario.version}</Typography.Text>
+        <Typography.Text strong className="tp-text-lg">{scenario.name}</Typography.Text>
+        <Typography.Text className="tp-text-sm" type="secondary">v{scenario.version}</Typography.Text>
         {dirty && <span data-testid="scene-dirty-dot" title="有未保存修改" style={{
           display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#D48806",
         }} />}
@@ -251,7 +253,7 @@ function Editor() {
       </div>
       <DebugDrawer />
       <ConflictModal />
-      <Modal open={leaveOpen} data-testid="leave-guard-modal" title="有未保存的修改"
+      <Modal centered open={leaveOpen} data-testid="leave-guard-modal" title="有未保存的修改"
         okText="放弃修改并离开" okButtonProps={{ danger: true, "data-testid": "leave-go" }}
         cancelText="留下继续编辑" cancelButtonProps={{ "data-testid": "leave-stay" }}
         onOk={() => blocker.state === "blocked" && blocker.proceed()}

@@ -99,7 +99,7 @@ function PlanFormModal({ open, editing, projectId, onClose, onSaved }: {
   }
 
   return (
-    <Modal open={open} onCancel={onClose} width={520} destroyOnHidden
+    <Modal open={open} onCancel={onClose} width={560} centered destroyOnHidden
       title={editing ? `编辑计划：${editing.name}` : "新建测试计划"}
       okText="保存" okButtonProps={{ loading: busy, "data-testid": "plan-save" }}
       cancelText="取消"
@@ -181,6 +181,7 @@ function PlansPanel() {
 
   function archiveOne(row: PlanOut): void {
     Modal.confirm({
+      centered: true,
       title: `归档计划「${row.name}」？`,
       content: "归档是终态：归档后计划不再参与执行编排，且**没有反归档入口**（重复归档后端会 409）。",
       okText: "归档", okButtonProps: { danger: true, "data-testid": "plans-archive-ok" }, cancelText: "取消",
@@ -196,6 +197,7 @@ function PlansPanel() {
 
   function removeOne(row: PlanOut): void {
     Modal.confirm({
+      centered: true,
       title: `删除计划「${row.name}」？`,
       content: "删除会级联删掉该计划的用例关联与已生成的计划报告（后端一条事务）。不可恢复。",
       okText: "删除", okButtonProps: { danger: true, "data-testid": "plans-delete-ok" }, cancelText: "取消",
@@ -226,10 +228,10 @@ function PlansPanel() {
         : <Typography.Text type="secondary" data-testid="plans-archived-tag">未归档</Typography.Text>) },
     { title: "创建时间", dataIndex: "created_at", key: "created_at", width: 168,
       render: (v: string | null) => (
-        <Typography.Text data-testid="plans-created" style={{ fontSize: 12 }}>{fmtTime(v) ?? "—"}</Typography.Text>) },
+        <Typography.Text className="tp-text-sm" data-testid="plans-created">{fmtTime(v) ?? "—"}</Typography.Text>) },
     { title: "更新时间", dataIndex: "updated_at", key: "updated_at", width: 168,
       render: (v: string | null) => (
-        <Typography.Text data-testid="plans-updated" style={{ fontSize: 12 }}>{fmtTime(v) ?? "—"}</Typography.Text>) },
+        <Typography.Text className="tp-text-sm" data-testid="plans-updated">{fmtTime(v) ?? "—"}</Typography.Text>) },
     { title: "操作", key: "ops", width: 200,
       render: (_: unknown, row: PlanOut) => (
         <Space size={4}>
@@ -261,7 +263,8 @@ function PlansPanel() {
   }
 
   return (
-    <>
+    <div className="tp-fill tp-fill-body">
+      <div style={{ flex: "0 0 auto" }}>
       <Space style={{ marginBottom: 12 }} wrap>
         {/* 刷新 = 重发当前页（load 读 current），不回第 1 页：把用户从第 3 页弹回第 1 页
             不是「刷新」这个词的意思。本页后端入参只有 project_id/current/size——**没有
@@ -278,32 +281,42 @@ function PlansPanel() {
         <Alert type="error" showIcon style={{ marginBottom: 12 }} data-testid="plans-load-error"
           message="测试计划列表加载失败" description={<EchoBlock text={loadError} />} />
       )}
-      <div data-testid="plans-table">
+      </div>
+      <div data-testid="plans-table" className="tp-fill-body">
         <AdminTable<PlanOut> rowKey="id" loading={loading} dataSource={rows} columns={columns}
           pagination={false}
           locale={{ emptyText: loadError
             ? "没取到计划——原因见上方错误条，点「刷新」重试"
-            : canCreate ? "还没有计划，点右上角新建" : "还没有计划（你没有新建权限）" }} />
+            : canCreate ? "还没有计划，点右上角新建" : "还没有计划（你没有新建权限）" }}
+          cardFooter={(
+            // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+            // grid 三列与内边距归 .tp-cardfoot / .ant-table-footer（styles.css）。
+            <div className="tp-cardfoot">
+              <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+              「归档」是终态列（无反归档）；列表不展示通过率/执行状态——那是详情页每次现算的结论
+              （空计划「全部通过」是空真，列表端点压根没给这个数，这里就不编）。
+              </Typography.Text>
+              <ListPager
+                current={current}
+                pageSize={pageSize}
+                total={total}
+                onPage={setCurrent}
+                onPageSize={setPageSize}
+              />
+            </div>
+          )} />
       </div>
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager current={current} pageSize={pageSize} total={total}
-          onPage={setCurrent} onPageSize={setPageSize} />
-      </div>
-      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
-        「归档」是终态列（无反归档）；列表不展示通过率/执行状态——那是详情页每次现算的结论
-        （空计划「全部通过」是空真，列表端点压根没给这个数，这里就不编）。
-      </Typography.Text>
 
       <PlanFormModal open={modal !== null} editing={modal?.editing ?? null} projectId={projectId}
         onClose={() => setModal(null)} onSaved={() => void load()} />
-    </>
+    </div>
   );
 }
 
 export default function PlansPage() {
   return (
-    <div data-testid="page-plans">
-      <PageHead title="测试计划"
+    <div data-testid="page-plans" className="tp-fill-stack">
+      <PageHead title="测试计划" descHover
         desc="把用例按计划组织、定时执行并汇总成绩；计划状态由执行结果现算。" />
       <ProjectGate><PlansPanel /></ProjectGate>
     </div>

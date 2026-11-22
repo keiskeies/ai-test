@@ -28,7 +28,7 @@ import { fmtTime } from "../shared/timefmt";
 import { STEP_STATUSES, STATUSES, SUBJECT_TYPES, TRIGGERS, vocabMeta } from "../shared/runVocab";
 import { fetchArtifactBlob } from "../shared/artifactSrc";
 import { pctAttr, ratePct } from "../shared/passRate";
-import { assertionRows, cmdRows, orderKeysByHints, shotsByCommand, stepTreeHints, stepTreeLabel,
+import { assertionRows, cmdRows, orderKeysByHints, shotsByCommand, stepTreeHints, stepTreeLabel, DEBUG_ROW,
   type StepTreeHint, type UiArtifactRef } from "../ui/debugRows";
 import { PassRing } from "./reports";
 import { tp } from "../theme";
@@ -175,7 +175,7 @@ function StepTree(props: {
               padding: "4px 8px 4px " + (8 + depth * 14) + "px",
               background: props.active === s.step_key ? "#EAF6F1" : undefined,
             }}>
-            <Typography.Text style={{ fontSize: 12, flex: 1, minWidth: 0 }}
+            <Typography.Text className="tp-text-sm" style={{ flex: 1, minWidth: 0 }}
               ellipsis={{ tooltip: s.step_key }}>
               {/* UI 命令行不能顶著用例名（7 行逐字相同的树读不出哪行是哪条命令），
                   非 UI 步空 subject_name 时退图上的节点名（画布早就显示着它），
@@ -184,7 +184,7 @@ function StepTree(props: {
             </Typography.Text>
             {/* 数据集步：行进度 3/10（§11.7.4 折叠语义：一行看完整个展开） */}
             {s.total_rows != null && s.total_rows > 0 && (
-              <Typography.Text type="secondary" style={{ fontSize: 11 }} className="tp-mono">
+              <Typography.Text type="secondary" className="tp-text-xs tp-mono">
                 {(s.pass_rows ?? 0) + "/" + s.total_rows}
               </Typography.Text>
             )}
@@ -237,8 +237,7 @@ function ArtifactImage({ runId, pid, name }: { runId: string; pid: string; name:
     return () => window.removeEventListener("keydown", onKey);
   }, [lightbox]);
   if (st.kind === "loading") {
-    return <Typography.Text type="secondary" data-testid="report-artifact-img-loading"
-      style={{ fontSize: 12 }}>截图加载中…</Typography.Text>;
+    return <Typography.Text className="tp-text-sm" type="secondary" data-testid="report-artifact-img-loading">截图加载中…</Typography.Text>;
   }
   if (st.kind === "error") {
     return <Alert type="warning" showIcon data-testid="report-artifact-img-error"
@@ -271,7 +270,7 @@ function ArtifactImage({ runId, pid, name }: { runId: string; pid: string; name:
               onClick={() => setLightbox(false)}
               style={{ position: "absolute", top: 6, right: 6 }} />
             {/* 「看原图」只活在灯箱里：缩略图那一下必须落在灯箱上，不能有跳过它的第二条路 */}
-            <Typography.Text style={{ display: "block", fontSize: 12, marginTop: 6, textAlign: "right" }}>
+            <Typography.Text className="tp-text-sm" style={{ display: "block", marginTop: 6, textAlign: "right" }}>
               <a href={st.url} target="_blank" rel="noreferrer"
                 data-testid="report-artifact-lightbox-origin">看原图</a>
             </Typography.Text>
@@ -565,7 +564,7 @@ function Detail() {
             <Button onClick={() => nav("/reports")}>返回列表</Button>
           </Space>
         }>
-        <Space size={28} wrap>
+        <Space size={24} wrap>
           {/* 外壳这份 data-percent 是 e2e 钉着的契约（web/e2e/reports.spec.mjs 在
               report-overview-pass-rate 上断言它），删不得；但它**不许自己算**——先前这里
               自己 `Math.round(pass_rate*100)` 一份、环里再算一份，两份各自都对时看不出问题，
@@ -602,27 +601,26 @@ function Detail() {
             description={report.error} data-testid="report-overview-error" />
         )}
         {rerunOf && (
-          <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
+          <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
             这是步骤重跑生成的报告，来源：
             <a data-testid="report-rerun-origin" onClick={() => nav("/reports/" + rerunOf)}> 原报告</a>
           </Typography.Paragraph>
         )}
       </Card>
 
+      {/* 三栏同高封顶 min(520px, 50vh)：768 高屏上「概览(≈300) + 520」超视口 → 页滚+卡滚双条 */}
       <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
         <Card size="small" title="步骤" style={{ width: 300, flex: "0 0 300px" }}
-          styles={{ body: { padding: 0, maxHeight: 520, overflow: "auto" } }}>
+          styles={{ body: { padding: 0, maxHeight: "min(520px, 50vh)", overflow: "auto" } }}>
           <StepTree steps={report.steps} active={active} hints={treeHints}
             onPick={(k) => { setActive(k); useSceneStore.getState().select(k); }} />
         </Card>
         <Card size="small" title="结果画布（只读）" style={{ flex: 1, minWidth: 0 }}
-          styles={{ body: { padding: 0, height: 520, display: "flex", flexDirection: "column" } }}>
+          styles={{ body: { padding: 0, height: "min(520px, 50vh)", display: "flex", flexDirection: "column" } }}>
           {/* R102 的代价必须说出口：独立 UI/ADB 运行 = 单节点 summary_graph，中间画布「看起来很空」
               是形状不是 bug。这句话只属于这两类运行——撒到 API/场景报告上就是在说别报告的事。 */}
           {(report.subject_type === "ui_case" || report.subject_type === "adb_case") && (
-            <div data-testid="report-ui-note" style={{
-              padding: "6px 12px", fontSize: 12, color: "var(--tp-text-2)",
-              background: "var(--tp-bg-layout)", borderBottom: "1px solid var(--tp-split)", flexShrink: 0 }}>
+            <div className="tp-text-sm" data-testid="report-ui-note" style={{ padding: "8px 12px", color: "var(--tp-text-2)", background: "var(--tp-bg-layout)", borderBottom: "1px solid var(--tp-split)", flexShrink: 0 }}>
               1 个顶层步骤 = 1 条 {subjectWord} 用例，命令明细在右栏（画布只有一个节点是 {subjectWord} 运行的形状，不是没跑到）。
             </div>
           )}
@@ -631,7 +629,7 @@ function Detail() {
           </div>
         </Card>
         <Card size="small" title="步骤详情" style={{ width: 420, flex: "0 0 420px" }}
-          styles={{ body: { maxHeight: 520, overflow: "auto" } }}>
+          styles={{ body: { maxHeight: "min(520px, 50vh)", overflow: "auto" } }}>
           <div data-testid="report-step-detail">
             {!active && (
               // UI/ADB 运行结构性没有 HTTP 请求/响应（按 hideHttp 不渲染两个编辑器），
@@ -667,10 +665,10 @@ function Detail() {
                   <Tag color={vocabMeta(STEP_STATUSES, stepData.status).color}>
                     {vocabMeta(STEP_STATUSES, stepData.status).label}</Tag>
                   {stepData.elapsed_ms != null && (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{stepData.elapsed_ms}ms</Typography.Text>
+                    <Typography.Text className="tp-text-sm" type="secondary">{stepData.elapsed_ms}ms</Typography.Text>
                   )}
                   {stepData.attempts > 1 && (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>尝试 {stepData.attempts} 次</Typography.Text>
+                    <Typography.Text className="tp-text-sm" type="secondary">尝试 {stepData.attempts} 次</Typography.Text>
                   )}
                 </Space>
                 {detail?.error && (
@@ -680,7 +678,7 @@ function Detail() {
                 {/* 命令行的回执（_write_step 的 detail.message）：UI 步没有 HTTP 报错时，
                     回执就是这一步说出口的话，不能只有状态色。 */}
                 {hideHttp && typeof detail?.message === "string" && detail.message !== "" && (
-                  <Typography.Paragraph style={{ fontSize: 12, marginBottom: 0 }}
+                  <Typography.Paragraph className="tp-text-sm" style={{ marginBottom: 0 }}
                     data-testid="report-cmd-message">{detail.message}</Typography.Paragraph>
                 )}
                 {/* 汇总行：跑在哪台、u2 还是降级当场说出（T6「降级看得见」与调试面板同一支笔）。
@@ -699,9 +697,9 @@ function Detail() {
                     所以这块以前少 adb 一条腿 = 逐命令回执整块不上屏（D154 后果①）。 */}
                 {isCaseSummary && (
                   <div data-testid="report-ui-commands">
-                    <Typography.Text strong style={{ fontSize: 12 }}>命令时间线（{uiCmdList.length}）</Typography.Text>
+                    <Typography.Text className="tp-text-sm" strong>命令时间线（{uiCmdList.length}）</Typography.Text>
                     {uiCmdList.length === 0 && (
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      <Typography.Text className="tp-text-sm" type="secondary">
                         这次运行没有留下命令行{detail?.error ? "（用例没跑成，看上方报错）" : "（执行核没回命令结果——数据缺失，不编造）"}
                       </Typography.Text>
                     )}
@@ -709,19 +707,19 @@ function Detail() {
                       <div key={r.id} data-testid="report-cmd-row" data-id={r.id} data-status={r.status}
                         style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap",
                           padding: "3px 4px", borderBottom: "1px dashed #F0F2F4" }}>
-                        <Typography.Text style={{ fontSize: 12, width: 46 }} className="tp-mono">{r.id}</Typography.Text>
-                        <Typography.Text style={{ fontSize: 12, width: 92 }}>{r.type}</Typography.Text>
+                        <Typography.Text className="tp-text-sm tp-mono" style={{ width: DEBUG_ROW.idW }}>{r.id}</Typography.Text>
+                        <Typography.Text className="tp-text-sm" style={{ width: DEBUG_ROW.typeW }}>{r.type}</Typography.Text>
                         <Tag style={{ marginInlineEnd: 0 }}
                           color={vocabMeta(STEP_STATUSES, r.status).color}>
                           {vocabMeta(STEP_STATUSES, r.status).label}</Tag>
-                        <Typography.Text type="secondary" style={{ fontSize: 12, width: 64 }}>{r.elapsed_ms}ms</Typography.Text>
-                        <span style={{ fontSize: 12, color: "var(--tp-text-2)", flex: 1, minWidth: 120 }}>{r.message}</span>
+                        <Typography.Text className="tp-text-sm" type="secondary" style={{ width: DEBUG_ROW.elapsedW }}>{r.elapsed_ms}ms</Typography.Text>
+                        <span className="tp-text-sm" style={{ color: "var(--tp-text-2)", flex: 1, minWidth: 120 }}>{r.message}</span>
                         {(uiShots[r.id]?.length ?? 0) > 0 && (
-                          <Space size={6} wrap style={{ width: "100%", paddingLeft: 54 }}>
+                          <Space size={6} wrap style={{ width: "100%", paddingLeft: DEBUG_ROW.indent }}>
                             {uiShots[r.id].map((s, i) => (
                               <span key={i} style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
                                 <ArtifactImage runId={id!} pid={pid} name={s.name} />
-                                <Typography.Text type="secondary" style={{ fontSize: 11 }}>{s.reason}</Typography.Text>
+                                <Typography.Text className="tp-text-xs" type="secondary">{s.reason}</Typography.Text>
                               </span>
                             ))}
                           </Space>
@@ -743,12 +741,12 @@ function Detail() {
                 )}
                 {isCaseSummary && (
                   <div data-testid="report-ui-vars">
-                    <Typography.Text strong style={{ fontSize: 12 }}>
+                    <Typography.Text className="tp-text-sm" strong>
                       变量快照（{Object.keys(stepData?.vars_snapshot ?? {}).length}）</Typography.Text>
                     {Object.keys(stepData?.vars_snapshot ?? {}).length === 0 ? (
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>（没有存过变量）</Typography.Text>
+                      <Typography.Text className="tp-text-sm" type="secondary">（没有存过变量）</Typography.Text>
                     ) : Object.entries(stepData?.vars_snapshot ?? {}).map(([k, v]) => (
-                      <div key={k} style={{ fontSize: 12 }}>
+                      <div className="tp-text-sm" key={k}>
                         <Typography.Text code>{"${" + k + "}"}</Typography.Text> = {String(v)}
                       </div>
                     ))}
@@ -758,7 +756,7 @@ function Detail() {
                   <Table<AssertRow> size="small" rowKey={(_, i) => String(i)} pagination={false}
                     dataSource={asserts}
                     columns={[
-                      { title: "项", dataIndex: "type", width: 150,
+                      { title: "项", dataIndex: "type", width: 110,
                         render: (v: string | undefined, r: AssertRow) => (
                           <Space size={4}>
                             <span>{v ?? "?"}</span>
@@ -784,23 +782,23 @@ function Detail() {
                     摆一个空 JSON 编辑器就是装样子（纪律 1），分流后整块不渲染。 */}
                 {!hideHttp && (
                   <div>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>请求</Typography.Text>
-                    <CodeEditor readOnly height={140} language="json"
+                    <Typography.Text className="tp-text-sm" type="secondary">请求</Typography.Text>
+                    <CodeEditor readOnly height={152} language="json"
                       value={JSON.stringify(detail?.request ?? {}, null, 2)} />
                   </div>
                 )}
                 {!hideHttp && (
                   <div>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>响应</Typography.Text>
+                    <Typography.Text className="tp-text-sm" type="secondary">响应</Typography.Text>
                     <CodeEditor readOnly height={160} language="json"
                       value={JSON.stringify(detail?.response ?? null, null, 2)} />
                   </div>
                 )}
                 {logs.length > 0 && (
                   <div>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>日志</Typography.Text>
-                    <pre className="tp-mono" data-testid="report-detail-logs"
-                      style={{ margin: 0, fontSize: 12, background: "var(--tp-bg-layout)", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>
+                    <Typography.Text className="tp-text-sm" type="secondary">日志</Typography.Text>
+                    <pre className=" tp-text-sm" data-testid="report-detail-logs"
+                      style={{ margin: 0, background: "var(--tp-bg-layout)", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>
                       {logs.join("\n")}
                     </pre>
                   </div>
@@ -810,17 +808,17 @@ function Detail() {
                     {/* 原话「超阈值外置的原始字节」是错的：64KB 阈值只存在于 offload_detail
                         （step detail 内大字段外置，不产生这里列出的 run_artifact 行）；
                         本区条目来自 save_artifact，截图/DOM 无条件入库、与大小无关。 */}
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>制品（截图/DOM 等外置的原始字节）</Typography.Text>
+                    <Typography.Text className="tp-text-sm" type="secondary">制品（截图/DOM 等外置的原始字节）</Typography.Text>
                     {stepArtifacts.map((a) => {
                       const name = String(a.ref).split("/").pop() ?? a.ref;
                       const label = a.kind + " · " + name + "（" + (a.bytes ?? "?") + "B）";
                       return (
-                        <div key={a.ref} style={{ fontSize: 12, marginTop: 4 }}>
+                        <div className="tp-text-sm" key={a.ref} style={{ marginTop: 4 }}>
                           {a.kind === "SCREENSHOT" ? (
                             // R107：截图内联 = 带 token fetch → Blob → objectURL；
                             // 裸 href 点开是 401（T11 Step 0 端到端实测），不能留。
                             <>
-                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{label}</Typography.Text>
+                              <Typography.Text className="tp-text-sm" type="secondary">{label}</Typography.Text>
                               <ArtifactImage runId={id!} pid={pid} name={name} />
                             </>
                           ) : (

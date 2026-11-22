@@ -94,7 +94,9 @@ export default function AuditTab({ projectId }: { projectId: string }) {
   const anyFilter = Boolean(entry || action.trim() || ok || uid || range);
 
   const cols: ColumnsType<AuditRow> = [
-    { title: "时间", dataIndex: "ts", width: 168, render: (v: string | null) => (
+    // 宽 150 与 UsersTab 创建时间列同尺：「2026-11-15 11:24:05」19 字符在 12/13 号
+    // 数字字距下渲染约 123px + 单元格左右 8+8，150 装得下，168 是过度预留。
+    { title: "时间", dataIndex: "ts", width: 150, render: (v: string | null) => (
       // 换算走 shared/timefmt（§3.4-6：UTC 存储 / Asia/Shanghai 展示）。
       // 原先是 slice(0,19)：形状对、钟点比真实时间早 8 小时，而形状正则的测试抓不到。
       <Typography.Text data-testid="audit-time" className="tp-text-sm"
@@ -119,7 +121,7 @@ export default function AuditTab({ projectId }: { projectId: string }) {
   ];
 
   return (
-    <div data-testid="tab-audit">
+    <div data-testid="tab-audit" className="tp-fill-tab">
       {/* audit-filters 仍是「五个筛选控件都在它里面」的那个容器（AuditTab.test.tsx 用
           node.contains 钉包含关系）；里面再按 FilterBar 的约定分成左筛选 / 右动作。 */}
       <div data-testid="audit-filters">
@@ -139,7 +141,8 @@ export default function AuditTab({ projectId }: { projectId: string }) {
             options={ops.map((c) => ({ value: c.id, label: c.account + " · " + c.name }))} />
           <Select allowClear placeholder="入口" style={{ width: 120 }} value={entry} data-testid="audit-filter-entry"
             onChange={setEntry} options={Object.entries(ENTRIES).map(([v, l]) => ({ value: v, label: l }))} />
-          <Select allowClear placeholder="结果" style={{ width: 110 }} value={ok} data-testid="audit-filter-ok"
+          {/* 宽 120：与「入口」同档，也是筛选控件的常用窄档——110 不在常规档上（2026-11-22 审计）。 */}
+          <Select allowClear placeholder="结果" style={{ width: 120 }} value={ok} data-testid="audit-filter-ok"
             onChange={setOk} options={[{ value: "true", label: "成功" }, { value: "false", label: "失败" }]} />
           <Input.Search allowClear placeholder="动作，如 env_create" style={{ width: 220 }} data-testid="audit-filter-action"
             value={actionDraft} onChange={(e) => setActionDraft(e.target.value)}
@@ -157,7 +160,7 @@ export default function AuditTab({ projectId }: { projectId: string }) {
           scroll={{ x: 860 }}
           onRow={(r: AuditRow) => ({ "data-testid": "audit-row", "data-audit-id": r.id } as React.HTMLAttributes<HTMLTableRowElement>)}
           expandable={{ expandedRowRender: (r: AuditRow) => (
-            <pre className="tp-mono" style={{ margin: 0, maxHeight: 220, overflow: "auto" }}
+            <pre className="tp-mono" style={{ margin: 0, maxHeight: 240, overflow: "auto" }}
               >{JSON.stringify(r.diff ?? {}, null, 2)}</pre>
           ), showExpandColumn: false }}
           locale={{ emptyText: failed ? (
@@ -169,12 +172,12 @@ export default function AuditTab({ projectId }: { projectId: string }) {
             <StateView compact title="当前筛选条件下没有匹配的记录" />
           ) : (
             <StateView compact title="这段时间没有写操作被记录（只读查询不进审计，这是设计如此）" />
-          ) }} />
-      {cursor && (
-        <div style={{ textAlign: "center", marginTop: 12 }}>
-          <Button data-testid="audit-more" loading={loading} onClick={() => void load(false)}>加载更多</Button>
-        </div>
-      )}
+          ) }}
+        cardFooter={(cursor ? (
+          // 「加载更多」住进卡底（同列表页脚注口径：卡有边有角，控件不该散在卡外的页面底色上）。
+          <div className="tp-cardfoot--center">
+            <Button data-testid="audit-more" loading={loading} onClick={() => void load(false)}>加载更多</Button>
+          </div>) : undefined)} />
       {openRow && (
         <Card size="small" style={{ marginTop: 12 }} title={"细节 · " + openRow.action}
           data-testid="audit-detail-card" extra={<Button type="link" size="small" data-testid="audit-detail-close"
@@ -182,7 +185,7 @@ export default function AuditTab({ projectId }: { projectId: string }) {
           <Typography.Paragraph className="tp-text-sm" style={{ marginBottom: 6 }}>
             目标：{openRow.target || "—"} · 用户 id：{openRow.user_id ?? "—"}
           </Typography.Paragraph>
-          <pre className="tp-mono" data-testid="audit-detail-body" style={{ margin: 0, maxHeight: 260, overflow: "auto" }}
+          <pre className="tp-mono" data-testid="audit-detail-body" style={{ margin: 0, maxHeight: 240, overflow: "auto" }}
             >{JSON.stringify(openRow.diff ?? {}, null, 2)}</pre>
         </Card>
       )}

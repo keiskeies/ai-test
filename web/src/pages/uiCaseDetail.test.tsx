@@ -196,7 +196,7 @@ describe("ui-case-meta / case-priority 把手行为", () => {
 
   it("ui-case-meta：名字→优先级→环境三件按源码序同排（Space/wrap/8px 间距/10px 底距）；无 update 权整排禁编辑不是摘控件", async () => {
     // 杀什么：:201 摘 wrap → flexWrap 断言红；size={8} 改成别的数 → rowGap 红；
-    // 摘 marginBottom:10 → 底距红；把 EnvSelect 挪出 Space → 源码序红；
+    // 摘 marginBottom:8 → 底距红；把 EnvSelect 挪出 Space → 源码序红；
     // :206 的 canUpdate 三元换成恒真 → 环境成可编辑下拉（「环境只读」缺席）红。
     mockBackend();
     const { unmount } = renderPage();
@@ -208,11 +208,11 @@ describe("ui-case-meta / case-priority 把手行为", () => {
     expect(document.querySelectorAll('[data-testid="ui-case-meta"]')).toHaveLength(1);
     expect(meta.tagName).toBe("DIV");
     expect(meta.className).toContain("ant-space");
-    // :201 的容器属性：wrap→内联 flexWrap:wrap；size={8}→行列 gap 都是 8px；marginBottom:10
+    // :201 的容器属性：wrap→内联 flexWrap:wrap；size={8}→行列 gap 都是 8px；marginBottom:8
     expect(meta.style.flexWrap).toBe("wrap");
     expect(meta.style.columnGap).toBe("8px");
     expect(meta.style.rowGap).toBe("8px");
-    expect(meta.style.marginBottom).toBe("10px");
+    expect(meta.style.marginBottom).toBe("8px");
     // 三件按源码序 name(:202)→priority(:204)→env(:207)，且都在这一排内（挪出/换位即红）
     const kids = ["case-name", "case-priority", "env-select"]
       .map((id) => meta.querySelector(`[data-testid="${id}"]`) as HTMLElement);

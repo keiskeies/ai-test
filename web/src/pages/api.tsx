@@ -30,12 +30,25 @@ import CaseList, { ScenarioRefsBlockModal, scenarioBlockOf } from "../api/CaseLi
 import type { ScenarioBlockDetails } from "../api/CaseList";
 import EnvSelect from "../api/EnvPanel";
 import { cleanRequest, varRefs, METHODS } from "../api/req";
-import { ListToolbar } from "../shared/listToolbar/ListToolbar";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
 import type { Option } from "../shared/listToolbar/ListToolbar";
-import { emptyFilter, filterQuery, isFilterEmpty } from "../shared/listFilters";
-import type { FilterDoc } from "../shared/listFilters";
+import { applyColumnPrefs, emptyFilter, filterQuery, isFilterEmpty } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 import type { ApiDef, Page, RunRow } from "../api/api";
 import { METHOD_TAG } from "../theme";
+/** 列设置面板要露的列（key 必须与下方 columns 的 key 逐字对上，对不上就是「面板能勾、
+ *  表头不动」的假把手——api.test.tsx 的「勾掉方法 → 表头真消失」钉这一环）。
+ *  操作列不列：它带着恢复/彻底删除的入口，被关掉等于把回收站的出口藏起来。 */
+const API_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "接口" },
+  { key: "method", label: "方法" },
+  { key: "mod", label: "模块" },
+  { key: "status", label: "状态" },
+  { key: "owner", label: "负责人" },
+  { key: "upd", label: "更新时间" },
+  { key: "badge", label: "最近结果" },
+];
+
 const STATUS_TAG: Record<string, { color: string; label: string }> = {
   draft: { color: "orange", label: "草稿" },
   complete: { color: "green", label: "完整" },
@@ -52,7 +65,7 @@ interface Badge { status: string; code: number | null; elapsed: number | null; t
 
 function BadgeCell({ b }: { b: Badge | undefined }) {
   if (!b || b.status === "none") {
-    return <Typography.Text type="secondary" style={{ fontSize: 12 }}>未运行</Typography.Text>;
+    return <Typography.Text className="tp-text-sm" type="secondary">未运行</Typography.Text>;
   }
   // 「这一行的运行记录没取到」与「这条接口真的还没跑过」是两件事（§13 纪律 1）：
   // 徽标 loader 是 silent:true，以前 catch 留空 → badges[id] 缺席 → 落进上面那句
@@ -62,7 +75,7 @@ function BadgeCell({ b }: { b: Badge | undefined }) {
   if (b.status === "unknown") {
     return (
       <Tooltip title="这一行的运行记录没取到（可能是请求失败或无权查看），刷新后重试——不能把它当成「未运行」">
-        <Typography.Text type="secondary" data-testid="run-badge-unknown" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid="run-badge-unknown">
           运行记录没取到
         </Typography.Text>
       </Tooltip>
@@ -413,6 +426,7 @@ function ApiWorkbench() {
 
   function removeDef(d: ApiDef) {
     Modal.confirm({
+      centered: true,
       title: "接口放入回收站？",
       // D131：后端只把定义置为 recycled（services.py:275），用例一行都不动——不进回收站、
       // 正常列表里还在，只是所属接口回收期间执行/调试一律 404（services.py:393-394
@@ -461,9 +475,35 @@ function ApiWorkbench() {
 
   const refs = varRefs(fromDraft(draft));
 
+  // 列设置：入口在 ListToolbar 左组（lt-cols），落盘/读盘在 useColumnPrefs，本页只做
+  // 「把 hidden 集套到 columns 上」这一件事。此前它挂在 ProTable 的 options.setting 上，
+  // ProTable 为此在卡片顶边自造一条 48px 空工具栏，只放一个 16px 齿轮——全站只有本页开
+  // options，所以只有本页出现这条孤栏（1280 宽时齿轮正好落在「接口」列表头正上方）。
+  const [colPref, setColPref] = useColumnPrefs("api", API_COL_CHOICES.map((c) => c.key));
+
   return (
-    <Row gutter={16} align="top">
-      <Col flex="208px">
+    /* 满高页：外层 .tp-fill-stack 算到内容区底，页头有几行吃几行，正文（.tp-fill）拿
+       剩下的。不用 tp-fill--head：它按 metrics 的 56px 扣页头，而本页页头带 desc 会折
+       到 86px，扣少了就凭空多出一条 18px 的整页竖滚（见 styles.css 那段）。
+       此前这里根本没有满高约束，表格卡 min-height 实测 0px 纯内容撑高——空项目时一张
+       295px 的小卡浮在 915px 视口里（下方空 414px = 45%），有数据时又长出一条竖滚，
+       同一页的版式跟着数据变。 */
+    <div className="tp-fill">
+      {/* wrap={false}：antd Row 默认 flex-wrap: wrap，而**多行**弹性容器的行高按内容算
+          （align-content 只在有余量时才补，20 行时是 −725 的负余量）。于是整行的交叉轴
+          尺寸跟着表格内容走：行 729 高、右列实测 1454，卡里根本不存在「剩余高度」，
+          min-height:0 那条链在第一环就断了——20 行时表格卡长到 1366、整页滚到 1617
+          （视口 915），分页器掉到 1616。关掉换行后行回到单行模式，交叉轴用容器自身的
+          确定高度 729，卡 641、正文内滚 725/1364、分页器钉在 891、整页 915/915。 */}
+      <Row gutter={16} wrap={false} style={{ flex: "1 1 auto", minHeight: 0 }}>
+        {/* 288 与 scenes.tsx:451 的模块树同宽（此前 208）：模块名是用户起的中文长句，
+            208 下二级模块普遍截断；两棵树的省略口径应该一致。 */}
+        {/* 列本身吃满行高；卡的高度上下界都由 styles.css 管——.tp-fill .ant-col > .ant-card
+            封顶（max-height:100%，展开到 31 个节点时在列里内滚）+ .tp-fill-side 拉满
+            （与右卡同底，短树不再 112 对 641）。这里不写 alignSelf: flex-start——那一行会让
+            列高变成「随内容」，卡的 max-height:100% 就没有确定基准可解，实测 896 的树卡照样
+            溢出 167px 把整页顶滚。 */}
+        <Col flex="288px" className="tp-fill-side">
         <Card size="small">
           <ModuleTree
             projectId={pid} tree={tree} recycled={recycledTree}
@@ -477,9 +517,19 @@ function ApiWorkbench() {
           />
         </Card>
       </Col>
-      {/* flex 基准必须是 0：`auto` 会拿表格内容的 max-content 当基准，208+宽表 > 行宽，
-          antd Row 的 flex-wrap 就把右列整块折到下一行、横跨全宽（2026-11-22 截图实测）。 */}
-      <Col flex="1 1 0" style={{ minWidth: 0 }}>
+      {/* minWidth: 0 是必需的：flex 项的 min-width:auto 会拿内容的 min-content 当下限，
+          表就压不进这一列、只能把列撑宽（内滚也就无从谈起）。基准值 0/auto 实测无差别
+          （1180 宽下 bodyW 都是 642），折行这件事由上面的 wrap={false} 兜住——
+          此前这里靠 `1 1 0` 防折行（2026-11-22 截图：右列整块折到下一行横跨全宽），
+          现在两道闸都在，留着 0 只是让它不必去解内容基准。
+          右栏与左栏同构（.tp-fill-side）：一张吃满列高的面板卡，筛选条 / 表 / 页码
+          三段都住在这张卡里，于是左右两栏共用上下两条边。此前这三段是列的裸子项，
+          卡只有 677、列 765，上下各缩 44/44——同一页里两套容器语义。
+          .tp-fill-body 挂在列上：满高表格卡那串 flex 链（styles.css）按后代选择器命中，
+          搬进卡里不改一行。 */}
+      <Col flex="1 1 0" className="tp-fill-body tp-fill-side" style={{ minWidth: 0 }}>
+        <Card size="small" styles={{ body: { padding: 0 } }}>
+        <div style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
         {/* D47-a 三件套（视图 / 高级搜索 / 列设置）。关键词框保留在 extra 里：D47-b 步4b 起
             它不再是本地子串，而是把已提交关键词以 keyword= 打到后端（name OR path 的
             SQL LIKE，大小写/声调不敏感由后端负责）；与高级搜索仍是两个入口，各打各的参数，
@@ -488,6 +538,7 @@ function ApiWorkbench() {
           projectId={pid} viewType="api"
           filter={advFilter} onFilterChange={(f) => patchFilters({ advFilter: f })}
           valueOptions={filterValueOptions}
+          allColumns={API_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
           canSaveView={can(perms, "search:view:create")}
           canDeleteView={can(perms, "search:view:delete")}
           extra={(<>
@@ -538,11 +589,12 @@ function ApiWorkbench() {
           <Alert type="error" showIcon style={{ marginBottom: 12 }} data-testid="api-def-load-error"
             message="接口列表加载失败" description={loadError} />
         )}
+        </div>
         <AdminTable<ApiDef> rowKey="id" loading={loading} dataSource={defs}
-          // 列设置交给 ProTable 自带面板（options.setting），偏好落 localStorage；
-          // 自建弹层与 applyColumnPrefs 已退场。
-          options={{ setting: true, reload: false, density: false, fullScreen: false }}
-          columnsState={{ persistenceKey: "tp.ptable.api", persistenceType: "localStorage" }}
+          className="tp-inpanel"
+          // 列设置在工具条（allColumns/columnPref 三个 props），不走 ProTable 的
+          // options.setting：那会让 ProTable 在卡片顶边多造一条只放一个齿轮的空工具栏。
+          options={false}
           rowSelection={canRead && !inRecycled ? {
             selectedRowKeys: selected,
             onChange: (keys) => setSelected(keys.map(String)),
@@ -569,8 +621,16 @@ function ApiWorkbench() {
                       // 真分支整串是 e2e api.spec.mjs:12 的契约，不许动。
                       : canCreate ? "还没有接口，点右上角新建" : "还没有接口（你没有新建权限）"} />
           ) }}
-          columns={[
-            { key: "name", title: "接口", dataIndex: "name", width: 200, render: (v: string, r) => (
+          // 998 = 其余固定列 746 + 选择列 32 + 「接口」列下限 220（下面那列刻意不给 width）。
+          // fixed：auto 布局会把超出 998 的部分按比例摊给每一列，实测 1680 视口下 8 列各涨
+          // 12.7%（方法 80→90、最近结果 104→117、操作 158→178）——盈余落在短列就成了空隙。
+          tableLayout="fixed"
+          scroll={{ x: 998 }}
+          columns={applyColumnPrefs([
+            // 「接口」是表里唯一可伸缩的列：table-layout: fixed 下不给 width 就是「吃掉其余
+            // 固定列之外的全部」，窄到 998 时拿到 998−746−32=220 的下限，1680 视口实测 346。
+            // 写死 220 的话盈余就只会去摊别的列（见上面 tableLayout 注释）。加/删列要同步 998。
+            { key: "name", title: "接口", dataIndex: "name", render: (v: string, r) => (
               <Space direction="vertical" size={0}>
                 <a data-testid="api-row" onClick={() => setDetail(r)}>{v}</a>
                 <Typography.Text type="secondary" className="tp-mono tp-text-sm" ellipsis
@@ -590,19 +650,28 @@ function ApiWorkbench() {
               } },
             // 负责人 / 更新时间（蓝图 :1376，D79 可自决半条）：名字来自后端 join app_user
             // 的 owner_name（前端拉成员表换名字在权限上就是错的——/members 要 ensure_member）。
-            { title: "负责人", key: "owner", width: 90, render: (_, r) => (
+            // 宽度按实测内容下限：owner_name 最长是「演示项目管理员」7 字 = 94px（含 16 内边距），
+            // 90 会在 1440 宽（实测列被压到 87）折成两行、行高 86→108。
+            { title: "负责人", key: "owner", width: 96, render: (_, r) => (
               // owner_id 为 null = 真没填负责人 →「—」；owner_id 有值但名字查不到（账号已删）
               // 说「已删除 <短id>」——查不到人 ≠ 没人负责，画「—」会把悬空负责人伪装成空缺。
               <span data-testid="api-row-owner">{!r.owner_id ? "—"
                 : r.owner_name ?? ("已删除 " + r.owner_id.slice(0, 8))}</span>) },
-            { title: "更新时间", key: "upd", width: 128, render: (_, r) => (
+            { title: "更新时间", key: "upd", width: 120, render: (_, r) => (
               // 换算走 shared/timefmt（§3.4-6：UTC 存 / Asia/Shanghai 展示）；
               // 截 ISO 字符串是 ledger R68 记过的 UTC 钟点假绿，禁止。
-              <Typography.Text type="secondary" data-testid="api-row-updated" style={{ fontSize: 12 }}>
+              // 120 = 实测「2026-11-20 11:11」102px + 16 内边距（128 是凭手感给的，多出的 8px
+              // 在这一列没有任何用处：内容是定长的）。
+              <Typography.Text className="tp-text-sm" type="secondary" data-testid="api-row-updated">
                 {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
               </Typography.Text>) },
-            { title: "最近结果", key: "badge", width: 96, render: (_, r) => <BadgeCell b={badges[r.id]} /> },
-            { title: "", key: "ops", width: 150, hideInSetting: true, render: (_, r) => (
+            // 104 的下限来自 run-badge-unknown 那句「运行记录没取到」（实测 84px + 16）：
+            // 它是诚实口径的一部分，折行会把「没取到」说成半句话。
+            { title: "最近结果", key: "badge", width: 104, render: (_, r) => <BadgeCell b={badges[r.id]} /> },
+            // 158 = 回收站视图实测下限（恢复 66 + 彻底删除 72 + 4 间距 + 16 内边距 = 158）。
+            // 原计划砍到 118 把盈余给「接口」列，实测否掉了：118 会让两个按钮折成两行，
+            // 回收站整行 86→108，而活行的按钮只有 76px——列宽得按最宽的那个视图给。
+            { title: "", key: "ops", width: 158, hideInSetting: true, render: (_, r) => (
               // D180：行身份逐行认 r.status，不认视图旗标——视图翻转与 refetch 之间那截窗口里
               // （以及取数一直失败期间）屏上还是活行，「彻底删除」长到活行上不是样式错，
               // 是给用户一个物理删除活接口的按钮。权限位分工不动（canUpdate/canDelete）。
@@ -632,12 +701,24 @@ function ApiWorkbench() {
                   </Space>
                 )
             ) },
-          ]}
+          ], colPref)}
         />
-        {/* D47-b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-            这里垫在 Table 之下；「共 N 条」从此只有服务端这一张嘴——旧脚注拿本地
-            visible.length / defs.length 现攒「共」的日子随本地过滤一起退役了。 */}
-        <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
+        {/* 页脚小字与分页器同一行：满高页的纵向是稀缺资源，这一行口径此前单独吃掉
+            18px 行高 + 12 间距。grid 的最小宽度写死 0（不是 auto），左栏放不下就省略号，
+            不许把中间的分页器挤走；分页器因此仍精确居中，与其余列表页同形。 */}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto minmax(0, 1fr)", alignItems: "center", gap: 8, padding: "12px 12px", flex: "0 0 auto" }}>
+          <Typography.Text className="tp-text-sm" type="secondary"
+            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {/* D47-b 步4b：hasMore 那句「本页取到 N 条（单页上限 200，后面还有没取的）」随游标
+                世界退役——页码模式下下一页永远点得到，「还有没取的」不再是脚注能说的事。
+                失败路径清行清 total（load 的 catch），这句只说「计数不作数」，
+                上一批行与陈旧「共 N」都不再留在屏上冒充当前页。 */}
+            {loadError ? "本次列表加载失败，本行计数不作数" : ""}
+            {/* 「选中模块」四个字的口径随徽标一起改了：徽标与列表如今都是子树口径
+                （步4a 徽标卷算 + 步4b module_ids 带上全部子孙，subtreeIds 的注释记着这笔账），
+                这句只说「你选了哪个模块」，不承诺直属/子树——两个口径下它都是真话。 */}
+            {moduleId ? "（选中模块）" : ""}{shownRecycled ? " · 回收站视图" : ""}
+          </Typography.Text>
           <ListPager
             current={current}
             pageSize={pageSize}
@@ -646,17 +727,7 @@ function ApiWorkbench() {
             onPageSize={setPageSize}
           />
         </div>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {/* D47-b 步4b：hasMore 那句「本页取到 N 条（单页上限 200，后面还有没取的）」随游标
-              世界退役——页码模式下下一页永远点得到，「还有没取的」不再是脚注能说的事。
-              失败路径清行清 total（load 的 catch），这句只说「计数不作数」，
-              上一批行与陈旧「共 N」都不再留在屏上冒充当前页。 */}
-          {loadError ? "本次列表加载失败，本行计数不作数" : ""}
-          {/* 「选中模块」四个字的口径随徽标一起改了：徽标与列表如今都是子树口径
-              （步4a 徽标卷算 + 步4b module_ids 带上全部子孙，subtreeIds 的注释记着这笔账），
-              这句只说「你选了哪个模块」，不承诺直属/子树——两个口径下它都是真话。 */}
-          {moduleId ? "（选中模块）" : ""}{shownRecycled ? " · 回收站视图" : ""}
-        </Typography.Text>
+        </Card>
       </Col>
 
       {/* 全屏编辑器：左基本信息 360 + 右请求编辑器 + 下方调试面板（§11.4.2） */}
@@ -712,7 +783,7 @@ function ApiWorkbench() {
                   </Space>
                 </Card>
               )}
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Text className="tp-text-sm" type="secondary">
                 断言为空时调试只发请求不判定，建议至少加一条状态码断言。
               </Typography.Text>
             </Space>
@@ -755,7 +826,7 @@ function ApiWorkbench() {
       </Drawer>
 
       {/* 彻底删除：不可逆，§11.4.18 要求「输名称确认」；服务端同样硬校验，不靠前端拦 */}
-      <Modal
+      <Modal centered
         open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         destroyOnHidden width={520}
         title="彻底删除接口？" okText="我已确认，彻底删除" cancelText="取消"
@@ -791,7 +862,8 @@ function ApiWorkbench() {
       {/* 导入向导（1E T4，§11.4.6）：三步 Steps；完成或关闭都刷一次列表 */}
       <ImportWizard projectId={pid} open={importOpen} onClose={() => setImportOpen(false)}
         onImported={() => void load()} />
-    </Row>
+      </Row>
+    </div>
   );
 }
 
@@ -919,7 +991,7 @@ function DetailBody({ def, envId, canDebug, perms, initialTab = "def", onChanged
               <Button type="primary" data-testid="detail-run" loading={running}
                 onClick={() => void runDebug()}>用当前环境调试</Button>
             )}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" type="secondary">
               调试会发真实请求并记入运行记录，不会改动定义。
             </Typography.Text>
           </Space>
@@ -934,18 +1006,18 @@ function DetailBody({ def, envId, canDebug, perms, initialTab = "def", onChanged
               <Button size="small" type="primary" ghost icon={<PlusOutlined />}
                 data-testid="detail-save-case"
                 onClick={() => { setCaseName(def.name); setCaseModal(true); }}>保存为用例</Button>
-              <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              <Typography.Text className="tp-text-sm" type="secondary" style={{ marginLeft: 8 }}>
                 把本次调试的请求存为该接口下的用例（完全继承接口请求，追加断言 0 条）。
               </Typography.Text>
             </div>
           )}
-          <Modal open={caseModal} onCancel={() => setCaseModal(false)} destroyOnHidden width={480}
+          <Modal centered open={caseModal} onCancel={() => setCaseModal(false)} destroyOnHidden width={480}
             title={"保存为用例 · 继承自「" + def.name + "」"}
             okText="创建" cancelText="取消"
             okButtonProps={{ "data-testid": "detail-save-case-ok", loading: caseSaving }}
             onOk={() => void saveAsCase()}>
             <div data-testid="save-case-modal">
-              <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Paragraph className="tp-text-sm" type="secondary">
                 请求对象完全继承接口「{def.name}」（后续在用例编辑器里按键覆盖），追加 0 条断言，
                 优先级默认 P2，可创建后编辑。
                 <br />
@@ -979,17 +1051,17 @@ function DetailBody({ def, envId, canDebug, perms, initialTab = "def", onChanged
         <div data-testid="detail-refs">
           {refsError != null ? (
             <Space size={6} data-testid="detail-refs-error">
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>引用清单没拉到：{refsError}</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary">引用清单没拉到：{refsError}</Typography.Text>
               <Button size="small" type="link" onClick={() => void loadRefs()}>重试</Button>
             </Space>
           ) : refs === null ? (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>加载中…</Typography.Text>
+            <Typography.Text className="tp-text-sm" type="secondary">加载中…</Typography.Text>
           ) : refs.items.length === 0 ? (
-            <Typography.Text type="secondary" data-testid="detail-refs-empty" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" type="secondary" data-testid="detail-refs-empty">
               还没有场景引用这个接口
             </Typography.Text>
           ) : (
-            <ul style={{ margin: "2px 0 0", paddingLeft: 18, fontSize: 12 }}>
+            <ul className="tp-text-sm" style={{ margin: "2px 0 0", paddingLeft: 18 }}>
               {refs.items.map((it) => (
                 <li key={it.scenario_id} data-testid="detail-ref">
                   <Typography.Link href={"#/scene/" + it.scenario_id}>{it.scenario_name}</Typography.Link>
@@ -1010,8 +1082,8 @@ function DetailBody({ def, envId, canDebug, perms, initialTab = "def", onChanged
 export default function ApiPage() {
   const { project } = useAuth();
   return (
-    <div data-testid="page-api">
-      <PageHead title="接口管理"
+    <div data-testid="page-api" className="tp-fill-stack">
+      <PageHead title="接口管理" descHover
         desc="接口定义与其用例的统一入口：左侧模块树、右侧列表，命令行「调试」即产生运行记录。"
         extra={project ? (
           <Tooltip title={"当前项目：" + project.name}>

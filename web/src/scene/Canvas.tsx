@@ -102,34 +102,32 @@ function NodeInner(props: NodeProps) {
       }}
     >
       <span style={{ width: 4, background: meta.color, borderRadius: "6px 0 0 6px", flex: "0 0 4px" }} />
-      <div style={{ padding: "6px 10px", minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12, color: "var(--tp-text-2)", display: "flex", gap: 6, alignItems: "center" }}>
+      <div style={{ padding: "8px 12px", minWidth: 0, flex: 1 }}>
+        <div className="tp-text-sm" style={{ color: "var(--tp-text-2)", display: "flex", gap: 6, alignItems: "center" }}>
           <span>{meta.label}</span>
-          {n.disable && <span data-testid="node-disabled-tag" style={{
-            background: "#F2F3F4", color: "#8B8E94", borderRadius: 4, padding: "0 4px", fontSize: 11,
-          }}>已禁用</span>}
-          {blocked && <span style={{ color: "#D48806", fontSize: 11 }}>保存会被拒（{BLOCKED_1B[n.kind]} 开放）</span>}
-        </div>
-        <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {n.disable && <span className="tp-text-xs" data-testid="node-disabled-tag" style={{ background: "#F2F3F4", color: "#8B8E94", borderRadius: 4, padding: "0 4px" }}>已禁用</span>}
+          {blocked && <span className="tp-text-xs" style={{ color: "#D48806" }}>保存会被拒（{BLOCKED_1B[n.kind]} 开放）</span>}
+</div>
+        <div className="tp-text-md" style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {n.name || n.key}
         </div>
-        <div style={{ fontSize: 11, color: "var(--tp-text-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {summary} · {n.key}
+        <div className="tp-text-xs" style={{ color: "var(--tp-text-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {/* 顶栏只有类型标签、没有 key——底行 key 必须留；名称与标题撞同时不再复读一遍 */}
+          {n.kind === "api_case" && d.caseName != null && d.caseName === (n.name || n.key)
+            ? n.key
+            : summary + " · " + n.key}
         </div>
       </div>
       {d.bad && (
-        <span data-testid="node-badge" title="本地校验问题，见底部问题面板" style={{
-          position: "absolute", top: -7, right: -7, width: 16, height: 16, borderRadius: "50%",
-          background: "var(--tp-func-error)", color: "#fff", fontSize: 11, lineHeight: "16px", textAlign: "center",
-        }}>!</span>
+        <span className="tp-text-xs" data-testid="node-badge" title="本地校验问题，见底部问题面板" style={{ position: "absolute", top: -7, right: -7, width: 16, height: 16, borderRadius: "50%", background: "var(--tp-func-error)", color: "#fff", lineHeight: "16px", textAlign: "center" }}>!</span>
       )}
       {d.hasChildren && (
-        <span data-testid={"node-collapse-" + n.key}
+        <span className="tp-text-xs" data-testid={"node-collapse-" + n.key}
           onDoubleClick={(e) => e.stopPropagation()}
           onClick={(e) => { e.stopPropagation(); useSceneStore.getState().toggleCollapsed(n.key); }}
           style={{
             position: "absolute", bottom: -10, left: "50%", transform: "translateX(-50%)",
-            background: "var(--tp-bg-container)", border: "1px solid var(--tp-border)", borderRadius: 8, fontSize: 10,
+            background: "var(--tp-bg-container)", border: "1px solid var(--tp-border)", borderRadius: 8,
             padding: "0 6px", cursor: "pointer", color: "var(--tp-text-2)", zIndex: 2,
           }}>
           {d.collapsed ? "+" : "−"}
@@ -175,7 +173,7 @@ function MoveIntoModal(props: { targetKey: string | null; onClose: () => void })
     props.onClose();
   };
   return (
-    <Modal open data-testid="move-into-modal" title="移入容器" onCancel={props.onClose}
+    <Modal centered open data-testid="move-into-modal" title="移入容器" onCancel={props.onClose}
       footer={<Button onClick={props.onClose}>取消</Button>} width={420}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <Button data-testid="move-into-top" onClick={() => tryMove(null)}>移到顶层</Button>
@@ -322,11 +320,11 @@ export default function Canvas() {
         onDragOver={(e) => { e.preventDefault(); }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--tp-border)" />
-        <MiniMap pannable zoomable style={{ width: 120, height: 80 }}
+        <MiniMap pannable zoomable style={{ width: 180, height: 120 }}
           onNodeClick={(_, n) => select(n.id)} />
       </ReactFlow>
       {dirty && (
-        <span data-testid="canvas-hint-dirty" style={{ position: "absolute", top: 8, left: 8, color: "var(--tp-text-3)", fontSize: 12, zIndex: 4 }}>
+        <span className="tp-text-sm" data-testid="canvas-hint-dirty" style={{ position: "absolute", top: 8, left: 8, color: "var(--tp-text-3)", zIndex: 4 }}>
           有未保存修改（Ctrl+S 保存；Shift+框选多选后可成组）
         </span>
       )}
@@ -352,8 +350,7 @@ function GroupButton() {
   // 「把选中的 N 步成组」的钮，点下去树纹丝不动——钮必须只在真能成组时给。
   if (!sameLevelSelection(nodes, selectedKeys)) {
     return (
-      <span data-testid="canvas-group-note"
-        style={{ position: "absolute", bottom: 12, left: 12, zIndex: 5, fontSize: 12, color: tpv.text[3] }}>
+      <span className="tp-text-sm" data-testid="canvas-group-note" style={{ position: "absolute", bottom: 12, left: 12, zIndex: 5, color: tpv.text[3] }}>
         选中的 {selectedKeys.length} 步不在同一层，成组只收同一层的步骤
       </span>
     );

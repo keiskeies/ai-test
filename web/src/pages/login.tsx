@@ -25,7 +25,7 @@ export default function LoginPage() {
     <div style={{ minHeight: "100vh", background: tpv.bg.layout, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <Card style={{ width: 400, boxShadow: tpv.shadow.s2 }}>
         <div style={{ textAlign: "center", marginBottom: 24 }}>
-          <Typography.Title level={3} style={{ marginBottom: 4 }} data-testid="login-heading">
+          <Typography.Title level={3} style={{ marginBottom: 8 }} data-testid="login-heading">
             TestPilot
           </Typography.Title>
           <Typography.Text type="secondary">自托管智能测试平台</Typography.Text>
@@ -41,7 +41,7 @@ export default function LoginPage() {
             登录
           </Button>
         </Form>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 16, marginBottom: 0, fontSize: 12, textAlign: "center" }}>
+        <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ marginTop: 16, marginBottom: 0, textAlign: "center" }}>
           没有账号？请联系管理员开通（平台不开放注册）
         </Typography.Paragraph>
       </Card>

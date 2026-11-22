@@ -41,27 +41,27 @@ export default function ScenarioPlansCard({ payload, ctx }: { payload: ScenarioP
             key={i}
             data-testid="plan-card"
             size="small"
-            title={<Typography.Text strong style={{ fontSize: 13 }}>{name}</Typography.Text>}
+            title={<Typography.Text className="tp-text-md" strong>{name}</Typography.Text>}
             style={{ flex: "1 1 300px", minWidth: 280 }}
           >
-            <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 6 }}>
+            <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ marginBottom: 6 }}>
               覆盖意图：{String(plan.intent ?? "—")}
             </Typography.Paragraph>
             <div data-testid="step-preview">
-              <Typography.Text style={{ fontSize: 12 }}>步骤预览：</Typography.Text>
-              <ol style={{ margin: "2px 0 6px", paddingLeft: 20, fontSize: 12 }}>
+              <Typography.Text className="tp-text-sm">步骤预览：</Typography.Text>
+              <ol className="tp-text-sm" style={{ margin: "2px 0 6px", paddingLeft: 20 }}>
                 {(Array.isArray(plan.est_steps) ? plan.est_steps : []).map((s, j) => (
                   <li key={j} data-testid="step-preview-row">{String(s)}</li>
                 ))}
               </ol>
             </div>
             {Array.isArray(plan.risks) && plan.risks.length > 0 && (
-              <Typography.Paragraph type="warning" style={{ fontSize: 12, marginBottom: 6 }}>
+              <Typography.Paragraph className="tp-text-sm" type="warning" style={{ marginBottom: 6 }}>
                 风险点：{plan.risks.map(String).join("；")}
               </Typography.Paragraph>
             )}
             {plan.env_hint && (
-              <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 6 }}>
+              <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ marginBottom: 6 }}>
                 环境建议：{String(plan.env_hint)}
               </Typography.Paragraph>
             )}
@@ -90,10 +90,10 @@ export default function ScenarioPlansCard({ payload, ctx }: { payload: ScenarioP
               >
                 选择
               </Button>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>保存（二期开放）</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary">保存（二期开放）</Typography.Text>
             </Space>
             {ctx.busy && (
-              <Typography.Text type="secondary" data-testid="card-busy-note" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+              <Typography.Text className="tp-text-sm" type="secondary" data-testid="card-busy-note" style={{ display: "block", marginTop: 6 }}>
                 等本轮结束
               </Typography.Text>
             )}

@@ -60,7 +60,8 @@ export default function AuditDiffModal({ diff, action, onClose }: {
         >{cell(v)}</div>) },
   ];
   return (
-    <Modal open onCancel={onClose} width={960} destroyOnHidden title={"变更对照 · " + action}
+    // centered：antd 默认 top:100，768 高屏上 960 宽的对照表底部顶出视口（2026-11-22 实测）。
+    <Modal open onCancel={onClose} width={960} centered destroyOnHidden title={"变更对照 · " + action}
       data-testid="audit-diff-modal"
       footer={<Typography.Text data-testid="audit-diff-summary" className="tp-text-sm">
         {changedCount === 0 ? <Tag>无差异键</Tag> : <Tag color="orange">{changedCount} 个差异键</Tag>}

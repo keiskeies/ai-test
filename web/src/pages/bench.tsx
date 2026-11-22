@@ -333,11 +333,9 @@ export default function Bench() {
   ];
 
   return (
-    // 整页 = 一条纵向 flex：块间距靠 gap，会话流靠 flex:1 吃掉剩余高度。
-    // 父级链路（.tp-main-content → .tp-content）自带滚动，所以这一列**不再算视口减法**
-    // （旧版 `calc(100vh - 330px)` 是拿常量猜骨架高度，骨架一动就错、还多出一条滚动条）。
-    // minHeight: 0 是 flex 子项能真正被压缩/撑开的前提，缺了它 overflow 会落到祖先身上。
-    <div data-testid="bench" style={{ display: "flex", flexDirection: "column", minHeight: 0, gap: 12 }}>
+    // 整页 = .tp-fill 纵向填满视口（遮挡高度从 metrics 反解，见 styles.css），块间距靠 gap。
+    // 旧版 `calc(100vh - 330px)` 是拿常量猜骨架高度，骨架一动就错、还多出一条滚动条。
+    <div data-testid="bench" className="tp-fill tp-fill--head" style={{ gap: tp.gap.sm }}>
       <div className="tp-page-head">
         <span className="tp-page-title">Pilot 试验台</span>
         <Space>
@@ -371,12 +369,15 @@ export default function Bench() {
       </FilterBar>
 
       {armed && (
-        <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
+        // 窄容器兜底：会话列 basis 360 + 右栏 256 折行阈值 ~632px，容器再窄右栏整块换到下一行，
+        // 而不是把两列一起挤扁（jsdom/无 matchMedia，用 flex-wrap 做容器断点）。
+        <div className="tp-fill-body" style={{ display: "flex", flexWrap: "wrap", gap: tp.gap.md }}>
+          <div style={{ flex: "1 1 360px", minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
             <div
               ref={listRef}
               data-testid="bench-stream"
-              style={{ flex: 1, minHeight: 320, overflowY: "auto", paddingRight: 8 }}>
+              className="tp-fill-body"
+              style={{ overflowY: "auto", paddingRight: 8 }}>
               {events.length === 0 && (
                 <StateView title="发一条消息，看 Pilot 一步步干活"
                   desc="Pilot 会把每一步工具调用、参数与返回，以及产出的资源都落在这条流里。"
@@ -392,7 +393,7 @@ export default function Bench() {
             {/* 汇总 pill（改版）：参考图上是「3 个文件已修改 +2 -6」，本后端不产 diff 统计，
                 所以这里只报事件流真说得出的两件事，且没改动过资源就整块不出现（不摆一个 0）。 */}
             {produced.length > 0 && (
-              <div data-testid="bench-summary-pill" style={{ display: "inline-flex", alignItems: "center", gap: 8, margin: "4px 0 0", padding: "4px 12px", borderRadius: tp.radius.pill, border: `1px solid ${tpv.primary[200]}`, background: tpv.primary[50], fontSize: tp.fontSize.sm, color: tpv.primary[700] }}>
+              <div data-testid="bench-summary-pill" style={{ display: "inline-flex", alignItems: "center", gap: 8, margin: "8px 0 0", padding: "4px 12px", borderRadius: tp.radius.pill, border: `1px solid ${tpv.primary[200]}`, background: tpv.primary[50], fontSize: tp.fontSize.sm, color: tpv.primary[700] }}>
                 <span data-testid="bench-pill-produced">已改动 {produced.length} 个资源</span>
                 <span style={{ color: tpv.primary[300] }}>·</span>
                 <span data-testid="bench-pill-tools">工具调用 {stat.toolCalls} 次</span>
@@ -413,10 +414,10 @@ export default function Bench() {
                 style={{
                   width: "100%", boxSizing: "border-box", resize: "none", display: "block",
                   background: tpv.bg.container, border: `1px solid ${tpv.border}`, borderRadius: tp.radius.xl,
-                  padding: "10px 12px 0", fontSize: tp.fontSize.base, outline: "none", fontFamily: "inherit",
+                  padding: "8px 12px 0", fontSize: tp.fontSize.base, outline: "none", fontFamily: "inherit",
                 }}
               />
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "6px 8px 8px 12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 8px 8px 12px" }}>
                 <Select
                   data-testid="bench-mode-select" size="small" variant="borderless" popupMatchSelectWidth={false}
                   value={mode} disabled={running || sessionId !== null} onChange={(v) => setMode(v)}
@@ -465,7 +466,7 @@ export default function Bench() {
 
           {/* 右栏（改版）：只放事件流真说得出的事实。截图里的「+2 -6 文件改动」「来源列表」
               本后端不产（无 diff 统计、无引用来源），照抄就是假面板，故整块不做。 */}
-          <div data-testid="bench-side" style={{ width: 260, flexShrink: 0, borderLeft: `1px solid ${tpv.split}`, paddingLeft: 16 }}>
+          <div data-testid="bench-side" style={{ width: 256, flexShrink: 0, borderLeft: `1px solid ${tpv.split}`, paddingLeft: 16 }}>
             <Typography.Text type="secondary" className="tp-text-sm">会话进度</Typography.Text>
             <div data-testid="bench-side-progress" className="tp-text-md" style={{ marginTop: 6 }}>
               <div>工具调用 <span className="tp-mono">{stat.toolCalls}</span> 次
@@ -518,7 +519,10 @@ export default function Bench() {
         </div>
       )}
       {!armed && (
-        <Card styles={{ body: { padding: 16 } }}>
+        // 空态 Card 撑满 tp-fill 余高并垂直居中（同 adb 设备管理空态），否则 206px 卡贴顶、
+        // 下方留约 421px 死空（2026-11-22 量测：面板 747 高、卡 y200→406）。
+        <Card style={{ flex: "1 1 0", minHeight: 0 }}
+          styles={{ body: { padding: 16, height: "100%", display: "flex", flexDirection: "column", justifyContent: "center" } }}>
           {/* 空白态不再摆第二个 primary：上方参数条里的「开始新会话」是全局唯一的主动作
               （§11.6.6 每屏 ≤1 个主色实底按钮）。这里只解释「为什么是空的」。 */}
           <StateView title="选择项目并点「开始新会话」"

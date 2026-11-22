@@ -148,7 +148,7 @@ function Detail() {
       content: "物理删除，不可恢复：后端在同一事务里删掉这份报告头和它的全部明细行"
         + "（级联只按 report_id，别的报告的明细一根毫毛不动）。",
       okText: "删除", okButtonProps: { danger: true, "data-testid": "plan-report-detail-delete-ok" },
-      cancelText: "取消",
+      cancelText: "取消", centered: true,
       onOk: async () => {
         try {
           await planApi.deleteReport(report.id, { project_id: projectId });
@@ -169,29 +169,28 @@ function Detail() {
             {SUBJECT_TYPES[r.subject_type]?.label ?? r.subject_type}
           </Tag>
           {/* subject_name = 生成时刻的快照名（此后改用例不动这里）——生码直读，不 join 资产表。 */}
-          <Typography.Text style={{ fontSize: 12 }}>{r.subject_name}</Typography.Text>
+          <Typography.Text className="tp-text-sm">{r.subject_name}</Typography.Text>
         </Space>
       ) },
     { title: "对象 id", dataIndex: "subject_id", key: "subject_id", width: 120,
       render: (v: string) => (
-        <Typography.Text type="secondary" className="tp-mono" style={{ fontSize: 11 }}
-          title={v}>{shortId(v)}</Typography.Text>) },
+        <Typography.Text type="secondary" className="tp-mono tp-text-xs" title={v}>{shortId(v)}</Typography.Text>) },
     { title: "生成时结论", key: "result", width: 150,
       render: (_: unknown, r) => <ItemResultCell it={r} /> },
-    { title: "环境", key: "env", width: 160,
+    { title: "环境", key: "env", width: 240,
       render: (_: unknown, r) => {
         // env_id = 生成时刻关联行环境值的副本；有 id 画短 id（生码——本页不拉 /envs，
         // 为一个快照副本开一条实时清单请求不值当，也不许拿别的时刻的环境名冒充当时的）。
         const label = r.env_id
-          ? <Typography.Text style={{ fontSize: 12 }}>{shortId(r.env_id)}</Typography.Text>
+          ? <Typography.Text className="tp-text-sm">{shortId(r.env_id)}</Typography.Text>
           : <Tooltip title="生成时关联行没覆盖环境：执行时沿用该对象自己的默认环境（抄的是当时的值）">
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{ENV_INHERIT}</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary">{ENV_INHERIT}</Typography.Text>
             </Tooltip>;
         return <span data-testid={"plan-report-item-env-" + r.id}>{label}</span>;
       } },
     { title: "快照时间", dataIndex: "created_at", key: "created_at", width: 150,
       render: (v: string | null) => (
-        <Typography.Text data-testid="plan-report-item-created" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" data-testid="plan-report-item-created">
           {fmtTime(v) ?? "—"}
         </Typography.Text>) },
   ];
@@ -228,7 +227,7 @@ function Detail() {
         </div>
       );
     }
-    return <Spin style={{ display: "block", margin: "20vh auto" }}
+    return <Spin style={{ display: "block", margin: "var(--tp-gap-lg) auto" }}
       data-testid="plan-report-detail-loading" />;
   }
 
@@ -256,7 +255,7 @@ function Detail() {
           <Space wrap size={6}>
             <Typography.Text strong>{report.name}</Typography.Text>
             <Tag color={dm.color} data-testid="plan-report-detail-status">{dm.label}</Tag>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>生成时状态快照</Typography.Text>
+            <Typography.Text className="tp-text-sm" type="secondary">生成时状态快照</Typography.Text>
           </Space>
         }>
         <Space size={24} wrap>
@@ -265,7 +264,7 @@ function Detail() {
           <span data-testid="plan-report-detail-pass-ring" data-rate={String(report.pass_rate)}>
             <PassRing rate={report.pass_rate} size={56} />
           </span>
-          <Descriptions size="small" column={4} colon={false} items={[
+          <Descriptions size="small" column={{ xs: 2, md: 4 }} colon={false} items={[
             // 两个率与六个计数全部直读详情头（口径 ①：页面零除法——data-rate 上钉的是后端
             // 给的原值，测试逐字断言，naive passed/total 复算必红）。
             { key: "pr", label: "通过率", children: (
@@ -290,7 +289,7 @@ function Detail() {
               <span data-testid="plan-report-detail-failed">{report.failed}</span>) },
           ]} />
         </Space>
-        <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" style={{ display: "block", marginTop: 8 }}>
           报告是生成时刻的定格快照：数字是当时抄下的副本（两率由后端从存量计数读时派生，
           分母恒为关联总数，空报告是 0% 不是 100%），此后的执行不动这份报告。本页一条除法都不做。
         </Typography.Text>
@@ -320,14 +319,15 @@ function Detail() {
           locale={{ emptyText: itemsError
             ? "没取到明细——原因见上方错误条，点右上角「刷新」重试"
             : "这份报告生成时计划没有关联对象（快照就是空的）" }} />
-        <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+        {/* 页码与脚注并成一排（卡内脚注格 .tp-cardfoot，口径同列表页）：省下卡体里整整一行。 */}
+        <div className="tp-cardfoot">
+          <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+              明细走页码窗口（序 = link_id 升序，与详情内联 items 同源同序）；「生成时结论」来自
+              快照副本，不回查实时状态——「执行中」来自 executing 布尔，不混进结论词表。
+          </Typography.Text>
           <ListPager current={current} pageSize={pageSize} total={total}
             onPage={setCurrent} onPageSize={setPageSize} />
         </div>
-        <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
-          明细走页码窗口（序 = link_id 升序，与详情内联 items 同源同序）；「生成时结论」来自
-          快照副本，不回查实时状态——「执行中」来自 executing 布尔，不混进结论词表。
-        </Typography.Text>
       </Card>
     </div>
   );

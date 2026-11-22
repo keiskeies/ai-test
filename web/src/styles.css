@@ -16,6 +16,11 @@
   --tp-metric-page-pad: 24px;
   --tp-metric-page-head-h: 56px;
   --tp-metric-control-h: 32px;
+  /* 间距阶梯（theme.ts 的 tp.gap）：只有 8/12/16/24 四档，见 theme.ts 的注释 */
+  --tp-gap-xs: 8px;
+  --tp-gap-sm: 12px;
+  --tp-gap-md: 16px;
+  --tp-gap-lg: 24px;
 
   /* ── 品牌 / 功能 / 域 ── */
   --tp-primary-50: #EAF6F1;
@@ -148,7 +153,11 @@ body {
 /* ───────────── 骨架（ProLayout 接管） ───────────── */
 /* 布局结构、侧栏滚动、菜单展开/折叠、固定头部/侧栏全部由 antd ProLayout 负责。
    这里只做三件事：把颜色接到我们的 CSS 变量、把折叠宽度钉到 56、给选中项加 3px 竖条。 */
-.ant-pro-layout .ant-pro-sider {
+/* ProLayout 给侧栏的实色规则是 .ant-layout-sider.ant-pro-sider{background:transparent}
+   （4 个类），只写 .ant-pro-sider 会被它吃掉——2026-11-22 实测侧栏 computed 是
+   rgba(0,0,0,0)，全靠 body 的 layout 色托底，于是侧栏与内容区之间只剩一条 1px 线。
+   选择器必须带上 .ant-layout-sider 才打得平。 */
+.ant-pro-layout .ant-layout-sider.ant-pro-sider {
   background: var(--tp-bg-container);
   border-right: 1px solid var(--tp-split);
 }
@@ -158,13 +167,51 @@ body {
   scrollbar-width: thin;
   scrollbar-gutter: stable;
 }
-.ant-pro-layout .ant-pro-sider .ant-menu-item,
-.ant-pro-layout .ant-pro-sider .ant-menu-submenu-title { height: 36px; line-height: 36px; }
+/* 菜单层级（2026-11-22 审计：标题 12/500/text-2 与条目 14/400/text-2 同色同轨，
+   6 组 17 项读起来是一张平表）。menu.type=group 后，一级节点画成「分组标签 +
+   分隔线」，条目才拿到图标槽。分层靠四件事：
+   ① 条目挂图标 → 文字左轨比分组标签缩进一级；
+   ② 分组标签退到 text-3 + 600 + 更矮的 30（它是标签不是点击目标），条目 34 高；
+   ③ 组与组之间用 ProLayout 的 divider + 4px 空气分成块；
+   ④ 分组图标压到 text-3，与标签同层，不抢条目的注意力。
+   34 高是为了让整棵树在 915 视口里少滚：原本 23 行 968 > 容器 859。 */
+.ant-pro-layout .ant-pro-sider .ant-menu-item { height: 34px; line-height: 34px; }
+.ant-pro-layout .ant-pro-sider .ant-menu-item-group-title {
+  height: 30px;
+  line-height: 30px;
+  font-size: var(--tp-fs-sm);
+  font-weight: 600;
+  color: var(--tp-text-3);
+  letter-spacing: .04em;
+  padding: 0 8px;
+}
+/* 分组图标与条目图标：继承所在层文字色（标签 text-3 / 条目 text-2），不用 antd 默认。
+   图标 16px（外部基准：展开侧栏图标 16-20px；1em 会跟着 12/14px 文字缩成 12/14，
+   比 16 小一档，扫读时不够抓眼）。条目 14px/500（同基准的 label 规格）。 */
+.ant-pro-layout .ant-pro-sider .ant-menu-item-group-title .anticon,
+.ant-pro-layout .ant-pro-sider .ant-menu-item .anticon { color: inherit; }
+.ant-pro-layout .ant-pro-sider .ant-pro-base-menu-inline-item-icon svg,
+.ant-pro-layout .ant-pro-sider .ant-menu-item-group-title .anticon svg { width: 16px; height: 16px; }
+.ant-pro-layout .ant-pro-sider .ant-menu-item { color: var(--tp-text-2); font-weight: 500; }
+/* 折叠窄轨（56px）：叶子图标 17 枚 + 6 条 divider 已足以导航。分组标题行在折叠态
+   只出 CJK 标签（37-40px 宽）、没有图标，56 宽里必然被裁成半截字——整行藏掉，
+   让 divider 继续分组。选择器必须把两个类叠在同一个 sider 节点上
+   （.ant-layout-sider-collapsed 与 .ant-pro-sider 是同一元素，不能做后代）。 */
+.ant-pro-layout .ant-pro-sider.ant-layout-sider-collapsed .ant-menu-item-group-title {
+  display: none;
+}
+/* divider：组与组之间的 1px 线，钉到 split 色（ProLayout 默认走 token，深浅两套都要对） */
+.ant-pro-layout .ant-pro-sider .ant-pro-base-menu-divider,
+.ant-pro-layout .ant-pro-sider .ant-menu .ant-menu-divider {
+  border-color: var(--tp-split);
+  margin: 6px 16px;
+}
+/* submenu 形态的兜底（折叠飞层里 antd 仍按 SubMenu 画）：同款标签样式 */
 .ant-pro-layout .ant-pro-sider .ant-menu-submenu-title {
   font-size: var(--tp-fs-sm);
-  font-weight: 500;
-  color: var(--tp-text-2);
-  letter-spacing: .02em;
+  font-weight: 600;
+  color: var(--tp-text-3);
+  letter-spacing: .04em;
 }
 .ant-pro-layout .ant-pro-sider .ant-menu-submenu-title:hover { color: var(--tp-text-2); }
 /* ProLayout 菜单项字色来自它自己的 token（navTheme=light 时是黑色）。
@@ -197,18 +244,34 @@ body {
   min-width: 56px !important;
   max-width: 56px !important;
 }
-/* ProLayout 的头部默认是半透明+模糊（实测 rgba(...,0.6)）；这里钉回实色容器底，
-   否则深色下会出现「内容透过头栏」的糊感。 */
+/* 顶栏真正上底色的是**外层** .ant-layout-header.ant-pro-layout-header
+   （实测 rgba(27,35,42,.6) + backdrop-filter: blur(8px)），此前只压了内层
+   .ant-pro-global-header——它只覆盖 x=16..1638，条带两侧各留 16px 半透明，
+   内容滚动时侧栏文字从头栏底下透出来。外层与内层一起钉成同一实色才对。 */
+.ant-pro-layout .ant-layout-header.ant-pro-layout-header,
 .ant-pro-layout .ant-pro-global-header,
 .ant-pro-layout .ant-pro-top-nav-header {
   background: var(--tp-bg-container) !important;
-  border-bottom: 1px solid var(--tp-split);
   box-shadow: none;
   backdrop-filter: none;
 }
+.ant-pro-layout .ant-layout-header.ant-pro-layout-header {
+  border-block-end: 1px solid var(--tp-split);
+}
 .ant-pro-layout .ant-pro-layout-content { background: var(--tp-bg-layout); }
-.ant-pro-layout .ant-pro-global-header-header-actions-item { align-items: center; }
 .ant-pro-layout .ant-layout-header { height: 56px; line-height: 56px; }
+/* line-height:56 是 antd 给「纯文字标题」用的居中手段，但它会继承进操作区：
+   实测一个 32 高的 Select 因此撑成 68 行盒，用户菜单只好用 paddingTop:2 手工找平。
+   操作项一律 normal——高度由 align-items:center 管，不由行盒管。 */
+.ant-pro-layout .ant-pro-global-header-header-actions-item { line-height: normal; align-items: center; padding: 0 2px; }
+/* 同一条顶栏里的控件必须共一行中线（2026-11-22 实测：5 个操作项 32/44/36/32/38 五种高，
+   看起来是一排没对齐的方块）。全部钉到 controlH=32 并垂直居中：
+   项目切换 Select 与搜索框是 antd 默认 32，但外层包 div 会随行盒漂到 44/36；
+   用户区（26 头像 + 20 行文字 = 46 高）与侧栏钮 32 各让一步到同一中线。 */
+.ant-pro-layout .ant-pro-global-header-header-actions-item .ant-select,
+.ant-pro-layout .ant-pro-global-header-header-actions-item .ant-input-affix-wrapper { height: 32px; }
+.ant-pro-layout .ant-pro-global-header-header-actions-item [data-testid="project-switcher"] { height: 32px; }
+.ant-pro-layout .ant-pro-global-header-header-actions-item [data-testid="user-menu"] { height: 32px; }
 
 /* 品牌块（ProLayout 的 logo/title 槽） */
 .tp-logo-mark {
@@ -276,6 +339,12 @@ body {
   letter-spacing: -0.01em;
 }
 .tp-page-desc { font-size: var(--tp-fs-sm); color: var(--tp-text-2); line-height: 20px; }
+/* 紧凑页头（PageHead 的 descHover）：满高页的页头是吸顶 chrome，它每多一行正文就少
+   一行。接口管理 1680×915 实测页头 86px（标题 28 + 说明 20 + PageHeader padding 22 +
+   下缘 8），正文只剩 811，而那一行说明既不滚动也不承载操作——说明收进标题悬停后按
+   单行收：min-height 40 = 标题 28 + padding-top 4 + 下缘留白 8。
+   metrics 的 56 是给带说明的页头留的，其余页面照旧。 */
+.tp-page-head--compact { min-height: 40px; padding-bottom: 4px; }
 .tp-page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .tp-breadcrumb { font-size: var(--tp-fs-sm); color: var(--tp-text-3); line-height: 20px; }
 
@@ -288,12 +357,70 @@ body {
 .tp-text-sm { font-size: var(--tp-fs-sm); line-height: 18px; }
 .tp-text-md { font-size: var(--tp-fs-md); line-height: 20px; }
 .tp-text-base { font-size: var(--tp-fs-base); line-height: 22px; }
+.tp-text-lg { font-size: var(--tp-fs-lg); line-height: 24px; }
 .tp-secondary { color: var(--tp-text-2); }
 .tp-tertiary { color: var(--tp-text-3); }
 
 /* 区块卡：页面里成组的内容统一用它，别再用裸 Card + 内联 margin */
-.tp-block { margin-top: 16px; }
+.tp-block { margin-top: var(--tp-gap-md); }
 .tp-card { background: var(--tp-bg-container); border: 1px solid var(--tp-border); border-radius: var(--tp-radius-lg); }
+
+/* 满高页：把「填满剩余高度」这件事收进一处（2026-11-22 审计：此前 6 页各抄一份
+   calc(100vh − 魔数)，魔数 104/120/160 三个值都对不上真实遮挡，结果要么留白要么双滚）。
+   遮挡高度全部从 metrics 反解：顶栏 + 内容区上下 padding（+ 吸顶页头，用 --head 变体加上）。
+   用法：根 <div className="tp-fill tp-fill--head"> → 里面直接写内容，
+   需要吃掉剩余高度的那一块挂 .tp-fill-body（自带 flex:1 + min-height:0）。 */
+.tp-fill {
+  --tp-fill-head-h: 0px;
+  height: calc(100dvh - var(--tp-metric-topbar-h) - var(--tp-metric-page-pad) * 2 - var(--tp-fill-head-h));
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.tp-fill--head { --tp-fill-head-h: calc(var(--tp-metric-page-head-h) + var(--tp-gap-xs)); }
+.tp-fill-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+/* 页头 + 满高正文的容器：页头有几行就吃几行，正文拿剩下的高度。
+   .tp-fill--head 那套是「视口 − 顶栏 − 页边距 − 页头」，页头高度取 metrics 的 56px，
+   而 56 只是单行页头的实测值：带 desc 的页头会折到 86px（接口管理 1680 宽实测），
+   常量算出的正文就比真实剩余高出 30px，整页凭空多一条 18px 的竖滚（实测 933 vs 915）。
+   这里不再猜页头高度：外层按 metrics 算到内容区底，内层 .tp-fill 改 flex 自然高。 */
+.tp-fill-stack {
+  height: calc(100dvh - var(--tp-metric-topbar-h) - var(--tp-metric-page-pad) * 2);
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.tp-fill-stack > * { flex: 0 0 auto; }
+.tp-fill-stack > .tp-fill { height: auto; flex: 1 1 auto; }
+
+/* 同排对照的两个列表卡：卡片高度不一致时短的一侧下悬空（workbench 452 vs 101），
+   统一窗口高度让两块卡片等高，数据超出时窗口内部滚。 */
+.tp-list-window {
+  height: 344px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 8px;
+  margin-right: -8px;
+}
+.tp-list-window--empty {
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* 卡片墙：列数由容器宽度决定，而不是视口断点。
+   与 <Row xs/md/xl/xxl> 的区别是致命的——断点量视口，容器恒 = 视口 − 侧栏 208 − 页边距 48
+   且被 pageMax 封在 1552，于是 md={6} 生效瞬间卡宽 116（workbench 统计卡）、
+   xl={6} 只有 216 而角色卡标题自然宽 250（settings 角色卡被裁）。
+   用法：<div className="tp-wall" style={{ '--tp-wall-min': '280px' }}>，
+   --tp-wall-min 取「卡片内容自然宽 + 左右内边距 40」。 */
+.tp-wall {
+  --tp-wall-min: 280px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--tp-wall-min), 1fr));
+  gap: var(--tp-gap-md);
+}
 
 /* 列表页：筛选条与表格卡之间不再手写 margin */
 .tp-filterbar {
@@ -325,6 +452,72 @@ body {
 .tp-tablecard .ant-table-thead > tr > th::before { display: none; }
 .tp-tablecard .ant-pagination { margin: 0; }
 
+/* 满高的表格卡：外层是 .tp-fill-body 时才生效（其余列表页一行不改）。
+   此前本页 min-height 实测 0px、纯内容撑高——空表 295px 的小卡浮在 915px 视口里
+   （下方空 414px = 45% 的空白），有数据时又长出一条竖滚：同一页版式随数据变。
+   中间那串 flex 是逐层打通的：wrapper→spin→table→container 少一环就断，实测断在
+   spin 时表格停在内容高 259px、卡片已经 562px，底下又是一片空。
+   flex 子项一律 flex: 0 0 auto：ProTable 的 loading Spin 会在 toolbar 与 table 之间
+   插一个兄弟节点，不显式声明的话它会去吃剩余高度。 */
+.tp-fill-body .tp-tablecard {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tp-fill-body .tp-tablecard > *,
+.tp-fill-body .tp-tablecard .ant-table-wrapper > * { flex: 0 0 auto; }
+.tp-fill-body .tp-tablecard .ant-table-wrapper,
+.tp-fill-body .tp-tablecard .ant-spin-nested-loading,
+.tp-fill-body .tp-tablecard .ant-spin-container,
+.tp-fill-body .tp-tablecard .ant-pro-card,
+.tp-fill-body .tp-tablecard .ant-table,
+.tp-fill-body .tp-tablecard .ant-table-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tp-fill-body .tp-tablecard .ant-table-content,
+.tp-fill-body .tp-tablecard .ant-table-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* 带 scroll.x 的表，rc-table 会给 .ant-table-content 写行内 style="overflow: auto hidden;"
+   ——横向自己滚、纵向交回页面。但满高页的整页高度是锁死的（.tp-fill-stack），纵向没有
+   「交给页面」这一说，实测 20 行时第 11–20 行既看不见也滚不到：wheel 后 scrollTop 仍 0、
+   可见行 10/20，分页器还显示 total=137——数据在 DOM 里却到不了用户眼前。行内样式压不过
+   特异性（试过 5 类选择器），只能 !important 在这一行。
+   表头钉住要挂在 thead 而不是 th：th sticky 的 containing block 是它自己那一行，实测
+   scrollTop 到 528 时表头跟着卷到 −528，等于没钉；挂 thead 才以滚动容器为界，滚到 725
+   时表头底边仍贴在容器顶。不用 scroll.y：antd 会换成 .ant-table-header + .ant-table-body
+   两套表，跟上面那条 flex 链打架。thead/th 上 antd 都没写行内样式，不需要 !important。 */
+.tp-fill-body .tp-tablecard .ant-table-content { overflow-y: auto !important; }
+.tp-fill-body .tp-tablecard .ant-table-thead { position: sticky; top: 0; z-index: 3; }
+/* 左栏卡片（模块树）封顶在行高内：行已经不换行了（api.tsx 的 wrap={false}），树展开到
+   31 个节点时卡片 896 > 行 729，多出的 167px 会把整页顶成可滚（1058 > 915）——满高约束
+   白做。max-height 是上限不是下限，空树/短树照旧 112 高，不会把空洞画回来。 */
+.tp-fill .ant-col > .ant-card { max-height: 100%; overflow: auto; }
+/* 满高页的左右面板：两栏各一张卡，共用上下两条边——主从（master–detail）版式的通则，
+   此前只有上面那条 max-height（封顶防溢出），3 个模块时左卡实测 112、右卡 677，两条
+   不齐的底边比留白还扎眼。列做 flex 列、卡吃满列高，卡体也是 flex 列：这样右侧的
+   筛选条/分页器可以搬进同一张卡里（面板 = 工具条 + 表 + 页码），上下边缘与左卡对齐。
+   卡体本身仍可滚（继承上一条 overflow:auto），长树与万一超出的内容都有出口。 */
+.tp-fill-side { display: flex; flex-direction: column; min-height: 0; }
+.tp-fill-side > .ant-card { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.tp-fill-side > .ant-card > .ant-card-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* 面板里的表格不再自带边框：一个面板只许一层框，此前是「卡里再套一张带框的卡」。
+   类名要写在 .tp-tablecard 之后（同特异性，后来者胜）。 */
+.tp-inpanel { border: 0; border-radius: 0; }
+/* 只把**空表**的 table 拉到满高，让「暂无数据」在卡里垂直居中（实测空态块 497–621，
+   正好落在 657 高的正文中段）。有数据时不许拉：table{height:100%} 会把 3 行 66px 的
+   行撑成 203px 摊满整屏——那是把空态的解法套在有数据的页面上。 */
+.tp-fill-body .tp-tablecard .ant-table-empty .ant-table-content > table,
+.tp-fill-body .tp-tablecard .ant-table-empty .ant-table-body > table,
+.tp-fill-body .tp-tablecard .ant-table-empty .ant-table-placeholder { height: 100%; }
+.tp-fill-body .tp-tablecard .ant-table-empty .ant-table-placeholder > td {
+  height: 100%;
+  border-bottom: none;
+  vertical-align: middle;
+}
+
 /* 工具栏按钮：同屏只允许一个主按钮（§11.6.6 红线），其余为次级——这里只统一高度与间距 */
 .tp-page-actions .ant-btn { font-size: var(--tp-fs-md); }
 
@@ -332,6 +525,48 @@ body {
    对应的组件 token 可映射；在 td 上声明即压过 antd 的 tr 继承——空态文案是让人读的原因，
    不是装饰。 */
 .tp-tablecard .ant-table-tbody > tr.ant-table-placeholder > td { color: var(--tp-text-3); }
+
+/* Tabs 装进满高页（系统设置）：页签面板要成为正文的满高容器，表卡才吃得到剩余高度。
+   不补这三层的话，满高链走到 .ant-tabs 就断在 display:block 上——面板停在内容高，
+   实测 5 人成员表 276 高浮在 915 视口里，底下空 451px（49%），正是本轮逐页清掉的那片空。
+   只作用于 .tp-fill-body 里的 Tabs，普通页里的 Tabs 一字不改。 */
+.tp-fill-body .ant-tabs { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.tp-fill-body .ant-tabs > .ant-tabs-nav { flex: 0 0 auto; }
+.tp-fill-body .ant-tabs-content-holder { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.tp-fill-body .ant-tabs-content-holder .ant-tabs-content { flex: 1 1 auto; min-height: 0; }
+/* 只给 -active 那一页拉高：写成 .ant-tabs-tabpane 会连累 antd 自己的
+   .ant-tabs-tabpane-hidden{display:none}（同特异性、后来者胜），未点开的页签会露出来。 */
+.tp-fill-body .ant-tabs-content-holder .ant-tabs-tabpane-active { height: 100%; display: flex; flex-direction: column; overflow: auto; }
+/* 页签正文（系统设置各 Tab）自己也得是 flex 列：.tp-fill-body .tp-tablecard 那条 grow
+   按后代命中，但中间隔着一层 display:block 的 tab 根就不传递——实测成员表停在内容高 276，
+   面板已经 729 高，底下又是 450 的空。裸子项一律钉住（同 .tp-fill-stack > *），
+   表卡才有确定的剩余高度可吃；工具条/报错条不会因为表变长被压扁。 */
+/* 卡内脚注（页码 + 口径小字）：小字曾是表卡的**兄弟节点**，画在页面底色上——卡有边有角，
+   它没有，读起来像掉在卡外的批注（业主点名）。现在走 antd Table 的 footer，DOM 落在
+   .ant-table 里，天然继承卡底色与圆角裁切；这条只补分隔线与排版。
+   压掉 antd 默认的 .ant-table-footer{background:tableFooterBg}（那是汇总行的灰底，
+   会把卡内劈成两种底色）。flex 给满高链收口：表体吃剩余，脚注恒 0 0 auto 钉在卡底。 */
+.tp-tablecard .ant-table-wrapper .ant-table-footer {
+  padding: 12px 16px;
+  background: transparent;
+  border-top: 1px solid var(--tp-split);
+  flex: 0 0 auto;
+}
+/* 脚注行：脚注占左格、页码恒居中（三列 grid 的口径从页内搬进卡内，一字未改）。 */
+.tp-cardfoot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.tp-cardfoot-note { min-width: 0; }
+.tp-cardfoot--center { display: flex; justify-content: center; }
+/* 没有表卡的页面（设备墙 / 工作台）自己垫一条卡底条：外壳与表卡同一套（.tp-card 的底色、
+   描边、圆角），只把内边距对齐卡内脚注——同一句话在不同页面不该换一套皮肤。 */
+.tp-cardfoot-strip { padding: 12px 16px; }
+
+.tp-fill-tab { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.tp-fill-tab > * { flex: 0 0 auto; }
 
 /* ───────────── Markdown 与代码块 ───────────── */
 .tp-md p { margin: 0 0 8px; }

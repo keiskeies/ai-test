@@ -85,7 +85,7 @@ export default function ElementPicker({ value, onPick, testIdBase = "el-pick" }:
       // 过滤走 searchText（label 是 JSX，optionFilterProp 量不了）；元素库页同款按名匹配
       searchText: r.name,
       label: <span data-testid={testIdBase + "-option"}>{r.name}
-        <Typography.Text type="secondary" style={{ marginLeft: 6, fontSize: 12 }}>{r.locator_type}:{r.locator}</Typography.Text>
+        <Typography.Text className="tp-text-sm" type="secondary" style={{ marginLeft: 6 }}>{r.locator_type}:{r.locator}</Typography.Text>
       </span>,
     }));
     // 值在库里查不到（元素被回收/删除）时也得显示点什么，而不是裸 id 闪一下没了名字。
@@ -143,7 +143,7 @@ export default function ElementPicker({ value, onPick, testIdBase = "el-pick" }:
       />
       {recentVisible.length > 0 && (
         <Space size={4} wrap data-testid={testIdBase + "-recent"}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>最近使用</Typography.Text>
+          <Typography.Text className="tp-text-sm" type="secondary">最近使用</Typography.Text>
           {recentVisible.map((r) => (
             <Tooltip key={r.id} title={r.name}>
               <Button size="small" data-testid={testIdBase + "-recent-" + r.id}

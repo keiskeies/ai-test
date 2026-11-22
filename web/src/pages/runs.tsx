@@ -148,7 +148,7 @@ function RunsWorkbench() {
     { title: "时间", dataIndex: "created_at", width: 168, render: (v: string | null) => (
       // UTC 存储 / Asia/Shanghai 展示（§3.4-6）：换算在 shared/timefmt，页面不碰字符串切片。
       // 老写法 slice(0,19) 显示的是 UTC 钟点，比真实时间早 8 小时，而形状正则测不出来（R68）。
-      <Typography.Text data-testid="run-time" style={{ fontSize: 12 }}>
+      <Typography.Text className="tp-text-sm" data-testid="run-time">
         {fmtTime(v) ?? "—"}
       </Typography.Text>) },
     { title: "对象", dataIndex: "subject_name", render: (v: string, r: RunRow) => (
@@ -174,7 +174,7 @@ function RunsWorkbench() {
     { title: "码", dataIndex: "status_code", width: 74, render: (v: number | null) => (
       <Tag data-testid="run-code" color={statusColor(v)}>{v ?? "—"}</Tag>) },
     { title: "耗时", dataIndex: "elapsed_ms", width: 88, render: (v: number | null) => (
-      <Typography.Text style={{ fontSize: 12 }}>{v == null ? "—" : v + " ms"}</Typography.Text>) },
+      <Typography.Text className="tp-text-sm">{v == null ? "—" : v + " ms"}</Typography.Text>) },
     { title: "环境", dataIndex: "env_name", width: 100, render: (v: string | null) => v ?? "—" },
     { title: "执行人", dataIndex: "created_by_name", width: 100, render: (v: string | null) => v ?? "—" },
     { title: "", key: "ops", width: 66, render: (_: unknown, r: RunRow) => (
@@ -182,7 +182,8 @@ function RunsWorkbench() {
   ];
 
   return (
-    <div data-testid="runs-body">
+    <div className="tp-fill tp-fill-body" data-testid="runs-body">
+      <div style={{ flex: "0 0 auto" }}>
       <Space style={{ marginBottom: 12 }} wrap data-testid="runs-filters">
         <Select allowClear placeholder="对象类型" style={{ width: 140 }} value={f.subjectType}
           onChange={(v) => patch({ subjectType: v })} data-testid="runs-filter-subject-type"
@@ -225,6 +226,7 @@ function RunsWorkbench() {
             onClose={() => { setHitId(null); setDismissed(runTarget); }} />
         )
       )}
+      </div>
       <AdminTable<RunRow>
         rowKey="id"
         loading={loading}
@@ -241,18 +243,20 @@ function RunsWorkbench() {
             </span>
           )} />
         ) }}
+        cardFooter={(total === null ? undefined : (
+          // 页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+          // total 缺键时 ListPager 自己不渲染，这里的壳也要跟着撤——否则卡底只剩一条分隔线。
+          <div className="tp-cardfoot--center">
+            <ListPager
+              current={current}
+              pageSize={pageSize}
+              total={total}
+              onPage={setCurrent}
+              onPageSize={setPageSize}
+            />
+          </div>
+        ))}
       />
-      {/* D47-b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-          这里垫在 Table 之下；「加载更多」随游标语义一起退场（一页两把尺子的老账）。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
       <Drawer open={detail !== null} width={720} onClose={() => setDetail(null)}
         title={detail ? "运行详情 · " + detail.subject_name : "运行详情"}
         data-testid="run-drawer">
@@ -290,8 +294,8 @@ function RunsWorkbench() {
 
 export default function RunsPage() {
   return (
-    <div data-testid="page-runs">
-      <PageHead title="运行记录"
+    <div data-testid="page-runs" className="tp-fill-stack">
+      <PageHead title="运行记录" descHover
         desc="调试 / 手动 / 定时 / Pilot 四类触发方式的执行存档；点行查看请求、响应与断言现场。" />
       <ProjectGate>
         <RunsWorkbench />

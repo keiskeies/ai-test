@@ -120,7 +120,7 @@ export default function DebugDrawer() {
   }, [detail]);
 
   if (!open) return null;
-  const maxH = Math.round(window.innerHeight * 0.6);
+  const maxH = Math.round(window.innerHeight * 0.45);
   const badgeStatus = phase === "running" ? "running" : phase === "done" ? finalStatus : null;
   const badge = phase === "error"
     ? <Tag color="red" data-testid="debug-run-badge" data-status="error">发起失败</Tag>
@@ -137,7 +137,7 @@ export default function DebugDrawer() {
       height, minHeight: MIN_H, maxHeight: maxH, background: "var(--tp-bg-container)",
       borderTop: "1px solid var(--tp-border)", display: "flex", flexDirection: "column", flexShrink: 0,
     }}>
-      {/* 拖把手：120 ~ 60vh（§11.7.3） */}
+      {/* 拖把手：120 ~ 45vh（与 UiDebugPanel 同尺） */}
       <div data-testid="debug-resize"
         onPointerDown={(e) => {
           dragRef.current = { startY: e.clientY, startH: height };
@@ -150,17 +150,17 @@ export default function DebugDrawer() {
         }}
         onPointerUp={() => { dragRef.current = null; }}
         style={{ height: 6, cursor: "ns-resize", background: "#F2F6F4", flexShrink: 0 }} />
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 12px", borderBottom: "1px solid var(--tp-split)" }}>
-        <Typography.Text strong style={{ fontSize: 13 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--tp-split)" }}>
+        <Typography.Text className="tp-text-md" strong>
           {trigger === "debug" ? "调试（未保存草稿）" : "执行（已保存场景）"}
         </Typography.Text>
         {badge}
         {phase === "done" && typeof stats?.elapsed_ms === "number" && (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{stats.elapsed_ms}ms</Typography.Text>
+          <Typography.Text className="tp-text-sm" type="secondary">{stats.elapsed_ms}ms</Typography.Text>
         )}
         <span style={{ flex: 1 }} />
         {phase === "running" && (
-          <Typography.Text type="secondary" data-testid="debug-progress-label" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary" data-testid="debug-progress-label">
             {streamDown ? "进度流断了，正在重连——期间状态可能不再更新" : "SSE 实时进度"}
           </Typography.Text>
         )}
@@ -176,8 +176,8 @@ export default function DebugDrawer() {
         </div>
       )}
       {stats && (
-        <div data-testid="debug-stats" data-stats={JSON.stringify(stats)}
-          style={{ padding: "2px 12px", borderBottom: "1px solid var(--tp-split)", fontSize: 12, color: "var(--tp-text-2)" }}>
+        <div className="tp-text-sm" data-testid="debug-stats" data-stats={JSON.stringify(stats)}
+          style={{ padding: "8px 12px", borderBottom: "1px solid var(--tp-split)", color: "var(--tp-text-2)" }}>
           共 {String(stats.total ?? 0)} · 过 {String(stats.pass ?? 0)} · 败 {String(stats.fail ?? 0)}
           {" · 跳 "}{String(stats.skip ?? 0)} · 错 {String(stats.error ?? 0)} · 取消 {String(stats.cancelled ?? 0)}
         </div>
@@ -191,13 +191,13 @@ export default function DebugDrawer() {
             <div key={key} data-testid="debug-step-row" data-key={key} data-status={st.status}
               onClick={() => void pickStep(key, st)}
               style={{
-                display: "flex", gap: 8, alignItems: "center", padding: "3px 12px", cursor: "pointer",
+                display: "flex", gap: 8, alignItems: "center", padding: "8px 12px", cursor: "pointer",
                 background: detail?.step_key === key ? "#EAF6F1" : undefined,
               }}>
-              <Typography.Text style={{ fontSize: 12, flex: 1, minWidth: 0 }}
+              <Typography.Text className="tp-text-sm" style={{ flex: 1, minWidth: 0 }}
                 ellipsis={{ tooltip: key }}>{names.get(key) ?? key}</Typography.Text>
               {st.rowProgress && (
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>{st.rowProgress}</Typography.Text>
+                <Typography.Text className="tp-text-xs" type="secondary">{st.rowProgress}</Typography.Text>
               )}
               <Tag data-testid={"debug-step-status-" + key}
                 color={STEP_STATUSES[st.status]?.color ?? "default"} style={{ marginInlineEnd: 0 }}>
@@ -206,7 +206,7 @@ export default function DebugDrawer() {
             </div>
           ))}
         </div>
-        <div data-testid="debug-step-detail" style={{ flex: 1, overflow: "auto", padding: 8, fontFamily: "Consolas, monospace", fontSize: 12 }}>
+        <div className="tp-text-sm" data-testid="debug-step-detail" style={{ flex: 1, overflow: "auto", padding: 8, fontFamily: "Consolas, monospace" }}>
           {!detail && !logs.length && (
             <Typography.Text type="secondary">点左边的步骤看请求 / 响应 / 日志。</Typography.Text>
           )}

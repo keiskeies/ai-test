@@ -42,7 +42,7 @@ export default function ChangePasswordModal({ open, onClose }: { open: boolean; 
   }
 
   return (
-    <Modal open={open} title="修改密码" data-testid="pwd-change-modal" okText="确认修改" cancelText="取消"
+    <Modal centered open={open} title="修改密码" data-testid="pwd-change-modal" okText="确认修改" cancelText="取消"
       okButtonProps={{ loading: saving, "data-testid": "pwd-change-ok" } as never}
       onOk={() => void submit()} onCancel={onClose} destroyOnHidden>
       <Form form={form} layout="vertical">
@@ -67,7 +67,7 @@ export default function ChangePasswordModal({ open, onClose }: { open: boolean; 
           <Input.Password data-testid="pwd-field-confirm" autoComplete="new-password" />
         </Form.Item>
       </Form>
-      <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+      <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ marginBottom: 0 }}>
         平台只存密码哈希，不保存明文。修改后当前浏览器的登录状态仍会保持到有效期结束，
         需要立即退出请再点「退出登录」。
       </Typography.Paragraph>

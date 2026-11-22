@@ -422,7 +422,7 @@ export function ListToolbar(props: ListToolbarProps) {
       )}
 
       {extra && <div className="tp-filterbar-actions">{extra}</div>}
-      <Modal open={naming} title="存为视图" okText="保存" cancelText="取消"
+      <Modal centered open={naming} title="存为视图" okText="保存" cancelText="取消"
         onCancel={() => { setNaming(false); setViewName(""); }} onOk={() => void doSaveView()}
         okButtonProps={{ "data-testid": "lt-view-name-ok" }}
         cancelButtonProps={{ "data-testid": "lt-view-name-cancel" }}>

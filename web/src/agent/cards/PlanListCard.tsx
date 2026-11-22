@@ -18,10 +18,10 @@ export default function PlanListCard({ items, title }: { items: PlanItem[]; titl
   const done = list.filter((it) => it.state === "done" || it.state === "skipped").length;
   return (
     <div data-testid="plan-list-card" style={{ border: "1px solid var(--tp-tag-green-bd)", borderRadius: 8, padding: "10px 12px", background: "var(--tp-tag-green-bg)" }}>
-      <Typography.Text strong style={{ fontSize: 13 }}>
+      <Typography.Text className="tp-text-md" strong>
         计划 · {String(title ?? "Pilot 任务清单")} {done}/{list.length}
       </Typography.Text>
-      <ul data-testid="plan-items" style={{ listStyle: "none", margin: "6px 0 0", padding: 0, fontSize: 13 }}>
+      <ul className="tp-text-md" data-testid="plan-items" style={{ listStyle: "none", margin: "6px 0 0", padding: 0 }}>
         {list.map((it, i) => {
           const meta = STATE_META[it.state as PlanItemState] ?? STATE_META.pending;
           return (

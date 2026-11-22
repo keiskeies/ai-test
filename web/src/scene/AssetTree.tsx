@@ -70,14 +70,14 @@ export default function AssetTree() {
       <Input data-testid="asset-search" allowClear prefix={<SearchOutlined />}
         placeholder="搜索用例（API / UI / ADB）" value={q} onChange={(e) => setQ(e.target.value)} />
       <div>
-        <Typography.Text strong style={{ fontSize: 12 }}>API 用例</Typography.Text>
+        <Typography.Text className="tp-text-sm" strong>API 用例</Typography.Text>
         {visible.length === 0 && (
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0" }}>
+          <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ margin: "4px 0" }}>
             {emptyNote("cases", cases.length, "接口用例", hasMore.cases)}
           </Typography.Paragraph>
         )}
         {visible.map((c) => (
-          <div key={c.id}
+          <div key={c.id} className="tp-text-md"
             data-testid="asset-case"
             draggable={!readOnly}
             onDragStart={(e) => {
@@ -88,13 +88,13 @@ export default function AssetTree() {
             }}
             onClick={() => { if (!readOnly) addStep("api_case", selectedKey, { ref: c.id, name: c.name }); }}
             style={{
-              padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab", fontSize: 13,
+              padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab",
               border: "1px solid transparent",
             }}
             onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "#F2F6F4"; }}
             onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
           >
-            {c.name} <Tag style={{ fontSize: 10 }}>{c.priority}</Tag>
+            {c.name} <Tag className="tp-text-xs">{c.priority}</Tag>
           </div>
         ))}
         {moreBtn("cases", "asset-more-cases")}
@@ -102,7 +102,7 @@ export default function AssetTree() {
       {/* D146：逻辑控件是纯写把手（点了就往画布插节点），只读整组隐藏（§11.5.1 隐藏派） */}
       {!readOnly && (
       <div>
-        <Typography.Text strong style={{ fontSize: 12 }}>逻辑控件</Typography.Text>
+        <Typography.Text className="tp-text-sm" strong>逻辑控件</Typography.Text>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
           {LOGIC_KINDS.map((k) => (
             <Tooltip key={k} title="点击加到选中节点之后；或拖到画布节点上">
@@ -121,16 +121,16 @@ export default function AssetTree() {
       </div>
       )}
       <div>
-        <Typography.Text strong style={{ fontSize: 12 }}>UI 用例</Typography.Text>
+        <Typography.Text className="tp-text-sm" strong>UI 用例</Typography.Text>
         {/* R111（1C 解禁）：与 API 用例同一交互——可拖入 / 点击加入，拖进去 =
             插一个 kind:"ui_case"、ref=case_id 的节点。断言长在用例命令里，不在这拖一步就完事。 */}
         {visibleUi.length === 0 && (
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0" }}>
+          <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ margin: "4px 0" }}>
             {emptyNote("uiCases", uiCases.length, "UI 用例", hasMore.uiCases)}
           </Typography.Paragraph>
         )}
         {visibleUi.map((c) => (
-          <div key={c.id}
+          <div key={c.id} className="tp-text-md"
             data-testid="asset-ui-case"
             draggable={!readOnly}
             onDragStart={(e) => {
@@ -141,28 +141,28 @@ export default function AssetTree() {
             }}
             onClick={() => { if (!readOnly) addStep("ui_case", selectedKey, { ref: c.id, name: c.name }); }}
             style={{
-              padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab", fontSize: 13,
+              padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab",
               border: "1px solid transparent",
             }}
             onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "#F2F6F4"; }}
             onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
           >
-            {c.name} <Tag style={{ fontSize: 10 }}>{c.priority}</Tag>
+            {c.name} <Tag className="tp-text-xs">{c.priority}</Tag>
           </div>
         ))}
         {moreBtn("uiCases", "asset-more-ui")}
       </div>
       <div>
-        <Typography.Text strong style={{ fontSize: 12 }}>ADB 用例</Typography.Text>
+        <Typography.Text className="tp-text-sm" strong>ADB 用例</Typography.Text>
         {/* 1D 解禁：与 API/UI 用例同一交互——可拖入 / 点击加入，拖进去 =
             插一个 kind:"adb_case"、ref=case_id 的节点。断言长在用例命令里。 */}
         {visibleAdb.length === 0 && (
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0" }}>
+          <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ margin: "4px 0" }}>
             {emptyNote("adbCases", adbCases.length, "ADB 用例", hasMore.adbCases)}
           </Typography.Paragraph>
         )}
         {visibleAdb.map((c) => (
-          <div key={c.id}
+          <div key={c.id} className="tp-text-md"
             data-testid="asset-adb-case"
             draggable={!readOnly}
             onDragStart={(e) => {
@@ -173,13 +173,13 @@ export default function AssetTree() {
             }}
             onClick={() => { if (!readOnly) addStep("adb_case", selectedKey, { ref: c.id, name: c.name }); }}
             style={{
-              padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab", fontSize: 13,
+              padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab",
               border: "1px solid transparent",
             }}
             onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "#F2F6F4"; }}
             onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
           >
-            {c.name} <Tag style={{ fontSize: 10 }}>{c.priority}</Tag>
+            {c.name} <Tag className="tp-text-xs">{c.priority}</Tag>
           </div>
         ))}
         {moreBtn("adbCases", "asset-more-adb")}

@@ -297,6 +297,7 @@ function ElementsWorkbench() {
 
   function removeOne(r: Row) {
     Modal.confirm({
+      centered: true,
       title: "元素放入回收站？",
       content: "「" + r.name + "」进入回收站，可随时恢复；被未回收用例引用时会拒绝并列出是哪几条。",
       okText: "放入回收站", okButtonProps: { danger: true, "data-testid": "ui-element-del-ok" },
@@ -346,8 +347,12 @@ function ElementsWorkbench() {
   }
 
   return (
-    <Row gutter={16} align="top">
-      <Col flex="208px">
+    /* 满高页 + 主从（master–detail）两栏：口径同 api.tsx，两栏各一张吃满列高的面板卡，
+       共用上下两条边。此前左卡按内容长、右栏三段是列的裸子项——同一页两套容器语义。 */
+    <div className="tp-fill">
+      {/* wrap={false}：多行弹性容器的行高按内容算，交叉轴没有确定高度可解（api.tsx 同判）。 */}
+      <Row gutter={16} wrap={false} style={{ flex: "1 1 auto", minHeight: 0 }}>
+      <Col flex="288px" className="tp-fill-side">
         <Card size="small">
           <ModuleTree
             projectId={pid} tree={tree} recycled={recycledTree}
@@ -364,9 +369,12 @@ function ElementsWorkbench() {
           />
         </Card>
       </Col>
-      {/* flex 基准必须是 0：`auto` 会拿表格内容的 max-content 当基准，208+宽表 > 行宽，
+      {/* flex 基准必须是 0：`auto` 会拿表格内容的 max-content 当基准，288+宽表 > 行宽，
           antd Row 的 flex-wrap 就把右列整块折到下一行、横跨全宽（2026-11-22 截图实测）。 */}
-      <Col flex="1 1 0" style={{ minWidth: 0 }}>
+      <Col flex="1 1 0" className="tp-fill-body tp-fill-side" style={{ minWidth: 0 }}>
+        {/* 与左栏同构的一张面板卡：工具条 / 表 / 页码三段都住进卡体，两栏共用上下两条边。 */}
+        <Card size="small" styles={{ body: { padding: 0 } }}>
+        <div style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
         <FilterBar actions={(
           <>
             <Button icon={<ReloadOutlined />} data-testid="ui-element-reload" onClick={() => void load()}>刷新</Button>
@@ -431,7 +439,9 @@ function ElementsWorkbench() {
             description="这条是 Ctrl+K 直达带过来的：URL 里带着元素 id，页面把它认出来；行在当前页时会高亮那一行。"
             onClose={() => setHitId(null)} />
         )}
+        </div>
         <AdminTable<Row> rowKey="id" loading={loading} dataSource={rows}
+          className="tp-inpanel"
           rowClassName={(r) => (r.id === hitId ? "tp-row-hit" : "")}
           locale={{ emptyText: loadError ? (
             // 失败不许画成空（§11.7.5）：kind="error" + 真重试把手，文案逐字保留。
@@ -523,11 +533,24 @@ function ElementsWorkbench() {
             ) },
           ]}
         />
-        {/* D47-b 步5d：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-            这里垫在 Table 之下（runs.tsx / scenes.tsx 的居中垫法）；「共 N 条」从此只有服务端
-            这一张嘴——旧脚注拿本地 visible.length / rows.length 现攒「共」的日子随本地过滤
-            一起退役了。 */}
-        <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
+        {/* D47-b 步5d：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染；
+            「共 N 条」从此只有服务端这一张嘴——旧脚注拿本地 visible.length / rows.length
+            现攒「共」的日子随本地过滤一起退役了。
+            版式：脚注与页码同排三列 grid（左注 / 中页码 / 右空位），页码仍精确居中，
+            表下方少一整行（口径同 api.tsx 的页码行）。 */}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto minmax(0, 1fr)", alignItems: "center", gap: 8, padding: "12px 12px", flex: "0 0 auto" }}>
+          <Typography.Text type="secondary" className="tp-text-sm"
+            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {/* D47-b 步5d：hasMore 那句「本页取到 N 条（单页上限 200，后面还有没取的）」随游标
+                世界退役——页码模式下下一页永远点得到，「还有没取的」不再是脚注能说的事；
+                「共」归 ListPager 报服务端 total，脚注不再现攒。失败清行清 total，
+                「上次取到 N 条」那条腿也没有意义了——失败就清行，这里只剩一句真话（照 uiCases.tsx）。
+                「选中模块」不写「含子模块」：按模块筛选只看这个模块自己的行，与树徽标
+                「count=直属未回收元素+用例」同口径（后端 module_services.py:100）。
+                三页同一个词，文案不许比代码多说（R120）。 */}
+            {loadError ? "本次列表加载失败，本行计数不作数" : ""}
+            {moduleId ? "（选中模块）" : ""}{shownRecycled ? " · 回收站视图" : ""}
+          </Typography.Text>
           <ListPager
             current={current}
             pageSize={pageSize}
@@ -536,21 +559,11 @@ function ElementsWorkbench() {
             onPageSize={setPageSize}
           />
         </div>
-        <Typography.Text type="secondary" className="tp-text-sm">
-          {/* D47-b 步5d：hasMore 那句「本页取到 N 条（单页上限 200，后面还有没取的）」随游标
-              世界退役——页码模式下下一页永远点得到，「还有没取的」不再是脚注能说的事；
-              「共」归 ListPager 报服务端 total，脚注不再现攒。失败清行清 total，
-              「上次取到 N 条」那条腿也没有意义了——失败就清行，这里只剩一句真话（照 uiCases.tsx）。
-              「选中模块」不写「含子模块」：按模块筛选只看这个模块自己的行，与树徽标
-              「count=直属未回收元素+用例」同口径（后端 module_services.py:100）。
-              三页同一个词，文案不许比代码多说（R120）。 */}
-          {loadError ? "本次列表加载失败，本行计数不作数" : ""}
-          {moduleId ? "（选中模块）" : ""}{shownRecycled ? " · 回收站视图" : ""}
-        </Typography.Text>
+        </Card>
       </Col>
 
       {/* 新建元素：快速弹窗（§11.4.11） */}
-      <Modal open={creating} title="新建元素" okText="创建" cancelText="取消"
+      <Modal centered open={creating} title="新建元素" okText="创建" cancelText="取消"
         confirmLoading={busy} data-testid="ui-element-new-modal"
         okButtonProps={{ "data-testid": "ui-element-new-ok" }}
         onOk={() => void submitCreate()} onCancel={() => setCreating(false)}>
@@ -576,7 +589,7 @@ function ElementsWorkbench() {
       {/* 编辑元素（D120）：字段与新建弹窗同一套把手（名称 / 类型同词表 / 表达式 / 备注），
           外加可见性开关；初值从行 prefilled。不含模块选择项——跨模块搬迁另有门径与否都
           不在这扇窗里（module_set 恒不置真，行不会被挪走）。 */}
-      <Modal open={editing !== null} title="编辑元素" okText="保存" cancelText="取消"
+      <Modal centered open={editing !== null} title="编辑元素" okText="保存" cancelText="取消"
         confirmLoading={busy} data-testid="ui-element-edit-modal"
         okButtonProps={{ "data-testid": "ui-element-edit-ok" }}
         onOk={() => void submitEdit()} onCancel={() => setEditing(null)}>
@@ -609,7 +622,7 @@ function ElementsWorkbench() {
       {/* 引用硬拦（R106；D120 起编辑改定位器同路复用）：details.cases 原样列出来，一个都不藏——
           除非调用方没有 ui:case:read（details_hidden），那也得说清「数量照报、名字不说」。
           标题/首句按入口措辞：清单本体（ui-element-refs / ui-element-ref-case）三个入口共用。 */}
-      <Modal open={refs !== null}
+      <Modal centered open={refs !== null}
         title={refs?.reason === "locator" ? "改定位器被拦截：还有 UI 用例在用这个元素"
           : "删除被拦截：还有 UI 用例在用这个元素"}
         okText="知道了" cancelButtonProps={{ style: { display: "none" } }} width={560}
@@ -643,7 +656,7 @@ function ElementsWorkbench() {
       </Modal>
 
       {/* 彻底删除：不可逆，输名确认（与 1A/1B 回收站手感一致；服务端同样硬校验） */}
-      <Modal
+      <Modal centered
         open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         destroyOnHidden width={520}
         title="彻底删除元素？" okText="我已确认，彻底删除" cancelText="取消"
@@ -666,14 +679,15 @@ function ElementsWorkbench() {
           placeholder={purge?.name} onChange={(e) => setPurgeName(e.target.value)} />
       </Modal>
     </Row>
+    </div>
   );
 }
 
 export default function UiElementsPage() {
   const { project } = useAuth();
   return (
-    <div data-testid="page-ui-elements">
-      <PageHead title="元素库" crumbs={["UI 测试"]}
+    <div data-testid="page-ui-elements" className="tp-fill-stack">
+      <PageHead title="元素库" descHover
         desc="项目共享的 UI 定位器资产，按模块归类；被未回收用例引用时删除/改定位器会被硬拦并点名引用者。" />
       <ProjectGate>{project ? <ElementsWorkbench /> : null}</ProjectGate>
     </div>

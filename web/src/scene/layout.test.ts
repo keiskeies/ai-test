@@ -92,7 +92,7 @@ describe("autoLayout 回落（elk.layout 抛错 → fallbackLayout）", () => {
     const cells = new Set(Object.values(map).map((p) => `${p.x},${p.y}`));
     expect(cells.size).toBe(flat.length);
 
-    // 深度 → x：每深一层整列右移（列宽 NODE_W+48，48 即 GAP_X，与 NODE_W/H 同出 §11.7.3）
+    // 深度 → x：每深一层整列右移（列宽 NODE_W+48，48 即 GAP_SIBLING，与 NODE_W/H 同出 §11.7.3）
     const depth = new Map<string, number>();
     for (const f of flat) {
       depth.set(f.node.key, f.parentKey === null ? 0 : depth.get(f.parentKey!)! + 1);

@@ -175,7 +175,9 @@ export default function StepListEditor<T extends StepLike>({
           } />
       )}
 
-      <div style={{ flex: 1, border: "1px solid var(--tp-split)", borderRadius: 6, background: "var(--tp-bg-container)" }}>
+      {/* 内滚封顶：flex:1 在页面级滚动容器里不约束高度，长列表会把整页撑高、
+          把停靠调试台卷出屏幕。480 ≈ 17 行（行高约 28px），与调试台 45vh 上限同屏共存。 */}
+      <div style={{ flex: 1, maxHeight: 480, overflowY: "auto", border: "1px solid var(--tp-split)", borderRadius: 6, background: "var(--tp-bg-container)" }}>
         {steps.length === 0 && (
           <Typography.Text type="secondary" style={{ display: "block", padding: 24 }}>
             还没有命令。{canUpdate ? "点「+ 添加命令」加第一条——空用例保存会被拒（零步全绿是假绿）。"
@@ -206,14 +208,14 @@ export default function StepListEditor<T extends StepLike>({
                   background: open ? "var(--tp-bg-hover)" : undefined,
                   opacity: rowIssue ? 0.85 : 1 }}>
                 {canUpdate
-                  ? (open ? <DownOutlined style={{ fontSize: 10, color: "var(--tp-text-3)" }} />
-                    : <RightOutlined style={{ fontSize: 10, color: "var(--tp-text-3)" }} />)
+                  ? (open ? <DownOutlined className="tp-text-xs" style={{ color: "var(--tp-text-3)" }} />
+                    : <RightOutlined className="tp-text-xs" style={{ color: "var(--tp-text-3)" }} />)
                   : <span style={{ width: 10 }} />}
                 <span className="tp-text-sm" style={{ width: 28, color: "var(--tp-text-3)",
                   fontVariantNumeric: "tabular-nums" }}>
                   {i + 1}
                 </span>
-                <Typography.Text className="tp-text-sm" style={{ width: 84, flexShrink: 0 }}>
+                <Typography.Text className="tp-text-sm" style={{ width: 80, flexShrink: 0 }}>
                   {descriptor.labels[s.type] ?? s.type}
                 </Typography.Text>
                 <Typography.Text className="tp-text-sm" style={{ flex: 1, minWidth: 0 }}
@@ -235,7 +237,7 @@ export default function StepListEditor<T extends StepLike>({
                 )}
               </div>
               {open && canUpdate && (
-                <div style={{ padding: "8px 12px 12px 36px", borderBottom: "1px solid var(--tp-split)",
+                <div style={{ padding: "8px 12px 12px 32px", borderBottom: "1px solid var(--tp-split)",
                   background: "var(--tp-bg-hover)" }}>
                   {descriptor.renderParams(s, {
                     testIdPrefix: "cmdp-" + i,
@@ -248,7 +250,7 @@ export default function StepListEditor<T extends StepLike>({
         })}
         {canUpdate && filtered.length > 0 && (
           <Button type="dashed" block icon={<PlusOutlined />} data-testid="cmd-add-end"
-            style={{ margin: 6, width: "calc(100% - 12px)" }}
+            style={{ margin: 8, width: "calc(100% - 16px)" }}
             onClick={() => insertRow(steps.length - 1, descriptor.defaultAppendType)}>
             在末尾添加命令
           </Button>

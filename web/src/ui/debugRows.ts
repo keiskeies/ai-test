@@ -101,6 +101,13 @@ export function cmdRows(commands: Record<string, unknown>[]): DebugCmdRow[] {
   }));
 }
 
+/**
+ * 命令行几何（时间线一行的列宽）。此前同样的四个数字在 UiDebugPanel、AdbDebugPanel、
+ * reportDetail 各抄一份，缩进 54 也抄三份——改一列宽要记得改三处，迟早分叉。
+ * indent = 命令 id 列 48 + 行内左右 padding 8（截图行要跟 id 对齐，不是随手值）。
+ */
+export const DEBUG_ROW = { idW: 48, typeW: 96, elapsedW: 64, indent: 56 };
+
 /** 一列步骤在报告左树里的位置线索：来自这一份运行自己的 summary_graph 快照。 */
 export interface StepTreeHint {
   /** 前序遍历序号（= 执行顺序；顶层步与它的子步共用一趟遍历）。 */

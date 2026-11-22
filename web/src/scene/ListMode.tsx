@@ -184,7 +184,7 @@ export default function ListMode() {
     <div data-testid="scene-list-mode" style={{ height: "100%", overflow: "auto", background: "var(--tp-bg-container)", padding: "4px 0" }}>
       <Toolbar q={q} setQ={setQ} />
       {rows.length === 0 && (
-        <Typography.Text type="secondary" style={{ padding: "8px 12px", display: "block", fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" style={{ padding: "8px 12px", display: "block" }}>
           {/* 折叠着的步没进搜索结果——有折叠时把「未参与搜索」说破，全称否定只留给全展开态 */}
           {hiddenByCollapse > 0
             ? <>没有名字或 key 含「{q}」的步骤（折叠中的 {hiddenByCollapse} 个步骤未参与搜索，展开后再试）</>
@@ -215,8 +215,8 @@ export default function ListMode() {
             }}
             onClick={() => st().select(n.key)}
             style={{
-              display: "flex", gap: 8, alignItems: "center", padding: "3px 12px", cursor: "pointer",
-              paddingLeft: 12 + r.depth * 20,
+              display: "flex", gap: 8, alignItems: "center", padding: "8px 12px", cursor: "pointer",
+              paddingLeft: 12 + r.depth * 16,
               background: n.key === selectedKey ? "#EAF6F1" : undefined,
               opacity: n.disable ? 0.55 : 1,
             }}>
@@ -226,22 +226,20 @@ export default function ListMode() {
               onChange={() => st().toggleDisableKey(n.key)} />
             <span data-testid={"list-collapse-" + n.key}
               onClick={(e) => { e.stopPropagation(); if (r.hasChildren) st().toggleCollapsed(n.key); }}
-              style={{ width: 16, textAlign: "center", color: "var(--tp-text-3)", fontSize: 10 }}>
+              className="tp-text-xs"
+              style={{ width: 16, textAlign: "center", color: "var(--tp-text-3)" }}>
               {r.hasChildren
                 ? (collapsed.includes(n.key) ? <RightOutlined /> : <DownOutlined />)
                 : <span style={{ opacity: 0 }}>·</span>}
             </span>
-            <span style={{ width: 40, color: "var(--tp-text-3)", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{r.no}</span>
+            <span className="tp-text-sm" style={{ width: 40, color: "var(--tp-text-3)", fontVariantNumeric: "tabular-nums" }}>{r.no}</span>
             <span style={{ width: 4, alignSelf: "stretch", background: meta.color, borderRadius: 2 }} />
-            <span style={{ fontSize: 12, color: "var(--tp-text-2)", width: 72, flexShrink: 0 }}>{meta.label}</span>
-            <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap" }}>{n.name || n.key}</span>
-            <span style={{ fontSize: 12, color: "var(--tp-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+            <span className="tp-text-sm" style={{ color: "var(--tp-text-2)", width: 80, flexShrink: 0 }}>{meta.label}</span>
+            <span className="tp-text-md" style={{ fontWeight: 600, whiteSpace: "nowrap" }}>{n.name || n.key}</span>
+            <span className="tp-text-sm" style={{ color: "var(--tp-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
               {summaryOf(n, caseName)}
             </span>
-            {bad && <span data-testid="node-badge" title="校验问题，见底部问题面板" style={{
-              width: 16, height: 16, borderRadius: "50%", background: "var(--tp-func-error)", color: "#fff",
-              fontSize: 11, lineHeight: "16px", textAlign: "center", flexShrink: 0,
-            }}>!</span>}
+            {bad && <span className="tp-text-xs" data-testid="node-badge" title="校验问题，见底部问题面板" style={{ width: 16, height: 16, borderRadius: "50%", background: "var(--tp-func-error)", color: "#fff", lineHeight: "16px", textAlign: "center", flexShrink: 0 }}>!</span>}
             <span style={{ flex: 1 }} />
             {/* D146：行菜单里除「重命名（去右面板）」外全是写动作，只读整钮隐藏 */}
             {!readOnly && (
@@ -275,8 +273,8 @@ export default function ListMode() {
           </div>
         );
       })}
-      <Typography.Paragraph type="secondary" style={{ fontSize: 12, padding: "8px 12px" }}>
-        {/* 搜索过滤态 draggable 已摘（行序不代表真实顺序），页脚不许再承诺能拖；只读同理 */}
+      <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ padding: "8px 12px" }}>
+{/* 搜索过滤态 draggable 已摘（行序不代表真实顺序），页脚不许再承诺能拖；只读同理 */}
         {readOnly
           ? "只读模式：可查看与搜索，编辑把手已关闭。与画布同一份图，随时切换。"
           : kw

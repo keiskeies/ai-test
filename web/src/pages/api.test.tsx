@@ -210,7 +210,7 @@ describe("接口列表行勾选导出（1E T5 补完）", () => {
       .map((c) => JSON.parse(String(c[1]?.body)) as Record<string, unknown>);
   }
   function rowBoxes(): HTMLElement[] {
-    return Array.from(document.querySelectorAll('.ant-table-tbody input[type="checkbox"]'));
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
   }
 
   it("勾选 2 行 → [导出选中] 的 definition_ids 恰好是这 2 个 id", async () => {
@@ -1106,7 +1106,7 @@ describe("把手行为补测（api-search / api-project / api-clear-selection / 
       .map((c) => JSON.parse(String(c[1]?.body)) as Record<string, unknown>);
   }
   function rowBoxes(): HTMLElement[] {
-    return Array.from(document.querySelectorAll('.ant-table-tbody input[type="checkbox"]'));
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
   }
   function rowLinks(): HTMLElement[] {
     return Array.from(document.querySelectorAll(".ant-table-tbody .ant-table-row")).map(
@@ -1995,36 +1995,32 @@ describe("D47-a api 页接线：条件真打进请求，列设置真改表头", 
     }));
   });
 
-  it("列设置勾掉「方法」→ 表头那一列真消失（改由 ProTable options.setting 提供）", async () => {
+  it("列设置勾掉「方法」→ 表头那一列真消失（入口是工具条 lt-cols）", async () => {
     mockPage([def()]);
     render(<MemoryRouter><ApiPage /></MemoryRouter>);
     await screen.findAllByTestId("api-row");
     expect(thead()).toContain("方法");                 // 正对照：不是「本来就没有」
-    // 2026-11-22：列设置从自建弹层（lt-cols）换成 ProTable 自带面板——点工具栏齿轮，
-    // 面板按列标题列项（操作列 hideInSetting，不出现在面板里）。
-    const setting = document.querySelector(".ant-pro-table-list-toolbar-setting-item") as HTMLElement;
-    expect(setting, "ProTable 列设置入口不在").toBeTruthy();
-    // rc-trigger 的点击监听挂在内层图标上：点外层 div 不会向下派发，必须点图标本身。
-    const trigger = (setting.querySelector("span") ?? setting) as HTMLElement;
-    fireEvent.click(trigger);
-    const panel = await waitFor(() => {
-      const el = document.querySelector(".ant-popover:not(.ant-popover-hidden)") as HTMLElement | null;
-      if (!el) throw new Error("列设置面板没打开");
-      return el;
-    });
-    const labels = Array.from(panel.querySelectorAll('[class*="list-item-title"]'))
-      .map((n) => (n.textContent ?? "").trim()).filter(Boolean);
-    expect(labels).toContain("方法");
-    expect(labels).not.toContain("操作");              // 操作列的删除入口不许被关掉
-    // 面板里的列是可勾选的 antd Tree 节点（不是每行一个 input）
-    const node = Array.from(panel.querySelectorAll(".ant-tree-treenode"))
-      .find((n) => (n.textContent ?? "").includes("方法"))!;
-    fireEvent.click(node.querySelector(".ant-tree-checkbox")!);
+    // 2026-11-22：列设置从 ProTable options.setting 搬回工具条。options.setting 会让
+    // ProTable 在卡片顶边自造一条只装一个齿轮的空工具栏（实测 1124×48，齿轮正好压在
+    // 「接口」列表头上方），而项目里别处一律 options={false}。搬回来的另一头是这条孤
+    // 栏必须真的消失，否则变成「两个入口 + 一条孤栏」，比原来更糟。
+    expect(document.querySelector(".ant-pro-table-list-toolbar-container")).toBeNull();
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    // 面板列的是 API_COL_CHOICES 那七个可藏列；操作列不进来——它带着恢复/彻底删除的
+    // 入口，被勾掉等于把回收站的出口藏起来。
+    expect(boxes).toHaveLength(7);
+    expect(within(panel).queryByText("操作")).toBeNull();
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["接口", "方法", "模块", "状态", "负责人", "更新时间", "最近结果"]);
+    const byLabel = (t: string) => boxes[labels.indexOf(t)];
+    fireEvent.click(byLabel("方法"));
     await waitFor(() => expect(thead()).not.toContain("方法"));
     expect(screen.queryByTestId("api-method")).toBeNull();
     expect(thead()).toContain("状态");                  // 只藏点名的那一列
-    // 偏好落 ProTable 的持久化键（列设置面板自己写）；键在即证明「设置被记住」这一环接上了
-    expect(localStorage.getItem("tp.ptable.api")).toBeTruthy();
+    // 偏好落工具条这一套的键（useColumnPrefs 写盘）；键在即「设置被记住」接上了
+    expect(localStorage.getItem("tp.listCols.api")).toContain("method");
   });
 
   it("高级搜索筛空 → 空态怪高级搜索；再输关键词也不抢走这句（归因链它在前）", async () => {

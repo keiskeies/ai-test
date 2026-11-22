@@ -50,7 +50,8 @@ function renderPanel(props: Partial<Parameters<typeof UiDebugPanel>[0]> = {}) {
 
 const panel = () => screen.getByTestId("ui-debug-panel");
 const badge = () => screen.getByTestId("ui-debug-badge");
-const MAX_H = Math.round(window.innerHeight * 0.6); // 夹具公式，不写死数字
+const MAX_H = Math.round(window.innerHeight * 0.45); // clamp 公式，不写死数字
+const DEFAULT_H = Math.min(300, Math.max(120, Math.round(window.innerHeight * 0.35))); // DebugDrawer 同款
 
 beforeEach(() => {
   cleanup();
@@ -180,16 +181,16 @@ describe("截图内联：projectId 必须跟着取字节请求走", () => {
   });
 });
 
-describe("拖把手：120 ~ round(0.6·innerHeight)", () => {
-  it("默认 300；上拖 +100；越界双向夹紧；pointerUp 后再移动不改高", () => {
+describe("拖把手：120 ~ round(0.45·innerHeight)", () => {
+  it("默认 clamp(35vh,120,300)；上拖 +100；越界双向夹紧；pointerUp 后再移动不改高", () => {
     renderPanel();
-    expect(panel().style.height).toBe("300px");
+    expect(panel().style.height).toBe(DEFAULT_H + "px");
     expect(panel().style.minHeight).toBe("120px");
     expect(panel().style.maxHeight).toBe(MAX_H + "px");
     const handle = screen.getByTestId("ui-debug-resize");
     fireEvent.pointerDown(handle, { clientY: 400, pointerId: 1 });
-    fireEvent.pointerMove(handle, { clientY: 300, pointerId: 1 });
-    expect(panel().style.height).toBe("400px");
+    fireEvent.pointerMove(handle, { clientY: 350, pointerId: 1 });
+    expect(panel().style.height).toBe(DEFAULT_H + 50 + "px"); // 269+50=319 < MAX_H，未撞顶
     fireEvent.pointerMove(handle, { clientY: 100, pointerId: 1 });
     expect(panel().style.height).toBe(MAX_H + "px");
     fireEvent.pointerUp(handle, { pointerId: 1 });

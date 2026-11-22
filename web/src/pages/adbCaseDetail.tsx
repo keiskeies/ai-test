@@ -259,9 +259,10 @@ function Editor({ caseId }: { caseId: string | "new" }) {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", minHeight: "calc(100vh - 120px)" }}>
-      <Space wrap size={8} style={{ marginBottom: 10 }} data-testid="adb-case-meta">
-        <Input data-testid="case-name" style={{ width: 240 }} maxLength={200} value={name}
+    // 满高写法与 uiCaseDetail 统一：.tp-fill 从 metrics 反解遮挡，不再手写视口减法
+    <div className="tp-fill tp-fill--head">
+      <Space wrap size={8} style={{ marginBottom: 8 }} data-testid="adb-case-meta">
+        <Input data-testid="case-name" style={{ width: 256 }} maxLength={200} value={name}
           disabled={!canUpdate} placeholder="用例名（项目内唯一）" onChange={(e) => setName(e.target.value)} />
         <Select data-testid="case-priority" style={{ width: 96 }} value={priority}
           disabled={!canUpdate} options={PRIO_OPTIONS} onChange={setPriority} />
@@ -310,23 +311,24 @@ function Editor({ caseId }: { caseId: string | "new" }) {
       <StepListEditor descriptor={descriptor} steps={steps} onChange={setSteps}
         canUpdate={canUpdate} saveIssues={saveIssues} dirty={dirty} />
 
-      {/* 场景引用（只读事实；adb_case 上画布后「这条用例被谁用了」必须看得见） */}
+      {/* 场景引用（只读事实；adb_case 上画布后「这条用例被谁用了」必须看得见）
+          ——同一套卡壳（.tp-card）：这一段此前是裸灰字漂在页面底色上，与上方带边框的步骤区不成一套。 */}
       {!isNew && (
-        <div style={{ marginTop: 10 }} data-testid="adb-case-refs">
-          <Typography.Text strong style={{ fontSize: 12 }}>场景引用</Typography.Text>
+        <div className="tp-card tp-cardfoot-strip" style={{ marginTop: 10 }} data-testid="adb-case-refs">
+          <Typography.Text className="tp-text-sm" strong>场景引用</Typography.Text>
           {refsError ? (
             <Space size={6}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>引用清单没拉到</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary">引用清单没拉到</Typography.Text>
               <Button size="small" type="link" onClick={() => void loadRefs()}>重试</Button>
             </Space>
           ) : refs === null ? (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}> 加载中…</Typography.Text>
+            <Typography.Text className="tp-text-sm" type="secondary"> 加载中…</Typography.Text>
           ) : refs.items.length === 0 ? (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" type="secondary">
               {refs.details_hidden ? "被场景引用中（你没有场景读取权限，明细隐瞒）" : "还没有场景引用这条用例"}
             </Typography.Text>
           ) : (
-            <ul style={{ margin: "2px 0 0", paddingLeft: 18, fontSize: 12 }}>
+            <ul className="tp-text-sm" style={{ margin: "2px 0 0", paddingLeft: 18 }}>
               {refs.items.map((it) => (
                 <li key={it.scenario_id} data-testid="adb-case-ref">
                   <Typography.Link href={"#/scene/" + it.scenario_id}>{it.scenario_name}</Typography.Link>

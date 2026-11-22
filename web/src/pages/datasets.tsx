@@ -1,7 +1,7 @@
 // 数据集页（§11.4.5）：左列表右编辑。粘贴优先——数据本来躺在 Excel 里，
 // 让用户一格一格敲等于逼他放弃数据驱动。解析在前端（csv.ts），后端只认结构。
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Empty, Input, Modal, Popconfirm, Space, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Empty, Input, Modal, Popconfirm, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import { CopyOutlined, DeleteOutlined, LockOutlined, PlusOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import type { ColumnsType } from "antd/es/table";
@@ -156,9 +156,15 @@ function DatasetsWorkbench() {
     ) });
   }
   return (
-    <Space size={16} align="start" style={{ width: "100%" }}>
-      <div style={{ width: 320, flexShrink: 0 }}>
-        <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}>
+    // 分栏与 api.tsx:678/722 同口径（Row gutter + Col flex），替换手写 Space+div。
+    // 左栏 320→360：旧 wrapper 实测 318 = 名称188+引用84+操作46 零余量，名称列毫无伸展；
+    // 360 下名称列（唯一不定宽）吃到 ~228。引用 84 = Tag+锁钮、操作 46 = 单图标钮，维持既有值。
+    // flex 基准必须是 0（`auto` 拿右表 max-content 当基准会整块折行，api.tsx:720 实测注释）。
+    <Row gutter={16} wrap={false} style={{ flex: "1 1 auto", minHeight: 0 }}>
+      <Col flex="360px" className="tp-fill-body tp-fill-side">
+        <Card size="small" styles={{ body: { padding: 0 } }}>
+        <div style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
+        <Space style={{ width: "100%", justifyContent: "space-between" }}>
           {/* 取失败时不画 0：那是「没查到」，不是「查到了 0 条」（同 reports.tsx 的 failed 口径） */}
           <Typography.Text strong>数据集（{failed ? "—" : items.length}）</Typography.Text>
           {canCreate && (
@@ -167,7 +173,9 @@ function DatasetsWorkbench() {
             </Button>
           )}
         </Space>
+        </div>
         <AdminTable<DatasetRow> rowKey="id" loading={loading} dataSource={items}
+          className="tp-inpanel"
           // 整行可点开编辑：数据集一般十几条，再来一列「查看」纯属浪费
           onRow={(r) => ({
             onClick: () => open(r), style: { cursor: "pointer" },
@@ -183,17 +191,23 @@ function DatasetsWorkbench() {
           columns={cols}
         />
         {items.length > 0 && (
-          <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 6 }}>
+          <Typography.Text type="secondary" className="tp-text-sm" style={{ padding: "12px 12px", flex: "0 0 auto" }}>
             引用数为 0 才删得掉：数据集是硬删，绑它的用例要先解绑。
           </Typography.Text>
         )}
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
+        </Card>
+      </Col>
+      <Col flex="1 1 0" className="tp-fill-body tp-fill-side" style={{ minWidth: 0 }}>
         {sel === null ? (
-          <Empty description="左侧选一个数据集，或新建一个" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Card size="small" styles={{ body: { padding: 0 } }}>
+            <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Empty description="左侧选一个数据集，或新建一个" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            </div>
+          </Card>
         ) : (
-          <div data-testid="ds-editor">
-            <Space wrap style={{ marginBottom: 8 }}>
+        <Card size="small" styles={{ body: { padding: 0 } }}>
+        <div data-testid="ds-editor" style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: "1 1 auto" }}>
+            <Space wrap style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
               <Input data-testid="ds-name" style={{ width: 240 }} maxLength={200} value={name}
                 placeholder="数据集名，如「订单参数」" onChange={(e) => setName(e.target.value)} />
               <Button icon={<CopyOutlined />} data-testid="ds-paste"
@@ -203,6 +217,7 @@ function DatasetsWorkbench() {
               <Button type="primary" data-testid="ds-save" loading={saving} onClick={() => void save()}>保存</Button>
               <Button type="text" onClick={() => setSel(null)}>关闭</Button>
             </Space>
+            <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "auto", padding: "12px 12px 0" }}>
             {columns.length === 0 ? (
               <Alert type="info" showIcon message="还没有列：点「粘贴表格」从 Excel/CSV 贴进来（首行=列名），或者手动加列" />
             ) : (
@@ -211,13 +226,16 @@ function DatasetsWorkbench() {
                 columns={gridCols}
               />
             )}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            </div>
+            <Typography.Text type="secondary" className="tp-text-sm" style={{ padding: "12px 12px", flex: "0 0 auto" }}>
               {"列名就是变量名：用例绑定数据集后，用 ${列名} 取值（调试取首行，批量执行在 1B）。"}
             </Typography.Text>
           </div>
+        </Card>
         )}
-      </div>
-      <Modal open={pasteOpen} width={760} destroyOnHidden title="粘贴表格（首行=列名，Tab 或逗号分隔）"
+      </Col>
+      {/* Modal 走 portal，挂在 Row 外不参与分栏布局 */}
+      <Modal open={pasteOpen} width={640} centered destroyOnHidden title="粘贴表格（首行=列名，Tab 或逗号分隔）"
         data-testid="ds-paste-modal" okText="导入" cancelText="取消"
         okButtonProps={{ disabled: !parsed || parsed.columns.length === 0, "data-testid": "ds-paste-confirm" }}
         onCancel={() => setPasteOpen(false)} onOk={() => { if (parsed) applyPaste(parsed); }}>
@@ -247,7 +265,7 @@ function DatasetsWorkbench() {
                   <Alert style={{ marginTop: 6 }} type="warning" showIcon
                     message={"列名重复：" + parsed.duplicates.join("、") + "，保存会被拦下：列名不能重复"} />
                 )}
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <Typography.Text className="tp-text-sm" type="secondary">
                   导入后是可直接编辑的表格，不是只读预览；列名会当成变量名。
                 </Typography.Text>
               </>
@@ -255,14 +273,14 @@ function DatasetsWorkbench() {
           </div>
         )}
       </Modal>
-    </Space>
+    </Row>
   );
 }
 
 export default function DatasetsPage() {
   return (
-    <div data-testid="page-datasets">
-      <PageHead title="数据集"
+    <div data-testid="page-datasets" className="tp-fill-stack">
+      <PageHead title="数据集" descHover
         desc="场景参数化的数据来源：CSV 粘贴或导入，执行时逐行喂给步骤。" />
       <ProjectGate>
         <DatasetsWorkbench />

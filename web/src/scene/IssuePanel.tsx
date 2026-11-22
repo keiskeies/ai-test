@@ -14,16 +14,17 @@ export default function IssuePanel() {
   const issues = useMemo(() => mergeIssues(nodes, serverIssues), [nodes, serverIssues]);
 
   return (
-    <div data-testid="scene-issue-panel" style={{ maxHeight: 160, overflow: "auto", background: "#fff", borderTop: "1px solid var(--tp-split)" }}>
+    // 上限随视口缩放（固定 160 在矮屏吃掉半屏问题行）：28vh 与 240px（24 档 ×10，
+    // small 表约 7 行）取小——面板是索引不是正文，画布才是主区。
+    <div data-testid="scene-issue-panel" style={{ maxHeight: "min(28vh, 240px)", overflow: "auto", background: "var(--tp-bg-container)", borderTop: "1px solid var(--tp-split)" }}>
       {refused && (
-        <div data-testid="save-refused" style={{ padding: "6px 12px" }}>
+        <div data-testid="save-refused" style={{ padding: "8px 12px" }}>
           <Alert type="error" showIcon
             message="保存被拒绝：先解决下面的问题（本地预检与后端同口径，后端仍是最终真相）" />
         </div>
       )}
       {issues.length === 0 ? (
-        <Typography.Text type="secondary" data-testid="issue-empty"
-          style={{ padding: "6px 12px", display: "block", fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid="issue-empty" style={{ padding: "8px 12px", display: "block" }}>
           没有校验问题。break/continue 出循环、缺必填配置等会在这里列出来。
         </Typography.Text>
       ) : (
@@ -32,8 +33,8 @@ export default function IssuePanel() {
           columns={[
             { key: "sev", width: 32, render: () => <Badge status="error" /> },
             { key: "msg", render: (_, r) => (
-              <span data-testid={"issue-row-" + r.code} style={{ fontSize: 12 }}>
-                <Typography.Text code style={{ fontSize: 11 }}>{r.node_key || "(无 key)"}</Typography.Text>{" "}
+              <span className="tp-text-sm" data-testid={"issue-row-" + r.code}>
+                <Typography.Text className="tp-text-xs" code>{r.node_key || "(无 key)"}</Typography.Text>{" "}
                 {r.message}
               </span>) },
             { key: "go", width: 72, render: (_, r) => (

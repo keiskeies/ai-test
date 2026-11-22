@@ -1,6 +1,6 @@
 // DebugDrawer（§11.5.6/§11.7.3 底部运行抽屉，T20/T21）组件测试，此前 vitest 侧零 import
 // （audit-test-debt.mjs 命中）。钉「渲染层不说谎」：① open=false 零 DOM；默认高 269px=
-// round(768×0.35)、上限 461px=round(768×0.6)——jsdom innerHeight 是真值 768，clamp 可断言；
+// round(768×0.35)、上限 346px=round(768×0.45)——jsdom innerHeight 是真值 768，clamp 可断言；
 // 指针拖拽手势几何归 e2e。② 头标文案=诚实条款：debug「调试（未保存草稿）」vs manual
 // 「执行（已保存场景）」，互换=撒谎（两者跑的不是同一份图）；③ 徽标三分支 + starting/idle
 // 无徽标（没终态就没结论）+ 未知 finalStatus 渲染原文（宁可生码，不编友好标签）；④ report-
@@ -95,7 +95,7 @@ describe("DebugDrawer 渲染层（真 store + 真 store 动作）", () => {
     expect(screen.queryByTestId("debug-drawer")).toBeNull();
     mount();
     const d = screen.getByTestId("debug-drawer");
-    expect([d.style.height, d.style.maxHeight]).toEqual(["269px", "461px"]); // round(768×0.35/0.6)
+    expect([d.style.height, d.style.maxHeight]).toEqual(["269px", "346px"]); // round(768×0.35/0.45)
     fireEvent.click(screen.getByTestId("debug-drawer-close"));
     expect(screen.queryByTestId("debug-drawer")).toBeNull();
     expect(useSceneStore.getState().run.open).toBe(false); // 真实 closeRun，不是本地藏起来

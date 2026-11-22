@@ -15,11 +15,14 @@ import DebugPanel from "../api/DebugPanel";
 import type { DebugResult } from "../api/DebugPanel";
 import { fetchArtifactBlob } from "../shared/artifactSrc";
 import { STATUSES } from "../shared/runVocab";
-import { assertionRows, cmdRows, shotsByStep } from "../ui/debugRows";
+import { assertionRows, cmdRows, shotsByStep, DEBUG_ROW } from "../ui/debugRows";
 import type { AdbDebugResult } from "../api/adbCase";
 
 const MIN_H = 120;
-const DEFAULT_H = 300; // 与 UI 面板同档（§11.4.12 标注的默认高）
+// 与 UiDebugPanel/DebugDrawer 同一 clamp 公式：300 是 §11.4.12 的标注高，作上限而不是定值。
+function defaultHeight(): number {
+  return Math.min(300, Math.max(MIN_H, Math.round(window.innerHeight * 0.35)));
+}
 
 /** mode 徽标的三态措辞——「降级」要说人话，不写 u2/dump 生码糊弄。 */
 export function modeBadge(mode: string | null | undefined): { text: string; color: string } | null {
@@ -47,8 +50,8 @@ function ShotImg({ runId, name, projectId, testId }: {
       .catch((e: unknown) => { if (!dead) setErr((e as Error)?.message ?? "截图取不到"); });
     return () => { dead = true; if (created) URL.revokeObjectURL(created); };
   }, [runId, name, projectId]);
-  if (err) return <Typography.Text type="danger" style={{ fontSize: 12 }}>{err}</Typography.Text>;
-  if (!url) return <Typography.Text type="secondary" style={{ fontSize: 12 }}>截图加载中…</Typography.Text>;
+  if (err) return <Typography.Text className="tp-text-sm" type="danger">{err}</Typography.Text>;
+  if (!url) return <Typography.Text className="tp-text-sm" type="secondary">截图加载中…</Typography.Text>;
   return (
     <img data-testid={testId} src={url} alt={name}
       style={{ maxWidth: 260, maxHeight: 150, border: "1px solid var(--tp-border)", borderRadius: 4 }} />
@@ -65,7 +68,7 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
   projectId: string;
   onClose: () => void;
 }) {
-  const [height, setHeight] = useState(DEFAULT_H);
+  const [height, setHeight] = useState(defaultHeight);
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
 
   const rows = useMemo(() => cmdRows(result?.commands ?? []), [result]);
@@ -91,7 +94,7 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
   } : null;
 
   const meta = result ? STATUSES[result.status] : null;
-  const maxH = Math.round(window.innerHeight * 0.6);
+  const maxH = Math.round(window.innerHeight * 0.45);
   const varsCount = result ? Object.keys(result.vars ?? {}).length : 0;
   const mode = result ? modeBadge(result.mode) : null;
 
@@ -100,7 +103,7 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
       height, minHeight: MIN_H, maxHeight: maxH, background: "var(--tp-bg-container)",
       borderTop: "1px solid var(--tp-border)", display: "flex", flexDirection: "column", flexShrink: 0,
     }}>
-      {/* 拖把手：120 ~ 60vh（DebugDrawer/UiDebugPanel 同款 pointer-capture mechanic） */}
+      {/* 拖把手：120 ~ 45vh（DebugDrawer/UiDebugPanel 同款 pointer-capture mechanic） */}
       <div data-testid="adb-debug-resize"
         onPointerDown={(e) => {
           dragRef.current = { startY: e.clientY, startH: height };
@@ -115,7 +118,7 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
         style={{ height: 6, cursor: "ns-resize", background: "#F2F6F4", flexShrink: 0 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 12px",
         borderBottom: "1px solid var(--tp-split)", flexShrink: 0, flexWrap: "wrap" }}>
-        <Typography.Text strong style={{ fontSize: 13 }}>调试</Typography.Text>
+        <Typography.Text className="tp-text-md" strong>调试</Typography.Text>
         {running && <Tag color="processing" data-testid="adb-debug-badge">运行中</Tag>}
         {!running && error && <Tag color="red" data-testid="adb-debug-badge" data-status="error">发起失败</Tag>}
         {!running && !error && result && (
@@ -124,7 +127,7 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
           </Tag>
         )}
         {result && !running && (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{result.elapsed_ms}ms</Typography.Text>
+          <Typography.Text className="tp-text-sm" type="secondary">{result.elapsed_ms}ms</Typography.Text>
         )}
         {/* 降级与设备当场说出（T6 交接：dump 模式界面必须可见） */}
         {result && !running && mode && (
@@ -142,8 +145,7 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
         <Button size="small" type="text" data-testid="adb-debug-close" icon={<CloseOutlined />} onClick={onClose} />
       </div>
       {note && !running && (
-        <div data-testid="adb-debug-note" style={{ padding: "4px 12px", fontSize: 12, color: "var(--tp-text-2)",
-          borderBottom: "1px solid var(--tp-split)", flexShrink: 0 }}>
+        <div className="tp-text-sm" data-testid="adb-debug-note" style={{ padding: "8px 12px", color: "var(--tp-text-2)", borderBottom: "1px solid var(--tp-split)", flexShrink: 0 }}>
           {note}
         </div>
       )}
@@ -164,34 +166,33 @@ export default function AdbDebugPanel({ result, running, error, note, projectId,
         )}
         {result && !running && (
           <div style={{ padding: 8 }}>
-            <Typography.Text strong style={{ fontSize: 12 }}>步骤时间线</Typography.Text>
+            <Typography.Text className="tp-text-sm" strong>步骤时间线</Typography.Text>
             {rows.map((r) => (
               <div key={r.id} data-testid="adb-debug-step-row" data-id={r.id} data-status={r.status}
                 style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap",
                   padding: "3px 4px", borderBottom: "1px dashed #F0F2F4" }}>
-                <Typography.Text style={{ fontSize: 12, width: 46 }}>{r.id}</Typography.Text>
-                <Typography.Text style={{ fontSize: 12, width: 92 }}>{r.type}</Typography.Text>
+                <Typography.Text className="tp-text-sm" style={{ width: DEBUG_ROW.idW }}>{r.id}</Typography.Text>
+                <Typography.Text className="tp-text-sm" style={{ width: DEBUG_ROW.typeW }}>{r.type}</Typography.Text>
                 <Tag style={{ marginInlineEnd: 0 }}
                   color={r.status === "pass" ? "green" : r.status === "fail" ? "orange"
                     : r.status === "error" ? "red" : "default"}>{r.status}</Tag>
-                <Typography.Text type="secondary" style={{ fontSize: 12, width: 64 }}>{r.elapsed_ms}ms</Typography.Text>
-                <span data-testid={"adb-debug-step-message-" + r.id}
-                  style={{ fontSize: 12, color: "var(--tp-text-2)", flex: 1, minWidth: 120 }}>{r.message}</span>
+                <Typography.Text className="tp-text-sm" type="secondary" style={{ width: DEBUG_ROW.elapsedW }}>{r.elapsed_ms}ms</Typography.Text>
+                <span className="tp-text-sm" data-testid={"adb-debug-step-message-" + r.id} style={{ color: "var(--tp-text-2)", flex: 1, minWidth: 120 }}>{r.message}</span>
                 {(shots[r.id]?.length ?? 0) > 0 && (
-                  <Space size={6} wrap style={{ width: "100%", paddingLeft: 54 }}>
+                  <Space size={6} wrap style={{ width: "100%", paddingLeft: DEBUG_ROW.indent }}>
                     {shots[r.id].map((s, i) => (
                       <span key={i} style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
                         <ShotImg runId={result.run_id} name={s.name} projectId={projectId}
                           testId={"adb-debug-shot-" + r.id} />
-                        <Typography.Text type="secondary" style={{ fontSize: 11 }}>{s.reason}</Typography.Text>
+                        <Typography.Text className="tp-text-xs" type="secondary">{s.reason}</Typography.Text>
                       </span>
                     ))}
                   </Space>
                 )}
               </div>
             ))}
-            <div data-testid="adb-debug-vars" style={{ marginTop: 8, fontSize: 12 }}>
-              <Typography.Text strong style={{ fontSize: 12 }}>变量快照（{varsCount}）</Typography.Text>
+            <div className="tp-text-sm" data-testid="adb-debug-vars" style={{ marginTop: 8 }}>
+              <Typography.Text className="tp-text-sm" strong>变量快照（{varsCount}）</Typography.Text>
               {varsCount === 0 ? (
                 <Typography.Text type="secondary"> （没有存过变量；screenshot/record 的 save_var
                   与 extract_ui_text 的结果会落在这里）</Typography.Text>

@@ -58,7 +58,7 @@ export function ScenarioRefsBlockModal({ subject, details, blurb, testid, busy, 
   const hidden = details?.reason === "missing_scenario_read" || !maySeeRefs;
   const shown = details?.scenarios ?? [];
   return (
-    <Modal open={details !== null} destroyOnHidden width={560}
+    <Modal open={details !== null} destroyOnHidden width={560} centered
       title="回收被拦截：还有场景在引用它"
       okText={hidden ? "知道了" : "仍要回收（会断掉这些步骤）"}
       okButtonProps={{ danger: !hidden, loading: busy, ...(hidden ? {} : { "data-testid": testid + "-force" }) }}
@@ -341,7 +341,7 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
           用例默认完全继承接口：只改要改的，其余跟着接口走；断言追加在接口断言之后。
         </Typography.Text>
         {(canCreate && !inRecycled) || canUpdate || canDelete ? (
-          <Space size={6}>
+          <Space size={8}>
             {canCreate && !inRecycled && (
               <Button size="small" type="primary" ghost icon={<PlusOutlined />}
                 data-testid="case-new" onClick={openCreate}>新建用例</Button>
@@ -391,8 +391,10 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
           { title: "可执行", key: "ex", width: 88, render: (_: unknown, r: CaseRow) => (
               r.effective_request ? <Tag color="green">可执行</Tag> : <Tag color="orange">缺 URL</Tag>
             ) },
-          { title: "", key: "ops", width: inRecycled ? 168 : 130, render: (_: unknown, r: CaseRow) => (
-              <Space size={4}>
+          // 列宽含格子 padding 8×2：回收行自然宽 172（恢复 64 + 彻底删除 92 + 2×gap8）→ 192；
+          // 普通行 136（调试 64 + 两个图标钮 28×2 + 2×gap8）→ 160。small 钮宽 = 内文 + 图标14+8 + 7×2。
+          { title: "", key: "ops", width: inRecycled ? 192 : 160, render: (_: unknown, r: CaseRow) => (
+              <Space size={8}>
                 {!inRecycled && canDebug && (
                   <Button size="small" icon={<BugOutlined />} data-testid="case-debug" loading={debugging === r.id}
                     onClick={() => void debugOne(r)}>调试</Button>
@@ -425,7 +427,8 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
           <DebugPanel result={result} subject={resultSubject} />
         </div>
       )}
-      <Modal open={editing !== null} width={920} destroyOnHidden
+      {/* 960 = 浮层五档：920 不在档上，内嵌 RequestEditor 也吃宽度。 */}
+      <Modal open={editing !== null} width={960} centered destroyOnHidden
         title={editing === "new" ? "新建用例 · 继承自「" + def.name + "」"
                : "编辑用例" + (editing ? " · " + editing.name : "")}
         okText={editing === "new" ? "创建" : "保存"} cancelText="取消" confirmLoading={saving}
@@ -453,7 +456,7 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
               onChange={(v) => setDsId(v ?? null)} />
           </Space>
           {touched.length > 0 && (
-            <Space wrap size={4}>
+            <Space wrap size={8}>
               <Typography.Text type="secondary">恢复继承：</Typography.Text>
               {touched.map((k) => (
                 <Button key={k} size="small" data-testid={"case-unset-" + k}
@@ -467,7 +470,7 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
         </div>
       </Modal>
       {/* 彻底删除（§11.4.18）：不可逆，手输用例名；服务端同样硬校验，不靠前端拦 */}
-      <Modal open={purge !== null} onCancel={() => setPurge(null)} destroyOnHidden width={520}
+      <Modal open={purge !== null} onCancel={() => setPurge(null)} destroyOnHidden width={560} centered
         title="彻底删除用例？" okText="我已确认，彻底删除" cancelText="取消"
         okButtonProps={{ danger: true, "data-testid": "case-purge-ok",
           disabled: purgeName !== (purge?.name ?? ""), loading: purging }}

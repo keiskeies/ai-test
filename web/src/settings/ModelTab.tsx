@@ -171,14 +171,13 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
     const usageRow = usage ? modelUsageApi.byModel(usage, c.id) : undefined;
     const usageSessions = usageRow?.usage_sessions ?? null;
     return (
-      <Col key={c.id} xs={24} md={12} xl={8}>
-        <Card size="small" data-testid="model-card" data-model-id={c.id}
-          title={<Space size={6}>
-            <span>{c.name}</span>
-            {c.is_default && <Tag color="gold" data-testid="model-default-star">默认★</Tag>}
-            {!c.enabled && <Tag data-testid="model-disabled-tag">停用</Tag>}
-          </Space>}
-          extra={<Typography.Text type="secondary" className="tp-text-sm">{isEmbed ? "向量" : c.protocol === "OPENAI_COMPAT" ? "OAI兼容" : c.protocol}</Typography.Text>}>
+      <Card key={c.id} size="small" data-testid="model-card" data-model-id={c.id}
+        title={<Space size={6}>
+          <span>{c.name}</span>
+          {c.is_default && <Tag color="gold" data-testid="model-default-star">默认★</Tag>}
+          {!c.enabled && <Tag data-testid="model-disabled-tag">停用</Tag>}
+        </Space>}
+        extra={<Typography.Text type="secondary" className="tp-text-sm">{isEmbed ? "向量" : c.protocol === "OPENAI_COMPAT" ? "OAI兼容" : c.protocol}</Typography.Text>}>
           <Typography.Paragraph type="secondary" className="tp-mono tp-text-sm" style={{ marginBottom: 8 }}>
             {c.base_url} · {c.model_name}
           </Typography.Paragraph>
@@ -240,19 +239,23 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
               )}
             </div>
           )}
-        </Card>
-      </Col>
+      </Card>
     );
   };
 
   return (
-    <div data-testid="tab-model">
+    <div data-testid="tab-model" className="tp-fill-tab">
       {failed && <Alert type="warning" showIcon style={{ marginBottom: 12 }}
         message={denied
           ? "模型列表没取到：这个账号现在没有 model:cfg:read（界面还留着管理员工号，后端权限已被收走）"
           : "模型列表没取到：请求没成功或后端没应答，与权限无关——重试或看后端日志"}
         data-testid="model-load-failed" />}
-      <Row gutter={[12, 12]}>{items.map(renderCard)}</Row>
+      {/* 容器断点卡片墙（xl={8} 在 2560 视口下容器封顶 1552 仍只切 3 列各 ~507，大屏空转）。
+          --tp-wall-min=300：1200 视口下 944 容器出 3 列各 304（≥ 旧实测 292 的「勉强够」），
+          1552 封顶容器出 4 列各 376——auto-fill 下 5 列要 5×300+64>1552，最多 4 列封顶。 */}
+      <div className="tp-wall" style={{ "--tp-wall-min": "300px" } as React.CSSProperties}>
+        {items.map(renderCard)}
+      </div>
       {!failed && items.length === 0 && (
         <StateView title="还没有登记模型（出厂种子经 .env 注入网关地址后自动出现）" />
       )}
@@ -264,7 +267,7 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
           <Col xs={24} lg={12}>
             <Card size="small" title="按用户用量（tokens 只认 usage 回执）" data-testid="model-usage-users">
               {usage.users.map((u) => (
-                <div key={u.user_id} className="tp-text-sm" style={{ lineHeight: "22px" }}>
+                <div key={u.user_id} className="tp-text-sm">
                   <Typography.Text strong>{u.user_name}</Typography.Text>
                   {" · 会话 " + u.sessions + " · 轮次 " + u.turns
                     + " · tokens " + (u.total_tokens == null ? "—" : String(u.total_tokens))}
@@ -275,8 +278,10 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
           <Col xs={24} lg={12}>
             <Card size="small" title="按会话用量" data-testid="model-usage-sessions">
               {usage.sessions.map((s) => (
-                <div key={s.session_id} className="tp-text-sm" style={{ lineHeight: "22px" }}>
-                  <Typography.Text ellipsis style={{ maxWidth: 160 }}>{s.title}</Typography.Text>
+                <div key={s.session_id} className="tp-text-sm">
+                  {/* 旧的 maxWidth: 160 魔数删掉：antd 单行 ellipsis 自带 max-width:100%，
+                      截断点跟着列宽走——与 .tp-wall「尺寸由容器决定」同一原则。 */}
+                  <Typography.Text ellipsis>{s.title}</Typography.Text>
                   {" · " + s.user_name + " · 轮次 " + s.turns
                     + " · tokens " + (s.total_tokens == null ? "—" : String(s.total_tokens))
                     + (s.model_name ? " · " + s.model_name : "")}
@@ -287,7 +292,7 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
         </Row>
       )}
       {editing && form && (
-        <Modal open data-testid="model-edit-modal" title={"编辑 · " + editing.name} width={640}
+        <Modal centered open data-testid="model-edit-modal" title={"编辑 · " + editing.name} width={640}
           confirmLoading={busy === editing.id} okText="保存"
           onOk={() => void save()} onCancel={() => setEditing(null)}>
           <Space direction="vertical" style={{ width: "100%" }} size={8}>

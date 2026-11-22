@@ -85,7 +85,7 @@ export function FileTextPicker({ testId, maxChars, onText }: {
           if (f) void pick(f);
           e.target.value = ""; // 同一个文件连选两次也要触发
         }} />
-      <Typography.Text type="secondary" data-testid={testId + "-hint"} style={{ fontSize: 12 }}>
+      <Typography.Text type="secondary" data-testid={testId + "-hint"} className="tp-text-sm">
         选文件会覆盖当前文本框内容
         {maxChars === undefined ? "" : "（上限 " + maxChars + " 字符，与后端一致）"}
       </Typography.Text>
@@ -167,7 +167,7 @@ export default function ImportWizard({ projectId, open, onClose, onImported }: {
   }, [preview, receipt]);
 
   return (
-    <Modal title="导入" open={open} width={960} onCancel={() => { reset(); onClose(); }}
+    <Modal title="导入" open={open} width={960} centered onCancel={() => { reset(); onClose(); }}
       data-testid="import-wizard"
       footer={step === 2 ? [
         <Button key="dl" data-testid="iw-download" disabled={reportLines.length === 0}
@@ -212,7 +212,8 @@ export default function ImportWizard({ projectId, open, onClose, onImported }: {
           </Space>
           {/* preview 判重不含回收站行，commit 门槛含（import_services name_taken 连回收站一并算）：
               占名条目预览报「新增」提交却被拒，任一失败整批回滚——门槛差异要在提交前说清。 */}
-          <Typography.Text type="secondary" data-testid="iw-recycle-note" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+          <Typography.Text type="secondary" data-testid="iw-recycle-note" className="tp-text-sm"
+            style={{ display: "block", marginBottom: 8 }}>
             「新增」以现有接口判重：回收站里的接口同样占名，占名条目提交会被拒且整批回滚，请先清理回收站同名接口。
           </Typography.Text>
           {preview.errors.length > 0 && (
@@ -229,7 +230,9 @@ export default function ImportWizard({ projectId, open, onClose, onImported }: {
               { title: "方法", dataIndex: "method", width: 90,
                 render: (v: string) => <Tag color={METHOD_TAG[v] ?? "default"}>{v}</Tag> },
               { title: "路径", dataIndex: "path", ellipsis: true, className: "tp-mono" },
-              { title: "冲突", width: 140, render: (_v, _r, i) => (
+              // 176 = 最坏内容「跳过（不勾 = 覆盖）」：8 全角字 ×14 = 112 + " = " ≈ 15，
+              // 加勾选框 16 + 标签左右 padding 8×2、格子 padding 8×2 ≈ 175 → 8 倍数取 176。
+              { title: "冲突", width: 176, render: (_v, _r, i) => (
                 _r.exists
                   ? <Checkbox data-testid={"iw-skip-" + i} checked={!!skipMap[i]}
                       onChange={(e) => setSkipMap({ ...skipMap, [i]: e.target.checked })}>
@@ -243,7 +246,7 @@ export default function ImportWizard({ projectId, open, onClose, onImported }: {
 
       {step === 2 && receipt && (
         <Space direction="vertical" style={{ width: "100%" }} size={12}>
-          <Typography.Text data-testid="iw-receipt" style={{ fontSize: 15 }}>
+          <Typography.Text data-testid="iw-receipt" className="tp-text-lg">
             {receipt.ok
               ? <>成功 {receipt.created + receipt.updated} · 失败 {receipt.failed}
                   （新增 {receipt.created} · 覆盖 {receipt.updated} · 跳过 {receipt.skipped}）</>

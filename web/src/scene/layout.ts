@@ -1,4 +1,4 @@
-// 画布自动布局（elkjs）：§11.7.3 规格——步骤节点 224×64、垂直距 48。
+// 画布自动布局（elkjs）：§11.7.3 规格——步骤节点 224×64。
 // 纯函数：nodes → LayoutMap（key → 绝对坐标）。渲染是平铺的（容器不包裹子节点，
 // 父子关系由树生成的边可视化），所以布局用「父在上、子在下」的 layered 图。
 // 失败回落：elk 抛错时用「深度缩进 + 顺序纵排」的保底坐标——布局是体验件，
@@ -10,8 +10,11 @@ import type { LayoutMap, StepNode } from "./stepTypes";
 
 export const NODE_W = 224;
 export const NODE_H = 64;
-const GAP_Y = 48; // §11.7.3 节点间垂直距
-const GAP_X = 48;
+// DOWN 方向下同层兄弟横向并排：GAP_SIBLING 是层内横向距（喂 nodeNode），
+// GAP_LAYER 是层间纵向距（喂 nodeNodeBetweenLayers，画布无边标签，48 收紧到 32）。
+// 旧名 GAP_X/Y 与轴向相反，改名消除误读；值不改算法逻辑。
+const GAP_SIBLING = 48; // §11.7.3 同层距
+const GAP_LAYER = 32; // 层间距（无边标签后收紧）
 
 interface FlatNode {
   node: StepNode;
@@ -42,8 +45,8 @@ export async function autoLayout(nodes: StepNode[]): Promise<LayoutMap> {
       algorithm: "layered",
       layoutOptions: {
         "elk.direction": "DOWN",
-        "elk.spacing.nodeNode": String(GAP_Y),
-        "elk.layered.spacing.nodeNodeBetweenLayers": String(GAP_X),
+        "elk.spacing.nodeNode": String(GAP_SIBLING),
+        "elk.layered.spacing.nodeNodeBetweenLayers": String(GAP_LAYER),
         "elk.layered.nodePlacement.strategy": "SIMPLE",
       },
       children: flat.map(({ node }) => ({ id: node.key, width: NODE_W, height: NODE_H })),
@@ -67,7 +70,8 @@ function fallbackLayout(nodes: StepNode[]): LayoutMap {
   let seq = 0;
   const place = (list: StepNode[], depth: number) => {
     for (const n of list) {
-      map[n.key] = { x: depth * (NODE_W + GAP_X), y: seq * (NODE_H + GAP_Y) };
+      // x 用同层横向距（test 钉死 48），y 与层间纵向距同源
+      map[n.key] = { x: depth * (NODE_W + GAP_SIBLING), y: seq * (NODE_H + GAP_LAYER) };
       seq++;
       place(childrenOf(n), depth + 1);
     }

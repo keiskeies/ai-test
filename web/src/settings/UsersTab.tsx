@@ -145,7 +145,7 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
   ];
 
   return (
-    <div data-testid="tab-users">
+    <div data-testid="tab-users" className="tp-fill-tab">
       <FilterBar actions={(
         <Toolbar>
           <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新</Button>
@@ -168,21 +168,21 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
         <Alert type="warning" showIcon style={{ marginBottom: 12 }}
           message="用户列表没取到" description="可能是网络不通，点「刷新」重试" />
       )}
-      <div className="tp-card tp-tablecard" style={{ padding: "0 4px" }}>
-        <AdminTable<UserRowOut> rowKey="id" loading={loading} columns={cols} dataSource={items}
-          locale={{ emptyText: failed
-            // 第 9 处「取失败摊成空列表」（datasets/reports/runs/scenes/api/adbCases/CaseList…）：
-            // catch 里 setItems([])，500 与「平台真没用户」在这一格长得一模一样。
-            ? <StateView compact kind="error" title="用户列表没取到，以上方的加载失败提示为准"
-                action={<Button size="small" onClick={refresh} loading={loading}>重试</Button>} />
-            : <StateView compact title="还没有用户" /> }} />
-      </div>
-      {cursor && (
-        <div style={{ textAlign: "center", marginTop: 12 }}>
-          <Button data-testid="users-more" onClick={() => void load(false)} loading={loading}>加载更多</Button>
-        </div>
-      )}
-      <Modal open={open} title="新建用户" data-testid="user-modal" okText="创建" cancelText="取消"
+      {/* 外壳只有 AdminTable 自己那一层 tp-tablecard（与 MembersTab/AuditTab 同口径，
+          此前多包一层 tp-card 是双白卡双描边 + 4px 手抄 padding）。 */}
+      <AdminTable<UserRowOut> rowKey="id" loading={loading} columns={cols} dataSource={items}
+        locale={{ emptyText: failed
+          // 第 9 处「取失败摊成空列表」（datasets/reports/runs/scenes/api/adbCases/CaseList…）：
+          // catch 里 setItems([])，500 与「平台真没用户」在这一格长得一模一样。
+          ? <StateView compact kind="error" title="用户列表没取到，以上方的加载失败提示为准"
+              action={<Button size="small" onClick={refresh} loading={loading}>重试</Button>} />
+          : <StateView compact title="还没有用户" /> }}
+        cardFooter={(cursor ? (
+          // 「加载更多」住进卡底（同列表页脚注口径：卡有边有角，控件不该散在卡外的页面底色上）。
+          <div className="tp-cardfoot--center">
+            <Button data-testid="users-more" onClick={() => void load(false)} loading={loading}>加载更多</Button>
+          </div>) : undefined)} />
+      <Modal centered open={open} title="新建用户" data-testid="user-modal" okText="创建" cancelText="取消"
         okButtonProps={{ loading: saving, "data-testid": "user-create-ok" } as never}
         onOk={() => void create()} onCancel={() => setOpen(false)} destroyOnHidden>
         <Form form={form} layout="vertical" data-testid="user-form">
@@ -207,7 +207,7 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
           新密码将告知用户，平台不保存明文（只存哈希；忘记密码同样只能重置）。
         </Typography.Paragraph>
       </Modal>
-      <Modal open={pwFor !== null} title={"编辑用户 · " + (pwFor?.name ?? "")} data-testid="pw-modal"
+      <Modal centered open={pwFor !== null} title={"编辑用户 · " + (pwFor?.name ?? "")} data-testid="pw-modal"
         okText="保存" cancelText="取消"
         okButtonProps={{ loading: saving, "data-testid": "pw-ok" } as never}
         onOk={() => void resetPassword()} onCancel={() => setPwFor(null)} destroyOnHidden>

@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Card, Checkbox, Col, Drawer, Input, Modal, Row, Segmented, Space, Switch,
+  Alert, Button, Card, Checkbox, Drawer, Input, Modal, Segmented, Space, Switch,
   Tag, Tooltip, Typography, message,
 } from "antd";
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, UndoOutlined } from "../ui/icons";
@@ -216,7 +216,7 @@ function EchoBlock({ text }: { text: string }) {
 /** 卡片墙上「测试连接」的成功回执：连接原话 + 机型/系统 + base64 PNG 截图内联。 */
 function TestResultModal({ name, out, onClose }: { name: string; out: TestOut; onClose: () => void }) {
   return (
-    <Modal open title={`测试连接：${name}`} width={520} okText="关闭"
+    <Modal open title={`测试连接：${name}`} width={480} centered okText="关闭"
       cancelButtonProps={{ style: { display: "none" } }}
       okButtonProps={{ "data-testid": "adb-test-close" }} onOk={onClose} onCancel={onClose}>
       <div data-testid="adb-test-result">
@@ -225,7 +225,7 @@ function TestResultModal({ name, out, onClose }: { name: string; out: TestOut; o
           description={out.ok && (out.model || out.os_version)
             ? `机型 ${out.model ?? "未知"} · 系统 ${out.os_version ?? "未知"}` : undefined} />
         {!out.ok && (
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Paragraph className="tp-text-sm" type="secondary">
             以上是 adb 的原始输出（未翻译未改写）。常见原因：设备未先执行过 adb connect、
             不在同一网段、5555 端口未开无线调试。
           </Typography.Paragraph>
@@ -280,7 +280,7 @@ function AddDeviceModal({ open, pid, onClose, onCreated }: {
   }
 
   return (
-    <Modal open={open} title="添加设备" width={560} okText="测试连接并添加" cancelText="取消"
+    <Modal open={open} title="添加设备" width={560} centered okText="测试连接并添加" cancelText="取消"
       confirmLoading={busy} okButtonProps={{ "data-testid": "adb-device-add-ok" }}
       onCancel={() => { setEcho(null); onClose(); }} onOk={() => void submit()}>
       <Space direction="vertical" style={{ width: "100%" }} size={10}>
@@ -291,9 +291,9 @@ function AddDeviceModal({ open, pid, onClose, onCreated }: {
           onChange={(e) => setSerial(e.target.value)} onPressEnter={() => void submit()} />
         <Space>
           <Switch data-testid="adb-device-public" checked={pub} onChange={setPub} size="small" />
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>项目内公开（关掉后仅自己可见）</Typography.Text>
+          <Typography.Text className="tp-text-sm" type="secondary">项目内公开（关掉后仅自己可见）</Typography.Text>
         </Space>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary">
           保存前会真的执行 adb connect + getprop 验证；连不上不会入库，下面是 adb 的原话。
           USB 直连一期不开放写入口（D14）。
         </Typography.Text>
@@ -362,25 +362,25 @@ function EditDeviceModal({ row, open, onClose, onSaved }: {
   }
 
   return (
-    <Modal open={open} title={`编辑设备：${row?.name ?? ""}`} width={520} okText="保存"
+    <Modal open={open} title={`编辑设备：${row?.name ?? ""}`} width={480} centered okText="保存"
       cancelText="取消" confirmLoading={busy} destroyOnHidden
       okButtonProps={{ "data-testid": "adb-device-edit-ok" }}
       onCancel={close} onOk={() => void submit()}>
       <Space direction="vertical" style={{ width: "100%" }} size={10}>
         <div>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>设备名（项目内唯一）</Typography.Text>
+          <Typography.Text className="tp-text-sm" type="secondary">设备名（项目内唯一）</Typography.Text>
           <Input data-testid="adb-device-edit-name" maxLength={200} value={name} autoFocus
             onChange={(e) => setName(e.target.value)} />
         </div>
         <Space>
           <Switch data-testid="adb-device-edit-enabled" checked={enabled} onChange={setEnabled} size="small" />
-          <Typography.Text style={{ fontSize: 13 }}>启用（关掉后不再被调度选中）</Typography.Text>
+          <Typography.Text className="tp-text-md">启用（关掉后不再被调度选中）</Typography.Text>
         </Space>
         <Space>
           <Switch data-testid="adb-device-edit-public" checked={pub} onChange={setPub} size="small" />
-          <Typography.Text style={{ fontSize: 13 }}>项目内公开（关掉后仅自己可见）</Typography.Text>
+          <Typography.Text className="tp-text-md">项目内公开（关掉后仅自己可见）</Typography.Text>
         </Space>
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}
+        <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ marginBottom: 0 }}
           data-testid="adb-device-edit-serial-hint">
           串号只读：<Typography.Text code>{serial}</Typography.Text>
           ——改串号/连接方式请走「测试连接」重验。后端原话：改 serial/connect_type 请用设备的「测试连接」端点完成重验，不直接
@@ -558,7 +558,7 @@ function DevicesWall() {
           </Typography.Paragraph>
         </div>
       ),
-      okText: "确认强制释放", okButtonProps: { danger: true }, cancelText: "取消",
+      okText: "确认强制释放", okButtonProps: { danger: true }, cancelText: "取消", centered: true,
       onOk: async () => {
         try {
           const r = await adbApi.forceRelease(pid, d.id);
@@ -580,7 +580,7 @@ function DevicesWall() {
       content: "软删，可随时恢复。被 ADB 用例设为默认设备也能删——那些用例执行时会如实报"
         + `「默认设备 '${d.serial}' 不在本项目可用设备里（未登记 / 已停用 / 已回收）：这一步没有设备可跑」；`
         + "彻底删除才会硬拦引用。",
-      okText: "放入回收站", okButtonProps: { danger: true }, cancelText: "取消",
+      okText: "放入回收站", okButtonProps: { danger: true }, cancelText: "取消", centered: true,
       onOk: async () => {
         try {
           await adbApi.removeDevice(pid, d.id);
@@ -632,7 +632,7 @@ function DevicesWall() {
     const ago = agoLabel(state?.last_check_at as string | null | undefined, nowMs);
     const muted = st === "offline";
     return (
-      <Col key={d.id} xs={24} sm={12} lg={8} xxl={6}>
+      <div key={d.id}>
         {/* 卡片三层信息（扫描顺序）：① 设备名 + 状态（含左上角状态点）② 机型/系统/电量/排队
             ③ serial/心跳/回收站（tp-tertiary 弱化）。左侧 4px 状态带保留——它是整墙快速扫读
             的主要线索，比状态点更早被眼睛抓到；hover 抬升用 tp.shadow.s2（不再手写阴影色）。
@@ -753,12 +753,13 @@ function DevicesWall() {
             </Space>
           </Space>
         </Card>
-      </Col>
+      </div>
     );
   }
 
   return (
-    <>
+    <div className="tp-fill">
+      <div style={{ flex: "0 0 auto" }}>
       <FilterBar actions={(
         <>
           <Button icon={<ReloadOutlined />} data-testid="adb-device-reload" onClick={() => void load()}>刷新</Button>
@@ -797,6 +798,12 @@ function DevicesWall() {
             </>
           } />
       )}
+      </div>
+      {/* 空墙/空卡按内容高会浮在 677 高的正文顶上，底下空一片（满高页最扎眼的一种空）：
+          没行时把唯一的空态块垂直居中，有墙时仍从顶部铺开。 */}
+      <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden",
+        display: "flex", flexDirection: "column",
+        justifyContent: rows.length === 0 ? "center" : "flex-start" }}>
       {!loading && rows.length === 0 && !loadError && (
         <Card size="small" className="tp-card">
           {/* D47-b 步5e：墙画的就是服务端按 state 筛后的当前页，空墙只说明「当前条件下
@@ -813,7 +820,7 @@ function DevicesWall() {
               空态可见时 loading 已落且 loadError 已清空，两flag 事实上等值；选 shownRecycled
               是为了让「回收文案只认到货数据」这条不变式在本文件内可一眼审计。 */}
           {!shownRecycled && filter === "全部" && (
-            <Typography.Paragraph type="secondary" style={{ fontSize: 12, textAlign: "center", marginBottom: 0 }}>
+            <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ textAlign: "center", marginBottom: 0 }}>
               若列表曾正常但设备一直「尚无心跳」，可能是后端未配置 adb 可执行（TP_ADB_PATH）或心跳未跑——
               空列表不等于一切正常，点添加试一次就能看到 adb 的原话。
             </Typography.Paragraph>
@@ -821,20 +828,25 @@ function DevicesWall() {
         </Card>
       )}
       {rows.length > 0 && (
-        <Row gutter={[12, 12]}>{rows.map(card)}</Row>
+        // tp-wall（--tp-wall-min=376）：底排并排钮是最宽一行：测试连接 72 + 让 Pilot 排查 114 + 编辑 44
+        // + 重连 60 + 回收钮 24 + 4×4 gap ≈ 330，+左右内边距 40 ≈ 370 → 取 8 的倍数 376：
+        // 1552 封顶容器恰好 4×376+3×16，944 容器 2 列各 464。旧 xs/sm/lg/xxl 量视口：1200
+        // 视口 lg=8 只切 3 列内容 ~303，按钮行被挤成两排。
+        <div className="tp-wall" style={{ "--tp-wall-min": "376px" } as React.CSSProperties}>
+          {rows.map(card)}
+        </div>
       )}
+      </div>
       {/* D47-b 步5e：共享页码分页器。total 缺键（后端未报总数）时 ListPager 整块不渲染，
           绝不画假「共 0 条」；「共 N 台」从此只有服务端 total 这一张嘴。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
-      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+      {/* 页码与脚注并成一行（版式口径同 api.tsx / scenes.tsx）：脚注占左格、页码恒居中，省下表格下方整整一行。
+          本页是卡片墙、没有 AdminTable 可挂卡内脚注，所以自己穿同一套外壳（.tp-card 的底色/描边/圆角
+          + .tp-cardfoot 的三列格）——小字此前裸画在页面底色上，卡有边有角它没有，读起来像掉在卡外的批注。 */}
+      {/* 空脚注 + 无页码（首屏未到货）时整条不画：否则页面底部闪一条空卡底条。 */}
+      {(loadError !== null || shownRecycled || total !== null) && (
+      <div className="tp-card tp-cardfoot-strip" style={{ flex: "0 0 auto" }}>
+        <div className="tp-cardfoot">
+        <Typography.Text className="tp-text-sm tp-cardfoot-note" type="secondary">
         {/* D47-b 步5e：旧脚注的两条现攒腿随游标世界退役——「共 visible.length 台」
             （本地过滤的行数当总数）与「本页取到 N 台（单页上限 200，后面还有没取的）」
             （游标 hedging，页码模式下下一页永远点得到，它不再是脚注能说的事）；
@@ -844,7 +856,17 @@ function DevicesWall() {
             不再复述固定口径。 */}
         {[loadError ? "本次设备列表加载失败，本行计数不作数" : "",
           shownRecycled ? "回收站视图" : ""].filter(Boolean).join(" · ")}
-      </Typography.Text>
+        </Typography.Text>
+        <ListPager
+          current={current}
+          pageSize={pageSize}
+          total={total}
+          onPage={setCurrent}
+          onPageSize={setPageSize}
+        />
+        </div>
+      </div>
+      )}
 
       <AddDeviceModal open={adding} pid={pid} onClose={() => setAdding(false)} onCreated={load} />
 
@@ -868,7 +890,7 @@ function DevicesWall() {
                   占用场景：<Typography.Text strong>{occDetail.run.subject_name}</Typography.Text>（{occDetail.run.subject_type}）
                 </Typography.Paragraph>
                 <Space size={6} wrap>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="adb-occ-run-id">run {occDetail.runId?.slice(0, 8)}</Typography.Text>
+                  <Typography.Text className="tp-text-sm" type="secondary" data-testid="adb-occ-run-id">run {occDetail.runId?.slice(0, 8)}</Typography.Text>
                   <Button size="small" type="link" style={{ padding: 0 }} data-testid="adb-occ-report"
                     onClick={() => nav("/reports/" + occDetail!.runId)}>报告</Button>
                 </Space>
@@ -888,7 +910,7 @@ function DevicesWall() {
             )}
             {!occDetail.loading && occDetail.stepsFailed && <Typography.Text type="secondary" data-testid="adb-occ-steps-missing">步骤读数没取到（报告可能还没生成）。</Typography.Text>}
             {!occDetail.loading && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="adb-occ-honest">「当前步骤」需要执行中的实时回放接口（目前没有），这里只给报告里已落库的步骤行，不把末步冒充当前步。</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary" data-testid="adb-occ-honest">「当前步骤」需要执行中的实时回放接口（目前没有），这里只给报告里已落库的步骤行，不把末步冒充当前步。</Typography.Text>
             )}
             {/* D159 门与卡片按钮同源：只跟 adb:device:manage，隐藏不是禁用 */}
             {canManage && <Button danger data-testid="adb-occ-force-release"
@@ -899,11 +921,11 @@ function DevicesWall() {
 
       {testRes && <TestResultModal name={testRes.name} out={testRes.out} onClose={() => setTestRes(null)} />}
       {echo && (
-        <Modal open title={echo.title} width={620} okText="知道了"
+        <Modal open title={echo.title} width={640} centered okText="知道了"
           cancelButtonProps={{ style: { display: "none" } }}
           okButtonProps={{ "data-testid": "adb-echo-ok" }}
           onOk={() => setEcho(null)} onCancel={() => setEcho(null)}>
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Paragraph className="tp-text-sm" type="secondary">
             以下是后端/adb 的原始输出，未做翻译或改写——排错要看的就是这句原话。
           </Typography.Paragraph>
           <EchoBlock text={echo.text} />
@@ -912,7 +934,7 @@ function DevicesWall() {
 
       {/* 彻底删除：逐字输名（后端同样硬校验）；被 default_device 引用时要显式勾选释放引用 */}
       <Modal open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); setDetach(false); }}
-        width={520} title="彻底删除设备？" okText="我已确认，彻底删除" cancelText="取消"
+        width={560} centered title="彻底删除设备？" okText="我已确认，彻底删除" cancelText="取消"
         okButtonProps={{ danger: true, "data-testid": "adb-device-purge-ok",
           disabled: purgeName !== (purge?.name ?? ""), loading: purging }}
         onOk={() => void submitPurge()}>
@@ -938,7 +960,7 @@ function DevicesWall() {
 
       {/* purge 被引用硬拦（409 in_use）：referring_cases 一条都不藏，点名是哪几条用例 */}
       <Modal open={purgeBlock !== null} title="删除被拦截：这些 ADB 用例把它设为默认设备"
-        okText="知道了" cancelButtonProps={{ style: { display: "none" } }} width={540}
+        okText="知道了" cancelButtonProps={{ style: { display: "none" } }} width={560} centered
         okButtonProps={{ "data-testid": "adb-purge-block-ok" }}
         onOk={() => setPurgeBlock(null)} onCancel={() => setPurgeBlock(null)}>
         <div data-testid="adb-purge-block">
@@ -956,15 +978,15 @@ function DevicesWall() {
           </Typography.Paragraph>
         </div>
       </Modal>
-    </>
+    </div>
   );
 }
 
 export default function AdbDevicesPage() {
   const { project } = useAuth();
   return (
-    <div data-testid="page-adb-devices">
-      <PageHead title="设备管理"
+    <div data-testid="page-adb-devices" className="tp-fill-stack">
+      <PageHead title="设备管理" descHover
         desc="设备在线状态来自心跳、占用来自实时设备锁；排队数是真实等待数，不估时长。" />
       <ProjectGate>{project ? <DevicesWall /> : null}</ProjectGate>
     </div>

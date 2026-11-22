@@ -127,45 +127,55 @@ function StatsSection({ project }: { project: ProjectOut }) {
 
   return (
     <Spin spinning={loading}>
-      <Row gutter={[16, 16]} data-testid="wb-stats">
-        <Col xs={12} md={6}>
-          <Card size="small" data-testid="wb-card-assets">
-            <Statistic title="资产数" value={st
-              ? (st.assets.api_definition ?? 0) + (st.assets.api_case ?? 0)
-                + (st.assets.scenario ?? 0) + (st.assets.ui_case ?? 0) + (st.assets.adb_case ?? 0)
-              : NO_DATA} />
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {st ? (<>接口 {st.assets.api_definition ?? 0} · 用例 {st.assets.api_case ?? 0} · 场景 {st.assets.scenario ?? 0} · UI {st.assets.ui_case ?? 0} · ADB {st.assets.adb_case ?? 0}</>)
-                : (<>接口 {NO_DATA} · 用例 {NO_DATA} · 场景 {NO_DATA} · UI {NO_DATA} · ADB {NO_DATA}</>)}
-            </Typography.Text>
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" data-testid="wb-card-runs"><Statistic title="近 7 天执行" value={st ? st.runs_7d : NO_DATA} /></Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" data-testid="wb-card-rate">
-            <Statistic title="近 7 天通过率" value={fmtRate(st?.pass_rate)} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" data-testid="wb-card-topfail">
-            <Statistic title="失败 TOP1 场景"
-              value={st ? (st.top_fail ? st.top_fail.subject_name : "无") : NO_DATA}
-              valueStyle={{ fontSize: 18 }} />
-            {st?.top_fail && (
-              <Typography.Text type="danger" style={{ fontSize: 12 }}>失败 {st.top_fail.fail_count} 次</Typography.Text>
-            )}
-          </Card>
-        </Col>
-      </Row>
+      {/* tp-wall：列数跟容器实测宽走，视口断点量不到本项目容器（见 styles.css 注释）。
+          --tp-wall-min=320：首卡副行自然宽实测约 191，据口径 +左右内边距 40 ≈ 231 是不绕行下限；
+          320 是列数取值——944 容器避开 3+1 孤卡（3 列要 min≤304）；1552 封顶容器出 4 列各 376、5 列要 min≤301，封顶 4 列。
+          四卡补齐同一内容层级（标题+值+一行副说明）：2/3 卡副行由后端真给的 daily/window 字段换算，
+          4 卡副行读 top_fail；均不是新字段，不造数据。 */}
+      <div className="tp-wall" data-testid="wb-stats" style={{ "--tp-wall-min": "320px" } as React.CSSProperties}>
+        <Card size="small" data-testid="wb-card-assets">
+          <Statistic title="资产数" value={st
+            ? (st.assets.api_definition ?? 0) + (st.assets.api_case ?? 0)
+              + (st.assets.scenario ?? 0) + (st.assets.ui_case ?? 0) + (st.assets.adb_case ?? 0)
+            : NO_DATA} />
+          <Typography.Text type="secondary" className="tp-text-sm">
+            {st ? (<>接口 {st.assets.api_definition ?? 0} · 用例 {st.assets.api_case ?? 0} · 场景 {st.assets.scenario ?? 0} · UI {st.assets.ui_case ?? 0} · ADB {st.assets.adb_case ?? 0}</>)
+              : (<>接口 {NO_DATA} · 用例 {NO_DATA} · 场景 {NO_DATA} · UI {NO_DATA} · ADB {NO_DATA}</>)}
+          </Typography.Text>
+        </Card>
+        <Card size="small" data-testid="wb-card-runs">
+          <Statistic title="近 7 天执行" value={st ? st.runs_7d : NO_DATA} />
+          <Typography.Text type="secondary" className="tp-text-sm">
+            {st ? (<>单日峰值 {Math.max(0, ...st.daily.map((d) => d.runs))} 次 · 有执行 {st.daily.filter((d) => d.runs > 0).length} / {st.window.days} 天</>)
+              : (<>单日峰值 {NO_DATA} 次 · 有执行 {NO_DATA}</>)}
+          </Typography.Text>
+        </Card>
+        <Card size="small" data-testid="wb-card-rate">
+          <Statistic title="近 7 天通过率" value={fmtRate(st?.pass_rate)} />
+          <Typography.Text type="secondary" className="tp-text-sm">
+            {st ? (<>有效分母天数 {st.daily.filter((d) => d.pass_rate !== null).length} / {st.window.days}</>)
+              : (<>有效分母天数 {NO_DATA}</>)}
+          </Typography.Text>
+        </Card>
+        <Card size="small" data-testid="wb-card-topfail">
+          <Statistic title="失败 TOP1 场景"
+            value={st ? (st.top_fail ? st.top_fail.subject_name : "无") : NO_DATA}
+            valueStyle={{ fontSize: tpv.fontSize.lg }} />
+          <Typography.Text type={st?.top_fail ? "danger" : "secondary"} className="tp-text-sm">
+            {st ? (st.top_fail ? `失败 ${st.top_fail.fail_count} 次` : "窗口内没有场景失败")
+              : <>失败次数 {NO_DATA}</>}
+          </Typography.Text>
+        </Card>
+      </div>
 
       {/* 静默失败（silent 请求）api() 不弹 toast，页面自己说明白：「-」是没取到，不是 0 */}
       {failed && (
-        <Typography.Text type="secondary" data-testid="wb-stats-failed"
-          style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+        // 同列表页脚注口径：这句话此前裸画在页面底色上（卡有边有角它没有），现在穿同一套外壳。
+        <div className="tp-card tp-cardfoot-strip" style={{ marginTop: 8 }}>
+        <Typography.Text type="secondary" data-testid="wb-stats-failed" className="tp-text-sm">
           统计未加载（本次请求失败）——以上「-」表示没取到，不是 0
         </Typography.Text>
+        </div>
       )}
 
       <Card size="small" title="近 7 天通过率趋势" style={{ marginTop: 16 }} data-testid="wb-trend">
@@ -179,12 +189,18 @@ function StatsSection({ project }: { project: ProjectOut }) {
         ) : null}
       </Card>
 
+      {/* 同排两卡各挂 .tp-list-window（定高 344）：两侧列表都 ≤10 条（后端 limit(10)），
+          按内容撑高时 10 条的 452 对 2 条的 101，右卡下悬空 351（2026-11-22 审计实测）。
+          定高 + 窗内滚后两卡恒等，空态在窗内垂直居中。 */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={12}>
           <Card size="small" title="最近执行" data-testid="wb-recent-runs">
             {(st?.recent_runs.length ?? 0) === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有执行记录" />
+              <div className="tp-list-window tp-list-window--empty">
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有执行记录" />
+              </div>
             ) : (
+            <div className="tp-list-window">
               <List size="small" dataSource={st?.recent_runs ?? []} rowKey={(r) => r.id}
                 renderItem={(r) => {
                   const stt = vocabMeta(STATUSES, r.status);
@@ -198,13 +214,13 @@ function StatsSection({ project }: { project: ProjectOut }) {
                     <List.Item>
                       <Space size={8} wrap>
                         <Tag color={spt.color}>{spt.label}</Tag>
-                        <Typography.Text ellipsis style={{ maxWidth: 200 }}>{r.subject_name}</Typography.Text>
+                        <Typography.Text ellipsis style={{ maxWidth: 220 }}>{r.subject_name}</Typography.Text>
                         <Tag color={stt.color}>{stt.label}</Tag>
                         <Tag>{trg.label}</Tag>
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        <Typography.Text type="secondary" className="tp-text-sm">
                           {r.elapsed_ms == null ? "—" : r.elapsed_ms + " ms"}
                         </Typography.Text>
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        <Typography.Text type="secondary" className="tp-text-sm">
                           {fmtTime(r.started_at, { seconds: false }) ?? "—"}
                           {r.created_by_name ? " · " + r.created_by_name : ""}
                         </Typography.Text>
@@ -212,20 +228,24 @@ function StatsSection({ project }: { project: ProjectOut }) {
                     </List.Item>
                   );
                 }} />
+            </div>
             )}
           </Card>
         </Col>
         <Col xs={24} lg={12}>
           <Card size="small" title="我最近编辑" data-testid="wb-my-edits"
             extra={st && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Text type="secondary" className="tp-text-sm">
                 覆盖：{(st.my_recent_edits_types ?? []).map((t) => editTypeLabel[t] ?? t).join(" / ")}
                 {editScopeNote(st.my_recent_edits_types ?? [])}
               </Typography.Text>
             )}>
             {(st?.my_recent_edits.length ?? 0) === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="最近没有你编辑的资产" />
+              <div className="tp-list-window tp-list-window--empty">
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="最近没有你编辑的资产" />
+              </div>
             ) : (
+            <div className="tp-list-window">
               <List size="small" dataSource={st?.my_recent_edits ?? []} rowKey={(r) => r.type + r.id}
                 renderItem={(r) => (
                   <List.Item>
@@ -240,12 +260,13 @@ function StatsSection({ project }: { project: ProjectOut }) {
                       ) : (
                         <Typography.Text ellipsis style={{ maxWidth: 220 }}>{r.name}</Typography.Text>
                       )}
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      <Typography.Text type="secondary" className="tp-text-sm">
                         {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
                       </Typography.Text>
                     </Space>
                   </List.Item>
                 )} />
+            </div>
             )}
           </Card>
         </Col>
@@ -344,7 +365,13 @@ export default function Workbench() {
             </Empty>
           </Card>
         ) : (
-          <div data-testid="project-list" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16, marginTop: 8 }}>
+          // tp-wall（--tp-wall-min=320）：与手搓 grid 的既有 minmax(320px) 同参，收敛到统一类。
+          // 展开全部时墙高封顶 70vh 内部滚动：200 项 ≈ 6400px 文档高才是病灶（滚动条细成线、
+          // 页内任何定位都被卷走），节点数本身一次画得动——「展开全部」的本意是一次看全，
+          // 所以封窗口不加分页，不把它变成要点 10 次下一页。
+          <div data-testid="project-list" className="tp-wall"
+            style={{ "--tp-wall-min": "320px", marginTop: 8,
+              ...(showAllProjects ? { maxHeight: "70vh", overflowY: "auto" } : null) } as React.CSSProperties}>
             {(showAllProjects ? items : items.slice(0, 12)).map((it) => {
               const active = project?.id === it.id;
               return (
@@ -359,13 +386,14 @@ export default function Workbench() {
                   }}>
                   <Space direction="vertical" size={4} style={{ width: "100%" }}>
                     <Space>
-                      <Typography.Text strong style={{ fontSize: 16 }}>{it.name}</Typography.Text>
+                      <Typography.Text strong className="tp-text-lg">{it.name}</Typography.Text>
                       {active && <Tag color="green">当前</Tag>}
                     </Space>
-                    <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                    <Typography.Paragraph type="secondary" className="tp-text-md"
+                      ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>
                       {it.description || "（暂无描述）"}
-                    </Typography.Text>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    </Typography.Paragraph>
+                    <Typography.Text type="secondary" className="tp-text-sm">
                       {"我的角色：" + String(ROLE_NAMES[it.my_role] ?? it.my_role)}
                     </Typography.Text>
                   </Space>
@@ -383,7 +411,7 @@ export default function Workbench() {
           </div>
         )}
       </Spin>
-      <Modal title="新建项目" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={submitting} cancelText="取消">
+      <Modal title="新建项目" open={open} width={560} centered onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={submitting} cancelText="取消">
         <Form form={form} layout="vertical" onFinish={create}>
           <Form.Item name="name" label="项目名称" rules={[{ required: true, message: "请输入项目名称" }]} style={{ marginBottom: 16 }}>
             <Input data-testid="project-name" placeholder="如：履约回归" autoFocus />

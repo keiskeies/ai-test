@@ -34,16 +34,18 @@ function adaptColumns<T extends object>(cols?: Array<ColumnsType<T>[number] & { 
 
 /** columns 用 antd 的 ColumnsType（业务列都按它写）；ProTable 内部接受超集，入口处断言一次。 */
 export type AdminTableProps<T extends object, U extends ParamsType = ParamsType> =
-  Omit<ProTableProps<T, U>, "columns"> & {
+  Omit<ProTableProps<T, U>, "columns" | "footer"> & {
     className?: string;
     /** hideInSetting 是 ProColumns 的能力，antd 列类型里没有；适配层会原样透传给 ProTable。 */
     columns?: Array<ColumnsType<T>[number] & { hideInSetting?: boolean }>;
+    /** 卡内脚注（页码 + 口径小字）：走 antd Table 的 footer，DOM 落在 .ant-table 里。 */
+    cardFooter?: React.ReactNode;
   };
 
 export default function AdminTable<T extends object, U extends ParamsType = ParamsType>(
   props: AdminTableProps<T, U>,
 ) {
-  const { className, options, search, pagination, columns, ...rest } = props;
+  const { className, options, search, pagination, columns, cardFooter, ...rest } = props;
   return (
     <ProTable<T, U>
       search={search ?? false}
@@ -54,6 +56,7 @@ export default function AdminTable<T extends object, U extends ParamsType = Para
       cardProps={false}
       bordered={false}
       {...rest}
+      {...(cardFooter ? { footer: () => cardFooter } : {})}
     />
   );
 }

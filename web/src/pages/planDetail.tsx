@@ -238,7 +238,7 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
   }
 
   return (
-    <Modal open={open} onCancel={onClose} width={560} destroyOnHidden title="加关联（给计划挂执行对象）"
+    <Modal open={open} onCancel={onClose} width={560} centered destroyOnHidden title="加关联（给计划挂执行对象）"
       okText="挂入计划" okButtonProps={{ loading: busy, "data-testid": "plan-picker-submit" }}
       cancelText="取消" onOk={() => void submit()}>
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
@@ -255,7 +255,7 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
           <Input data-testid="plan-picker-search" allowClear value={keyword}
             placeholder="输入名称片段" onChange={(e) => setKeyword(e.target.value)} />
           {/* 诚实标签（纪律 1）：三个列表后端不支持按名搜索——搜索只在已加载的 200 条里生效。 */}
-          <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}
+          <Typography.Text className="tp-text-sm" type="secondary" style={{ display: "block", marginTop: 4 }}
             data-testid="plan-picker-filter-note">
             {meta?.serverSearch
               ? `场景支持后端搜索；当前清单 ${loaded.length} 条。`
@@ -273,10 +273,10 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
               message="对象列表没取到" description={<EchoBlock text={list.msg} />} />
           )}
           {list.kind === "ok" && (
-            <div data-testid="plan-picker-list" style={{ maxHeight: 180, overflow: "auto", marginTop: 6,
+            <div data-testid="plan-picker-list" style={{ maxHeight: 240, overflow: "auto", marginTop: 8,
               border: "1px solid " + tpv.border, borderRadius: 6 }}>
               {rows.length === 0 ? (
-                <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", padding: 8 }}>
+                <Typography.Text className="tp-text-sm" type="secondary" style={{ display: "block", padding: 8 }}>
                   {`已加载的 ${loaded.length} 条里没有匹配项（列表只拉前 200 条且不含回收站）——换关键词，或用「按 ID 直接关联」。`}
                 </Typography.Text>
               ) : rows.map((r) => (
@@ -290,10 +290,9 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
                       棘轮连注释一起数，这句里都不许写 hex 原值）。 */}
                   <input type="radio" readOnly checked={selectedId === r.id}
                     style={{ pointerEvents: "none" }} />
-                  <Typography.Text style={{ fontSize: 12, flex: 1, minWidth: 0 }}
+                  <Typography.Text className="tp-text-sm" style={{ flex: 1, minWidth: 0 }}
                     ellipsis={{ tooltip: r.name }}>{r.name}</Typography.Text>
-                  <Typography.Text type="secondary" style={{ fontSize: 11 }}
-                    className="tp-mono">{shortId(r.id)}</Typography.Text>
+                  <Typography.Text type="secondary" className="tp-text-xs tp-mono">{shortId(r.id)}</Typography.Text>
                 </div>
               ))}
             </div>
@@ -314,7 +313,7 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
               options={envs.map((e) => ({ value: e.id, label: e.name }))} />
           ) : (
             // 缺 env:config:read：不摆一个永远空的假下拉；不覆盖=后端抄 subject 默认。
-            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block" }}
+            <Typography.Text className="tp-text-sm" type="secondary" style={{ display: "block" }}
               data-testid="plan-picker-env-note">
               没有 env:config:read 权限，这里不提供环境覆盖——挂入后沿用对象自己的默认环境。
             </Typography.Text>
@@ -459,7 +458,7 @@ function Detail() {
       title: `归档计划「${plan.name}」？`,
       content: "归档是终态：归档后计划不再参与执行编排，且**没有反归档入口**（重复归档后端会 409）。",
       okText: "归档", okButtonProps: { danger: true, "data-testid": "plan-detail-archive-ok" },
-      cancelText: "取消",
+      cancelText: "取消", centered: true,
       onOk: async () => {
         try {
           setPlan(await planApi.archive(plan.id, { project_id: projectId }));
@@ -475,7 +474,7 @@ function Detail() {
       title: `从计划摘除「${row.subject_name}」？`,
       content: "摘挂只删关联行，用例对象本身毫发无损；已生成的报告是快照副本，也不动。",
       okText: "摘除", okButtonProps: { danger: true, "data-testid": "plan-link-remove-ok" },
-      cancelText: "取消",
+      cancelText: "取消", centered: true,
       onOk: async () => {
         setBusyLinkId(row.id);
         try {
@@ -522,31 +521,28 @@ function Detail() {
             color={SUBJECT_TYPES[r.subject_type]?.color ?? "default"}>
             {SUBJECT_TYPES[r.subject_type]?.label ?? r.subject_type}
           </Tag>
-          <Typography.Text style={{ fontSize: 12 }}>{r.subject_name}</Typography.Text>
+          <Typography.Text className="tp-text-sm">{r.subject_name}</Typography.Text>
         </Space>
       ) },
     { title: "对象 id", dataIndex: "subject_id", key: "subject_id", width: 120,
       render: (v: string) => (
-        <Typography.Text type="secondary" className="tp-mono" style={{ fontSize: 11 }}
-          title={v}>{shortId(v)}</Typography.Text>) },
+        <Typography.Text type="secondary" className="tp-mono tp-text-xs" title={v}>{shortId(v)}</Typography.Text>) },
     { title: "执行结论", key: "result", width: 150,
       render: (_: unknown, r) => <LinkResultCell st={statusMap.get(r.id)} rowId={r.id} /> },
-    { title: "环境", key: "env", width: 200,
+    { title: "环境", key: "env", width: 240,
       render: (_: unknown, r) => {
         const label = r.env_id
           // 有 env id 但清单没取到/查不到名字：画短 id（生码），不编名字（schedules 同款）。
           ? (canEnvRead ? envName(r.env_id) : shortId(r.env_id))
           : <Tooltip title="未单独覆盖：执行时沿用该对象自己的默认环境（后端建关联时抄 subject 的环境）">
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{ENV_INHERIT}</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary">{ENV_INHERIT}</Typography.Text>
             </Tooltip>;
         // env 编辑把手同时要求 link:update 与 env:config:read：缺 env 读位时摆一个
         // 永远拉不出选项的空下拉，就是假门（§13 纪律 1）。
         if (!canLinkUpdate || !canEnvRead) return <span data-testid={"plan-link-env-" + r.id}>{label}</span>;
         return (
           <Space size={6} style={{ width: "100%" }}>
-            <span data-testid={"plan-link-env-" + r.id}
-              style={{ fontSize: 12, maxWidth: 96, overflow: "hidden",
-                textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}>
+            <span className="tp-text-sm" data-testid={"plan-link-env-" + r.id} style={{ maxWidth: 96, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}>
               {label}
             </span>
             <Select size="small" data-testid={"plan-link-env-edit-" + r.id} allowClear
@@ -560,7 +556,7 @@ function Detail() {
       } },
     { title: "挂入时间", dataIndex: "created_at", key: "created_at", width: 150,
       render: (v: string | null) => (
-        <Typography.Text data-testid="plan-link-created" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" data-testid="plan-link-created">
           {fmtTime(v) ?? "—"}
         </Typography.Text>) },
     { title: "操作", key: "ops", width: 88,
@@ -594,10 +590,10 @@ function Detail() {
       render: (_: unknown, r) => <span>{ratePct(r.execute_rate)}</span> },
     { title: "过/败", key: "counts", width: 80,
       render: (_: unknown, r) => (
-        <Typography.Text style={{ fontSize: 12 }}>{r.passed + " / " + r.failed}</Typography.Text>) },
+        <Typography.Text className="tp-text-sm">{r.passed + " / " + r.failed}</Typography.Text>) },
     { title: "生成时间", dataIndex: "created_at", key: "created_at", width: 150,
       render: (v: string | null) => (
-        <Typography.Text style={{ fontSize: 12 }}>{fmtTime(v) ?? "—"}</Typography.Text>) },
+        <Typography.Text className="tp-text-sm">{fmtTime(v) ?? "—"}</Typography.Text>) },
   ];
 
   // 无读权限：什么都渲染不了，也**一条请求都不发**（门在 effect 的 mayRead 上）。
@@ -668,7 +664,7 @@ function Detail() {
             {dm && <Tag color={dm.color} data-testid="plan-detail-display-status">{dm.label}</Tag>}
             {plan.archived
               ? <Tag color="orange" data-testid="plan-detail-archived-tag">已归档</Tag>
-              : <Typography.Text type="secondary" style={{ fontSize: 12 }}>未归档</Typography.Text>}
+              : <Typography.Text className="tp-text-sm" type="secondary">未归档</Typography.Text>}
           </Space>
         }>
         {status ? (
@@ -700,7 +696,7 @@ function Detail() {
                 { key: "fa", label: "未通过", children: status.failed },
               ]} />
             </Space>
-            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+            <Typography.Text className="tp-text-sm" type="secondary" style={{ display: "block", marginTop: 8 }}>
               两个率出自后端唯一算式 _rates（分母恒为关联总数；未执行/执行中拉低通过率，
               空计划是 0% 不是 100%）。本页一条除法都不做。
             </Typography.Text>
@@ -740,14 +736,15 @@ function Detail() {
             locale={{ emptyText: linksError
               ? "没取到关联——原因见上方错误条，点右上角「刷新」重试"
               : canLinkCreate ? "还没有关联，点右上角「加关联」" : "还没有关联（你没有 testplan:link:create 权限）" }} />
-          <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+          {/* 页码与脚注并成一排（卡内脚注格 .tp-cardfoot，口径同列表页）：省下卡体里整整一行。 */}
+          <div className="tp-cardfoot">
+            <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+                「执行结论」按 link_id join 实时状态——join 不上画「—」（跨页时是常态，不是没跑过）；
+                「执行中」来自 executing 布尔，不混进结论词表。
+            </Typography.Text>
             <ListPager current={linkCurrent} pageSize={linkPageSize} total={linkTotal}
               onPage={setLinkCurrent} onPageSize={setLinkPageSize} />
           </div>
-          <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
-            「执行结论」按 link_id join 实时状态——join 不上画「—」（跨页时是常态，不是没跑过）；
-            「执行中」来自 executing 布尔，不混进结论词表。
-          </Typography.Text>
         </Card>
       ) : (
         <Alert type="warning" showIcon data-testid="plan-detail-links-noread"
@@ -773,14 +770,15 @@ function Detail() {
               : canReportCreate
                 ? "还没有报告——点右上角「生成报告」把当前结论定格成快照"
                 : "还没有报告（你没有 testplan:report:create 权限）" }} />
-          <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+          {/* 页码与脚注并成一排（卡内脚注格 .tp-cardfoot，口径同列表页）：省下卡体里整整一行。 */}
+          <div className="tp-cardfoot">
+            <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+                报告是生成时刻的定格快照：此后的执行不动已生成的报告。点报告名进详情页
+                （/plan-reports/:id，含明细分页——6c 已落地）。
+            </Typography.Text>
             <ListPager current={reportCurrent} pageSize={reportPageSize} total={reportTotal}
               onPage={setReportCurrent} onPageSize={setReportPageSize} />
           </div>
-          <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
-            报告是生成时刻的定格快照：此后的执行不动已生成的报告。点报告名进详情页
-            （/plan-reports/:id，含明细分页——6c 已落地）。
-          </Typography.Text>
         </Card>
       ) : (
         <Alert type="warning" showIcon data-testid="plan-detail-reports-noread"

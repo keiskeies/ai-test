@@ -147,6 +147,7 @@ function CasesList() {
 
   function removeOne(r: Row): void {
     Modal.confirm({
+      centered: true,
       // 文案照 adbCases.tsx:74-76（同族页面的软删手感：可恢复 + 彻底删除要输名，两句都在）
       title: `把「${r.name}」放入回收站？`,
       // 后半句别承诺「点名」：无 scenario:read 的调用方（D37 自定义角色可带 delete 不带
@@ -184,7 +185,8 @@ function CasesList() {
   }
 
   return (
-    <>
+    <div className="tp-fill tp-fill-body">
+      <div style={{ flex: "0 0 auto" }}>
       <FilterBar actions={(
         <>
           {canCreate && !inRecycled && (
@@ -216,6 +218,7 @@ function CasesList() {
         <Alert type="error" showIcon style={{ marginBottom: 12 }} data-testid="ui-case-load-error"
           message="用例列表加载失败" description={loadError} />
       )}
+      </div>
       <AdminTable<Row> rowKey="id" loading={loading} dataSource={rows}
         pagination={false}
         locale={{ emptyText: loadError ? (
@@ -297,31 +300,33 @@ function CasesList() {
               )
           ) },
         ]}
+        cardFooter={(
+          // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+          <div className="tp-cardfoot">
+            <Typography.Text type="secondary" className="tp-cardfoot-note tp-text-sm">
+            {/* D47-b 步5a：「单页上限 200，后面还有没取的」随游标世界退役——页码模式下下一页
+                永远点得到，「还有没取的」不再是脚注能说的事；「共 N 条」从此只有服务端 total
+                这一张嘴（ListPager 报），脚注不再拿 rows.length 现攒。失败清行清 total，
+                「上次取到 N 条（本次刷新失败，这个数可能已旧）」那条腿也没有意义了——失败就清行，
+                这里只剩一句真话（照 api.tsx:656）。 */}
+            {loadError ? "本次列表加载失败，本行计数不作数" : ""}
+            {shownRecycled ? " · 回收站视图" : ""}
+            {(loadError || shownRecycled) ? " · " : ""}
+            「最近结果」只记正式执行（调试是过程，不回写结论）
+            </Typography.Text>
+            <ListPager
+              current={current}
+              pageSize={pageSize}
+              total={total}
+              onPage={setCurrent}
+              onPageSize={setPageSize}
+            />
+          </div>
+        )}
       />
-      {/* D47-b 步5a：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-          这里垫在 Table 之下（居中垫法同 runs.tsx）。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
-      <Typography.Text type="secondary" className="tp-text-sm">
-        {/* D47-b 步5a：「单页上限 200，后面还有没取的」随游标世界退役——页码模式下下一页
-            永远点得到，「还有没取的」不再是脚注能说的事；「共 N 条」从此只有服务端 total
-            这一张嘴（ListPager 报），脚注不再拿 rows.length 现攒。失败清行清 total，
-            「上次取到 N 条（本次刷新失败，这个数可能已旧）」那条腿也没有意义了——失败就清行，
-            这里只剩一句真话（照 api.tsx:656）。 */}
-        {loadError ? "本次列表加载失败，本行计数不作数" : ""}
-        {shownRecycled ? " · 回收站视图" : ""} ·
-        「最近结果」只记正式执行（调试是过程，不回写结论）
-      </Typography.Text>
 
       {/* 彻底删除：不可逆，逐字输名才放行 ok（与元素/场景/ADB 页同手感；服务端 :338 同样硬校验） */}
-      <Modal open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
+      <Modal centered open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         width={520} title="彻底删除用例？" okText="我已确认，彻底删除" cancelText="取消"
         okButtonProps={{ danger: true, "data-testid": "ui-case-purge-ok",
           disabled: purgeName !== (purge?.name ?? ""), loading: purging }}
@@ -348,15 +353,15 @@ function CasesList() {
         onCancel={() => setBlocked(null)}
         onForce={() => void forceRemove()}
       />
-    </>
+    </div>
   );
 }
 
 export default function UiCasesPage() {
   const { project } = useAuth();
   return (
-    <div data-testid="page-ui-cases">
-      <PageHead title="UI 用例" crumbs={["UI 测试"]}
+    <div data-testid="page-ui-cases" className="tp-fill-stack">
+      <PageHead title="UI 用例" descHover
         desc="命令序列组成的 UI 自动化用例；「最近结果」只记正式执行（调试属于过程，不回写结论）。" />
       <ProjectGate>{project ? <CasesList /> : null}</ProjectGate>
     </div>

@@ -162,15 +162,16 @@ function ReportsWorkbench() {
         {typeof r.stats?.total === "number" ? r.stats.total : "—"}
       </Typography.Text>) },
     { title: "耗时", dataIndex: "elapsed_ms", width: 92, render: (v: number | null) => (
-      <Typography.Text style={{ fontSize: 12 }}>{v == null ? "—" : v + " ms"}</Typography.Text>) },
+      <Typography.Text className="tp-text-sm">{v == null ? "—" : v + " ms"}</Typography.Text>) },
     { title: "环境", dataIndex: "env_name", width: 104, render: (v: string | null) => v ?? "—" },
     { title: "执行人", dataIndex: "created_by_name", width: 104, render: (v: string | null) => v ?? "—" },
     { title: "开始时间", dataIndex: "started_at", width: 168, render: (v: string | null) => (
-      <Typography.Text data-testid="report-time" style={{ fontSize: 12 }}>{fmtTime(v) ?? "—"}</Typography.Text>) },
+      <Typography.Text className="tp-text-sm" data-testid="report-time">{fmtTime(v) ?? "—"}</Typography.Text>) },
   ];
 
   return (
-    <div data-testid="reports-body">
+    <div className="tp-fill tp-fill-body" data-testid="reports-body">
+      <div style={{ flex: "0 0 auto" }}>
       <Space style={{ marginBottom: 12 }} wrap data-testid="reports-filters">
         <Select data-testid="reports-filter-days" style={{ width: 128 }} value={f.days}
           onChange={(v) => patch({ days: v })}
@@ -208,6 +209,7 @@ function ReportsWorkbench() {
         <Alert type="warning" showIcon style={{ marginBottom: 12 }} data-testid="reports-failed"
           message="报告没取到" description="可能是角色刚被改动或网络不通，点「刷新」重试" />
       )}
+      </div>
       <AdminTable<ReportRow>
           rowKey="id" loading={loading} columns={cols} dataSource={items}
           pagination={false} scroll={{ x: 1080 }}
@@ -219,27 +221,28 @@ function ReportsWorkbench() {
           locale={{ emptyText: failed
             ? "暂时取不到报告"
             : f.includeDebug ? "这个条件下还没有报告——跑一次场景就有了" : "还没有报告（调试运行默认不显示，右上角「含调试」可看）" }}
+          cardFooter={(total === null ? undefined : (
+            // 页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+            // total 缺键时 ListPager 自己不渲染，这里的壳也要跟着撤——否则卡底只剩一条分隔线。
+            <div className="tp-cardfoot--center">
+              <ListPager
+                current={current}
+                pageSize={pageSize}
+                total={total}
+                onPage={setCurrent}
+                onPageSize={setPageSize}
+              />
+            </div>
+          ))}
         />
-      {/* 表格自身即卡片（.tp-tablecard）：不再外套 Card，避免双边框双圆角。 */}
-      {/* D47-b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-          这里照旧挂在表格卡之下；「加载更多」随游标语义一起退场（一页两把尺子的老账）。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
     </div>
   );
 }
 
 export default function ReportsPage() {
   return (
-    <div data-testid="page-reports">
-      <PageHead title="报告中心"
+    <div data-testid="page-reports" className="tp-fill-stack">
+      <PageHead title="报告中心" descHover
         desc="场景与 UI 执行的报告归档；调试运行默认不入榜，右上角「含调试」可看。" />
       <ProjectGate>
         <ReportsWorkbench />

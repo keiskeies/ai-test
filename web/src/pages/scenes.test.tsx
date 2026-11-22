@@ -823,8 +823,10 @@ describe("从用例生成（scene-gen-modal）", () => {
     expect(within(modal).getByText("下单")).not.toBeNull();
     expect(within(modal).queryByText("已废弃")).toBeNull(); // status!=normal 的不给勾（宁缺毋滥）
     fireEvent.change(within(modal).getByTestId("scene-gen-name"), { target: { value: "交易链路" } });
+    // 必须限定 .ant-table-row：这张表带 scroll.y，rc-table 会在 tbody 顶部插一条
+    // aria-hidden 的 measure 行（实测多出一个 checkbox），按裸索引取会整体错一位。
     const boxes = Array.from(modal.querySelectorAll<HTMLInputElement>(
-      ".ant-table-tbody input[type=checkbox]"));
+      ".ant-table-tbody .ant-table-row input[type=checkbox]"));
     fireEvent.click(boxes[0]);
     fireEvent.click(boxes[1]);
     fireEvent.click(screen.getByTestId("scene-gen-ok"));

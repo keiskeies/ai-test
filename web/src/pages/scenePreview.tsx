@@ -52,8 +52,8 @@ export default function ScenePreviewPage() {
         display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
         padding: "8px 12px", background: "var(--tp-bg-layout)", border: "1px solid var(--tp-split)", borderRadius: 8,
       }}>
-        <Typography.Text strong style={{ fontSize: 13 }}>Pilot 候选预览（未落库）</Typography.Text>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <Typography.Text strong className="tp-text-md">Pilot 候选预览（未落库）</Typography.Text>
+        <Typography.Text type="secondary" className="tp-text-sm">
           方案「{entry.planName}」是 Pilot 给出的候选，尚未保存为场景，仅在此只读预览。
         </Typography.Text>
         <Space style={{ marginLeft: "auto" }}>
@@ -66,7 +66,8 @@ export default function ScenePreviewPage() {
           </Tooltip>
         </Space>
       </div>
-      <div data-testid="preview-canvas" style={{ flex: 1, minHeight: 420 }}>
+      {/* 420 不在阶梯上；432 = 16×27，比取 424 更贴「画布最小可用高」的量级 */}
+      <div data-testid="preview-canvas" style={{ flex: 1, minHeight: 432 }}>
         {/* 只读由 store 说了算：loadCardGraph 已置 readOnly:true，Canvas 按它关死拖拽/右键/编辑
             （与 reportDetail 同款——readOnly 走 store 不走 props，这是既有只读画布的成型形状）。 */}
         <Canvas />

@@ -57,10 +57,13 @@ function SettingsWorkbench() {
   ];
 
   return (
-    <div data-testid="settings-body">
+    // 必须同时挂 .tp-fill：.tp-fill-stack > * 只把 flex 给 .tp-fill（styles.css:341-342），
+    // 只写 .tp-fill-body 会被同特异性的后代选择器覆盖回 flex:0 0 auto，整块卡在内容高。
+    <div data-testid="settings-body" className="tp-fill tp-fill-body">
       {/* 抬头：role 是后端生码，这里翻译成中文名（唯一词表在 shared/roleName.ts，
           工作台与设置页同一份——此前只有工作台翻译，本页把 PROJECT_ADMIN 摊给业主读）。 */}
-      <Typography.Paragraph type="secondary" className="tp-text-sm">
+      <Typography.Paragraph type="secondary" className="tp-text-sm"
+        style={{ marginBottom: "var(--tp-gap-xs)" }}>
         当前项目「{project!.name}」·我的角色 {roleLabel(project!.my_role)}
         {isSysAdmin ? "（平台管理员）" : ""}
       </Typography.Paragraph>
@@ -69,7 +72,7 @@ function SettingsWorkbench() {
           className 直接挂在 Tabs 根上（而不是再包一层 div）：Tabs 根自带 testid 与
           ant-tabs 类，settings.test.tsx 钉着「body.children[1] 就是 tab 根」的层序。 */}
       {/* items 与权限过滤一个字都没动（门禁口径见上面各 Tab 的注释）。 */}
-      <Tabs type="line" className="tp-card" style={{ padding: "0 16px 16px" }}
+      <Tabs type="line" className="tp-card" style={{ padding: "var(--tp-gap-xs) var(--tp-gap-md) var(--tp-gap-md)" }}
         defaultActiveKey="members" items={items} data-testid="settings-tabs" destroyInactiveTabPane />
     </div>
   );
@@ -77,8 +80,8 @@ function SettingsWorkbench() {
 
 export default function SettingsPage() {
   return (
-    <div data-testid="page-settings">
-      <PageHead title="系统设置"
+    <div data-testid="page-settings" className="tp-fill-stack">
+      <PageHead title="系统设置" descHover
         desc="项目成员与角色、平台用户、审计、模型与通知——可见范围由你的权限决定。" />
       <ProjectGate>
         <SettingsWorkbench />

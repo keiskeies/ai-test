@@ -29,7 +29,7 @@ export default function ConflictModal() {
 
   if (!conflict) return null;
   return (
-    <Modal
+    <Modal centered
       open data-testid="scene-conflict-modal" width={960}
       title="保存冲突：场景在你编辑期间被别人改过"
       onCancel={() => clearConflict()}
@@ -58,17 +58,11 @@ export default function ConflictModal() {
       <div style={{ display: "flex", gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Typography.Text strong>我的（未保存）</Typography.Text>
-          <pre data-testid="conflict-mine" style={{
-            maxHeight: 360, overflow: "auto", background: "#FBEBEA", padding: 8,
-            fontSize: 12, borderRadius: 6, whiteSpace: "pre-wrap",
-          }}>{conflict.mine}</pre>
+          <pre className="tp-text-sm" data-testid="conflict-mine" style={{ maxHeight: 360, overflow: "auto", background: "#FBEBEA", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>{conflict.mine}</pre>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Typography.Text strong>服务器（当前）</Typography.Text>
-          <pre data-testid="conflict-server" style={{
-            maxHeight: 360, overflow: "auto", background: "#EDF3FE", padding: 8,
-            fontSize: 12, borderRadius: 6, whiteSpace: "pre-wrap",
-          }}>{conflict.server}</pre>
+          <pre className="tp-text-sm" data-testid="conflict-server" style={{ maxHeight: 360, overflow: "auto", background: "#EDF3FE", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>{conflict.server}</pre>
         </div>
       </div>
     </Modal>

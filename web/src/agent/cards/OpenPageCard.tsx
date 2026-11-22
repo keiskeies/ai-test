@@ -20,14 +20,14 @@ export default function OpenPageCard({ payload, ctx }: { payload: OpenPagePayloa
   const url = toPageUrl(String(payload.route ?? ""), payload.params);
   return (
     <div data-testid="open-page-card" style={{ border: "1px solid #D6E4FF", borderRadius: 8, padding: "8px 12px", background: "#F7FAFF", display: "flex", alignItems: "center", gap: 8 }}>
-      <Typography.Text style={{ fontSize: 13 }}>建议打开：</Typography.Text>
-      <Typography.Text className="tp-mono" style={{ fontSize: 12, color: "#1677ff" }}>{url}</Typography.Text>
+      <Typography.Text className="tp-text-md">建议打开：</Typography.Text>
+      <Typography.Text className="tp-text-sm tp-mono" style={{ color: "#1677ff" }}>{url}</Typography.Text>
       <Space size={8}>
         <Button size="small" type="primary" data-testid="open-page-go" disabled={ctx.busy} onClick={() => navigate(url)}>
           前往
         </Button>
         {ctx.busy && (
-          <Typography.Text type="secondary" data-testid="card-busy-note" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary" data-testid="card-busy-note">
             等本轮结束
           </Typography.Text>
         )}

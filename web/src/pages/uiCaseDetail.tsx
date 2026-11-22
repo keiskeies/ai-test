@@ -210,12 +210,10 @@ function Editor({ caseId }: { caseId: string | "new" }) {
   }
 
   return (
-    // 撑满剩余高度走 flex（不用 calc(100vh - 120px)）：父级链路每层都带 minHeight:0，
-    // 内容区自己滚（骨架的 .tp-main-content 已负责滚动）。省掉视口减法后，顶栏/页头
-    // 高度再变也不会切到编辑区底部。
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <Space wrap size={8} style={{ marginBottom: 10 }} data-testid="ui-case-meta">
-        <Input data-testid="case-name" style={{ width: 260 }} maxLength={200} value={name}
+    // 满高写法与 adbCaseDetail 统一：.tp-fill 从 metrics 反解遮挡（旧写法是各页抄一份视口减法）
+    <div className="tp-fill tp-fill--head">
+      <Space wrap size={8} style={{ marginBottom: 8 }} data-testid="ui-case-meta">
+        <Input data-testid="case-name" style={{ width: 256 }} maxLength={200} value={name}
           disabled={!canUpdate} placeholder="用例名（项目内唯一）" onChange={(e) => setName(e.target.value)} />
         <Select data-testid="case-priority" style={{ width: 96 }} value={priority}
           disabled={!canUpdate} options={PRIO_OPTIONS} onChange={setPriority} />

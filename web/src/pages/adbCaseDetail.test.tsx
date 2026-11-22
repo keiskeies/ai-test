@@ -431,8 +431,8 @@ describe("详情页编排", () => {
         & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     }
     // :248 写死的内联 marginBottom（antd Space 的 display 来自组件 CSS，钉 style 位才
-    // 指得到这一行；摘掉 style={{ marginBottom: 10 }} 即红）
-    expect(meta.style.marginBottom).toBe("10px");
+    // 指得到这一行；摘掉 style={{ marginBottom: 8 }} 即红）
+    expect(meta.style.marginBottom).toBe("8px");
 
     // 对照腿（D47「隐藏不是禁用」在 meta 这一排的另一半）：控件不摘、整排 disabled。
     // 与上一条只差 my_perms 一个 fixture 位。

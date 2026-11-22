@@ -111,6 +111,7 @@ function CasesList() {
 
   function removeOne(r: Row): void {
     Modal.confirm({
+      centered: true,
       title: `把「${r.name}」放入回收站？`,
       content: "软删，可随时恢复；彻底删除需逐字确认名称。",
       okText: "放入回收站", okButtonProps: { danger: true, "data-testid": "adb-case-del-ok" }, cancelText: "取消",
@@ -149,7 +150,8 @@ function CasesList() {
   }
 
   return (
-    <>
+    <div className="tp-fill tp-fill-body">
+      <div style={{ flex: "0 0 auto" }}>
       <Space style={{ marginBottom: 12 }} wrap>
         {canCreate && !inRecycled && (
           <Button type="primary" icon={<PlusOutlined />} data-testid="adb-case-new"
@@ -167,6 +169,7 @@ function CasesList() {
         <Alert type="error" showIcon style={{ marginBottom: 12 }} data-testid="adb-case-load-error"
           message="用例列表加载失败" description={loadError} />
       )}
+      </div>
       <AdminTable<Row>
         size="middle" rowKey="id" loading={loading} dataSource={rows}
         pagination={false}
@@ -187,7 +190,7 @@ function CasesList() {
             <Tag color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
           { title: "默认设备", key: "dev", width: 160, render: (_, r) => (
             r.default_device
-              ? <Typography.Text style={{ fontSize: 12 }} data-testid="adb-case-row-device">{r.default_device}</Typography.Text>
+              ? <Typography.Text className="tp-text-sm" data-testid="adb-case-row-device">{r.default_device}</Typography.Text>
               : <Tag data-testid="adb-case-row-device" color="blue">任一空闲</Tag>) },
           { title: "启用", dataIndex: "enabled", width: 70, render: (v: boolean) => (
             <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag>) },
@@ -201,7 +204,7 @@ function CasesList() {
           { title: "负责人", key: "owner", width: 110, render: (_, r) => (
             <span>{ownerLabel(r.owner_id, members)}</span>) },
           { title: "更新时间", key: "upd", width: 150, render: (_, r) => (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" type="secondary">
               {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
             </Typography.Text>) },
           ...(shownRecycled
@@ -219,8 +222,7 @@ function CasesList() {
                   : null) },
               { title: "删除时间", key: "delat", width: 150, render: (_: unknown, r: Row) => (
                 r.status === "recycled" ? (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}
-                    data-testid="adb-case-row-delat">
+                  <Typography.Text className="tp-text-sm" type="secondary" data-testid="adb-case-row-delat">
                     {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
                   </Typography.Text>
                 ) : null) },
@@ -250,29 +252,31 @@ function CasesList() {
               <Button size="small" danger data-testid="adb-case-del"
                 onClick={() => removeOne(r)}>删除</Button>) }] : [])),
         ]}
+        cardFooter={(
+          // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
+          <div className="tp-cardfoot">
+            <Typography.Text type="secondary" className="tp-cardfoot-note tp-text-sm">
+            {/* D47-b 步5a：「单页上限 200，后面还有没取的」随游标世界退役——页码模式下下一页
+                永远点得到，「还有没取的」不再是脚注能说的事；「共 N 条」从此只有服务端 total
+                这一张嘴（ListPager 报），脚注不再拿 rows.length 现攒。失败清行清 total，
+                这里只剩一句真话（照 api.tsx:656）。 */}
+            {loadError ? "本次列表加载失败，本行计数不作数" : ""}
+            {shownRecycled ? " · 回收站视图" : ""}
+            {(loadError || shownRecycled) ? " · " : ""}
+            「最近结果」只记正式执行（调试是过程，不回写结论）；「任一空闲」= 执行时锁第一台未被占用（未回收且启用）的设备，心跳离线不剔除它
+            </Typography.Text>
+            <ListPager
+              current={current}
+              pageSize={pageSize}
+              total={total}
+              onPage={setCurrent}
+              onPageSize={setPageSize}
+            />
+          </div>
+        )}
       />
-      {/* D47-b 步5a：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
-          这里垫在 Table 之下（居中垫法同 runs.tsx）。 */}
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
-        <ListPager
-          current={current}
-          pageSize={pageSize}
-          total={total}
-          onPage={setCurrent}
-          onPageSize={setPageSize}
-        />
-      </div>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        {/* D47-b 步5a：「单页上限 200，后面还有没取的」随游标世界退役——页码模式下下一页
-            永远点得到，「还有没取的」不再是脚注能说的事；「共 N 条」从此只有服务端 total
-            这一张嘴（ListPager 报），脚注不再拿 rows.length 现攒。失败清行清 total，
-            这里只剩一句真话（照 api.tsx:656）。 */}
-        {loadError ? "本次列表加载失败，本行计数不作数" : ""}
-        {shownRecycled ? " · 回收站视图" : ""} ·
-        「最近结果」只记正式执行（调试是过程，不回写结论）；「任一空闲」= 执行时锁第一台未被占用（未回收且启用）的设备，心跳离线不剔除它
-      </Typography.Text>
 
-      <Modal open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
+      <Modal centered open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         width={520} title="彻底删除用例？" okText="我已确认，彻底删除" cancelText="取消"
         okButtonProps={{ danger: true, "data-testid": "adb-case-purge-ok",
           disabled: purgeName !== (purge?.name ?? ""), loading: purging }}
@@ -286,15 +290,15 @@ function CasesList() {
         <Input data-testid="adb-case-purge-confirm" value={purgeName} autoFocus
           placeholder={purge?.name} onChange={(e) => setPurgeName(e.target.value)} />
       </Modal>
-    </>
+    </div>
   );
 }
 
 export default function AdbCasesPage() {
   const { project } = useAuth();
   return (
-    <div data-testid="page-adb-cases">
-      <PageHead title="ADB 用例"
+    <div data-testid="page-adb-cases" className="tp-fill-stack">
+      <PageHead title="ADB 用例" descHover
         desc="面向 Android 设备的 UI 自动化步骤；执行前需有可用设备。" />
       <ProjectGate>{project ? <CasesList /> : null}</ProjectGate>
     </div>

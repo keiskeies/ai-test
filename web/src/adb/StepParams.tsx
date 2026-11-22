@@ -36,7 +36,7 @@ function KeyField({ kspec, kind, value, testId, disabled, onPatch, onRemove }: {
   const req = kspec.startsWith("!");
   const row = (control: React.ReactNode) => (
     <Space size={8} align="center" wrap style={{ width: "100%" }}>
-      <span style={{ width: 108, display: "inline-block", fontSize: 12, color: "#5B6670" }}>
+      <span className="tp-text-sm" style={{ width: 108, display: "inline-block", color: "#5B6670" }}>
         {label}{req && <span style={{ color: "#C4565C" }}> *</span>}
       </span>
       {control}
@@ -127,11 +127,11 @@ export default function StepParams({ step, testIdPrefix, onChange, readOnly = fa
       {t === "shell" ? (
         // 蓝图 §11.4.12 原话：shell→命令 Monaco
         <div>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>shell 命令
+          <Typography.Text className="tp-text-sm" type="secondary">shell 命令
             （adb shell 之后那段；设备路径写 /sdcard/…，不要写宿主路径）</Typography.Text>
           <div data-testid={testIdPrefix + "-cmd"} style={{ marginTop: 4 }}>
             <Suspense fallback={<Typography.Text type="secondary">编辑器加载中…</Typography.Text>}>
-              <CodeEditor language="shell" height={140} value={String(cfg.cmd ?? "")}
+              <CodeEditor language="shell" height={152} value={String(cfg.cmd ?? "")}
                 onChange={(v) => patchCfg("cmd", v)} readOnly={readOnly} />
             </Suspense>
           </div>
@@ -146,15 +146,15 @@ export default function StepParams({ step, testIdPrefix, onChange, readOnly = fa
                 testId={testIdPrefix + "-" + key}
                 onPatch={(v) => patchCfg(key, v)} onRemove={() => removeCfg(key)} />
               {problem && (
-                <Typography.Text type="danger" data-testid={testIdPrefix + "-" + key + "-issue"}
-                  style={{ fontSize: 12, marginLeft: 116 }}>{problem}</Typography.Text>
+                <Typography.Text className="tp-text-sm" type="danger" data-testid={testIdPrefix + "-" + key + "-issue"}
+                  style={{ marginLeft: 116 }}>{problem}</Typography.Text>
               )}
             </div>
           );
         })
       )}
       {Object.keys(schema).length === 0 && (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary">
           {LABELS[t] ?? t} 没有参数。
         </Typography.Text>
       )}
@@ -167,19 +167,17 @@ export default function StepParams({ step, testIdPrefix, onChange, readOnly = fa
             <Switch data-testid={testIdPrefix + "-optional"} disabled={readOnly || optionalBlocked}
               size="small" checked={Boolean(step.optional)}
               onChange={(v) => onChange({ ...step, optional: v })} />
-            <span style={{ fontSize: 12 }}>失败继续</span>
+            <span className="tp-text-sm">失败继续</span>
           </Space>
         </Tooltip>
         {optionalBlocked && (
           // 锁死的原因不藏进 hover：CommandParams 对 BLOCKED 类型的先例是「原因就写在
           // 控件旁边」——禁用了却说不出为什么，和用户自己乱猜禁用了什么是一个量级的坑。
-          <Typography.Text type="secondary" data-testid={testIdPrefix + "-optional-why"}
-            style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary" data-testid={testIdPrefix + "-optional-why"}>
             操作类步骤不允许失败继续：点了没点上，后面全是对着空气操作
           </Typography.Text>
         )}
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}
-          data-testid={testIdPrefix + "-summary"}>
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid={testIdPrefix + "-summary"}>
           {summary(step)}
         </Typography.Text>
       </Space>

@@ -133,7 +133,7 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
   }
 
   return (
-    <div data-testid="tab-members">
+    <div data-testid="tab-members" className="tp-fill-tab">
       <FilterBar actions={(
         <Toolbar>
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>刷新</Button>
@@ -155,15 +155,15 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
           description={denied ? "你已不是本项目成员或没有读取权限，刷新不会改变结论"
             : "可能是网络不通，点「刷新」重试"} />
       )}
-      <div className="tp-card tp-tablecard" style={{ padding: "0 4px" }}>
-        <AdminTable<MemberRow> rowKey="id" loading={loading} columns={cols} dataSource={rows}
-          locale={{ emptyText: failed
-            // catch 里 rows 不清（与 UsersTab 不同），但首拉就失败时 rows 本就是空——
-            // 这一格和「项目里真没人」长得一模一样，得说清是哪一种。
-            ? "成员列表没取到，以上方的加载失败提示为准"
-            : "还没有成员" }} />
-      </div>
-      <Modal open={open} title="添加成员" data-testid="member-modal" okText="加入项目" cancelText="取消"
+      {/* 外壳只有 AdminTable 自己那一层 tp-tablecard：此前外面又包了一层 tp-card tp-tablecard，
+          双白卡双描边 + 4px 手抄 padding（2026-11-22 审计定罪）。 */}
+      <AdminTable<MemberRow> rowKey="id" loading={loading} columns={cols} dataSource={rows}
+        locale={{ emptyText: failed
+          // catch 里 rows 不清（与 UsersTab 不同），但首拉就失败时 rows 本就是空——
+          // 这一格和「项目里真没人」长得一模一样，得说清是哪一种。
+          ? "成员列表没取到，以上方的加载失败提示为准"
+          : "还没有成员" }} />
+      <Modal centered open={open} title="添加成员" data-testid="member-modal" okText="加入项目" cancelText="取消"
         okButtonProps={{ loading: saving, "data-testid": "member-add-ok" } as never}
         onOk={() => void add()} onCancel={() => setOpen(false)} destroyOnClose>
         <Typography.Paragraph type="secondary" className="tp-text-sm">
@@ -176,9 +176,9 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
           onChange={(v) => setPicked(v)} loading={searching}
           options={cands.map((c) => ({ value: c.id, label: c.account + " · " + c.name
             + (c.is_member ? "（已在项目）" : "") }))} />
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: "var(--tp-gap-sm)" }}>
           <Typography.Text type="secondary">角色</Typography.Text>
-          <Select style={{ width: "100%", marginTop: 4 }} value={role} data-testid="member-new-role"
+          <Select style={{ width: "100%" }} value={role} data-testid="member-new-role"
             onChange={setRole} options={roles.map((x) => ({ value: x.code,
               label: <Tooltip title={(x.perms ?? []).join(" ")}>{x.name}</Tooltip> }))} />
         </div>

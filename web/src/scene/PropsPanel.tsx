@@ -98,28 +98,28 @@ function CronBindSection() {
   const others = (tasks ?? []).filter((t) => t.subject_id !== scenarioId);
 
   return (
-    <div data-testid="scene-cron-bind" style={{ margin: "6px 0 12px" }}>
+    <div data-testid="scene-cron-bind" style={{ margin: "8px 0 12px" }}>
       {!mayRead ? (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="cron-bind-noperm">
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid="cron-bind-noperm">
           当前项目没有 schedule:task:read 权限，看不到这个场景的定时绑定。
         </Typography.Text>
       ) : loadError ? (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="cron-bind-error">
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid="cron-bind-error">
           定时任务加载失败：{loadError}
         </Typography.Text>
       ) : tasks === null ? (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>定时任务加载中…</Typography.Text>
+        <Typography.Text className="tp-text-sm" type="secondary">定时任务加载中…</Typography.Text>
       ) : (
-        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
           {bound.length === 0 ? (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="cron-bind-empty">
+            <Typography.Text className="tp-text-sm" type="secondary" data-testid="cron-bind-empty">
               {partial ? "前 200 条定时任务里没有跑这个场景的。" : "还没有定时任务跑这个场景。"}
             </Typography.Text>
           ) : bound.map((t) => (
-            <div key={t.id} data-testid={"cron-bind-task-" + t.id} style={{ fontSize: 12 }}>
-              <Typography.Text strong style={{ fontSize: 12 }}>{t.name}</Typography.Text>
-              <Typography.Text code style={{ fontSize: 12, marginLeft: 6 }}>{t.cron}</Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>
+            <div className="tp-text-sm" key={t.id} data-testid={"cron-bind-task-" + t.id}>
+              <Typography.Text className="tp-text-sm" strong>{t.name}</Typography.Text>
+              <Typography.Text className="tp-text-sm" code style={{ marginLeft: 8 }}>{t.cron}</Typography.Text>
+              <Typography.Text className="tp-text-sm" type="secondary" style={{ marginLeft: 8 }}>
                 {t.enabled === 1 ? "启用中" : "已停用"}
               </Typography.Text>
             </div>
@@ -128,7 +128,7 @@ function CronBindSection() {
             去定时任务页新建/编辑
           </Button>
           {mayUpdate && others.length > 0 && (
-            <Space size={4} wrap>
+            <Space size={8} wrap>
               <Select showSearch optionFilterProp="label" size="small" style={{ width: 180 }}
                 data-testid="cron-bind-rebind-select" value={pick} placeholder="选一个已有定时任务"
                 options={others.map((t) => ({ value: t.id, label: t.name + "（" + t.cron + "）" }))}
@@ -140,7 +140,7 @@ function CronBindSection() {
             </Space>
           )}
           {mayUpdate && others.length === 0 && bound.length === 0 && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text className="tp-text-sm" type="secondary">
               {partial
                 ? "前 200 条定时任务里没有可改绑的——去定时任务页看看后面的页或新建一个。"
                 : "项目里还没有别的定时任务可改绑——先去定时任务页建一个。"}
@@ -233,18 +233,18 @@ function ScenarioPanel() {
     <div data-testid="scene-props-scenario" style={{ height: "100%", overflow: "auto", padding: 12 }}>
       <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没选中步骤：这里是场景级设置"
         style={{ margin: "0 0 8px" }} />
-      <Typography.Text strong style={{ fontSize: 13 }}>基本信息</Typography.Text>
-      <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0 12px" }}>
+      <Typography.Text className="tp-text-md" strong>基本信息</Typography.Text>
+      <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ margin: "8px 0 12px" }}>
         {scenario?.name}（v{scenario?.version}，{scenario?.priority}）
       </Typography.Paragraph>
 
-      <Typography.Text strong style={{ fontSize: 13 }}>场景变量</Typography.Text>
-      <div data-testid="scene-var-table" style={{ margin: "6px 0 12px", display: "flex", flexDirection: "column", gap: 6 }}>
+      <Typography.Text className="tp-text-md" strong>场景变量</Typography.Text>
+      <div data-testid="scene-var-table" style={{ margin: "8px 0 12px", display: "flex", flexDirection: "column", gap: 8 }}>
         {varRows.map(([k, v], i) => (
           <Space key={i} data-testid={"var-row-" + i} style={{ display: "flex" }}>
-            <Input data-testid={"var-key-" + i} size="small" style={{ width: 120 }} placeholder="变量名"
+            <Input data-testid={"var-key-" + i} size="small" style={{ flex: "1 1 0", minWidth: 0 }} placeholder="变量名"
               disabled={readOnly} value={k} onChange={(e) => writeVar(i, e.target.value, v)} />
-            <Input data-testid={"var-val-" + i} size="small" style={{ width: 150 }} placeholder="值"
+            <Input data-testid={"var-val-" + i} size="small" style={{ flex: "1 1 0", minWidth: 0 }} placeholder="值"
               disabled={readOnly} value={v} onChange={(e) => writeVar(i, k, e.target.value)} />
             {!readOnly && (
             <Button size="small" type="text" danger icon={<DeleteOutlined />}
@@ -263,17 +263,17 @@ function ScenarioPanel() {
         )}
       </div>
 
-      <Typography.Text strong style={{ fontSize: 13 }}>失败策略</Typography.Text>
-      <div style={{ margin: "6px 0 12px", display: "flex", alignItems: "center", gap: 8 }}>
+      <Typography.Text className="tp-text-md" strong>失败策略</Typography.Text>
+      <div style={{ margin: "8px 0 12px", display: "flex", alignItems: "center", gap: 8 }}>
         <Switch data-testid="scene-fail-continue" checked={!failFast} disabled={readOnly}
           onChange={(v) => setFailFast(!v)} />
-        <Typography.Text style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm">
           {failFast ? "遇错停止（后续步骤 skip）" : "忽略继续（失败行不阻断后续）"}
         </Typography.Text>
       </div>
 
-      <Typography.Text strong style={{ fontSize: 13 }}>执行超时（ms）</Typography.Text>
-      <div style={{ margin: "6px 0 12px" }}>
+      <Typography.Text className="tp-text-md" strong>执行超时（ms）</Typography.Text>
+      <div style={{ margin: "8px 0 12px" }}>
         <Input data-testid="scene-max-runtime" size="small" style={{ width: 160 }} disabled={readOnly}
           placeholder={String(DEFAULT_MAX_RUNTIME_MS)}
           value={maxRuntimeMs === null ? "" : String(maxRuntimeMs)}
@@ -281,13 +281,13 @@ function ScenarioPanel() {
             const t = e.target.value.trim();
             setMaxRuntimeMs(t === "" ? null : Math.max(1000, Number(t) || 0));
           }} />
-        <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+        <Typography.Text className="tp-text-sm" type="secondary" style={{ marginLeft: 8 }}>
           默认 {DEFAULT_MAX_RUNTIME_MS / 60000} 分钟
         </Typography.Text>
       </div>
 
-      <Typography.Text strong style={{ fontSize: 13 }}>公共断言</Typography.Text>
-      <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0 6px" }}>
+      <Typography.Text className="tp-text-md" strong>公共断言</Typography.Text>
+      <Typography.Paragraph className="tp-text-sm" type="secondary" style={{ margin: "8px 0 8px" }}>
         对每一个发出请求的步骤逐条求值；任一步不过，整次运行判「断言失败」。
       </Typography.Paragraph>
       <div data-testid="scene-common-assertions" style={{ margin: "0 0 12px" }}>
@@ -301,17 +301,17 @@ function ScenarioPanel() {
         />
       </div>
 
-      <Typography.Text strong style={{ fontSize: 13 }}>定时绑定</Typography.Text>
+      <Typography.Text className="tp-text-md" strong>定时绑定</Typography.Text>
       <CronBindSection />
 
-      <Typography.Text strong style={{ fontSize: 13 }}>引用提示</Typography.Text>
-      <div data-testid="scene-refs-hint" style={{ margin: "6px 0 12px" }}>
+      <Typography.Text className="tp-text-md" strong>引用提示</Typography.Text>
+      <div data-testid="scene-refs-hint" style={{ margin: "8px 0 12px" }}>
         {refCaseIds.size === 0 ? (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             这个场景没有引用任何接口用例。
           </Typography.Text>
         ) : (
-          <Typography.Text style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm">
             引用 {refCaseIds.size} 个接口用例：
             {[...refCaseIds].map((id) => cases.find((c) => c.id === id)?.name ?? id.slice(0, 8)).join("、")}
           </Typography.Text>
@@ -398,7 +398,7 @@ export default function PropsPanel() {
                   value={String(node.config?.device_serial ?? "")} />
               </Labeled>
             )}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="prop-adb-queue-note">
+            <Typography.Text className="tp-text-sm" type="secondary" data-testid="prop-adb-queue-note">
               {/* D136：占用语义按策略分叉，绝不无条件承诺排队/位次——
                   任一空闲真实现是轮询等待（不排队、无位次可看）。 */}
               {policy === "specified"
@@ -473,7 +473,7 @@ export default function PropsPanel() {
         return (
           <Labeled label="脚本（受限沙箱，§8.5）">
             <Suspense fallback={editorFallback}>
-              <CodeEditor language="javascript" height={220} readOnly={readOnly}
+              <CodeEditor language="javascript" height={224} readOnly={readOnly}
                 value={String(node.config?.code ?? "")}
                 onChange={(v) => updateConfig(node.key, { code: v })} />
             </Suspense>
@@ -507,7 +507,7 @@ export default function PropsPanel() {
         );
       case "group":
         return (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             分组是串行容器：子节点按顺序执行。并发分组（parallel）是二期。
           </Typography.Text>
         );
@@ -518,7 +518,7 @@ export default function PropsPanel() {
 
   const tabs = [
     { key: "config", label: "配置", children: (
-      <Space direction="vertical" style={{ width: "100%" }} size={10}>
+      <Space direction="vertical" style={{ width: "100%" }} size={12}>
         <Labeled label="名称">
           <Input data-testid="prop-name" value={nameDraft} maxLength={200} disabled={readOnly}
             onChange={(e) => setNameDraft(e.target.value)}
@@ -530,7 +530,7 @@ export default function PropsPanel() {
   ];
   if (node.kind === "api_case") {
     tabs.push({ key: "assert", label: "断言", children: (
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      <Typography.Text className="tp-text-sm" type="secondary">
         API 用例步骤的断言跟着用例走（接口管理里编辑）；要对整条场景收尾断言，
         加一个独立的「断言」步骤。
       </Typography.Text>
@@ -541,7 +541,7 @@ export default function PropsPanel() {
     // assert 步型等，在各自用例详情页编辑），不在场景这一步上——所以这里不放假断言编辑器。
     const where = node.kind === "ui_case" ? "UI 用例" : "ADB 用例";
     tabs.push({ key: "assert", label: "断言", children: (
-      <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="prop-ui-assert-note">
+      <Typography.Text className="tp-text-sm" type="secondary" data-testid="prop-ui-assert-note">
         {where}步骤的断言跟着用例走（在 {where} 的命令里编辑，如「断言文本」）；
         要对整条场景收尾断言，加一个独立的「断言」步骤。
       </Typography.Text>
@@ -552,14 +552,14 @@ export default function PropsPanel() {
   // 没页签就等于「这一步永远不许有断言」，而 500 也算通过，那是假绿（1A §5.3 同源口径）。
   if (node.kind === "http_direct") {
     tabs.push({ key: "assert", label: "断言", children: (
-      <Space direction="vertical" style={{ width: "100%" }} size={6}>
+      <Space direction="vertical" style={{ width: "100%" }} size={8}>
         <AssertionListEditor
           items={(Array.isArray(node.config?.assertions) ? node.config.assertions : []) as Asrt[]}
           prefix="prop-direct-assert" addLabel="加断言"
           emptyHint="无断言：这一步只要请求发得出去就算通过——目标系统回 500 也是绿的。至少加一条状态码断言。"
           ro={readOnly}
           onChange={(xs) => updateConfig(node.key, { assertions: xs })} />
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <Typography.Text className="tp-text-sm" type="secondary">
           与场景公共断言同一套控件、同一份求值（shared/assertions.py）；报告里这一步的
           断言行会同时含「自己的」与带「场景级」标的。
         </Typography.Text>
@@ -567,7 +567,7 @@ export default function PropsPanel() {
     ) });
   }
   tabs.push({ key: "adv", label: "高级", children: (
-    <Space direction="vertical" style={{ width: "100%" }} size={10}>
+    <Space direction="vertical" style={{ width: "100%" }} size={12}>
       <Labeled label="步骤 key（报告的步骤主键，改名会影响历史对照）">
         <KeyEditor node={node} />
       </Labeled>
@@ -585,11 +585,9 @@ export default function PropsPanel() {
 
   return (
     <div data-testid="scene-props" style={{ height: "100%", overflow: "auto" }}>
-      <div style={{ padding: "10px 12px 0", display: "flex", alignItems: "center", gap: 8 }}>
-        <span data-testid="prop-kind" style={{
-          background: meta.color, color: "#fff", borderRadius: 4, padding: "1px 8px", fontSize: 12,
-        }}>{meta.label}</span>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{node.key}</Typography.Text>
+      <div style={{ padding: "8px 12px 0", display: "flex", alignItems: "center", gap: 8 }}>
+        <span className="tp-text-sm" data-testid="prop-kind" style={{ background: meta.color, color: "#fff", borderRadius: 4, padding: "1px 8px" }}>{meta.label}</span>
+        <Typography.Text className="tp-text-sm" type="secondary">{node.key}</Typography.Text>
       </div>
       <Tabs items={tabs} size="small" tabBarStyle={{ paddingLeft: 12, marginBottom: 0 }} />
     </div>
@@ -599,7 +597,7 @@ export default function PropsPanel() {
 function Labeled(props: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div style={{ fontSize: 12, color: "var(--tp-text-2)", marginBottom: 4 }}>{props.label}</div>
+      <div className="tp-text-sm" style={{ color: "var(--tp-text-2)", marginBottom: 8 }}>{props.label}</div>
       {props.children}
     </div>
   );
@@ -630,7 +628,7 @@ function BranchEditor({ node }: { node: StepNode }) {
     <Space direction="vertical" style={{ width: "100%" }} size={8}>
       {branches.map((b, i) => (
         <div key={i} data-testid={"prop-branch-" + i} style={{
-          border: "1px solid var(--tp-border)", borderRadius: 6, padding: 8, display: "flex", gap: 6, alignItems: "center",
+          border: "1px solid var(--tp-border)", borderRadius: 6, padding: 8, display: "flex", gap: 8, alignItems: "center",
         }}>
           <Segmented data-testid={"prop-branch-type-" + i} disabled={readOnly}
             options={[{ value: "cond", label: "条件" }, { value: "else", label: "否则" }]}
@@ -645,7 +643,7 @@ function BranchEditor({ node }: { node: StepNode }) {
               value={b.cond ?? ""}
               onChange={(e) => { const nb = branches.slice(); nb[i] = { ...nb[i], cond: e.target.value }; write(nb); }} />
           )}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text className="tp-text-sm" type="secondary">
             {b.children?.length ?? 0} 步
           </Typography.Text>
           {branches.length > 1 && !readOnly && (
@@ -667,7 +665,7 @@ function BranchEditor({ node }: { node: StepNode }) {
           加否则(else)
         </Button>
       )}
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      <Typography.Text className="tp-text-sm" type="secondary">
         分支按顺序求值，「否则」兜底；未命中分支的子步骤在执行期标 skip。
       </Typography.Text>
     </Space>
@@ -681,7 +679,7 @@ function ExtractEditor({ node }: { node: StepNode }) {
   const rules = (Array.isArray(node.config?.rules) ? node.config.rules : []) as Rule[];
   const write = (rs: Rule[]) => updateConfig(node.key, { rules: rs });
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size={6}>
+    <Space direction="vertical" style={{ width: "100%" }} size={8}>
       {rules.map((r, i) => (
         <Space key={i} data-testid={"prop-rule-" + i}>
           <Input placeholder="变量名" value={r.var ?? ""} style={{ width: 110 }} disabled={readOnly}
@@ -744,9 +742,9 @@ export function AssertionListEditor({ items, onChange, prefix, addLabel, emptyHi
     write(xs);
   };
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size={6}>
+    <Space direction="vertical" style={{ width: "100%" }} size={8}>
       {items.length === 0 && emptyHint && (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid={prefix + "-empty"}>
+        <Typography.Text className="tp-text-sm" type="secondary" data-testid={prefix + "-empty"}>
           {emptyHint}
         </Typography.Text>
       )}
@@ -768,9 +766,9 @@ export function AssertionListEditor({ items, onChange, prefix, addLabel, emptyHi
             // 选项就是让用户选一个永远填不上的类型。
             // R49/D174：升级 CodeEditor（本文件已有懒加载 CodeEditor，script 步骤同款）。
             // testid 落外层 div：CodeEditor 不转发 testid，现有测试经 wrapper 定位不变。
-            <div data-testid={prefix + "-code-" + i} style={{ width: 420 }}>
+            <div data-testid={prefix + "-code-" + i} style={{ width: "100%" }}>
               <Suspense fallback={editorFallback}>
-                <CodeEditor height={120} language="python" readOnly={ro}
+                <CodeEditor height={160} language="python" readOnly={ro}
                   value={a.code ?? ""} onChange={(v) => setAt(i, { code: v })} />
               </Suspense>
             </div>
@@ -812,10 +810,10 @@ function AssertEditor({ node }: { node: StepNode }) {
   const readOnly = useSceneStore((s) => s.readOnly);
   const items = (Array.isArray(node.config?.assertions) ? node.config.assertions : []) as Asrt[];
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size={6}>
+    <Space direction="vertical" style={{ width: "100%" }} size={8}>
       <AssertionListEditor items={items} prefix="prop-assert" addLabel="加断言" ro={readOnly}
         onChange={(xs) => updateConfig(node.key, { assertions: xs })} />
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      <Typography.Text className="tp-text-sm" type="secondary">
         脚本断言走沙箱（T5 已开放）；类型表与请求编辑器同源（api/req.ts ASSERT_TYPES）。
       </Typography.Text>
     </Space>
@@ -829,15 +827,15 @@ function JsonBox({ text, onCommit, ro = false }: { text: string; onCommit: (obj:
   return (
     <div>
       <Suspense fallback={editorFallback}>
-        <CodeEditor language="json" height={160} value={draft} onChange={setDraft} readOnly={ro} />
+        <CodeEditor language="json" height={200} value={draft} onChange={setDraft} readOnly={ro} />
       </Suspense>
       {!ro && (
-      <Button size="small" style={{ marginTop: 6 }} onClick={() => {
+      <Button size="small" style={{ marginTop: 8 }} onClick={() => {
         try { onCommit(JSON.parse(draft) as Record<string, unknown>); setBad(false); }
         catch { setBad(true); }
       }}>应用 JSON</Button>
       )}
-      {bad && <Typography.Text type="danger" style={{ fontSize: 12 }}>JSON 解析失败，先改对再应用</Typography.Text>}
+      {bad && <Typography.Text className="tp-text-sm" type="danger">JSON 解析失败，先改对再应用</Typography.Text>}
     </div>
   );
 }

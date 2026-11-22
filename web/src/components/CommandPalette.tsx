@@ -271,7 +271,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
             const rows = byKind(g.kind);
             return (
               <div key={g.kind} data-testid="palette-group" data-kind={g.kind}>
-                <div style={{ padding: "4px 16px", fontSize: 11, color: "var(--tp-text-3)", letterSpacing: 1 }}>
+                <div className="tp-text-xs" style={{ padding: "4px 16px", color: "var(--tp-text-3)", letterSpacing: 1 }}>
                   {g.label}
                   {/* 空组的两种来路分开说：查过了没有 vs 这一组根本没查。 */}
                   {rows.length === 0 && <span style={{ marginLeft: 8 }}>{groupUnsearched(g.kind) ?? "无匹配"}</span>}
@@ -287,15 +287,15 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
                         display: "flex", gap: 8, alignItems: "center", padding: "6px 16px", cursor: "pointer",
                         background: idx === active ? "#EAF6F1" : undefined,
                       }}>
-                      <Typography.Text style={{ fontSize: 13, flex: 1, minWidth: 0 }}
+                      <Typography.Text className="tp-text-md" style={{ flex: 1, minWidth: 0 }}
                         ellipsis={{ tooltip: f.item.name }}>{f.item.name}</Typography.Text>
                       {f.kind === "definition" && (
-                        <Typography.Text type="secondary" className="tp-mono" style={{ fontSize: 12 }}>
+                        <Typography.Text type="secondary" className="tp-mono tp-text-sm">
                           {f.item.method} {f.item.path}
                         </Typography.Text>
                       )}
                       {f.kind === "case" && (
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        <Typography.Text className="tp-text-sm" type="secondary">
                           属于 {f.item.definition_name ?? "（定义已删）"}
                         </Typography.Text>
                       )}
@@ -303,7 +303,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
                       {f.kind === "ui_case" && <Tag style={{ marginInlineEnd: 0 }}>{f.item.priority}</Tag>}
                       {f.kind === "adb_case" && <Tag style={{ marginInlineEnd: 0 }}>{f.item.priority}</Tag>}
                       {f.kind === "nav_device" && (
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        <Typography.Text className="tp-text-sm" type="secondary">
                           <MobileOutlined /> 打开 /adb/devices
                         </Typography.Text>
                       )}
@@ -316,8 +316,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
           {!loading && !out && !project && (
             // 没项目时搜索请求根本发不出去（上面的 effect 第一行就 return），
             // 再喊「输入关键词开始搜索」就是让业主打字打到疲倦也不会有一个结果。
-            <div data-testid="palette-no-project"
-              style={{ padding: "18px 16px", color: tpv.text[3], fontSize: 12 }}>
+            <div className="tp-text-sm" data-testid="palette-no-project" style={{ padding: "18px 16px", color: tpv.text[3] }}>
               还没有选定项目，全局查找搜不了——先在顶栏的项目下拉或工作台选一个项目，再按 Ctrl+K。
             </div>
           )}
@@ -326,7 +325,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
             // 这里却把它们列进「输入关键词就能搜到」，是同一段浮层里的第二句谎。
             const named = searchableLabels.join("、");
             return (
-              <div style={{ padding: "18px 16px", color: "var(--tp-text-3)", fontSize: 12 }}>
+              <div className="tp-text-sm" style={{ padding: "18px 16px", color: "var(--tp-text-3)" }}>
                 输入关键词开始搜索——{named}，搜「设备」可打开设备卡片墙。
                 {unsearchedLabels.length > 0
                   && ` ${unsearchedLabels.join(" / ")} 你的角色没有读权限，不会出现在结果里。`}
