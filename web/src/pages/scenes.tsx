@@ -33,6 +33,10 @@ import type { ModNode } from "../api/ModuleTree";
 import { downloadBlob } from "../api/ImportWizard";
 import { flatten, ownModuleIds } from "../shared/moduleTree";
 import { sceneApi, type ScenarioListQuery, type ScenarioListRow } from "../api/scene";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 import { ownerLabel, MEMBERS_FAILED, MEMBERS_LOADING, membersReady, type MemberLookup } from "../shared/ownerName";
 import { STATUSES } from "../shared/runVocab";
 import { fmtTime } from "../shared/timefmt";
@@ -41,6 +45,8 @@ import type { components } from "../api/schema";
 import type { CaseRow, EnvRow, MemberRow, Page } from "../api/api";
 
 type Row = ScenarioListRow;
+// D261：`/projects` 里本页关心的最小形状（my_perms 缺失 = 服务端没下发，不禁用）。
+type OtherProject = { id: string; name: string; my_perms?: string[] };
 
 const PRIO_COLOR: Record<string, string> = { P0: "red", P1: "volcano", P2: "blue", P3: "default" };
 // 这一列的取值域只有四态 + NULL：last_run_status 全站唯一的回写门是终态门
@@ -54,6 +60,20 @@ const RUN_DOT: Record<string, { color: string; label: string }> = {
   error: { color: tpv.func.error, label: STATUSES.error.label },
   cancelled: { color: tpv.func.skip, label: STATUSES.cancelled.label },
 };
+
+// D214：列设置面板要露的列（key 与下方 columns 的 key 逐字对上，对不上就是「面板能勾、
+// 表头不动」的假把手——scenes.test.tsx 的列设置用例钉这一环）。回收站专属的
+// 「删除人/删除时间」是视图态列、操作列带恢复/彻底删除入口——都不进面板。
+const SCENARIO_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "mod", label: "模块" },
+  { key: "prio", label: "优先级" },
+  { key: "run", label: "最近结果" },
+  { key: "steps", label: "步骤数" },
+  { key: "cron", label: "定时" },
+  { key: "owner", label: "负责人" },
+  { key: "upd", label: "更新时间" },
+];
 
 // flatten / ownModuleIds 已抽到 shared/moduleTree.ts（R99：api.tsx 与 scenes.tsx 曾逐字重复两份）。
 
@@ -106,6 +126,9 @@ function ScenesWorkbench() {
   // 都汇进 onSearch——allowClear 的清空也带 source:'clear' 触发它）。
   const [qText, setQText] = useState("");
   const [kw, setKw] = useState("");
+  // D214：高级搜索条件（D47-a 三件套）+ 列偏好（列设置的落盘在 useColumnPrefs）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("scenario", SCENARIO_COL_CHOICES.map((c) => c.key));
   // D47-b 步5b：页码分页（current/pageSize/total）替换「拉 200 条本地过滤」。默认档位 20
   // 在 ListPager 档位表（20/50/100）里、后端 size 上限（le=200）内。current 只有 pager 回调
   // 与 patchFilters 写，load 永不写它（runs.tsx 同法，一页只许有一个「我在第几页」的真相）。
@@ -115,16 +138,26 @@ function ScenesWorkbench() {
   // 三类筛选（模块/已提交关键词/回收站开关）只有 patchFilters 这一个写入口，「回第 1 页」
   // 钉在唯一入口处——停在第 7 页改筛选，落的是新条件下无关的切片甚至空页
   // （runs.tsx:84 / listPagination.tsx 注释③同款 hazard）；各 setState 漏接一个 reset 没人拦得住。
+  // D214：高级搜索与列偏好也走同一个写入口（advFilter 是第四类筛选）。
   const patchFilters = useCallback((p: {
-    moduleId?: string | null; kw?: string; inRecycled?: boolean;
+    moduleId?: string | null; kw?: string; inRecycled?: boolean; advFilter?: FilterDoc;
   }): void => {
     if ("moduleId" in p) setModuleId(p.moduleId!);
     if ("kw" in p) setKw(p.kw!);
     if ("inRecycled" in p) setInRecycled(p.inRecycled!);
+    if ("advFilter" in p) setAdvFilter(p.advFilter!);
     setCurrent(1);
   }, []);
   const [loading, setLoading] = useState(false);
   const [sel, setSel] = useState<string[]>([]);
+  const [restoring, setRestoring] = useState(false);
+  // D261：跨项目复制。项目列表**开窗时才取**（其余操作都在当前项目内，首屏不该为
+  // 一个偶尔用的入口多打一发）；`my_perms` 缺失时不禁用——真正的门禁在后端。
+  const [copyToOpen, setCopyToOpen] = useState(false);
+  const [copyToProjects, setCopyToProjects] = useState<OtherProject[]>([]);
+  const [copyToTarget, setCopyToTarget] = useState<string | null>(null);
+  const [copyToLoading, setCopyToLoading] = useState(false);
+  const [copyToErr, setCopyToErr] = useState(false);
   // 三态：加载中/拉挂了下不了结论，别把真成员判成「非项目成员」（shared/ownerName.ts）
   const [members, setMembers] = useState<MemberLookup>(MEMBERS_LOADING);
   // 取数失败与「项目里真的没有场景」是两句话：把失败画成实测零，是把故障演成空数据
@@ -147,6 +180,8 @@ function ScenesWorkbench() {
       const q: ScenarioListQuery = { project_id: pid, size: pageSize, current };
       if (inRecycled) q.recycled = true;
       if (kw.trim()) q.keyword = kw.trim(); // 空/纯空白 = 不过滤，参数整个不上线
+      // D214：空条件不上线（与 keyword 同口径）；非空才拼 filter JSON 串。
+      if (!isFilterEmpty(advFilter)) q.filter = JSON.stringify(advFilter);
       if (moduleId) {
         // **直属口径**（ownModuleIds = 只有选中节点自身），不是接口页那个 subtreeIds：
         // 场景树徽标还是直属数，发子树就是「徽标写 3、列表出 7」的 R120 谎；子树化要
@@ -183,7 +218,7 @@ function ScenesWorkbench() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "场景列表加载失败");
     } finally { setLoading(false); }
-  }, [pid, inRecycled, kw, moduleId, current, pageSize]);
+  }, [pid, inRecycled, kw, moduleId, current, pageSize, advFilter]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     setMembers(MEMBERS_LOADING);
@@ -207,6 +242,16 @@ function ScenesWorkbench() {
     walk(tree); walk(recycledTree);
     return map;
   }, [tree, recycledTree]);
+
+  // D214：高级搜索的候选值——都来自页面已经拿得到的东西，不拉第二遍：
+  // 优先级是编辑器同一份 P0-P3 词表，模块用已到手的模块树摊平，最近结果用本页的
+  // RUN_DOT（终态四值，词表同源 runVocab）。owner_id/env_id 没有等价词表可复用 → 不给
+  // 候选，按原值精确匹配（面板底部已写明）。
+  const filterValueOptions = useMemo<Record<string, Option[]>>(() => ({
+    priority: Object.keys(PRIO_COLOR).map((p) => ({ value: p, label: p })),
+    module_id: flatten(tree),
+    last_run_status: Object.keys(RUN_DOT).map((s) => ({ value: s, label: RUN_DOT[s].label })),
+  }), [tree]);
 
   // —— 新建：空白 / 从用例生成 / Pilot（1F 说明） ——
   const [blank, setBlank] = useState(false);
@@ -287,6 +332,10 @@ function ScenesWorkbench() {
   // —— 行/批量操作 ——
   const [purge, setPurge] = useState<{ id: string; name: string } | null>(null);
   const [purgeName, setPurgeName] = useState("");
+  // D256：批量彻底删除（短语确认，服务端同样硬校验）
+  const [batchPurgeOpen, setBatchPurgeOpen] = useState(false);
+  const [batchPurgeWord, setBatchPurgeWord] = useState("");
+  const [batchPurging, setBatchPurging] = useState(false);
   const [purging, setPurging] = useState(false);
   const [move, setMove] = useState(false);
   const [moveTarget, setMoveTarget] = useState<string | null>(null);
@@ -326,6 +375,18 @@ function ScenesWorkbench() {
     } catch { /* toast；保持弹窗，改名重试或取消 */ } finally { setPurging(false); }
   }
 
+  async function submitBatchPurge(): Promise<void> {
+    setBatchPurging(true);
+    try {
+      await sceneApi.batchPurge({ project_id: pid, scenario_ids: sel, confirm_word: batchPurgeWord });
+      message.success("已彻底删除 " + sel.length + " 个场景");
+      setBatchPurgeOpen(false);
+      setBatchPurgeWord("");
+      setSel([]);
+      await load();
+    } catch { /* toast；弹窗留着改名重试或取消 */ } finally { setBatchPurging(false); }
+  }
+
   async function batchMove(): Promise<void> {
     setBusy(true);
     try {
@@ -339,10 +400,46 @@ function ScenesWorkbench() {
   async function batchDuplicate(): Promise<void> {
     setBusy(true);
     try {
-      for (const id of sel) await sceneApi.duplicate(id, { project_id: pid });
-      message.success("已复制 " + sel.length + " 个场景");
+      const r = await sceneApi.batchCopy({ project_id: pid, scenario_ids: sel });
+      message.success("已复制 " + r.created + " 个场景（名称自动加「 - 副本」）");
       await load();
     } catch { /* toast */ } finally { setBusy(false); }
+  }
+
+  // D261：复制到别的项目。环境与模块是项目私有资产，副本到目标项目后不带环境、落在
+  // 未分类——这句必须写在弹窗里：用户以为「环境也一起过去了」再到目标项目跑失败，
+  // 病因与现场隔着一次跳项目。
+  async function openCopyTo(): Promise<void> {
+    setCopyToOpen(true);
+    setCopyToTarget(null);
+    setCopyToErr(false);
+    setCopyToLoading(true);
+    try {
+      const r = await get<{ items: OtherProject[] }>("/projects?size=200", { silent: true });
+      setCopyToProjects(r.items.filter((p) => p.id !== pid));
+    } catch {
+      setCopyToProjects([]);
+      setCopyToErr(true);
+    } finally { setCopyToLoading(false); }
+  }
+
+  function canCreateIn(p: OtherProject): boolean {
+    // my_perms 缺席（旧快照/字段未下发）时不猜——放行由后端裁决，比「一律禁用」少一次骗人。
+    return !p.my_perms || p.my_perms.length === 0 || can(p.my_perms, "scenario:create");
+  }
+
+  async function submitCopyTo(): Promise<void> {
+    if (!copyToTarget) return;
+    setBusy(true);
+    try {
+      const r = await sceneApi.batchCopy({
+        project_id: pid, scenario_ids: sel, target_project_id: copyToTarget });
+      const name = copyToProjects.find((p) => p.id === copyToTarget)?.name ?? copyToTarget;
+      message.success("已复制 " + r.created + " 个场景到「" + name
+        + "」（环境与模块已在副本上清空，按需在目标项目重新指定）");
+      setCopyToOpen(false);
+      await load();
+    } catch { /* client 已 toast；选择保留，用户可换目标或改名单 */ } finally { setBusy(false); }
   }
 
   // 导出备份（D74，§11.4.8 批量条 [导出]）：手法照接口域 api.tsx 的 exportDefs——
@@ -410,26 +507,25 @@ function ScenesWorkbench() {
 
   async function submitBatchRun(): Promise<void> {
     setBusy(true);
-    let enqueued = 0;
     try {
-      for (const id of sel) {
-        await sceneApi.run(id, { project_id: pid, env_id: runEnvId });
-        enqueued += 1;
+      // D258：一次请求投递整批。预检（存在/状态/重复/环境可解析）全有或全无；
+      // 投递本身逐条 commit，broker 中途挂掉时回包用 failed[] 如实说明——
+      // 所以提示不能只说勾选数，必须说「已入队几个」并点出没投递的那几条。
+      const r = await sceneApi.batchRun({ project_id: pid, scenario_ids: sel, env_id: runEnvId });
+      const n = r.run_ids.length;
+      if (r.failed.length === 0) {
+        message.success("已入队 " + n + " 个执行，进度看报告中心");
+      } else {
+        message.warning("已入队 " + n + " 个，" + r.failed.length + " 个没投递成功："
+          + r.failed.map((f) => f.message).join("；"));
       }
-      message.success("已入队 " + enqueued + " 个执行，进度看报告中心");
+      if (n > 0) await load();
     } catch {
-      // 不能照抄 purge 的「留着弹窗可重试」：purge 幂等，enqueue 不幂等——
-      // 第 2 个失败时第 1 个**已经跑起来了**，弹窗原样留着再点一次就是重跑第 1 个。
-      // 所以任何结局都关窗，并把「已入队几个」说出口，重试由用户重新勾选显式发起。
-      // （client 已统一弹错误原因，这里补的是「前面那几个去哪了」。）
-      message.warning(enqueued > 0
-        ? "已入队 " + enqueued + " 个，之后的没投递——重试请重新勾选（已入队的那几个会重跑）"
-        : "一个都没投递成功");
+      // 预检失败（404/422）整批一个 run 都没建，重试是安全的；client 已统一弹原因。
     } finally {
       setBusy(false);
       setRunOpen(false);
     }
-    if (enqueued > 0) await load();
   }
   const newMenu = {
     items: [
@@ -475,7 +571,18 @@ function ScenesWorkbench() {
             上下两条边。卡体 padding 归零，内部分段自己留白（口径同 api.tsx）。 */}
         <Card size="small" styles={{ body: { padding: 0 } }}>
         <div style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
-        <Space wrap>
+        {/* D214：D47-a 三件套铺到场景页（视图保存 / 高级搜索 / 列设置）。快捷搜索框留在
+            extra 里——它是既有入口（keyword= 只打 name 的后端契约），与高级搜索各打各的
+            参数、并存不互相替代（接口页 D47-b 步4b 已定同款口径）。 */}
+        <ListToolbar
+          projectId={pid} viewType="scenario"
+          filter={advFilter} onFilterChange={(f) => patchFilters({ advFilter: f })}
+          valueOptions={filterValueOptions}
+          allColumns={SCENARIO_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+          canSaveView={can(perms, "search:view:create")}
+          canDeleteView={can(perms, "search:view:delete")}
+          extra={(
+          <Space wrap>
           {/* 关键词是服务端契约（D47-b 步5b）：打字只动 qText（受控现值），提交才进 load
               依赖（kw）。提交口恰好三个：Enter、放大镜钮、allowClear 清空——antd 5.29 的
               Input.Search 把三条路径都汇进 onSearch（clear 图标点击也以 source:'clear' 触发它）。
@@ -493,20 +600,27 @@ function ScenesWorkbench() {
               </Button>
             </Dropdown>
           )}
-        </Space>
+          </Space>
+          )}
+        />
         {sel.length > 0 && !inRecycled && (
           <div data-testid="scene-batch-bar" style={{ marginBottom: 8 }}>
             <Space wrap>
               <Typography.Text>已选 {sel.length} 项</Typography.Text>
-              {/* 执行(选环境)：D70 真入口——弹环境选择后逐个 sceneApi.run（投递语义，
-                  trigger=manual 由入口自动决定）。无 scenario:run 时不渲染（按钮级权限点
-                  隐藏而非禁用，§11.5.1/D47 口径）。 */}
+              {/* 执行(选环境)：D70 真入口，D258 起一次 /scenario-batch-run 投递整批
+                  （预检全有或全无，回包 failed[] 如实分账）。无 scenario:run 时不渲染
+                  （按钮级权限点隐藏而非禁用，§11.5.1/D47 口径）。 */}
               {canRun && (
                 <Button size="small" data-testid="scene-batch-run" loading={busy}
                   onClick={() => void openRunModal()}>执行</Button>
               )}
               {canUpdate && <Button size="small" data-testid="scene-batch-move" onClick={() => { setMove(true); setMoveTarget(null); }}>移动</Button>}
               {canUpdate && <Button size="small" data-testid="scene-batch-copy" loading={busy} onClick={() => void batchDuplicate()}>复制</Button>}
+              {/* D261：跨项目复制。与「复制」并列但落点在别的项目，环境/模块不跟随。 */}
+              {canUpdate && (
+                <Button size="small" data-testid="scene-batch-copy-to" loading={busy}
+                  onClick={() => void openCopyTo()}>复制到项目</Button>
+              )}
               {/* 导出（D74）：位置照蓝图批量条 [移动][复制][导出][回收站]，权限 scenario:read
                   （与后端 scenario_export 的 perm 同源；无读位时隐藏而非禁用，§11.5.1/D47）。
                   导出选中：ids 原样带进 /scenario-export，勾 3 条绝不悄悄变全量（同 api.tsx 口径）。 */}
@@ -519,11 +633,12 @@ function ScenesWorkbench() {
                   Modal.confirm({
       centered: true,
                     title: "把选中的 " + sel.length + " 个场景放入回收站？",
-                    content: "进入回收站后可恢复；报告与运行记录不受影响。",
+                    content: "进入回收站后可恢复；报告与运行记录不受影响。"
+                      + "全有或全无：只要有一个已在回收站，整批都不会删。",
                     okText: "放入回收站", okButtonProps: { danger: true, "data-testid": "scene-del-ok" }, cancelText: "取消",
                     onOk: async () => {
                       try {
-                        for (const id of sel) await sceneApi.remove(pid, id);
+                        await sceneApi.batchDelete({ project_id: pid, scenario_ids: sel });
                         message.success("已放入回收站");
                         await load();
                       } catch { /* toast */ }
@@ -541,12 +656,47 @@ function ScenesWorkbench() {
             message="场景列表加载失败" description={loadError} />
         )}
         </div>
+        {sel.length > 0 && inRecycled && canUpdate && (
+          <div data-testid="scene-batch-bar-recycled" style={{ marginBottom: 8 }}>
+            <Space wrap>
+              <Typography.Text>已选 {sel.length} 项</Typography.Text>
+              {/* D255：回收站批量恢复。全有或全无的判据在后端，前端只负责说清方向。 */}
+              <Button size="small" type="primary" data-testid="scene-batch-restore"
+                loading={restoring} onClick={() => {
+                  Modal.confirm({
+                    centered: true,
+                    title: "恢复选中的 " + sel.length + " 个场景？",
+                    content: "全有或全无：只要有一个不在回收站，整批都不会恢复。",
+                    okText: "恢复",
+                    onOk: async () => {
+                      setRestoring(true);
+                      try {
+                        await sceneApi.batchRestore({ project_id: pid, scenario_ids: sel });
+                        message.success("已恢复 " + sel.length + " 个场景");
+                        await load();
+                      } catch { /* client 已 toast；选择保留让用户改名单 */ }
+                      finally { setRestoring(false); }
+                    },
+                  });
+                }}>批量恢复</Button>
+              <Button size="small" data-testid="scene-batch-clear" onClick={() => setSel([])}>
+                取消选择
+              </Button>
+              {canDelete && (
+                <Button size="small" danger data-testid="scene-batch-purge"
+                  onClick={() => { setBatchPurgeWord(""); setBatchPurgeOpen(true); }}>
+                  批量彻底删除
+                </Button>
+              )}
+            </Space>
+          </div>
+        )}
         <AdminTable<Row> rowKey="id" loading={loading} dataSource={rows}
           className="tp-inpanel"
-          rowSelection={inRecycled ? undefined : {
+          rowSelection={(!inRecycled || canUpdate) ? {
             selectedRowKeys: sel, onChange: (ks) => setSel(ks as string[]),
             columnWidth: 36,
-          }}
+          } : undefined}
           locale={{ emptyText: loadError ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
               description="场景列表没取到，以上方的加载失败提示为准" />
@@ -564,8 +714,8 @@ function ScenesWorkbench() {
                   : moduleId ? "这个模块下没有场景（换个模块或看「未分类」）"
                     : canCreate ? "还没有场景，点右上角新建" : "还没有场景（你没有新建权限）"} />
           ) }}
-          columns={[
-            { title: "名称", dataIndex: "name", width: 200, render: (v: string) => (
+          columns={applyColumnPrefs([
+            { key: "name", title: "名称", dataIndex: "name", width: 200, render: (v: string) => (
               <span data-testid="scene-row-name">{v}</span>) },
             // §11.4.18 回收站「删除人/删除时间」两列——模板整组读 shownRecycled（D180：跟数据走），
             // 单元格再按 r.status 逐行兜底。
@@ -588,7 +738,7 @@ function ScenesWorkbench() {
             { title: "模块", key: "mod", width: 120, render: (_, r) => (
               r.module_id ? <Tag>{moduleName.get(r.module_id) ?? "已回收模块"}</Tag>
                 : <Typography.Text type="secondary">—</Typography.Text>) },
-            { title: "优先级", dataIndex: "priority", width: 80, render: (v: string) => (
+            { title: "优先级", dataIndex: "priority", key: "prio", width: 80, render: (v: string) => (
               <Tag data-testid={"scene-prio-" + v} color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
             { title: (
               // 这列读的是场景行上的冗余列，它只在终态回写（orchestration.py:268 的 TERMINAL 门），
@@ -596,7 +746,7 @@ function ScenesWorkbench() {
               // 时读的人会拿它当实时状态（D178 裁 ①：口径改准，不开 start 侧回写）。
               <Tooltip title="最近一次真执行的终态（不含调试，也不反映正在跑的那次）">最近结果</Tooltip>
             ), key: "run", width: 100, render: (_, r) => <RunDot status={r.last_run_status} /> },
-            { title: "步骤数", dataIndex: "step_count", width: 76, render: (v: number) => (
+            { title: "步骤数", dataIndex: "step_count", key: "steps", width: 76, render: (v: number) => (
               <span data-testid="scene-steps">{v}</span>) },
             { title: (
               <Tooltip title="单场景的定时绑定看场景编辑器右栏；列表行不反查——GET /schedule-tasks 是项目级分页列表，逐行对照不是这里能如实给的">定时</Tooltip>
@@ -643,7 +793,7 @@ function ScenesWorkbench() {
                   </Space>
                 )
             ) },
-          ]}
+          ], colPref)}
         />
         {/* D47-b 步5b：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染，
             这里垫在 Table 之下；「共 N 条」从此只有服务端这一张嘴——旧脚注拿本地
@@ -771,7 +921,39 @@ function ScenesWorkbench() {
         </Space>
       </Modal>
 
-      {/* 彻底删除：不可逆，输名确认（与 1A 回收站手感一致；服务端同样硬校验） */}
+      {/* D261：跨项目复制。两处私有资产不跟随（环境清空、模块落未分类），必须写在
+          弹窗里——否则用户到目标项目运行失败时，病因与现场隔着一次跳项目。 */}
+      <Modal centered open={copyToOpen}
+        title={"复制 " + sel.length + " 个场景到其他项目"} okText="复制" cancelText="取消"
+        confirmLoading={busy} data-testid="scene-copy-to-modal"
+        okButtonProps={{ "data-testid": "scene-copy-to-ok", disabled: copyToTarget === null }}
+        onOk={() => void submitCopyTo()} onCancel={() => setCopyToOpen(false)}>
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Select data-testid="scene-copy-to-project" style={{ width: "100%" }}
+            loading={copyToLoading} value={copyToTarget ?? undefined}
+            onChange={(v) => setCopyToTarget(v ?? null)}
+            placeholder="选目标项目（需要该项目的场景新建权限）"
+            options={copyToProjects.map((p) => ({
+              value: p.id,
+              label: p.name + (canCreateIn(p) ? "" : "（无场景新建权限）"),
+              disabled: !canCreateIn(p),
+            }))} />
+          {copyToErr && (
+            <Typography.Text type="danger" data-testid="scene-copy-to-failed">
+              项目列表没取到——这不等于「没有其他项目」；关掉本窗再点一次[复制到项目]会重新拉。
+            </Typography.Text>
+          )}
+          {!copyToErr && !copyToLoading && copyToProjects.length === 0 && (
+            <Typography.Text type="secondary" data-testid="scene-copy-to-empty">
+              没有其他可复制的项目（或都缺场景新建权限）
+            </Typography.Text>
+          )}
+          <Typography.Text className="tp-text-sm" type="secondary">
+            环境与模块是项目私有资产：副本不带环境、落在目标项目的「未分类」，请按需重新指定；
+            名称自动加「 - 副本」并在目标项目内去重。源场景不受影响。
+          </Typography.Text>
+        </Space>
+      </Modal>
       <Modal centered
         open={purge !== null} onCancel={() => { setPurge(null); setPurgeName(""); }}
         destroyOnHidden width={520}
@@ -789,6 +971,28 @@ function ScenesWorkbench() {
         </Typography.Paragraph>
         <Input data-testid="scene-purge-confirm" value={purgeName} autoFocus
           placeholder={purge?.name} onChange={(e) => setPurgeName(e.target.value)} />
+      </Modal>
+
+      {/* D256：批量彻底删除——短语确认；服务端也验（confirm_word），disabled 只是提示 */}
+      <Modal centered
+        open={batchPurgeOpen}
+        onCancel={() => { setBatchPurgeOpen(false); setBatchPurgeWord(""); }}
+        destroyOnHidden width={520}
+        title="彻底删除所选场景？" okText="我已确认，彻底删除" cancelText="取消"
+        okButtonProps={{ danger: true, "data-testid": "scene-batch-purge-ok",
+          disabled: batchPurgeWord !== "彻底删除", loading: batchPurging }}
+        onOk={() => void submitBatchPurge()}
+      >
+        <Typography.Paragraph data-testid="scene-batch-purge-summary">
+          「{rows.filter((r) => sel.includes(r.id)).slice(0, 3).map((r) => r.name).join("」「")}」
+          {sel.length > 3 ? ` 等 ${sel.length} 个场景` : ""}将被物理删除，
+          <Typography.Text strong>无法恢复</Typography.Text>；运行记录与报告保留（历史不追删）。
+        </Typography.Paragraph>
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+          输入「彻底删除」四个字确认。全有或全无：只要有一个不在回收站，整批都不会删除。
+        </Typography.Paragraph>
+        <Input data-testid="scene-batch-purge-confirm" value={batchPurgeWord} autoFocus
+          placeholder="彻底删除" onChange={(e) => setBatchPurgeWord(e.target.value)} />
       </Modal>
     </Row>
     </div>

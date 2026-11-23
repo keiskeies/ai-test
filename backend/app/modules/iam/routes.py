@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -121,8 +121,11 @@ async def update_project(project_id: str, payload: schemas.ProjectUpdateIn, db: 
 
 
 @router.get("/projects/{project_id}/members")
-async def list_members(project_id: str, db: Db, user: Cur) -> dict[str, Any]:
-    return {"items": [m.model_dump() for m in await project_services.list_members(db, user, project_id)]}
+async def list_members(project_id: str, db: Db, user: Cur,
+                       filter_: str | None = Query(default=None, alias="filter")) -> dict[str, Any]:
+    """D245：`filter` 是高级搜索条件（JSON 串），空/缺省 = 全量。"""
+    return {"items": [m.model_dump() for m in await project_services.list_members(
+        db, user, project_id, adv_filter=filter_)]}
 
 
 @router.put("/projects/{project_id}/members/{user_id}")

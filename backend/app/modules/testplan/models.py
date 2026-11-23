@@ -30,12 +30,15 @@ plan_record 这一张表是整个计划的「形状示范」：每一个列都�
 plan_case_link（步 2）与 plan_report / plan_report_item（步 4）的逐列口径写在各类
 自己的 docstring 里。
 """
+
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Integer, String, Text, UniqueConstraint
+from datetime import UTC, datetime
+
+from sqlalchemy import Boolean, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.db import Base, ProjectScopedMixin, TimestampMixin, new_id
+from app.core.db import Base, ProjectScopedMixin, TimestampMixin, UtcDateTime, new_id
 
 
 class PlanRecord(ProjectScopedMixin, TimestampMixin, Base):
@@ -51,8 +54,70 @@ class PlanRecord(ProjectScopedMixin, TimestampMixin, Base):
     # 写入方唯一：plan_archive（testplan:plan:manage）；正常更新路径改不到它——
     # PlanUpdateIn 里的 archived 是一枚只拒不存的哨兵（拒收理由见 schemas）。
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    # D211：计划所属模块（可空 = 未分组）。指向 plan_module.id，无外键（全库纪律）；
+    # 归属校验由写入方做（plan_create/plan_update 用 _module 验同项目存在）。
+    # 模块删除时**不**级联删计划：有计划的模块 409 拒绝删（MS 是递归连计划一起删，
+    # 我们不做这种「删文件夹顺手删内容」的隐含级联；计划删除仍只走 plan_delete 显式路径）。
+    module_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class PlanFollower(Base):
+    """计划关注人 `plan_follower`（D231）：复合主键 = (plan_id, user_id)，一人一计划一行。
+
+    形状与缺陷关注（defect/models.py:205 DefectFollower）同族，权限也同尺：MS 用 READ 位
+    就能 follow/unfollow，我们**写副作用一律走写位**（`testplan:plan:update`），不借 read。
+
+    要点名 `created_by` 吗？不需要：关注行的身份就是「谁」，`user_id` 本身就是答案。
+    只保留 `created_at`（关注时间）；**不建 `updated_at`**——关注关系没有更新语义，
+    建了就是一列永远等于 created_at 的假列。
+
+    - 没有 `followed` 反向列：状态由本表「有没有这行」回答，不存第二份真相。
+    - 级联在应用层（全仓零 ForeignKey）：plan_delete / plan_batch_delete 的 `_purge_plan`
+      同事务按 plan_id 删净本表（与关联/报告/结论同一条事务）；删用户不级联
+      （用户行被删后关注行悬空，计数仍如实——MS 同款）。
+    - 可见性 = `project_id` 显式过滤（与本表族一致）：`followed_by_me` 的列表轴只在
+      当前项目内取「我关注的行」，跨项目的关注行不会混进另一个项目的列表。
+    """
+
+    __tablename__ = "plan_follower"
+
+    plan_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False,
+                                                 default=lambda: datetime.now(UTC))
+
+
+class PlanModule(ProjectScopedMixin, TimestampMixin, Base):
+    """计划模块树节点（D211）：计划列表的左树 + 按模块过滤 + 模块计数。
+
+    形状与 functional_module 同族（parent_id + sort + 同父重名 409 + 防环），但**不做回收站**：
+    计划本身没有回收站（物理删），模块再搞一套软删会让「模块在、计划没了」与
+    「模块没了、计划在哪」两种半截现场并存。删模块的规则是**非空 409**：
+    有子模块或有计划（含归档计划）就拒绝，先搬走/删掉内容再删——不做 MS 的递归删计划
+    （`TestPlanModuleService.deleteModule` 会递归把模块下的计划一起 batchDelete；
+    那是一次误点清空一整个模块的隐含级联，与本仓 D183 步 1「删除不藏第二层动作」相反）。
+
+    - `parent_id` 可空 = 根模块；防环在 plan_module_update（不能把节点挂到自己子树）。
+    - `name` 同父唯一：DB 约束 (project_id, parent_id, name) 在 parent_id NULL 时 MySQL
+      不拦重复（NULL 互不相等），所以服务层 `_sibling_name_taken` 是真正生效的那道门；
+      约束只为非根节点兜底。functional_module 同款落法。
+    - `sort` 升序，同值按 (name, id) 兜底——树渲染绝不出现不确定序。
+    - 计数不存列：tree 端点现场按 plan_record.module_id 聚合（archive 不改 module_id，
+      所以计数含归档；要排除归档是列表过滤的事，不是树的事）。
+    """
+
+    __tablename__ = "plan_module"
+    __table_args__ = (
+        UniqueConstraint("project_id", "parent_id", "name", name="uq_plan_module_parent_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
 
 class PlanCaseLink(ProjectScopedMixin, TimestampMixin, Base):
@@ -72,6 +137,13 @@ class PlanCaseLink(ProjectScopedMixin, TimestampMixin, Base):
     - **uq(plan_id, subject_type, subject_id)**：同一对象在同一计划里只能挂一条——
       重复挂会让步 3 的执行率分母重复计数（MS 的关联表同尺）。不同计划挂同一对象
       必须允许：「同一用例挂两个计划可以用不同环境跑」是 §二 3 那条能力的全部意义。
+    - `executor_id`（D206）：这条关联指派给谁执行，可空（= 未指派）。写入方只有
+      plan_link_assign（批量指派/取消指派，先验对方是本项目成员）；读方 = 关联列表与
+      功能用例列表的「执行人」列。它只是**指派**，不是「谁真的执行了」——真实执行人
+      在 run_record / plan_functional_exec.executed_by，两者不互相覆盖。
+    - `sort_order`（D206）：计划内手工排序位（升序；同值按 id 兜底，绝不出现不确定序）。
+      写入方只有 plan_link_sort（拖拽后整批重排）；读方 = plan_link_list 的 ORDER BY
+      与前端拖拽回显。默认 0 = 从未排过，列表退化回 id 升序（D183 的绝对序不变）。
     - `env_id` 可空，**这一列是「这条关联用什么环境」的权威值**（§二 3）：执行读关联行
       这一份，而不是用例上当前的环境。建关联时能抄就抄（scenario/ui_case 有值则抄），
       抄不到留空——三种 subject 的环境来源本来就不一样（§四 末段：api_case 没有 env 列、
@@ -97,7 +169,68 @@ class PlanCaseLink(ProjectScopedMixin, TimestampMixin, Base):
     subject_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     subject_name: Mapped[str] = mapped_column(String(200), nullable=False)  # 快照名，对象删除后仍可读
     env_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # D206：指派执行人（可空 = 未指派）+ 手工排序位（升序，同值按 id 兜底）。
+    executor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+PLAN_FUNCTIONAL_RESULTS: tuple[str, ...] = ("pass", "fail", "blocked", "skip")
+
+
+class PlanFunctionalExec(ProjectScopedMixin, TimestampMixin, Base):
+    """计划内功能用例的**当前执行结论**（D204；一条关联一行，重复执行覆盖）。
+
+    为什么不像接口/场景那样 join run_record：功能用例在计划里是**人工执行**（点通过/
+    不通过/阻塞/跳过），没有 run_record 可 join。MS 把结论写在 `test_plan_functional_case`
+    行上（一份单行状态），我们沿用同一语义但**不往 plan_case_link 上塞列**——关联行是
+    「挂了什么」的指针，结论是「跑成什么」的事实，两条生命周期不同的东西不混表
+    （D183 步 2 的 docstring 已钉过「关联行不复制执行结论」）。
+
+    - `link_id` 唯一：一条关联只有一个当前结论；历史在 plan_functional_exec_history
+      追加（append-only，谁改过看得见）。
+    - `result` 四值 pass/fail/blocked/skip：blocked/skip 在通过率口径里算「未通过」
+      （`_functional_result` 一处解释），但列表行显示原值，不把「阻塞」谎报成「失败」。
+    - `executed_by/executed_at`：谁在什么时刻给的结论（当前结论的写入方）。updated_at
+      由 TimestampMixin 的 onupdate 负责，语义 = 「这条结论最后被改的时刻」。
+    - 级联：摘挂（plan_link_delete）与删计划（plan_delete）同事务删净本表与历史表；
+      删用例本体**不动**计划侧的关联/结论（快照 + 证据链，D183 同口径）。
+    """
+
+    __tablename__ = "plan_functional_exec"
+    __table_args__ = (UniqueConstraint("link_id", name="uq_plan_functional_exec_link"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    plan_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    link_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    executed_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+
+
+class PlanFunctionalExecHistory(ProjectScopedMixin, TimestampMixin, Base):
+    """功能用例结论变更的 append-only 流水（D204）。
+
+    每次 execute（含同值重复提交）都追加一行——「谁在什么时候改成了什么」是计划执行
+    记录的最小可追责面。行不可变（没有任何 update/delete 服务）；级联只随关联/计划删。
+
+    排序用 `seq`（每条关联内 1,2,3…）而不是 created_at：MySQL DATETIME 默认秒级精度，
+    同一秒内的两次改判用时间戳分不出先后（D204 测试当场栽过），序号才是确定事实。
+    """
+
+    __tablename__ = "plan_functional_exec_history"
+    __table_args__ = (Index("ix_plan_functional_exec_history_link_seq", "link_id", "seq"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    plan_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    link_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    executed_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class PlanReport(ProjectScopedMixin, TimestampMixin, Base):
@@ -126,8 +259,10 @@ class PlanReport(ProjectScopedMixin, TimestampMixin, Base):
       详情/列表的归属谓词 + **plan_delete 的级联**（与删计划同事务按 plan_id 删净，
       同 §四 那笔债在步 2 的还法——不补这条就是「计划没了、报告还在」的孤儿报告）。
       级联只按 plan_id，别的计划一根毫毛不许动（步 2 判断 3 同款断言）。
-    - `name`：报告名。生成时写入（payload 给名，没给则抄计划名）；此后**不可改**
-      （没有 update 服务——重命名是 MS 报告端点，本刀不做，§四 表格外）。读方 = 列表/详情。
+    - `name`：报告名。生成时写入（payload 给名，没给则抄计划名）；D210 起可经
+      `plan_report_rename`（PATCH /plan-reports/{id}，perm testplan:report:update）改名——
+      这是 MS `/reName` 的同位，**只写 name 一列**。快照冻结的是内容（status/五个计数/明细），
+      标题是元数据；改标题不是重算，也不动任何证据。读方 = 列表/详情。
     - `status`：生成时刻 _plan_display 的快照值。写入方 = plan_report_create（就是唯一
       写入方，没有第二条路改它）；读方 = 详情/列表。**读取路径现算它是被禁的**：
       快照用例（判据 2）+ 变异 M-读路径现算 一起守这一点。
@@ -136,12 +271,11 @@ class PlanReport(ProjectScopedMixin, TimestampMixin, Base):
       整数组由生成路径一次写入；读方 = 详情/列表的汇总区。**不存 pass_rate/execute_rate/
       not_executed**：它们是这五个计数上的纯函数（除法无独立信息），存两份 = 两份会各自
       漂移的真相——判据 3 要钉的是**口径逐字相同**，不是**列数相同**。
-    - `created_by/created_at/updated_at`：语义与 plan_record 同族。updated_at 有写入方吗？
-      **没有列外路径**——本刀之后若加「改报告名」服务它才有第二个值；现在它与 created_at
-      同值来自 TimestampMixin 的 default。诚实条款：这一列在场的原因是**行不可变 ⇒
-      updated_at ≡ created_at 是快照语义的断言本身**（用例
-      test_generated_rows_are_immutable_stamp 从库侧逐行钉 `updated_at == created_at`，
-      正拿它俩相等钉「没有任何路径动过这行」），不是「最后修改时间」的展示语义。
+    - `created_by/created_at/updated_at`：语义与 plan_record 同族。updated_at 的第二个写入方
+      是 D210 的改名服务（只改 name）；**内容列**（status/五个计数）仍无列外路径——
+      「行内容不可变 ⇒ 未改名的行 updated_at ≡ created_at」仍是快照语义的断言
+      （用例 test_generated_rows_are_immutable_stamp 从库侧逐行钉；D210 起该断言的
+      口径是「改名之外没有任何路径动过内容」，改名用例单独钉「改名只动 name/updated_at」）。
       若业主判这列多余，删列与删那条断言是同一个提交。
     """
 
@@ -189,9 +323,7 @@ class PlanReportItem(ProjectScopedMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "plan_report_item"
-    __table_args__ = (
-        UniqueConstraint("report_id", "link_id", name="uq_plan_report_item_report_link"),
-    )
+    __table_args__ = (UniqueConstraint("report_id", "link_id", name="uq_plan_report_item_report_link"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     report_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)

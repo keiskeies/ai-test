@@ -48,6 +48,22 @@ function element(id: string, over: Partial<Row> = {}): Row {
 const TREE = { tree: [{ id: "m1", parent_id: null, name: "登录模块", sort: 0,
   status: "normal", count: 1, children: [] }], recycled: [] };
 
+// D220：元素库页工具栏要的 /filter-meta（形状与后端 filter_registry 一致）。
+// supported_view_types 必须含 ui_element，否则工具栏按「本页不支持」画——
+// 那会把「桩没 mock 到」演成「功能不存在」。
+const UI_ELEMENT_META = {
+  view_type: "ui_element",
+  fields: [
+    { field: "name", label: "元素名", kind: "text",
+      ops: ["CONTAINS", "EQUALS", "IN", "NOT_CONTAINS", "NOT_EQUALS", "NOT_IN"] },
+    { field: "locator_type", label: "定位方式", kind: "enum",
+      ops: ["EMPTY", "EQUALS", "IN", "NOT_EQUALS", "NOT_EMPTY"] },
+  ],
+  supported_view_types: ["ui_element"],
+  view_label: "元素库",
+  operators: [], labels: {}, kinds: {}, unavailable: {},
+};
+
 // ── 请求风暴刹车（罩住本文件全部 fetch 桩）──────────────────────────────────────
 // 为什么要有它：本文件里「挂载恰好一条请求」的绊线，挡的是「取数落地把自己写的 state
 // 塞回 load 依赖」的无限回路。但**回路的表现形式不是报红，是整份文件挂死**——每一跳
@@ -93,6 +109,8 @@ function mockBackend(recycledRows: Row[]) {
     const method = (init?.method ?? "GET").toUpperCase();
     const resp = (json: unknown) =>
       ({ ok: true, status: 200, json: async () => json }) as unknown as Response;
+    if (url.includes("/filter-meta")) return resp(UI_ELEMENT_META);
+    if (url.includes("/saved-views")) return resp([]);
     if (url.includes("/ui-modules?") && method === "GET") return resp(TREE);
     if (url.includes("/ui-elements?") && method === "GET") {
       return resp(url.includes("recycled=true")
@@ -122,6 +140,8 @@ function elementServer(rows: Row[], opts: {
     ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(json)) }) as unknown as Response;
   global.fetch = vi.fn(stormyFetch(async (input: RequestInfo | URL) => {
     const url = String(input);
+    if (url.includes("/filter-meta")) return resp(UI_ELEMENT_META);
+    if (url.includes("/saved-views")) return resp([]);
     if (url.includes("/ui-modules?")) return resp({ tree: opts.tree ?? [], recycled: [] });
     if (/\/ui-elements\?/.test(url)) {
       listUrls.push(url); // 计数照记：绊线要报的就是「一共发了几条」这个真数字
@@ -1366,5 +1386,44 @@ describe("uiApi.listElements 的 module_ids 是重复 query 键（逗号拼接�
     const seen2 = captureFetch();
     await uiApi.listElements({ project_id: "p1", size: 20, current: 1, module_ids: [] });
     expect(new URLSearchParams(seen2[0].split("?")[1]).getAll("module_ids")).toEqual([]);
+  });
+});
+
+// ── D220：元素库页的 D47-a 三件套 ────────────────────────────────────────────────
+describe("uiElements D220 高级搜索与列设置", () => {
+  it("空条件不拼 filter；应用「元素名包含 登录」后下一次列表请求带条件 JSON", async () => {
+    const h = elementServer([element("e1", { name: "登录按钮" })]);
+    renderPage();
+    await waitForRows(1);
+    // 空条件整个参数不上线（不是 filter=）
+    expect(lastListQ(h).has("filter")).toBe(false);
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "登录" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(h.listUrls.length).toBe(2));
+    // 字段名来自后端 meta 的第一项（name），前端不自列字段
+    expect(JSON.parse(lastListQ(h).get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "登录" }],
+    });
+  });
+
+  it("列设置勾掉「关联用例数」只藏那一列（其余表头原样）", async () => {
+    elementServer([element("e1")]);
+    renderPage();
+    await waitForRows(1);
+    const thead = (): string => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("关联用例数");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "定位方式", "表达式", "关联用例数", "更新时间"]);
+    fireEvent.click(boxes[labels.indexOf("关联用例数")]);
+    await waitFor(() => expect(thead()).not.toContain("关联用例数"));
+    expect(thead()).toContain("定位方式");
   });
 });

@@ -5,7 +5,7 @@
 // 这是继承语义最容易被做错的地方。「恢复继承」走 request_unset 把键真删掉。
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Empty, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
-import { BugOutlined, DeleteOutlined, EditOutlined, PlusOutlined, RestOutlined, UndoOutlined } from "../ui/icons";
+import { BugOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PlusOutlined, RestOutlined, UndoOutlined } from "../ui/icons";
 import { ApiErr, get, patch, post } from "../api/client";
 import type { ApiDef, CaseRow, DatasetRow } from "./api";
 import type { Assertion } from "./req";
@@ -106,6 +106,7 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
   const canUpdate = can(perms, "api:case:update");
   const canDelete = can(perms, "api:case:delete");
   const canDebug = can(perms, "api:debug:run");
+  const canRun = can(perms, "api:case:run");
   // 列表取失败 ≠ 查到了 0 条（第 7 处同款：datasets/reports/runs/scenes/api/adbCases 都改过，
   // 这里漏了）。failed 同时管三件事：表格空态说人话、Tab 计数改口、上方亮一条不可关的横幅。
   const [rows, setRows] = useState<CaseRow[]>([]);
@@ -132,6 +133,9 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
   // 单存 result 再让面板猜名字，猜出来的就是撒谎（§13 纪律 1）。
   const [resultSubject, setResultSubject] = useState<string | null>(null);
   const [debugging, setDebugging] = useState<string | null>(null);
+  // D228「运行」：独立执行接口用例（落 api_case run，trigger=manual），与「调试」
+  // 共用后端执行链；这里只回一句结论并刷新列表，不抢调试面板的位置。
+  const [running, setRunning] = useState<string | null>(null);
   // 回收站视图（§11.4.5/§4.4）：用例能回收，就得看得见、回得来、也能彻底删掉
   const [inRecycled, setInRecycled] = useState(false);
   const [purge, setPurge] = useState<CaseRow | null>(null);
@@ -333,6 +337,19 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
     } finally { setDebugging(null); }
   }
 
+  async function runOne(c: CaseRow): Promise<void> {
+    setRunning(c.id);
+    try {
+      const r = await post<{ run_id: string; ok: boolean; passed: boolean; status: number | null }>(
+        "/api-cases/" + c.id + "/run",
+        { project_id: def.project_id, case_id: c.id, env_id: envId });
+      const code = r.status === null ? "无响应" : "HTTP " + r.status;
+      if (r.passed) message.success("执行通过（" + code + "）");
+      else message.warning("执行完成：断言未通过（" + code + "）");
+      onChanged?.();
+    } catch { /* toast；失败原因由 client 统一弹出 */ } finally { setRunning(null); }
+  }
+
   const inherited = (def.request?.assertions ?? []) as { type: string; path?: string }[];
   return (
     <div data-testid="case-panel">
@@ -392,9 +409,14 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
               r.effective_request ? <Tag color="green">可执行</Tag> : <Tag color="orange">缺 URL</Tag>
             ) },
           // 列宽含格子 padding 8×2：回收行自然宽 172（恢复 64 + 彻底删除 92 + 2×gap8）→ 192；
-          // 普通行 136（调试 64 + 两个图标钮 28×2 + 2×gap8）→ 160。small 钮宽 = 内文 + 图标14+8 + 7×2。
-          { title: "", key: "ops", width: inRecycled ? 192 : 160, render: (_: unknown, r: CaseRow) => (
+          // 普通行 200（调试 64 + 运行 64 + 两个图标钮 28×2 + 3×gap8）→ 224。small 钮宽 = 内文 + 图标14+8 + 7×2。
+          { title: "", key: "ops", width: inRecycled ? 192 : 224, render: (_: unknown, r: CaseRow) => (
               <Space size={8}>
+                {!inRecycled && canRun && (
+                  <Button size="small" icon={<PlayCircleOutlined />} data-testid="case-run"
+                    loading={running === r.id}
+                    onClick={() => void runOne(r)}>运行</Button>
+                )}
                 {!inRecycled && canDebug && (
                   <Button size="small" icon={<BugOutlined />} data-testid="case-debug" loading={debugging === r.id}
                     onClick={() => void debugOne(r)}>调试</Button>

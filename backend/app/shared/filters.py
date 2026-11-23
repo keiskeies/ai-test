@@ -74,15 +74,29 @@ class FieldSpec:
     于是「模块 不属于 [M1]」在朴素的 `NOT IN` 下会把**未分类**（module_id IS NULL）的
     接口整批藏起来——用户看到的结果是「这些就是不属于 M1 的」，而少掉的那批恰恰最不属于
     M1。所以可空列上的否定谓词必须补 `OR col IS NULL`（见 `_neg`）。
+
+    `ops` 是**操作符子集**（缺省 = 该控件型的全集）：给「值不是单纯列、而是拼出来的
+    表达式」用（如环境组的环境名 group_concat）。全集里有些操作符对表达式没有诚实语义
+    （对拼接串做 EQUALS/IN 在多个环境时必然漏判），摆出来就是假筛选项；这里收窄，
+    编译分支不动（子集必须是 `_KIND_OPS[kind]` 的子集，构造时校验）。
     """
 
     column: Any
     kind: str
     nullable: bool = True
+    ops: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise ValueError(f"未知字段类型 {self.kind!r}，可选：{sorted(KINDS)}")
+        if self.ops is not None:
+            bad = set(self.ops) - _KIND_OPS[self.kind]
+            if bad:
+                raise ValueError(f"{self.kind} 列不能收窄出这些操作符：{sorted(bad)}")
+
+    def allowed_ops(self) -> frozenset[str]:
+        return self.ops if self.ops is not None else _KIND_OPS[self.kind]
+
 
 
 class BadFilter(ValueError):
@@ -172,8 +186,8 @@ def _one(cond: dict[str, Any], fields: dict[str, FieldSpec]) -> ColumnElement[bo
     if op not in OPERATORS:
         raise _bad(f"操作符 {op!r} 不存在，可用：{sorted(OPERATORS)}")
     spec = fields[field]
-    if op not in _KIND_OPS[spec.kind]:
-        raise _bad(f"{field} 是 {spec.kind} 列，不支持 {op}，可用：{sorted(_KIND_OPS[spec.kind])}")
+    if op not in spec.allowed_ops():
+        raise _bad(f"{field} 是 {spec.kind} 列，不支持 {op}，可用：{sorted(spec.allowed_ops())}")
 
     col = spec.column
     val = cond.get("value")

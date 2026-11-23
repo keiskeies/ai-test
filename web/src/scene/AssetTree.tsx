@@ -91,7 +91,7 @@ export default function AssetTree() {
               padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab",
               border: "1px solid transparent",
             }}
-            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "#F2F6F4"; }}
+            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "var(--tp-bg-hover)"; }}
             onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
           >
             {c.name} <Tag className="tp-text-xs">{c.priority}</Tag>
@@ -144,7 +144,7 @@ export default function AssetTree() {
               padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab",
               border: "1px solid transparent",
             }}
-            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "#F2F6F4"; }}
+            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "var(--tp-bg-hover)"; }}
             onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
           >
             {c.name} <Tag className="tp-text-xs">{c.priority}</Tag>
@@ -176,7 +176,7 @@ export default function AssetTree() {
               padding: "4px 8px", borderRadius: 6, cursor: readOnly ? "default" : "grab",
               border: "1px solid transparent",
             }}
-            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "#F2F6F4"; }}
+            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = "var(--tp-bg-hover)"; }}
             onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
           >
             {c.name} <Tag className="tp-text-xs">{c.priority}</Tag>

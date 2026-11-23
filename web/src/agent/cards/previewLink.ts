@@ -15,15 +15,17 @@ export function previewPageUrl(key: string): string {
   return "#/scene-preview?k=" + encodeURIComponent(key);
 }
 
-/** 存进 sessionStorage 的信封：预览页要显示方案名，光有 graph 不够。 */
+/** 存进 sessionStorage 的信封：预览页要显示方案名，光有 graph 不够。
+ *  D264 落库还要知道是哪个项目的候选（新 Tab 读不到 bench 的本地选择）。 */
 export interface PreviewEntry {
   plan_name: string;
   graph: unknown;
+  project_id?: string;
 }
 
 /** 坏键的三态必须可分辨（各自一个人话文案），「没存过」和「存坏了」不是一回事。 */
 export type PreviewRead =
-  | { kind: "ok"; planName: string; graph: Record<string, unknown> }
+  | { kind: "ok"; planName: string; graph: Record<string, unknown>; projectId: string | null }
   | { kind: "missing" }   // 键不存在 / 未登录直达 / 会话过期被清
   | { kind: "corrupt" }   // 存的东西 JSON 解析不出来
   | { kind: "bad_graph" }; // 解析出来了但 graph 不是 §7.4 形状（没有 nodes 数组）
@@ -52,7 +54,11 @@ export function readPreviewEntry(k: string | null | undefined): PreviewRead {
   if (!g || typeof g !== "object" || Array.isArray(g) || !Array.isArray((g as { nodes?: unknown }).nodes)) {
     return { kind: "bad_graph" };
   }
-  return { kind: "ok", planName: String(entry.plan_name ?? "未命名方案"), graph: g as Record<string, unknown> };
+  const pid = typeof entry.project_id === "string" && entry.project_id !== "" ? entry.project_id : null;
+  return {
+    kind: "ok", planName: String(entry.plan_name ?? "未命名方案"),
+    graph: g as Record<string, unknown>, projectId: pid,
+  };
 }
 
 /** 候选卡的 graph 是否可预览：只认 §7.4 形状（对象 + nodes 数组），形状不对按钮就不开。 */

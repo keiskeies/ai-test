@@ -169,6 +169,28 @@ class ApiDefDeleteIn(BaseModel):
     force: bool = False
 
 
+class ApiDefBatchDeleteIn(BaseModel):
+    """D251：批量放入回收站（MS `/delete/batch`）。
+
+    全有或全无：任一 id 不存在/已回收 → 404 整批不动；任一被未回收场景引用 → 409
+    整批不动（不提供批量 force——强删必须逐个确认，见 services 同名函数注释）。
+    """
+
+    project_id: str
+    definition_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class ApiDefBatchRestoreIn(BaseModel):
+    """D252：批量从回收站恢复（与批量回收对称）。
+
+    全有或全无：任一 id 不存在/不在回收站 → 404 整批不动。恢复后的状态由
+    request 是否存在决定（complete / draft），与单条 restore 同一条规则。
+    """
+
+    project_id: str
+    definition_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class ApiDefPurgeIn(BaseModel):
     """彻底删除（§11.4.18）：confirm_name 必须与接口名逐字相等。
 
@@ -241,6 +263,21 @@ class DebugOut(BaseModel):
     error: str | None = None
     assertions: list[dict] = []
     env_name: str | None = None
+
+
+# —— 执行接口用例（D228）——
+class ApiCaseRunIn(BaseModel):
+    """执行一条接口用例（区别于调试：trigger 按入口记 manual/schedule，不是 debug）。"""
+    project_id: str
+    case_id: str
+    env_id: str | None = None
+
+
+class ApiCaseRunOut(BaseModel):
+    run_id: str
+    ok: bool
+    passed: bool
+    status: int | None = None
 
 
 # —— 模块树（T9） ——
@@ -460,6 +497,8 @@ class DatasetListIn(BaseModel):
     project_id: str
     cursor: str | None = None
     size: int = Field(default=50, ge=1, le=200)
+    # D223：高级搜索条件组（JSON 串，形状见 shared/filter_registry）。None / 空串 = 没筛选。
+    filter: str | None = None
 
 
 class DatasetCreateIn(BaseModel):

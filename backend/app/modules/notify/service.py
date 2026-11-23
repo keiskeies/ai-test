@@ -29,10 +29,30 @@ from app.core.permissions import match_perm
 from app.core.service import ServiceResult, service
 from app.modules.notify import schemas, senders
 from app.modules.notify.models import CHANNEL_TYPES, NotifyChannel
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.utcnow import utc_now_iso
 
 # 引用明细最多列这么多条（列表页 409 弹窗读得完；计数永远是全量）。
 REF_DETAIL_CAP = 20
+
+# D243：通知渠道页高级搜索（D47-a 三件套铺到本页）。白名单只收页面上看得见的
+# 标量列：名称 / 类型 / 创建时间 / 最近更新时间。
+# - `config` 是渠道配置（密钥逐键打码回显的 JSON），条件比较它既无稳定语义，
+#   还可能把「按密钥值筛」这种不该存在的入口摆出来；`last_send` 同理是发送回执 JSON。
+# - `id` 是定位键，页头没有按 id 找的入口。
+# - 渠道是平台级配置（无 project_id 列），所以白名单天然没有项目维度；
+#   project_id 只用于 filter-meta / 保存视图的作用域校验，不参与数据过滤。
+CHANNEL_LIST_FILTER = ListViewFilter(
+    view_type="channel",
+    label="通知渠道",
+    fields={
+        "name": FieldDecl(NotifyChannel.name, "text", "名称", nullable=False),
+        "type": FieldDecl(NotifyChannel.type, "enum", "类型", nullable=False),
+        "created_at": FieldDecl(NotifyChannel.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(NotifyChannel.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(CHANNEL_LIST_FILTER)
 
 
 def _out(row: NotifyChannel) -> schemas.ChannelOut:
@@ -107,6 +127,8 @@ async def notify_channel_list(payload: schemas.ChannelListIn, ctx) -> ServiceRes
     stmt = select(NotifyChannel).order_by(NotifyChannel.id)
     if payload.type:
         stmt = stmt.where(NotifyChannel.type == payload.type)
+    # D243：条件进 SQL（在分页前），total 与翻页吃同一份集合；空条件 = 没传。
+    stmt = stmt.where(CHANNEL_LIST_FILTER.parse(payload.filter))
     # D47-b：cursor 与 current 二选一（同 report_list）。「我在哪」的两套真相一起到场
     # 是调用方的 bug，静默择一会把错位藏进翻页里，所以大声 400，不静默。
     if payload.current is not None and payload.cursor is not None:

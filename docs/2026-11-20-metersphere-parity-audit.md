@@ -69,9 +69,9 @@
 | `api.tsx` 接口管理 | `views/api-test/management` + `ApiDefinitionController` | 34 | 列表工具栏三件套、跨页全选、收藏/标签、服务端检索 | D47-a/b/c/d |
 | `scenes.tsx` 场景 | `views/api-test/scenario` + `ApiScenarioController` | 35 | 同上 + 批量操作 8 端点对照 | D47-a/b/d |
 | `reports.tsx`/`reportDetail` | `views/api-test/report` + `ApiReportController`/`ApiScenarioReportController` | 25 | 分页档位、PDF 导出(三期点名项)、分享 | D47-b |
-| `datasets.tsx` | `api_scenario_csv` + `_csv_step`(3 表) | 挂在场景内 | 数据集从「场景附属」到「可独立管理」的差距未裁 | 新(本文 D182) |
-| `workbench.tsx` | `views/workbench` + `dashboard`(35) + `MyViewController`(7) + `ToDoController`(4) | 46 | 我们**已交付 §11.5.2 简化版**(统计卡 ×4 + 近 7 天 ECharts 趋势 + 最近执行 10 条 + 我最近编辑 + 快捷入口,`workbench.tsx:1` 自陈)。**差的是另一件事**:MS 是**自定义卡片仪表盘**(`homePage/components/cardSettingDrawer` 可增删卡片)+ **个人视图** + **待办流**(`ToDoController` 4)——蓝图 §11.5.2 原话已把「MS 的待办/评审/关注流 [三期]」写明,故这一格**只有「卡片可自定义」是新的**,余皆既有分期 | D47 系 |
-| `settings.tsx` 角色 Tab | `ProjectUserRoleController`(10)+`GlobalUserRoleController` | 10 | 两级权限树我们已落地(D37),差 MS 的「用户组」层级(§2.3-C) | D37 已结 |
+| `datasets.tsx` | `api_scenario_csv` + `_csv_step`(3 表) | 挂在场景内 | **已裁定并交付独立管理面**：`data_set` 是项目级表（`uq_dataset_project_name`），`/datasets` 页独立 CRUD/搜索/引用计数（`used_by`），`api_case.dataset_id` 绑定与 `dataset_set` 显式解绑（D47-a/D223）。差异保留一处：本仓数据驱动是「每个用例绑一个数据集」，不做 MS 的场景级多 CSV 叠加——这是数据模型差异，不是缺口 | D47-a / D223 |
+| `workbench.tsx` | `views/workbench` + `dashboard`(35) + `MyViewController`(7) + `ToDoController`(4) | 46 | 我们**已交付 §11.5.2 简化版**(统计卡 ×4 + 近 7 天 ECharts 趋势 + 最近执行 10 条 + 我最近编辑 + 快捷入口,`workbench.tsx:1` 自陈)。个人视图由 `saved_view`（迁移 0023）支撑，待办流由 D227 交付；**卡片可自定义由 D272 交付**（`cardSettingDrawer` 同款语义：显隐 + 上下移序，本机 localStorage 偏好，坏配置降级默认全显示） | D47 系 / D272 |
+| `settings.tsx` 角色 Tab | `ProjectUserRoleController`(10)+`GlobalUserRoleController` | 10 | 两级权限树我们已落地(D37)；MS 的「用户组」层级由 **D270/D271** 以组织级用户组交付（组 = 组织管理位集合，不做项目角色叠加） | D37 / D270 |
 | 通用列表交互 | `components/pure/ms-table/*` + `ms-advance-filter/*` | 组件级 | 见 §2.1.1 | D47 |
 
 #### 2.1.1 MS 列表页底色的**实物契约**(源码读语义,不抄文件)
@@ -124,16 +124,31 @@ subject 通用设计的——所以批次 B 头名不是从零建执行模型,�
 | C6 | 资源池 | 5 | `TestResourcePoolController` | 我们是单 Celery worker,**无多执行机/池化调度** |
 | C7 | 插件体系 | 7 | `PluginController` + `ApiTestController:/plugin/*` 协议插件 | 我们的协议与断言**硬编码在 `shared/assertions.py`**,无插件装载 |
 | C8 | 个人中心 | 8 | `PersonalCenterController`(语言/最近项目/…/我的资产) | 我们只有顶栏「修改密码」(`shell.tsx:230`),**没有个人中心页** |
-| C9 | 状态流转设置 | 14 | 组织级 7 + 项目级 7 | 我们 `api_definition.status` 是 `draft/complete` 两值常量,**无可配置状态机** |
+| C9 | 状态流转设置 | 14 | 组织级 7 + 项目级 7 | **已交付（D267 + D271）**：项目级 `defect_status` / `defect_status_transition`（D267），组织级 `org_defect_status` / `org_defect_status_transition` 模板与继承（D271）；生效优先级 项目自定义 > 组织模板 > 内置默认，空表逐层回落 |
 | C10 | 分享链接 | 18 | `ApiDocShareController` 13 + `ApiReportShareController` 3 + `ApiShareController` 2 | 我们**无任何对外分享**;报告只能登录后看 |
-| C11 | 用例脑图 | 6 | `FunctionalCaseMinderController` + `ms-minder-editor` 组件 | 我们无脑图(依赖 B 档功能用例库,排在它后面) |
+| C11 | 用例脑图 | 6 | `FunctionalCaseMinderController` + `ms-minder-editor` 组件 | **已交付（D268）**：模块 + 便签（MS 的「空白节点」）+ 用例叶一树，可拖拽/改名/增删；不搬 `ms-minder-editor` 画布（用树视图），且按本仓分页口径不做 MS 的 100 条/模块分片 |
 | C12 | 文件管理/仓库 | 31 | 5 个 controller(仓库 8 + 管理 13 + 模块 5 + 关联 3 + 预览 2) | 我们只有执行**制品**(`run_artifact`),**没有项目文件库** |
 | C13 | 许可证 | 2 | `LicenseController.validate` | **MS 商业版门,复刻应主动排除**(§4) |
-| C14 | 用户组 | 10 | `ProjectUserRoleController`(项目级角色) | **不是纯缺口**:我们的 `custom_role`(D37 已交付)语义等价,差的是 MS 的**组织级用户组**那一层 → 属「三级组织」范围题 |
+| C14 | 用户组 | 10 | `ProjectUserRoleController`(项目级角色) | **已交付（D269 + D270）**：项目级等价物是 D37 `custom_role`；D269 落地组织层（组织 CRUD/成员/项目归属 + `ORG_ADMIN`/`ORG_MEMBER`）；D270 补齐**组织级用户组**（一组 = 组织管理位的权限集，`my_perms` 投影 + 独立 `/orgs` 页）；D271 追加第五枚 `system:org:defect:manage` 并落地组织级缺陷状态流模板。三级组织树按 §4.1 仍属三期，本轮不做 |
 | C15 | 误报库 | 5 | 「新增/编辑/启停/列表误报规则」,表 `fake_error` | 我们执行失败**一律算失败**,无「已知误报」白名单 |
 
 **C 档不擅自实现,一条都不做。** 理由与 D47 待裁那八条同尺:每一项都要新表或新契约,
 且「MS 有」不等于「我们该有」——§3 就是反例(连 MS 自己都没做完的东西)。
+
+> **2026-11-24 进展**：上表是 11-20 的快照，C 档后来逐项落地——C1/C2（D248）、
+> C3（D199）、C4/C6/C7（D203）、C5/C8（D198）、C10（D202）、C12（D195）、
+> C15（D199）均已交付，见 README 批次表。**C9 由 D267 交付项目级、D271 交付组织级**
+> （组织模板 + 继承，优先级 项目 > 组织 > 内置默认；删组织清模板；**功能用例状态流属勘误
+> ——MS v3 的 `functional_case` 表没有业务状态列，「用例状态」是模板自定义字段，
+> 本仓 D192 起已具备，不算缺口**）；
+> **C11 用例脑图由 D268 交付**（模块 + 便签 + 用例一树，便签不承载用例）；
+> **C14 的组织层基础面由 D269 交付**（组织/成员/项目归属 + `ORG_ADMIN`/`ORG_MEMBER`；
+> 单租户口径下组织只做分组，不改变项目数据权限）。**组织级用户组由 D270 交付**
+> （一组 = 组织管理位；组委派不能自升 ORG_ADMIN；组织入口独立成 `/orgs`），
+> D271 追加第五枚 `system:org:defect:manage`。**C 档至此全部交付**；
+> **D272 补齐工作台卡片可自定义**（A 档 `workbench.tsx` 行最后一处差异，本机视图偏好），
+> 同时把 A 档 `datasets.tsx` 的「差距未裁」裁定为「独立管理面已交付，场景级多 CSV 属数据模型差异」。
+> C13 License 按 §4 主动排除。
 
 ---
 

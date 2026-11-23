@@ -74,6 +74,17 @@ class InterruptIn(BaseModel):
     run_id: str
 
 
+class ApprovalIn(BaseModel):
+    """D263 审批回传（§12.2 `:1571`）：只决定放不放行，不代替执行者扩权。
+
+    decision 三档：once=仅本次 / session=本会话该工具免再批 / deny=拒绝。
+    """
+
+    tool_call_id: str = Field(min_length=1, max_length=64)
+    decision: Literal["once", "session", "deny"]
+    comment: str | None = Field(default=None, max_length=500)
+
+
 def _sess_out(s: AgentSession) -> dict:
     return {"id": s.id, "project_id": s.project_id, "user_id": s.user_id, "title": s.title,
             "mode": s.mode, "model_id": s.model_id, "thinking": s.thinking,
@@ -109,6 +120,10 @@ async def list_agent_tools(project_id: str = Query(...), ctx: ServiceCtx = Depen
         raise ApiError("forbidden", "无此项目权限", 403)
     items = [{"name": t.name, "description": t.description, "effect": t.effect, "perm": t.perm}
              for t in REGISTRY.list_tools(perms)]
+    # D265：MCP 工具同样是「Agent 可见工具」的一部分；没有治理位时该函数返回 []。
+    from app.modules.mcp import client as mcp_client
+
+    items += await mcp_client.tool_declarations(ctx.db, perms)
     return {"items": items}
 
 
@@ -174,6 +189,38 @@ async def interrupt(session_id: str, body: InterruptIn, ctx: ServiceCtx = Depend
         await store.append_event(ctx.db, sess.id, run.id, "RUN_END", {"status": "CANCELLED"})
         tasks.cancel_task(session_id)
     return {"ok": True, "run_id": run.id, "status": run.status}
+
+
+@router.post("/agent/runs/{run_id}/approval", status_code=202)
+async def decide_run_approval(run_id: str, body: ApprovalIn,
+                              ctx: ServiceCtx = Depends(get_agent_ctx)) -> dict:
+    """审批回传 → 落决策 + 异步续推（§12.3/§12.2 `:1571`）。
+
+    鉴权分两层，缺一不可：
+    1) 能看见会话（项目成员，`_load_session`，与其余端点字节一致）；
+    2) 能代表这条会话做决定——会话是私有工作区，只有所有者或系统管理员能点。
+       审批**不放宽**工具自身的权限位：续推仍以会话所有者的 perms 走 dispatcher，
+       换个人来点「批准」不会让本该 403 的写工具变得能执行。
+    """
+    from sqlalchemy import select
+
+    run = (await ctx.db.execute(select(AgentRun).where(AgentRun.id == run_id))).scalar_one_or_none()
+    if run is None:
+        raise ApiError("not_found", "运行不存在", 404, {"run_id": run_id})
+    sess = await _load_session(ctx.db, ctx, run.session_id)
+    if sess.user_id != ctx.user_id and not ctx.is_system_admin:
+        raise ApiError("forbidden", "无此项目权限", 403)
+    try:
+        await tasks.decide_approval(
+            ctx.db, session_id=sess.id, run_id=run.id, tool_call_id=body.tool_call_id,
+            decision=body.decision, comment=body.comment,
+        )
+    except tasks.Busy:
+        raise ApiError("session_busy", "该会话有正在进行的任务，请等待完成或先中断", 409,
+                       {"session_id": sess.id}) from None
+    except tasks.ApprovalConflict as e:
+        raise ApiError(e.code, str(e), e.status, e.details) from None
+    return {"ok": True, "run_id": run.id, "decision": body.decision}
 
 
 @router.get("/agent/sessions/{session_id}/messages")

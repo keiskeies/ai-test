@@ -141,7 +141,7 @@ async def enqueue(db: Any, *, project_id: str, subject_id: str, subject_name: st
     if mode == "celery":
         try:
             _celery_client().send_task(RUN_TASK_NAME, args=[rec.id, _clean_actor(actor)],
-                                       queue=get_settings().task_queue)
+                                       task_id=rec.id, queue=get_settings().task_queue)
         except Exception as e:
             await db.delete(rec)  # 行是这次调用建的，删它不伤任何人
             await db.commit()

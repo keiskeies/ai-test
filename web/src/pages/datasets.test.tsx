@@ -62,6 +62,22 @@ const DUP_TSV = "a\ta\n1\t2\n3\t4";
 // calls 带 body：粘贴导入→保存的请求体必须逐字段可查（ds-paste-modal 钉 payload）。
 const calls: { url: string; method: string; body?: unknown }[] = [];
 
+// D223：数据集页工具栏要的 /filter-meta（形状与后端 filter_registry 一致）。
+// supported_view_types 必须含 dataset，否则工具栏画成「本页不支持」——
+// 那会把「桩没 mock 到」演成「功能不存在」。
+const DATASET_META = {
+  view_type: "dataset",
+  fields: [
+    { field: "name", label: "数据集名称", kind: "text",
+      ops: ["CONTAINS", "EQUALS", "IN", "NOT_CONTAINS", "NOT_EQUALS", "NOT_IN"] },
+    { field: "created_at", label: "创建时间", kind: "time",
+      ops: ["EQUALS", "GT", "LT", "BETWEEN", "NOT_EQUALS"] },
+  ],
+  supported_view_types: ["dataset"],
+  view_label: "数据集",
+  operators: [], labels: {}, kinds: {}, unavailable: {},
+};
+
 function mockBackend(items = ITEMS, opts: { listFails?: boolean } = {}) {
   calls.length = 0;
   global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -70,6 +86,8 @@ function mockBackend(items = ITEMS, opts: { listFails?: boolean } = {}) {
     calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     const resp = (json: unknown) =>
       ({ ok: true, status: 200, json: async () => json }) as unknown as Response;
+    if (url.includes("/filter-meta")) return resp(DATASET_META);
+    if (url.includes("/saved-views")) return resp([]);
     if (url.includes("/datasets?") && method === "GET") {
       if (opts.listFails) throw new TypeError("Failed to fetch"); // 断网/挂断在 fetch 层，同真实网络错误
       return resp({ items, next_cursor: null });
@@ -410,6 +428,49 @@ describe("删除气泡按 used_by 分叉（后端 used_by≥1 必 409）", () =>
     expect(free).not.toContain("失去数据源");
     expect(free).not.toContain("不影响任何用例"); // D124 旧假话：回收绑定恢复会 409，不许承诺「不影响」
     expect(free).not.toMatch(/\d+\s*条/); // 回收绑定数前端拿不到，不许编「N 条」
+  });
+});
+
+// ── D223：数据集页的 D47-a 三件套（视图保存 / 高级搜索 / 列设置） ─────────────
+describe("数据集 D223 高级搜索与列设置", () => {
+  const lastListUrl = (): string => [...calls].reverse()
+    .find((c) => c.method === "GET" && c.url.includes("/datasets?"))!.url;
+  const listQuery = (): URLSearchParams => new URL(lastListUrl(), "http://x").searchParams;
+
+  it("空条件不拼 filter；应用「数据集名称包含 参数」后下一次列表请求带条件 JSON", async () => {
+    mockBackend();
+    render(<MemoryRouter><DatasetsPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("ds-rows-tag")).not.toBeNull());
+    // 空条件整个参数不上线（不是 filter=）
+    expect(listQuery().has("filter")).toBe(false);
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "参数" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listQuery().get("filter")).toBeTruthy());
+    // 字段名来自后端 meta 的第一项（name），前端不自列字段
+    expect(JSON.parse(listQuery().get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "参数" }],
+    });
+  });
+
+  it("列设置勾掉「引用」只藏那一列（名称表头原样）", async () => {
+    mockBackend();
+    render(<MemoryRouter><DatasetsPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("ds-rows-tag")).not.toBeNull());
+    const thead = (): string => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("引用");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "引用"]);
+    fireEvent.click(boxes[labels.indexOf("引用")]);
+    await waitFor(() => expect(thead()).not.toContain("引用"));
+    expect(thead()).toContain("名称");
   });
 });
 

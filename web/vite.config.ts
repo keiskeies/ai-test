@@ -31,10 +31,10 @@ export default defineConfig(({ mode }) => ({
   },
   server: {
     port: 5173,
-    proxy: { "/api": { target: backend, changeOrigin: true } },
+    proxy: { "/api": { target: backend, changeOrigin: true }, "/mock": { target: backend, changeOrigin: true } },
   },
   preview: {
     port: 5173,
-    proxy: { "/api": { target: backend, changeOrigin: true } },
+    proxy: { "/api": { target: backend, changeOrigin: true }, "/mock": { target: backend, changeOrigin: true } },
   },
 }));

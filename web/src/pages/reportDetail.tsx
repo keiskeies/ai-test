@@ -31,7 +31,8 @@ import { pctAttr, ratePct } from "../shared/passRate";
 import { assertionRows, cmdRows, orderKeysByHints, shotsByCommand, stepTreeHints, stepTreeLabel, DEBUG_ROW,
   type StepTreeHint, type UiArtifactRef } from "../ui/debugRows";
 import { PassRing } from "./reports";
-import { tp } from "../theme";
+import ShareButton from "../ui/ShareButton";
+import { tpv } from "../theme";
 import Canvas from "../scene/Canvas";
 import { useSceneStore } from "../scene/store";
 
@@ -173,7 +174,7 @@ function StepTree(props: {
             style={{
               display: "flex", gap: 6, alignItems: "center", cursor: "pointer",
               padding: "4px 8px 4px " + (8 + depth * 14) + "px",
-              background: props.active === s.step_key ? "#EAF6F1" : undefined,
+              background: props.active === s.step_key ? tpv.bg.selected : undefined,
             }}>
             <Typography.Text className="tp-text-sm" style={{ flex: 1, minWidth: 0 }}
               ellipsis={{ tooltip: s.step_key }}>
@@ -257,11 +258,11 @@ function ArtifactImage({ runId, pid, name }: { runId: string; pid: string; name:
           data-testid="report-artifact-lightbox"
           onMouseDown={(e) => { if (e.target === e.currentTarget) setLightbox(false); }}
           style={{
-            position: "fixed", inset: 0, zIndex: 1000, background: tp.mask,
+            position: "fixed", inset: 0, zIndex: 1000, background: tpv.mask,
             display: "flex", alignItems: "center", justifyContent: "center",
           }}>
-          <div style={{ position: "relative", background: tp.bg.container, borderRadius: 8,
-            padding: 8, boxShadow: tp.shadow.s3 }}>
+          <div style={{ position: "relative", background: tpv.bg.container, borderRadius: 8,
+            padding: 8, boxShadow: tpv.shadow.s3 }}>
             <img data-testid="report-artifact-lightbox-img" src={st.url}
               alt={"失败截图 " + name}
               style={{ maxWidth: "88vw", maxHeight: "84vh", objectFit: "contain", display: "block" }} />
@@ -321,6 +322,8 @@ function Detail() {
   // 写入口隐藏不是禁用（uiCaseDetail.tsx:13 同款），禁用了又不说原因才是 §13 纪律 1 的假门。
   const perms = patternsForProject(project, user?.is_system_admin);
   const canRerun = can(perms, "scenario:run");
+  // 分享是写副作用（创建链接），缺位不渲染（同 canRerun 口径）。
+  const canShare = can(perms, "share:link:create");
   const [report, setReport] = useState<ReportDetailData | null>(null);
   const [failed, setFailed] = useState(false);
   const [active, setActive] = useState<string | null>(null);
@@ -561,6 +564,8 @@ function Detail() {
                 </Button>
               </Tooltip>
             )}
+            {canShare && <ShareButton projectId={pid} targetType="report" targetId={id!}
+              title={report.subject_name} />}
             <Button onClick={() => nav("/reports")}>返回列表</Button>
           </Space>
         }>
@@ -588,10 +593,10 @@ function Detail() {
                 {statsByCommand
                   ? String(report.stats?.total ?? 0) + " 命令"
                   : report.steps.filter((s) => !s.parent_step_key && s.row_no === 0).length + " 顶层"}
-                <span style={{ color: "#2BA47D" }}>过 {String(report.stats?.pass ?? 0)}</span>
-                <span style={{ color: "#D48806" }}>败 {String(report.stats?.fail ?? 0)}</span>
+                <span style={{ color: tpv.func.success }}>过 {String(report.stats?.pass ?? 0)}</span>
+                <span style={{ color: tpv.func.warning }}>败 {String(report.stats?.fail ?? 0)}</span>
                 <span style={{ color: "var(--tp-text-3)" }}>跳 {String(report.stats?.skip ?? 0)}</span>
-                <span style={{ color: "#D3564F" }}>错 {String(report.stats?.error ?? 0)}</span>
+                <span style={{ color: tpv.func.error }}>错 {String(report.stats?.error ?? 0)}</span>
               </Space>) },
           ]} />
         </Space>
@@ -706,7 +711,7 @@ function Detail() {
                     {uiCmdList.map((r) => (
                       <div key={r.id} data-testid="report-cmd-row" data-id={r.id} data-status={r.status}
                         style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap",
-                          padding: "3px 4px", borderBottom: "1px dashed #F0F2F4" }}>
+                          padding: "3px 4px", borderBottom: "1px dashed var(--tp-split)" }}>
                         <Typography.Text className="tp-text-sm tp-mono" style={{ width: DEBUG_ROW.idW }}>{r.id}</Typography.Text>
                         <Typography.Text className="tp-text-sm" style={{ width: DEBUG_ROW.typeW }}>{r.type}</Typography.Text>
                         <Tag style={{ marginInlineEnd: 0 }}
@@ -770,7 +775,7 @@ function Detail() {
                       { title: "实际", dataIndex: "actual", ellipsis: true,
                         render: (v: unknown) => <span className="tp-mono">{JSON.stringify(v ?? null)}</span> },
                       { title: "", dataIndex: "passed", width: 36, render: (v: boolean) => (
-                        <span data-testid="report-assert-mark" style={{ color: v ? "#2BA47D" : "#D3564F" }}>
+                        <span data-testid="report-assert-mark" style={{ color: v ? "var(--tp-func-success)" : "var(--tp-func-error)" }}>
                           {v ? "✓" : "✗"}
                         </span>) },
                     ]}

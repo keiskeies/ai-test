@@ -120,6 +120,9 @@ class AdbDeviceListIn(BaseModel):
     #   绝不「只数这一页」冒充「共 N 台」）。offline 对 cursor 模式也可用（纯 SQL 谓词，
     #   游标语义不被破坏）；occupied/idle 与 cursor 互斥（400，见 handler 注释）。
     state: Literal["offline", "occupied", "idle"] | None = None
+    # D224：高级搜索条件组（JSON 串，形状见 shared/filter_registry）。None / 空串 = 没筛选。
+    # 与上面两条轴（state 三档 / recycled 视图）并行 AND；白名单不含它们，理由见登记处。
+    filter: str | None = None
     # current（D47-b 步 5e）：页码分页入口，MS {current, pageSize, total} 口径（姊妹刀 5a/5c 同款）。
     # None = 键集/游标路径；与 cursor 互斥，两者同时到场在 handler 里大声 400。
     current: int | None = None
@@ -314,6 +317,9 @@ class AdbCaseListIn(BaseModel):
     module_id: str | None = None
     unfiled_only: bool = False
     recycled: bool = False
+    # D217：高级搜索条件组（JSON 串，形状见 shared/filters.py）。与 module/unfiled/recycled
+    # 并行 AND；空串=没筛选，坏条件 400 且带本页可筛清单。
+    filter: str | None = None
     cursor: str | None = None
     # current（D47-b 步 5a）：页码分页入口，MS 页脚的 {current, pageSize, total} 口径。
     # None = 键集/游标路径（形状逐字节不变）；与 cursor 互斥，两者同时到场在 handler 里 400。

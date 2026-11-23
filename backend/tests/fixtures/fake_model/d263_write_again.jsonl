@@ -1,0 +1,5 @@
+{"type":"thinking_delta","text":"再创建一个接口。"}
+{"type":"tool_call","id":"tc_w2","name":"api_definition_create","args":{"project_id":"{{PID}}","name":"第二次创建的接口","method":"POST","path":"/second","request":{"method":"POST","url":"http://127.0.0.1:9999/second","headers":[],"params":[],"body":{"type":"none"},"timeout_ms":5000,"assertions":[{"type":"status_code","expected":200}]}}}
+{"type":"text_delta","text":"第二个接口也建好了。"}
+{"type":"usage","input_tokens":11,"output_tokens":6}
+{"type":"done","stop_reason":"stop"}

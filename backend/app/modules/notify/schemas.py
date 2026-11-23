@@ -26,6 +26,9 @@ class ChannelCreateIn(BaseModel):
 
 class ChannelListIn(BaseModel):
     type: str | None = None  # 过滤：五型之一；枚外值按「查不到」处理（读类不设 422）
+    # D243：高级搜索条件（JSON 串，形状同 shared/filters.py）。与 type 快捷轴并行
+    # AND；空串 = 没筛选，坏条件 400 且 message 带本页可筛清单。
+    filter: str | None = None
     cursor: str | None = None
     # current（D47-b）：页码分页入口，MS 页脚的 {current, pageSize, total} 口径。
     # None = 键集/游标路径；与 cursor 互斥，两者同时到场在 handler 里 400（判据同 report_list）。

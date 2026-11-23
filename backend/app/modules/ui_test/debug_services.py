@@ -60,7 +60,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.errors import ApiError
-from app.core.service import ctx_from_actor, ensure_project_access, service
+from app.core.service import ctx_from_actor, ensure_project_access, service, trigger_from_entry
 from app.modules.execution.artifacts import save_artifact
 from app.modules.execution.models import RunEvent, RunRecord
 from app.modules.execution.services import new_run
@@ -610,7 +610,7 @@ async def ui_case_run(payload: UiCaseRunIn, ctx) -> UiRunEnqueueOut:
     rec = await new_run(ctx.db, project_id=payload.project_id, subject_type="ui_case",
                         subject_id=c.id, subject_name=c.name, env_id=c.env_id,
                         env_name=env["env_name"],
-                        trigger="agent" if ctx.entry == "agent" else "manual",
+                        trigger=trigger_from_entry(ctx.entry),
                         created_by=ctx.user_id,
                         max_runtime_ms=get_settings().ui_default_max_runtime_ms)
     rid = rec.id

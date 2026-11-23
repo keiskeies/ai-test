@@ -59,6 +59,21 @@ function res(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
 }
 
+// D244：高级搜索三件套的依赖。字段与后端 USER_LIST_FILTER 同名同 kind。
+const FILTER_META = {
+  view_type: "user", view_label: "平台用户",
+  supported_view_types: ["user"],
+  fields: [
+    { field: "account", label: "账号", kind: "text",
+      ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS"] },
+    { field: "status", label: "状态", kind: "enum",
+      ops: ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"] },
+    { field: "is_system_admin", label: "平台管理员", kind: "bool",
+      ops: ["EQUALS", "NOT_EQUALS"] },
+  ],
+  unavailable: {},
+};
+
 interface Call { url: string; method: string; body?: string }
 type Resp = { status: number; body: unknown };
 
@@ -80,6 +95,9 @@ function mockBackend(rows: UserRow[], over: {
     const url = String(input);
     const method = (init?.method ?? "GET").toUpperCase();
     calls.push({ url, method, body: init?.body ? String(init.body) : undefined });
+    // D244：ListToolbar 挂载即拉元数据与个人视图（未 mock 会 throw，整页红成取数失败）
+    if (url.includes("/filter-meta?")) return res(200, FILTER_META);
+    if (url.includes("/saved-views?")) return res(200, []);
     if (method === "GET" && url.startsWith("/api/v1/system/users?")) {
       const page = url.includes("cursor=")
         ? { items: over.moreRows ?? [], next_cursor: null }
@@ -116,7 +134,7 @@ function renderTab(over: {
 } = {}) {
   return render(
     <ConfigProvider theme={{ token: { motion: false } }}>
-      <UsersTab canCreate={over.canCreate ?? true} canUpdate={over.canUpdate ?? true}
+      <UsersTab projectId="p1" canCreate={over.canCreate ?? true} canUpdate={over.canUpdate ?? true}
         canDisable={over.canDisable ?? true} selfId={over.selfId ?? ""} />
     </ConfigProvider>,
   );
@@ -161,9 +179,10 @@ describe("① 列表渲染", () => {
     const calls = mockBackend([ADMIN, LI]);
     renderTab();
     await screen.findAllByTestId("user-account");
-    // 请求口径：GET /system/users?size=50（PAGE=50 是后端 UserListIn 的默认页）
-    expect(calls[0].url).toBe("/api/v1/system/users?size=50");
-    expect(calls[0].method).toBe("GET");
+    // 请求口径：GET /system/users?size=50（PAGE=50 是后端 UserListIn 的默认页）。
+    // D244：ListToolbar 也往 calls 记账，取「列表请求」要按端点族收窄，不能取 calls[0]。
+    expect(listGets(calls)[0].url).toBe("/api/v1/system/users?size=50");
+    expect(listGets(calls)[0].method).toBe("GET");
 
     const accounts = screen.getAllByTestId("user-account").map((n) => n.textContent);
     expect(accounts).toEqual(["admin", "lisi"]);
@@ -603,5 +622,50 @@ describe("⑨ 批量导入 → 列表重拉（UsersTab 182 行 onImported={refre
     // 先钉「导入真的做成了」再钉重拉：否则任何一条 POST 失败都可能让下面的 GET 断言假绿/假红
     expect((await screen.findByTestId("uiw-receipt")).textContent).toContain("成功 1 · 跳过 0 · 失败 0");
     await waitFor(() => expect(listGets(calls).length).toBe(getsBefore + 1));
+  });
+});
+
+// ── D244：高级搜索 + 列设置（三件套铺到平台用户）────────────────────────────
+describe("D244 高级搜索 + 列设置（三件套铺到平台用户）", () => {
+  const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+
+  it("空条件不拼 filter；应用「账号包含 admin」后重查且请求带条件 JSON", async () => {
+    // 变异靶：load 不接 advFilter（重查请求无 filter）· 空条件也拼 filter=
+    const calls = mockBackend([ADMIN, LI, ZHANG]);
+    renderTab();
+    await waitFor(() => expect(screen.getAllByTestId("user-account").length).toBe(3));
+    expect(listGets(calls)[0].url).not.toContain("filter=");
+    const before = listGets(calls).length;
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    // 字段名来自后端 meta 的第一项（account），前端不自列字段
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "admin" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listGets(calls).length).toBe(before + 1));
+    const last = listGets(calls)[listGets(calls).length - 1];
+    const q = new URL(last.url, "http://t.test").searchParams;
+    expect(JSON.parse(q.get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "account", operator: "CONTAINS", value: "admin" }],
+    });
+  });
+
+  it("列设置勾掉「邮箱」只藏那一列（其余表头原样）", async () => {
+    // 变异靶：columns 不包 applyColumnPrefs（勾了没反应）· key 与 CHOICES 漂移（藏错列）
+    const calls = mockBackend([ADMIN, LI, ZHANG]);
+    renderTab();
+    await waitFor(() => expect(screen.getAllByTestId("user-account").length).toBe(3));
+    expect(calls.some((c) => c.url.includes("/filter-meta?"))).toBe(true);
+    expect(thead()).toContain("邮箱");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["账号", "姓名", "邮箱", "创建时间", "类型", "状态"]);
+    fireEvent.click(boxes[labels.indexOf("邮箱")]);
+    await waitFor(() => expect(thead()).not.toContain("邮箱"));
+    expect(thead()).toContain("创建时间");
   });
 });

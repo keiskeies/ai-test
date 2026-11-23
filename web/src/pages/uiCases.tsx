@@ -12,10 +12,12 @@
 // client.post——路径/请求体逐字对齐 schema.d.ts 的 ui_case_delete/restore/purge_body。
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Input, Modal, Space, Tag, Typography, message } from "antd";
 import { PlusOutlined, UndoOutlined } from "../ui/icons";
 import StateView from "../ui/StateView";
-import { FilterBar } from "../ui/Toolbar";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
 import { useAuth } from "../auth/store";
@@ -34,6 +36,17 @@ type Row = UiCaseListRow;
 type MemberRow = { user_id: string; account: string | null; name: string | null };
 
 const PRIO_COLOR: Record<string, string> = { P0: "red", P1: "volcano", P2: "blue", P3: "default" };
+
+// D213：列设置面板（正常视图六列）。回收站专属的「删除人/删除时间」不进面板——
+// 它们只在回收站视图出现，是视图态列而不是用户可裁的常态列；操作列同理（藏了就没有入口）。
+const UI_CASE_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "priority", label: "优先级" },
+  { key: "enabled", label: "启用" },
+  { key: "last", label: "最近结果" },
+  { key: "owner", label: "负责人" },
+  { key: "upd", label: "更新时间" },
+];
 
 function CasesList() {
   const { project, user } = useAuth();
@@ -62,6 +75,9 @@ function CasesList() {
   const [current, setCurrent] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState<number | null>(null);
+  // D213：高级搜索条件 + 列偏好。条件与回收站/模块等顶层开关并行（后端同一个 WHERE）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("ui_case", UI_CASE_COL_CHOICES.map((c) => c.key));
   // inRecycled 只有这一个写入口（runs.tsx 的 patch 同款）：三个 setState 各写各的时，
   // 漏接一个 setCurrent(1) 没人拦得住——停在第 3 页点回收站，落的是回收集里无关的切片，
   // 和换档位不回页是同一个 hazard（listPagination.tsx 注释③）。
@@ -78,7 +94,9 @@ function CasesList() {
       // 请求永不带 cursor：current+cursor 同传后端直接 400，一页两把尺子正是被禁的那件事
       const r = await uiApi.listCases({
         project_id: pid, size: pageSize, current,
-        ...(inRecycled ? { recycled: true } : {}) });
+        ...(inRecycled ? { recycled: true } : {}),
+        ...(isFilterEmpty(advFilter) ? {} : { filter: JSON.stringify(advFilter) }),
+      });
       // 页码模式是替换语义：第 3 页的行就只画第 3 页的，别页的行必须下桌。
       setRows(r.items);
       // total 只从响应来，永不由 rows.length 客户端现攒（页内行数不是总数）。
@@ -96,7 +114,7 @@ function CasesList() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "用例列表加载失败");
     } finally { setLoading(false); }
-  }, [pid, inRecycled, current, pageSize]);
+  }, [pid, inRecycled, current, pageSize, advFilter]);
   useEffect(() => { void load(); }, [load]);
   // 负责人列要名字不是 id：成员表拉一次。失败如实标 failed（ownerLabel 会说「名字未取到」），
   // 不静默把 uuid 当名字摊出去——同 scenes.tsx 一起改的口径。
@@ -187,31 +205,37 @@ function CasesList() {
   return (
     <div className="tp-fill tp-fill-body">
       <div style={{ flex: "0 0 auto" }}>
-      <FilterBar actions={(
-        <>
-          {canCreate && !inRecycled && (
-            <Button type="primary" icon={<PlusOutlined />} data-testid="ui-case-new"
-              onClick={() => nav("/ui/cases/new")}>
-              新建用例
+      {/* D213：D47-a 三件套（视图保存 / 高级搜索 / 列设置）铺到 UI 用例页。
+          条件与「回收站」开关并行（后者是视图轴，前者是业务属性）。 */}
+      <ListToolbar
+        projectId={pid} viewType="ui_case"
+        filter={advFilter} onFilterChange={(f) => { setAdvFilter(f); setCurrent(1); }}
+        allColumns={UI_CASE_COL_CHOICES}
+        columnPref={colPref} onColumnPrefChange={setColPref}
+        canSaveView canDeleteView
+        extra={(
+          <>
+            {canCreate && !inRecycled && (
+              <Button type="primary" icon={<PlusOutlined />} data-testid="ui-case-new"
+                onClick={() => nav("/ui/cases/new")}>
+                新建用例
+              </Button>
+            )}
+            {/* 回收站 toggle：照 adbCases.tsx:120-121 同位同文案（本页无模块树，孪生是它不是元素页）。
+                按钮挂 ui:case:read（本页可读即可见）——与 adbCases 一致不另设门；写操作在行上再各自门控。 */}
+            <Button data-testid="ui-case-recycled" type={inRecycled ? "primary" : "default"}
+              onClick={toggleRecycled}>
+              {inRecycled ? "退出回收站" : "♻ 回收站"}
             </Button>
-          )}
-          {/* 回收站 toggle：照 adbCases.tsx:120-121 同位同文案（本页无模块树，孪生是它不是元素页）。
-              按钮挂 ui:case:read（本页可读即可见）——与 adbCases 一致不另设门；写操作在行上再各自门控。 */}
-          <Button data-testid="ui-case-recycled" type={inRecycled ? "primary" : "default"}
-            onClick={toggleRecycled}>
-            {inRecycled ? "退出回收站" : "♻ 回收站"}
-          </Button>
-        </>
-      )}>
-        {/* 左槽只放「影响看到什么」的东西：本页固定一屏列表、无筛选控件（页码模式下
-            关键词/模块筛选都没下推到本页），所以左槽在正常视图留空；回收站视图给一句
-            这一屏能做什么，免得用户对着回收站列表找删除入口。 */}
-        {shownRecycled && (
-          <Typography.Text type="secondary" className="tp-text-sm">
-            回收站里的用例可恢复；彻底删除要逐字输名
-          </Typography.Text>
-        )}
-      </FilterBar>
+          </>
+        )} />
+      {/* 回收站视图的一句说明：这一屏能做什么（免得用户对着回收站列表找删除入口）。 */}
+      {shownRecycled && (
+        <Typography.Text type="secondary" className="tp-text-sm"
+          style={{ display: "block", marginBottom: 8 }}>
+          回收站里的用例可恢复；彻底删除要逐字输名
+        </Typography.Text>
+      )}
       {/* 刻意不给 ×：脚注（:251）与空态都读 loadError，关掉这条会把「用例没取到」
           擦成「还没有 UI 用例」——一条能消证的错误提示，比没有提示更会骗人。 */}
       {loadError && (
@@ -231,8 +255,8 @@ function CasesList() {
               : canCreate ? "还没有 UI 用例，点「新建用例」进命令编辑器"
                 : "还没有 UI 用例（你没有新建权限）"} />
         ) }}
-        columns={[
-          { title: "名称", dataIndex: "name", render: (v: string, r) => (
+        columns={applyColumnPrefs([
+          { title: "名称", key: "name", dataIndex: "name", render: (v: string, r) => (
             // 回收站行名称不是链接：ui_case_get 对已回收用例回 404（case_services.py:211-212）。
             // 按**行自己**的 status 判（D180）：在途/失败窗口里后面的行还是正常行，摘链接就是说谎。
             r.status === "recycled"
@@ -261,9 +285,9 @@ function CasesList() {
                   {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
                 </Typography.Text>) : <span>—</span>) },
           ] : []),
-          { title: "优先级", dataIndex: "priority", width: 80, render: (v: string) => (
+          { title: "优先级", key: "priority", dataIndex: "priority", width: 80, render: (v: string) => (
             <Tag color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
-          { title: "启用", dataIndex: "enabled", width: 70, render: (v: boolean) => (
+          { title: "启用", key: "enabled", dataIndex: "enabled", width: 70, render: (v: boolean) => (
             <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag>) },
           { title: "最近结果", key: "last", width: 110, render: (_, r) => {
             if (!r.last_run_status) return <Typography.Text type="secondary">未运行</Typography.Text>;
@@ -299,7 +323,7 @@ function CasesList() {
                   onClick={() => removeOne(r)}>删除</Button>)
               )
           ) },
-        ]}
+        ], colPref)}
         cardFooter={(
           // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
           <div className="tp-cardfoot">

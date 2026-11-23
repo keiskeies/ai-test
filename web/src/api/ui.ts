@@ -51,13 +51,14 @@ function qs(o: Record<string, unknown>): string {
 // 这笔漂移记在 D47-b 计划 §六，收尾整份重画 OpenAPI 时统一还（已知漂移的显式补键，
 // 字段名与后端 UiElementListIn 逐字一致，照本文件头手写镜像约定与 CaseListInput 先例）。
 export type ElementListInput = Pick<ElementListQuery, "project_id"> & Partial<Omit<ElementListQuery, "project_id">>
-  & { current?: number; keyword?: string; module_ids?: string[] };
+  & { current?: number; keyword?: string; module_ids?: string[];
+      /** D220：高级搜索条件（JSON 串；生成物尚未收录，同 current 手补） */ filter?: string };
 // D47-b 步5a：`current?: number` 是**已知漂移的显式补键**——后端 /ui-cases 已收 current
 // （页码分页那半边已提交），但 schema.d.ts 尚未重画（gen:api 会自起后端抢 8321 的业主
 // demo 服务，本刀不许跑），operations 的 query 里还没有这个参数。收尾时整份重画生成物
 // 统一还这笔债；不许挑单个字段手补 schema.d.ts（那是生成物）。
 export type CaseListInput = Pick<CaseListQuery, "project_id"> & Partial<Omit<CaseListQuery, "project_id">>
-  & { current?: number };
+  & { current?: number; /** D213：高级搜索条件（JSON 串；生成物尚未收录，同 current 手补） */ filter?: string };
 
 /** 409 referenced_by_case 的 details（element_services._guard_delete）：
  * 无 ui:case:read 时数量照报、明细隐瞒（details_hidden=true 且 cases=[]）。 */

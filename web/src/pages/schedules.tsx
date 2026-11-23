@@ -5,7 +5,9 @@
 //    不写正则、不引 cron-parser，只在 422 时把 message 原样回显成红字（§13 纪律 1）。
 // ② [预览未来 5 次] 打 POST /schedule-tasks/next-5，发的是抽屉里**未落库的草稿** cron；
 //    返回 times 已带 +08:00（Shanghai 日历，§3.4-6），一律 fmtTime 展示。
-// ③ subject_type 一期只有 scenario 一项（D30，后端白名单把守）——下拉里不许出现别的选项。
+// ③ subject_type 三值（后端口径）：scenario 可绑任务级环境；plan 到点整批投递；
+//    plan_report（D229）到点生成计划报告快照并推绑定渠道（= 报告订阅）。
+//    候选各查各的名单（plan/plan_report 共用 /plans，subject_id 都是 plan_id）。
 // ④ notify_channel_ids 候选来自 GET /notify-channels（平台级、不带 project_id）；
 //    该接口加载失败（含 403）时多选框降级成只读提示（只有 403 才许喊「权限」），
 //    **绝不把列表里的 id 编成渠道名**。
@@ -14,8 +16,10 @@
 //    run_final.ok**——fire 顶层 ok 只是「投递成败」。没 run_final 分两句：有 run_id
 //    （还在跑）画「执行结果未回」；没 run_id（未投递/投递失败——service.py 那两种回执
 //    压根没建 run，投递失败的孤儿 run 当场删掉）画「未产生执行，不会回结果」，
-//    绝不拿投递成败冒充执行结果，也不对没 run 的回执许诺「结果未回」。consecutive_failures 整数
-//    直出，缺 run_id 显示「—」。
+//    绝不拿投递成败冒充执行结果，也不对没 run 的回执许诺「结果未回」。
+//    D229：plan_report 回执有 report_id（没有 run_id）——画「已生成报告」+ 报告链接 +
+//    计数 + 未推送原因，既不演「未产生执行」，也不演「结果未回」。
+//    consecutive_failures 整数直出，缺 run_id 显示「—」。
 // ⑥ 「计划」三选（每天/每周/自定义 cron，D76 尾账）：反解 parsePlan 只把**选择器能逐字
 //    重拼出来的规范 cron**（humanizeCron 的逆运算、还更严一档）落到每天/每周，其余一律
 //    落自定义原样可见；将写入的串永远同屏（见下方「计划三选」段的口径注释）。
@@ -27,9 +31,9 @@
 // 且 schedules.test.tsx 从这里 import TaskRow——换引生成物是一次纯类型替换的重构，
 // 归到「前端统一改用 components["schemas"]」那笔账，不在本批顺手混做。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
-  Alert, Button, Checkbox, Drawer, Input, Modal, Radio, Select, Space, Switch, Table, Tag, Tooltip, Typography, message,
+  Alert, Button, Checkbox, Drawer, Input, Modal, Radio, Select, Space, Switch, Tag, Tooltip, Typography, message,
 } from "antd";
 import { PlusOutlined, ReloadOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
@@ -41,6 +45,22 @@ import type { Page } from "../api/api";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
 import { STATUSES } from "../shared/runVocab";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import {
+  applyColumnPrefs, emptyFilter, isFilterEmpty,
+  type ColumnChoice, type FilterDoc,
+} from "../shared/listFilters";
+
+// D240：列设置面板要露的列（key 与 columns 的 key 逐字一致；ops 是操作钮，不可隐藏）。
+const SCHEDULE_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "subject", label: "主体" },
+  { key: "cron", label: "调度" },
+  { key: "enabled", label: "启用" },
+  { key: "last_run", label: "最近结果" },
+  { key: "consecutive_failures", label: "连续失败" },
+];
 
 // ── 本地类型（字段 = schemas.py TaskOut / TaskCreateIn / Next5Out，一个不许多一个不许少）──
 
@@ -77,8 +97,25 @@ export interface Next5Out {
   times: string[]; // 5 个严格递增 ISO 串，带 +08:00 偏移（后端 Shanghai 日历）
 }
 
-// D30：一期只放开 scenario（后端 SUBJECT_TYPES=("scenario",) 同尺）。
-const SUBJECT_OPTIONS = [{ value: "scenario", label: "场景（scenario）" }];
+// D226：主体类型（后端 SUBJECT_TYPES 同尺）。D229 增 plan_report（定时生成计划报告 =
+// 报告订阅：到点出快照并推任务绑定的通知渠道）。
+// Scenario 可绑任务级环境；plan / plan_report 不绑（计划内每条关联各自带 env），
+// 切过去时抽屉隐藏环境框并把 env_id 提交为 null（后端还会复核 422）。
+const SUBJECT_OPTIONS = [
+  { value: "scenario", label: "场景（scenario）" },
+  { value: "plan", label: "测试计划（plan）" },
+  { value: "plan_report", label: "计划报告（plan_report）" },
+];
+const SUBJECT_LABEL: Record<string, string> = {
+  scenario: "场景", plan: "测试计划", plan_report: "计划报告",
+};
+
+/** 高级搜索的候选值：主体类型复用页面同一份 SUBJECT_OPTIONS（不另抄一份词表）。 */
+const SCHEDULE_FILTER_OPTIONS: Record<string, Option[]> = {
+  subject_type: SUBJECT_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
+};
+/** 计划类主体（候选都来自 /plans）：plan 与 plan_report 的 subject_id 都是 plan_id。 */
+const isPlanSubject = (v: string): boolean => v === "plan" || v === "plan_report";
 
 /**
  * Ctrl+K ?q=<id> 直达的纯判断半边（与 uiElements.tsx 的高亮同一形状）：
@@ -115,10 +152,20 @@ function EchoBlock({ text, testid }: { text: string; testid?: string }) {
  * 投递失败压根没建 run）说「未产生执行，不会回结果」——回执里没有的语义一概不编，
  * 更不拿投递成败冒充执行结果。
  */
-function LastRunCell({ lastRun, testid }: { lastRun: TaskRow["last_run"]; testid: string }) {
+function LastRunCell({ lastRun, testid, subjectType }: {
+  lastRun: TaskRow["last_run"]; testid: string; subjectType?: string;
+}) {
   if (!lastRun) return <Typography.Text type="secondary">从未触发</Typography.Text>;
   const fired = typeof lastRun.fired_at === "string" ? fmtTime(lastRun.fired_at) : null;
   const runId = typeof lastRun.run_id === "string" && lastRun.run_id ? lastRun.run_id : null;
+  // D229：plan_report 回执没有 run（不产生执行），但**产生了一份报告**——把它当
+  // 「未产生执行，不会回结果」画就是在撒谎，所以单独一条真话：报告 id/名字/计数。
+  const reportId = typeof lastRun.report_id === "string" && lastRun.report_id ? lastRun.report_id : null;
+  const reportName = typeof lastRun.report_name === "string" && lastRun.report_name
+    ? lastRun.report_name : null;
+  const reportTotal = typeof lastRun.total === "number" ? lastRun.total : null;
+  const reportPassed = typeof lastRun.passed === "number" ? lastRun.passed : null;
+  const reportNotified = typeof lastRun.notified === "boolean" ? lastRun.notified : null;
   const rf = lastRun.run_final;
   const final = rf !== null && typeof rf === "object" && !Array.isArray(rf)
     ? rf as Record<string, unknown> : null;
@@ -162,10 +209,28 @@ function LastRunCell({ lastRun, testid }: { lastRun: TaskRow["last_run"]; testid
         <div>
           <div data-testid="schedule-last-run-time">{fired ?? "触发时间未知"}</div>
           {/* WHY: run 只在 run_id 存在时才存在（service.py 的未投递/投递失败回执没建 run，
-              孤儿 run 还被当场删掉）——没 run 就不许许诺「结果未回」这种还在路上的话。 */}
+              孤儿 run 还被当场删掉）——没 run 就不许许诺「结果未回」这种还在路上的话。
+              D229：plan_report 回执有 report_id 而没有 run_id——那是「报告生成了」，
+              既不许演成「未产生执行」，也不许演成「结果未回」。 */}
           <Typography.Text type="secondary">
-            {runId ? "执行结果未回" : "未产生执行，不会回结果"}
+            {runId ? "执行结果未回" : reportId ? "已生成报告"
+              : subjectType === "plan_report" ? "本次未生成报告" : "未产生执行，不会回结果"}
           </Typography.Text>
+          {reportId && (
+            <div data-testid="schedule-last-report">
+              <Link to={"/plan-reports/" + reportId}>{reportName ?? shortId(reportId)}</Link>
+              {reportTotal !== null && (
+                <Typography.Text type="secondary">
+                  {" · 总数 " + reportTotal + " · 通过 " + (reportPassed ?? 0)}
+                </Typography.Text>
+              )}
+              {reportNotified === false && (
+                <Typography.Text type="secondary">
+                  {" · 未推送" + (reason ? "：" + reason : "")}
+                </Typography.Text>
+              )}
+            </div>
+          )}
           {reason && <div><Typography.Text type="secondary">{reason}</Typography.Text></div>}
         </div>
       )}
@@ -300,20 +365,24 @@ function shortId(id: string): string {
 
 // ── 新建/编辑抽屉（计划三选：每天/每周/自定义 cron + 预览 + 挂渠道多选）────────
 
-interface Option { value: string; label: string }
+// Option 用 ListToolbar 导出的那一份（形状相同的本地声明会与 import 冲突，TS2440）。
+
 interface Cands { options: Option[]; error: string | null; is403?: boolean }
 
-function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, onSaved }: {
+function TaskDrawer({ open, editing, projectId, canWrite, scenarios, plans, onClose, onSaved }: {
   open: boolean;
   editing: TaskRow | null;
   projectId: string;
   canWrite: boolean;
   /** 场景候选：页体拉一次、和主体列共用同一份——抽屉再拉一份就是两套真相。 */
   scenarios: Cands | null;
+  /** 计划候选（D226）：同上，主体类型 = plan 时用。 */
+  plans: Cands | null;
   onClose: () => void;
   onSaved: (row: TaskRow) => void;
 }) {
   const [name, setName] = useState("");
+  const [subjectType, setSubjectType] = useState("scenario");
   const [subjectId, setSubjectId] = useState<string | null>(null);
   const [envId, setEnvId] = useState<string | null>(null);
   // 计划三选（§11.4.17 D76 尾账）：三个槽位各自存值、切态互不覆盖——将写入的 cron
@@ -345,6 +414,7 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
   useEffect(() => {
     if (!open) return;
     setName(editing?.name ?? "");
+    setSubjectType(editing?.subject_type ?? "scenario");
     setSubjectId(editing?.subject_id ?? null);
     setEnvId(editing?.env_id ?? null);
     const src = editing?.cron ?? "";
@@ -404,17 +474,18 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
   }
 
   async function submit(): Promise<void> {
-    if (!name.trim() || !subjectId) { message.warning("任务名称与场景必填"); return; }
+    if (!name.trim() || !subjectId) { message.warning(`任务名称与${SUBJECT_LABEL[subjectType]}必填`); return; }
     if (planCron === null) { message.warning("每周计划至少勾选一个星期"); return; }
     setBusy(true);
     setSaveErr(null);
     const body: TaskCreateBody = {
       project_id: projectId,
       name: name.trim(),
-      subject_type: "scenario", // D30：唯一合法值；别的类型根本不出现在这里
+      subject_type: subjectType,
       subject_id: subjectId,
       cron: planCron,
-      env_id: envId,
+      // plan 不绑任务级环境（后端同尺 422）；切主体时界面上也藏了环境框。
+      env_id: subjectType === "scenario" ? envId : null,
       enabled,
       notify_channel_ids: channelIds,
     };
@@ -433,6 +504,8 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
     } finally { setBusy(false); }
   }
 
+  const cands = isPlanSubject(subjectType) ? plans : scenarios;
+
   return (
     <Drawer open={open} onClose={onClose} width={560}
       title={editing ? `定时任务：${editing.name}` : "新建定时任务"}
@@ -450,32 +523,43 @@ function TaskDrawer({ open, editing, projectId, canWrite, scenarios, onClose, on
             placeholder="如「夜间回归」" onChange={(e) => setName(e.target.value)} />
         </div>
         <div>
-          <Typography.Text strong>主体类型（一期只支持场景，D30）</Typography.Text>
-          <Select style={{ width: "100%" }} disabled value="scenario" options={SUBJECT_OPTIONS}
-            data-testid="schedule-field-subject_type" />
+          <Typography.Text strong>主体类型</Typography.Text>
+          <Select style={{ width: "100%" }} value={subjectType} options={SUBJECT_OPTIONS}
+            data-testid="schedule-field-subject_type"
+            onChange={(v) => {
+              // 换主体 = 换一份候选：旧的 subject_id 属于另一张表，必须清掉（留着就是
+              // 一条指向不存在对象的关联）；计划类主体不绑环境，切过去连带把 env 清空。
+              setSubjectType(v);
+              setSubjectId(null);
+              if (v !== "scenario") setEnvId(null);
+            }} />
         </div>
         <div>
-          <Typography.Text strong>场景</Typography.Text>
-          {scenarios?.error ? (
-            <EchoBlock text={"场景列表加载失败：" + scenarios.error} testid="schedule-scenarios-error" />
+          <Typography.Text strong>{SUBJECT_LABEL[subjectType]}</Typography.Text>
+          {cands?.error ? (
+            <EchoBlock text={`${SUBJECT_LABEL[subjectType]}列表加载失败：` + cands.error}
+              testid="schedule-subjects-error" />
           ) : (
-            <Select showSearch style={{ width: "100%" }} value={subjectId} placeholder="选择场景"
+            <Select showSearch style={{ width: "100%" }} value={subjectId}
+              placeholder={"选择" + SUBJECT_LABEL[subjectType]}
               data-testid="schedule-field-subject_id" optionFilterProp="label"
-              loading={scenarios === null} options={scenarios?.options ?? []}
+              loading={cands === null} options={cands?.options ?? []}
               onChange={(v) => setSubjectId(v)} />
           )}
         </div>
-        <div>
-          <Typography.Text strong>环境（可选）</Typography.Text>
-          <Select allowClear style={{ width: "100%" }} value={envId} placeholder={envs ? "不绑定环境" : "加载中…"}
-            data-testid="schedule-field-env_id" loading={envs === null} options={envs?.options ?? []}
-            onChange={(v) => setEnvId(v ?? null)} />
-          {editing && (
-            <Typography.Text className="tp-text-sm" type="secondary">
-              后端 PATCH 把 env_id=null 视为「未改动」——清空再保存不会解绑环境，换环境请直接选另一个。
-            </Typography.Text>
-          )}
-        </div>
+        {subjectType === "scenario" && (
+          <div>
+            <Typography.Text strong>环境（可选）</Typography.Text>
+            <Select allowClear style={{ width: "100%" }} value={envId} placeholder={envs ? "不绑定环境" : "加载中…"}
+              data-testid="schedule-field-env_id" loading={envs === null} options={envs?.options ?? []}
+              onChange={(v) => setEnvId(v ?? null)} />
+            {editing && (
+              <Typography.Text className="tp-text-sm" type="secondary">
+                后端 PATCH 把 env_id=null 视为「未改动」——清空再保存不会解绑环境，换环境请直接选另一个。
+              </Typography.Text>
+            )}
+          </div>
+        )}
         <div>
           <Typography.Text strong>计划</Typography.Text>
           <Radio.Group data-testid="schedule-plan-mode" style={{ display: "block", marginTop: 4 }}
@@ -604,6 +688,9 @@ function TasksPanel() {
   const [pageSize, setPageSize] = useState(50);
   const [total, setTotal] = useState<number | null>(null);
   const [enabledFilter, setEnabledFilter] = useState<string | undefined>();
+  // D240：高级搜索条件组 + 列设置偏好（D47-a 三件套铺到定时任务页）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("schedule", SCHEDULE_COL_CHOICES.map((c) => c.key));
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<{ editing: TaskRow | null } | null>(null);
@@ -628,9 +715,30 @@ function TasksPanel() {
   }, [projectId]);
   const subjectName = useMemo(() => {
     const m = new Map<string, string>();
-    for (const o of scenarios?.options ?? []) m.set(o.value, o.label);
+    for (const o of scenarios?.options ?? []) if (typeof o.value === "string") m.set(o.value, o.label);
     return m;
   }, [scenarios]);
+
+  // D226：计划候选同款拉在页体（plan 主体列的名字 + 抽屉下拉共用）。
+  const [plans, setPlans] = useState<Cands | null>(null);
+  useEffect(() => {
+    let dead = false;
+    void (async () => {
+      try {
+        const r = await get<Page<{ id: string; name: string }>>(
+          "/plans?" + new URLSearchParams({ project_id: projectId, size: "200" }), { silent: true });
+        if (!dead) setPlans({ options: r.items.map((s) => ({ value: s.id, label: s.name })), error: null });
+      } catch (e) {
+        if (!dead) setPlans({ options: [], error: e instanceof ApiErr ? e.message : "计划列表加载失败" });
+      }
+    })();
+    return () => { dead = true; };
+  }, [projectId]);
+  const planName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of plans?.options ?? []) if (typeof o.value === "string") m.set(o.value, o.label);
+    return m;
+  }, [plans]);
 
   // Ctrl+K 直达落点（?q=<任务id>）：那一条标出来。形状逐字抄 uiElements.tsx:70-78，
   // 三条来由在那边的注释里都挨过打，这里一条都不能丢：
@@ -666,7 +774,10 @@ function TasksPanel() {
     setLoadError(null);
     try {
       const q = new URLSearchParams({ project_id: projectId, size: String(pageSize), current: String(current),
-        ...(enabledFilter ? { enabled: enabledFilter } : {}) });
+        ...(enabledFilter ? { enabled: enabledFilter } : {}),
+        // 空条件不拼参数（与列表页同一把尺：URL 里不出现骗人的 filter=）。
+        // D240：条件是服务端 WHERE，与 enabled 快捷轴并行 AND。
+        ...(isFilterEmpty(advFilter) ? {} : { filter: JSON.stringify(advFilter) }) });
       const page = await get<Page<TaskRow>>("/schedule-tasks?" + q.toString(), { silent: true });
       setRows(page.items);
       // total 只从响应来，永不由 items.length 客户端现攒（页内行数不是总数）。
@@ -678,7 +789,7 @@ function TasksPanel() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "定时任务列表加载失败");
     } finally { setLoading(false); }
-  }, [projectId, enabledFilter, current, pageSize]);
+  }, [projectId, enabledFilter, current, pageSize, advFilter]);
   useEffect(() => { if (mayRead) void load(); }, [mayRead, load]);
 
   const upsert = (row: TaskRow) => setRows((prev) => {
@@ -717,13 +828,15 @@ function TasksPanel() {
     });
   }
 
-  const columns = [
+  const columns = applyColumnPrefs([
     { title: "名称", dataIndex: "name", key: "name",
       render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
     { title: "主体", key: "subject", width: 220,
       render: (_: unknown, r: TaskRow) => {
-        // 名单里有才配叫名字；不在（场景已删/超出 size=200）画截断 id——留白和错名都算撒谎
-        const name = subjectName.get(r.subject_id) ?? null;
+        // 名单里有才配叫名字；不在（对象已删/超出 size=200）画截断 id——留白和错名都算撒谎。
+        // 两张表各查各的（plan 与 scenario 的 id 空间不同，不能混成一张 map；
+        // plan_report 的 subject_id 也是 plan_id，与 plan 共用 /plans 那份名单）。
+        const name = (isPlanSubject(r.subject_type) ? planName : subjectName).get(r.subject_id) ?? null;
         return (
           <span data-testid={"schedule-subject-" + r.id}>
             <Tag>{r.subject_type}</Tag>
@@ -758,7 +871,8 @@ function TasksPanel() {
       ) },
     { title: "最近结果", dataIndex: "last_run", key: "last_run", width: 210,
       render: (lr: TaskRow["last_run"], row: TaskRow) => (
-        <LastRunCell lastRun={lr} testid={"schedule-result-" + row.id} />
+        <LastRunCell lastRun={lr} testid={"schedule-result-" + row.id}
+          subjectType={row.subject_type} />
       ) },
     { title: "连续失败", dataIndex: "consecutive_failures", key: "consecutive_failures", width: 90,
       render: (n: number) => <span data-testid="schedule-failures">{n}</span> },
@@ -774,7 +888,7 @@ function TasksPanel() {
           )}
         </Space>
       ) },
-  ];
+  ], colPref);
 
   // 无读权限：表格压根不渲染（也不发列表请求）——只给一句人话，不演假空表。
   if (!mayRead) {
@@ -788,18 +902,26 @@ function TasksPanel() {
   return (
     <div className="tp-fill tp-fill-body">
       <div style={{ flex: "0 0 auto" }}>
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Select allowClear placeholder="按启停筛选" style={{ width: 150 }} value={enabledFilter}
-          data-testid="schedule-filter-enabled" onChange={(v) => applyEnabledFilter(v)}
-          options={[{ value: "1", label: "只看启用" }, { value: "0", label: "只看停用" }]} />
-        {/* 刷新 = 重发当前页（load() 读 current），不回第 1 页：把用户从第 3 页弹回
-            第 1 页不是「刷新」这个词的意思。 */}
-        <Button icon={<ReloadOutlined />} data-testid="schedule-reload" onClick={() => void load()}>刷新</Button>
-        {canCreate && (
-          <Button type="primary" icon={<PlusOutlined />} data-testid="schedule-create"
-            onClick={() => setDrawer({ editing: null })}>新建任务</Button>
-        )}
-      </Space>
+      <ListToolbar projectId={projectId} viewType="schedule"
+        filter={advFilter} onFilterChange={(f) => { setAdvFilter(f); setCurrent(1); }}
+        allColumns={SCHEDULE_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        valueOptions={SCHEDULE_FILTER_OPTIONS}
+        canSaveView={can(perms, "search:view:create")}
+        canDeleteView={can(perms, "search:view:delete")}
+        extra={(
+          <Space wrap>
+            <Select allowClear placeholder="按启停筛选" style={{ width: 150 }} value={enabledFilter}
+              data-testid="schedule-filter-enabled" onChange={(v) => applyEnabledFilter(v)}
+              options={[{ value: "1", label: "只看启用" }, { value: "0", label: "只看停用" }]} />
+            {/* 刷新 = 重发当前页（load() 读 current），不回第 1 页：把用户从第 3 页弹回
+                第 1 页不是「刷新」这个词的意思。 */}
+            <Button icon={<ReloadOutlined />} data-testid="schedule-reload" onClick={() => void load()}>刷新</Button>
+            {canCreate && (
+              <Button type="primary" icon={<PlusOutlined />} data-testid="schedule-create"
+                onClick={() => setDrawer({ editing: null })}>新建任务</Button>
+            )}
+          </Space>
+        )} />
       {loadError && (
         // 不 closable：这张表失败后是空的（catch 里 setRows([])），这条 Alert 是「这一屏没取到」
         // 的唯一证据。给个 × 等于发一个消证按钮——关掉之后屏幕只剩一张空表，
@@ -837,7 +959,7 @@ function TasksPanel() {
       </div>
 
       <TaskDrawer open={drawer !== null} editing={drawer?.editing ?? null} projectId={projectId}
-        canWrite={canUpdate} scenarios={scenarios} onClose={() => setDrawer(null)} onSaved={upsert} />
+        canWrite={canUpdate} scenarios={scenarios} plans={plans} onClose={() => setDrawer(null)} onSaved={upsert} />
     </div>
   );
 }
@@ -846,7 +968,7 @@ export default function SchedulesPage() {
   return (
     <div data-testid="page-schedules" className="tp-fill-stack">
       <PageHead title="定时任务" descHover
-        desc="按 cron 周期触发场景执行；停用不影响历史运行与报告。" />
+        desc="按 cron 周期触发场景或测试计划执行；停用不影响历史运行与报告。" />
       <ProjectGate><TasksPanel /></ProjectGate>
     </div>
   );

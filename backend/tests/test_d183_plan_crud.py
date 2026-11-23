@@ -1,7 +1,7 @@
 """D183 步 1 判据刀：plan_record 本体 CRUD（计划 §六 应用到步 1）。
 
 钉的契约（一条判断一条用例，命名即判据）：
-1. **表形状 = 迁移形状**：列集恰好九列，没有 owner_id/project_public/软删列/状态枚举列
+1. **表形状 = 迁移形状**：列集恰好十列（D211 加入 module_id），没有 owner_id/project_public/软删列/状态枚举列
    （§六 1「没有任何一列是有 schema 没写入方」的反面清单）；project_id 有索引、
    项目内重名有唯一约束。走真 information_schema（模型声明了不等于库里有）。
 2. **CRUD 往返 + 每列有写入方**：created_by/updated_by 由两个不同的人分别写出来并被读出
@@ -36,6 +36,9 @@ import pytest
 from pydantic import ValidationError
 
 from app.modules.testplan.models import PlanRecord
+
+# D231：详情比创建回执时摘掉的两问（现查 plan_follower，写路径不回答它们）。
+_FOLLOW_KEYS = {"followed", "follower_count"}
 
 _BASE = "/api/v1"
 _NOW = datetime.now(UTC).replace(microsecond=0)
@@ -84,7 +87,7 @@ async def _seed(session, pid: str, *, row_id: str, name: str, archived: bool = F
 # ══════════ 1. 表形状（迁移真跑出来的形状 + 反面清单） ══════════
 
 async def test_plan_record_shape_is_exactly_the_migration(conn) -> None:
-    """列集恰好九列；索引/唯一键在场；三族「MS 式死列」都**不许**在。
+    """列集恰好十列（D211 的 module_id 在内）；索引/唯一键在场；三族「MS 式死列」都**不许**在。
 
     反面清单逐族点名（都对应计划里骂过的形状）：
     - owner_id/project_public：没有表单能把计划置成行级私有，列永远只有 true 一个值；
@@ -92,6 +95,9 @@ async def test_plan_record_shape_is_exactly_the_migration(conn) -> None:
       助手不接线（另一半钉在用例 7 的源码扫描）。0018 的静默失效教训（schedule/models:10-13）。
     - deleted_at/软删列：删除是物理删（§四 末段）。
     - status/state/phase：状态只有 archived 一个持久值（§二 1），其余现算（步 3）。
+
+    D211 的 module_id **有写方也有读方**：plan_create/plan_update 写，_out/列表过滤/模块树读；
+    它不像上面三族那样是「挂名不写」的死列，所以进列集。
     """
     from sqlalchemy import inspect
 
@@ -108,14 +114,17 @@ async def test_plan_record_shape_is_exactly_the_migration(conn) -> None:
     got = await conn.run_sync(_read)
     assert "plan_record" in got["tables"], "迁移没建表（alembic 没跑到 0024）"
     assert set(got["cols"]) == {"id", "project_id", "name", "description", "archived",
-                                "created_by", "updated_by", "created_at", "updated_at"}, \
+                                "module_id", "created_by", "updated_by", "created_at",
+                                "updated_at"}, \
         "列集变了 = 有人加了没写方/没读方的列（§六 1）：" + str(sorted(got["cols"]))
     assert not ({"owner_id", "project_public"} & set(got["cols"])), "可见性两列被「顺手补上」了"
     assert not ({"deleted_at", "deleted", "recycled_at"} & set(got["cols"])), "物理删不许有软删列"
     assert not ({"status", "state", "phase"} & set(got["cols"])), "状态枚举列 = 说谎的列（§二 1）"
     assert "ix_plan_record_project_id" in got["idx"], "所有查询都按 project_id 走，缺索引就是全表扫"
+    assert "ix_plan_record_module_id" in got["idx"], "模块过滤按 module_id 走，缺索引就是全表扫"
     assert ("uq_plan_record_project_name", ("name", "project_id")) in got["uq"]
     assert got["cols"]["archived"]["nullable"] is False
+    assert got["cols"]["module_id"]["nullable"] is True
 
 
 # ══════════ 2. CRUD 往返 + 每列写入方点名 ══════════
@@ -139,9 +148,13 @@ async def test_crud_roundtrip_writes_every_column(client, session, make_user) ->
     g = await _get(client, hb, pid, p["id"])
     # 除时刻外逐字段相等。时刻不比：create 回执带 Python 微秒（内存对象直接吐出），
     # DATETIME 列无小数秒、读回截到秒——全仓同款存储事实（ui/api 各表同型），不是本刀的形状。
+    # D231 起详情多两问（followed / follower_count，现查 plan_follower）：创建回执不回答
+    # 这两问（写路径不凭空补库外的数），所以比对时先摘掉，再单独钉「新计划 = 没被关注」。
     assert g.status_code == 200, g.text
-    assert {k: v for k, v in g.json().items() if "at" not in k} == \
-           {k: v for k, v in p.items() if "at" not in k}, "详情必须与创建回执逐字段相等（时刻除外）"
+    got = {k: v for k, v in g.json().items() if "at" not in k and k not in _FOLLOW_KEYS}
+    assert got == {k: v for k, v in p.items() if "at" not in k}, \
+        "详情必须与创建回执逐字段相等（时刻与 D231 的关注两问除外）"
+    assert g.json()["followed"] is False and g.json()["follower_count"] == 0
 
     mem, hm = await make_user("d183mem")
     mem_id = mem.id
@@ -532,7 +545,7 @@ def test_row_level_visibility_is_never_wired_in() -> None:
     写的）。行为不变的东西行为测试照不出，只能静态钉。visible_clause 更直接：
     它按属性建谓词，接上线当天列表就 AttributeError——但「没接线」这件事本身要有人钉，
     不然哪天「顺手统一一下」的人两边都看不见红。DDL 侧另一半在
-    test_plan_record_shape_is_exactly_the_migration（列集恰好九列）。
+    test_plan_record_shape_is_exactly_the_migration（列集恰好十列）。
     """
     assert not hasattr(PlanRecord, "project_public") and not hasattr(PlanRecord, "owner_id"), \
         "模型长出可见性两列 = 把「不该接的助手」变成「看着能接」，先摘列再谈"

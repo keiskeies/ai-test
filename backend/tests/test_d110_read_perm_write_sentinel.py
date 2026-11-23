@@ -41,6 +41,26 @@ ADJUDICATED_READ_PERM_WRITES: dict[str, str] = {
     "api_export": "只读导出，函数体不写库不发外部请求（POST 承载筛选条件）。",
     "scenario_export": "同上，形状逐字照抄 api_export。",
     "schedule_task_next_5": "纯算 cron，入参是**未落库草稿**，无副作用。",
+    # D191/D201：POST 只为承载筛选/试探参数，函数体只读不写、不发外部请求。
+    "defect_export": "只读导出 CSV（筛选条件走 POST body）；函数体不写库、不发外呼。",
+    "mock_rule_test": "只用方法与路径在本项目规则表里试匹配顺序；返回命中规则，不落库、不记命中。",
+    # D236：POST 只承载 recycled 开关；函数体两次 count/group by，不写库不发外呼。
+    "functional_case_stats": "功能用例分组计数（只为承载项目+视图参数用 POST）；只读聚合。",
+    # D269：组织读接口用 POST 承载 org_id/q；函数体只 select，授权在体内按组织成员/管理员判定。
+    # 平台面上非管理员只有 auth:*，READONLY 的项目位集又被 `-system:*` 裁掉，触发不到这些口。
+    "org_list": "组织列表：只读 select；POST 仅为承载 q/status 筛选，零副作用。",
+    "org_get": "组织详情：只读 select + count；授权按系统管理员/组织成员在现场判定。",
+    "org_member_list": "组织成员列表：只读 join；要求系统管理员或该组织 ORG_ADMIN，不写库。",
+    "org_project_list": "组织项目列表：只读 select；要求系统管理员或该组织成员，不写库。",
+    # D270：用户组读接口同样用 POST 承载 org_id/group_id；只 select，不写库。
+    "org_group_list": "用户组列表：只读 select + count；要求组织管理位持有者，零副作用。",
+    "org_group_member_list": "用户组成员列表：只读 join；要求组织管理位持有者，不写库。",
+    # D271：组织级缺陷状态流模板的读口同样用 POST 承载 org_id；只 select，不写库。
+    # 写口（save/reset）声明的是 system:org:update，不在这份名单里。
+    "defect_org_flow_get": "组织状态流模板读取：只 select 两张模板表；授权经 org_cap_check，零副作用。",
+    # D271：跨模块能力核验口（缺陷等模块经 REGISTRY 调用）。只查成员/组权限并投影，
+    # 不写库、不发外呼——POST 只是为了让请求体能装下 org_id + cap。
+    "org_cap_check": "组织管理位核验：只查 org_member/组并集后返回投影，零副作用。",
     # —— 边界：有外部动作但不改平台状态。D109 已按同一把尺子量过，业主裁决前留在名单里 ——
     "adb_device_test": "连设备取型号 + screencap，不写库（docstring 自述）；无密钥回显。",
     # —— D109：已知违规，业主裁决前如实登记，不在本轮自决修 ——
@@ -140,6 +160,15 @@ ADJUDICATED_UNREACHABLE_WRITES: dict[str, str] = {
         "这不是漏审：它的每一次执行都发生在一个 scenario_run 内部，而 scenario_run 是 "
         "POST service、由路由投影落审计——审计粒度是「一次场景运行」，不是「一次设备交互」，"
         "逐步明细在 run_step 表而非 audit_log（§4.9 两表分工）。"
+    ),
+    # 以下三条同为 `http=None + tool=False` 的内部件，只在已带门的写服务同一事务内被调用；
+    # 审计由外层那次 HTTP body 写调用承载（audit_log 记 action=外层服务名），
+    # 本条自身没有独立入口，因此也不该要求它单独落行。
+    "project_num_next": "内部取号：由创建缺陷/功能用例的 POST 服务同事务调用，审计落外层那次创建。",
+    "file_target_purge": "内部附件清理：由删除缺陷/用例的 POST 服务同事务调用，审计落外层那次删除。",
+    "review_case_auto_re_review": (
+        "内部重提审：由更新功能用例的 POST/PATCH 服务在同事务内触发（受项目开关控制），"
+        "审计落外层那次更新。"
     ),
 }
 

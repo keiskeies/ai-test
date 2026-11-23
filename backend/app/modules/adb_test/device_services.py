@@ -34,11 +34,35 @@ from app.modules.execution.adb_cli import (
     adb_screencap,
 )
 from app.modules.execution.adb_lock import force_release, occupation_batch, occupied
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.visibility import assert_row_visible, visible_clause
 
 # 引用明细上限（notify/service.py:35、iam/role_services.py:34 同款尺）：count 全量照报，
 # 明细只给前 REF_DETAIL_CAP 条，截了必须用 details_truncated 说出口。
 REF_DETAIL_CAP = 20
+
+# D224：设备卡片墙的可筛面（D47-a 三件套铺到设备页）。白名单只收 `adb_device` 上真实
+# 存在的列：name / serial / connect_type / enabled / project_public / created_at /
+# updated_at。刻意不进的四项，理由各自写明：
+# - `state`（空闲/占用/离线）不是 SQL 列：占用一半在 Redis，本页已有自己的 Segmented
+#   三档轴（含两阶段取数 + 超限大声报错）。把它再塞进条件组 = 两把尺子量同一个词；
+# - `recycled` / `status` 是视图轴（回收站开关），进 UI 是「换个视图」不是「按属性筛」；
+# - `owner_id` / `updated_by` 是裸 id：界面上没有人名可比，按 id 筛是给调用方用的；
+# - `last_state` 是心跳 JSON 帧（机型/电量/在线），不是属性列。
+ADB_DEVICE_LIST_FILTER = ListViewFilter(
+    view_type="adb_device",
+    label="设备管理",
+    fields={
+        "name": FieldDecl(AdbDevice.name, "text", "设备名", nullable=False),
+        "serial": FieldDecl(AdbDevice.serial, "text", "连接地址", nullable=False),
+        "connect_type": FieldDecl(AdbDevice.connect_type, "enum", "连接方式", nullable=False),
+        "enabled": FieldDecl(AdbDevice.enabled, "bool", "启用", nullable=False),
+        "project_public": FieldDecl(AdbDevice.project_public, "bool", "项目内公开", nullable=False),
+        "created_at": FieldDecl(AdbDevice.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(AdbDevice.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(ADB_DEVICE_LIST_FILTER)
 
 # D47-b 步 5e 两阶段取数（state=occupied/idle）的 SQL 全集硬上限。超限**报错**而不是
 # 只数本页：Redis 读数进不了 SQL，「筛完全集再数 total」的前提是全集取回；给不出真
@@ -209,6 +233,11 @@ async def adb_device_list(payload: schemas.AdbDeviceListIn, ctx) -> ServiceResul
         visible_clause(AdbDevice, ctx),
         AdbDevice.status == (STATUS_RECYCLED if payload.recycled else "normal"),
     )
+    # D224：高级搜索条件组进同一个 WHERE，位置在 order_by 与两条取数腿之前——
+    # ① 白名单外 400 带本页清单（parse 的文案），不降级成「忽略这条继续查」；
+    # ② 两阶段腿（occupied/idle）筛的是同一份条件后的在线全集，total 与状态轴不吃两套口径；
+    # ③ visible_clause 已在上面，条件组绕不过「非公开仅 owner 可见」。
+    stmt = stmt.where(ADB_DEVICE_LIST_FILTER.parse(payload.filter))
     # 判据 5 的「同一个表达式」在本函数内只有一个来源：两腿（SQL 分页腿 / 两阶段腿）都吃
     # 这条已排序 stmt，ORDER BY AdbDevice.id 一次定死，谁都不许另排。
     stmt = stmt.order_by(AdbDevice.id)

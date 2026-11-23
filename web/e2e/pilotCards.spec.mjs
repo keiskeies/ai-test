@@ -1,6 +1,6 @@
 // 1F T6：候选场景卡片的业主 e2e 演示路径（一期 DoD 第四条 §1.5 :51 的 UI 半边）。
 // 动线：进 bench → 选假模型 → 发一句话 → ≥2 张候选卡 → [画布预览] 新 Tab 只读画布
-// → 预览页顶部「Pilot 候选预览（未落库）」+ [保存为正式场景] disabled + Tooltip「二期开放」
+// → 预览页顶部「Pilot 候选预览（未落库）」+ [保存为场景] 接真（D264：弹窗落库 → 已保存）
 // → [选择] 回写用户消息进事件流。
 //
 // 模型走行（计划 T6 原文 + 1A 金线先例）：seed 一条 base_url=fake://two_candidate_plans
@@ -64,9 +64,9 @@ async function sendDodMessage(page, cfgName) {
   await expect(page.getByTestId("bench-status")).toHaveText("空闲", { timeout: 20_000 });
 }
 
-test("候选卡 ×2 + 画布预览只读页：banner、[保存] disabled 且 Tooltip「二期开放」、节点真渲染", async ({ page }) => {
+test("候选卡 ×2 + 画布预览只读页：banner、[保存为场景] 落库成真场景、节点真渲染", async ({ page }) => {
   test.setTimeout(120_000);
-  const { cfgName } = await seedBenchPage(page, "1f候选卡预览");
+  const { token, projectId, cfgName } = await seedBenchPage(page, "1f候选卡预览");
   await sendDodMessage(page, cfgName);
 
   // ≥2 张候选卡（DoD 判据第 1 条的卡片面）+ 步骤预览非空 + 方案名来自夹具
@@ -88,12 +88,22 @@ test("候选卡 ×2 + 画布预览只读页：banner、[保存] disabled 且 Too
   await expect(preview.getByTestId("preview-banner"))
     .toContainText("方案「登录冒烟（方案A）」是 Pilot 给出的候选，尚未保存为场景，仅在此只读预览。");
 
-  // 一期的口子不开：[保存为正式场景] 恒 disabled（§4 :206 / §13 :1604 二期点名）
-  const save = preview.getByTestId("preview-save");
-  await expect(save).toBeDisabled();
-  await save.hover({ force: true });
-  await expect(preview.locator(".ant-tooltip:not(.ant-tooltip-hidden)").last())
-    .toContainText("二期开放");
+  // D264：保存接真——[保存为场景] 可点；弹窗改名 → POST /scenarios → 「已保存」+ 场景链接
+  // （e2e 库跨轮次保留，名字加时间戳避开 409 同名）
+  await preview.getByTestId("plan-save").click();
+  const savedName = "e2e落库-" + Date.now().toString(36);
+  await preview.getByTestId("plan-save-name").fill(savedName);
+  await preview.getByTestId("plan-save-ok").click();
+  await expect(preview.getByTestId("plan-saved")).toBeVisible({ timeout: 15_000 });
+  await expect(preview.getByTestId("plan-saved-open")).toHaveAttribute("href", /#\/scene\//);
+  // 横幅翻面：页面上不许同时出现「尚未保存」与「已保存」
+  await expect(preview.getByTestId("preview-banner")).toContainText("已保存为正式场景");
+  await expect(preview.getByTestId("preview-banner")).not.toContainText("尚未保存为场景");
+  // 库里得真有一条（UI 绿了不算）：按名字回查项目的场景列表
+  const found = await asUser(token, "get",
+    "scenarios?project_id=" + encodeURIComponent(projectId) + "&keyword=" + encodeURIComponent(savedName));
+  expect(found.ok, JSON.stringify(found.body)).toBeTruthy();
+  expect(found.body.items.map((it) => it.name)).toContain(savedName);
 
   // 只读画布真出节点（夹具方案A 的单节点 key=s1；sessionStorage 传 graph 的链路通了才有这行）
   await expect(preview.getByTestId("preview-canvas")).toBeVisible();

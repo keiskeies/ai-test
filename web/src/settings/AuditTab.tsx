@@ -5,7 +5,7 @@
 // 行 [diff] 开双栏 JSON 对照模态（§11.4.27 画的是双栏并排，不是行内 diff）。
 import { useCallback, useEffect, useState } from "react";
 import AdminTable from "../ui/AdminTable";
-import { Alert, Button, Card, DatePicker, Input, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
+import { Alert, Button, Card, DatePicker, Input, Select, Space, Tag, Tooltip, Typography } from "antd";
 import { ReloadOutlined } from "../ui/icons";
 import type { ColumnsType } from "antd/es/table";
 import { get, ApiErr } from "../api/client";
@@ -13,12 +13,31 @@ import { fmtTime } from "../shared/timefmt";
 import AuditDiffModal, { hasComparison } from "./AuditDiffModal";
 import { FilterBar, Toolbar } from "../ui/Toolbar";
 import StateView from "../ui/StateView";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import {
+  applyColumnPrefs, emptyFilter, isFilterEmpty,
+  type ColumnChoice, type FilterDoc,
+} from "../shared/listFilters";
 import type { AuditRow, CandidateRow, Page } from "../api/api";
 
 const PAGE = 20;
 const ENTRIES: Record<string, string> = { http: "HTTP", agent: "Pilot", schedule: "定时" };
 
-export default function AuditTab({ projectId }: { projectId: string }) {
+// D246：列设置面板要露的列（key 与下方 cols 的 key 逐字一致；ops 是操作钮，不可隐藏）。
+const AUDIT_COL_CHOICES: ColumnChoice[] = [
+  { key: "time", label: "时间" },
+  { key: "user", label: "操作人" },
+  { key: "entry", label: "入口" },
+  { key: "action", label: "动作" },
+  { key: "ok", label: "结果" },
+];
+
+export default function AuditTab({ projectId, canSaveView, canDeleteView }: {
+  projectId: string;
+  /** D246：视图写入位（search:view:create/delete）——READONLY 不摆保存/删除按钮。 */
+  canSaveView: boolean; canDeleteView: boolean;
+}) {
   const [items, setItems] = useState<AuditRow[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [entry, setEntry] = useState<string | undefined>(undefined);
@@ -37,6 +56,9 @@ export default function AuditTab({ projectId }: { projectId: string }) {
   const [denied, setDenied] = useState(false);
   const [openRow, setOpenRow] = useState<AuditRow | null>(null);
   const [diffRow, setDiffRow] = useState<AuditRow | null>(null);
+  // D246：高级搜索条件组 + 列设置偏好（高级搜索条件是 WHERE，与上面五条快捷轴并行 AND）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("audit", AUDIT_COL_CHOICES.map((c) => c.key));
 
   const load = useCallback(async (reset: boolean): Promise<void> => {
     setLoading(true);
@@ -49,13 +71,15 @@ export default function AuditTab({ projectId }: { projectId: string }) {
       if (ok) q.set("ok", ok);
       if (uid) q.set("user_id", uid);
       if (range) { q.set("ts_from", range[0]); q.set("ts_to", range[1]); }
+      // 空条件不拼参数（URL 里不出现骗人的 filter=），非空才交给后端编 WHERE。
+      if (!isFilterEmpty(advFilter)) q.set("filter", JSON.stringify(advFilter));
       if (next) q.set("cursor", next);
       const r = await get<Page<AuditRow>>("/audit?" + q.toString(), { silent: true });
       setItems((prev) => (next === null ? r.items : [...prev, ...r.items]));
       setCursor(r.next_cursor);
     } catch (e) { setFailed(true); setDenied(e instanceof ApiErr && e.status === 403); if (reset) { setItems([]); setCursor(null); } }
     finally { setLoading(false); }
-  }, [projectId, entry, action, ok, uid, range, cursor]);
+  }, [projectId, entry, action, ok, uid, range, advFilter, cursor]);
 
   // D128：这是真·受控输入框——value 绑草稿 state，onChange 只改草稿（不是每敲一键查一次）。
   // onSearch 仍守「回车/点钮才查」（业主裁过）；点 × 由 onClear 把已生效的 action 一并清掉，
@@ -63,7 +87,10 @@ export default function AuditTab({ projectId }: { projectId: string }) {
   // 依赖里保留 action：onSearch 改 action → effect 重查，与上面「入口」等筛选同机制。
   // 曾经漏过它——「动作」框回车后状态变了、请求却一个不发，直到动「入口」才把 action 顺带
   // 捎上；而审计页默认列表恰好含那条动作，e2e 就一路绿着（settings.spec.mjs 同形）。
-  useEffect(() => { void load(true); }, [projectId, entry, action, ok, uid, range]);
+  // load 写 cursor（分页状态），不能进依赖组：进了会让每次翻页再触发一次 reset 查询。
+  // 下面列出的就是「换筛选条件必须重查」的那组 state，与 load 的闭包变量逐项对应。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { void load(true); }, [projectId, entry, action, ok, uid, range, advFilter]);
 
   // 操作人下拉的数据源：复用 MembersTab 加人用的项目内查找（UUID 的唯一合法项目级来源；
   // /system/users 是平台权限位，即使本页只给系统管理员，也保持同一条读法不另开口子）。
@@ -89,25 +116,28 @@ export default function AuditTab({ projectId }: { projectId: string }) {
   }, [projectId]);
   useEffect(() => { void searchOps(""); }, [searchOps]);
 
-  // 空态文案要分清「没筛出东西」和「什么都没发生」：五个筛选项任一有值即算带筛选。
+  // 空态文案要分清「没筛出东西」和「什么都没发生」：五个快捷筛选项或高级搜索条件
+  // 任一有值即算带筛选。
   // 注意 action 读的是已生效的 state（onSearch/onClear 才改，草稿 actionDraft 不算），与 load 的口径一致。
-  const anyFilter = Boolean(entry || action.trim() || ok || uid || range);
+  const anyFilter = Boolean(entry || action.trim() || ok || uid || range || !isFilterEmpty(advFilter));
 
-  const cols: ColumnsType<AuditRow> = [
+  // D246：key 与 AUDIT_COL_CHOICES 逐字一致——applyColumnPrefs 只按 key 过滤，
+  // 只写 dataIndex 的列永远藏不掉。
+  const cols: ColumnsType<AuditRow> = applyColumnPrefs([
     // 宽 150 与 UsersTab 创建时间列同尺：「2026-11-15 11:24:05」19 字符在 12/13 号
     // 数字字距下渲染约 123px + 单元格左右 8+8，150 装得下，168 是过度预留。
-    { title: "时间", dataIndex: "ts", width: 150, render: (v: string | null) => (
+    { title: "时间", key: "time", dataIndex: "ts", width: 150, render: (v: string | null) => (
       // 换算走 shared/timefmt（§3.4-6：UTC 存储 / Asia/Shanghai 展示）。
       // 原先是 slice(0,19)：形状对、钟点比真实时间早 8 小时，而形状正则的测试抓不到。
       <Typography.Text data-testid="audit-time" className="tp-text-sm"
         >{fmtTime(v) ?? "—"}</Typography.Text>) },
-    { title: "操作人", dataIndex: "user_name", width: 110, render: (v: string | null) => v ?? "未知" },
-    { title: "入口", dataIndex: "entry", width: 78, render: (v: string) => (
+    { title: "操作人", key: "user", dataIndex: "user_name", width: 110, render: (v: string | null) => v ?? "未知" },
+    { title: "入口", key: "entry", dataIndex: "entry", width: 78, render: (v: string) => (
       <Tag data-testid="audit-entry" color={v === "agent" ? "purple" : v === "schedule" ? "geekblue" : "default"}
         >{ENTRIES[v] ?? v}</Tag>) },
-    { title: "动作", dataIndex: "action", render: (v: string) => (
+    { title: "动作", key: "action", dataIndex: "action", render: (v: string) => (
       <Typography.Text className="tp-mono" data-testid="audit-action">{v}</Typography.Text>) },
-    { title: "结果", dataIndex: "ok", width: 78, render: (v: boolean) => (
+    { title: "结果", key: "ok", dataIndex: "ok", width: 78, render: (v: boolean) => (
       <Tag data-testid="audit-ok" color={v ? "green" : "red"}>{v ? "成功" : "失败"}</Tag>) },
     { title: "", key: "ops", width: 110, render: (_: unknown, r: AuditRow) => (
       <Space size={0}>
@@ -118,10 +148,21 @@ export default function AuditTab({ projectId }: { projectId: string }) {
             onClick={() => setDiffRow(r)}>diff</Button>
         </Tooltip>
       </Space>) },
-  ];
+  ], colPref);
 
   return (
     <div data-testid="tab-audit" className="tp-fill-tab">
+      {/* D246：高级搜索三件套。条件进后端 AUDIT_LIST_FILTER（WHERE），始终叠加在
+          project 作用域与下面五条快捷轴之后——两条筛选面同时生效、互不覆盖。 */}
+      <ListToolbar projectId={projectId} viewType="audit" filter={advFilter}
+        onFilterChange={setAdvFilter} allColumns={AUDIT_COL_CHOICES}
+        columnPref={colPref} onColumnPrefChange={setColPref}
+        canSaveView={canSaveView} canDeleteView={canDeleteView}
+        valueOptions={{
+          entry: Object.entries(ENTRIES).map(([value, label]) => ({ value, label })),
+          // bool 列只收真布尔：字符串 "true" 后端 400（D246 契约）。
+          ok: [{ value: true, label: "成功" }, { value: false, label: "失败" }] as Option[],
+        }} />
       {/* audit-filters 仍是「五个筛选控件都在它里面」的那个容器（AuditTab.test.tsx 用
           node.contains 钉包含关系）；里面再按 FilterBar 的约定分成左筛选 / 右动作。 */}
       <div data-testid="audit-filters">

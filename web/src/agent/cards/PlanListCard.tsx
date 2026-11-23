@@ -27,7 +27,7 @@ export default function PlanListCard({ items, title }: { items: PlanItem[]; titl
           return (
             <li key={String(it.id ?? i)} data-testid={"plan-item-" + String(it.state)} style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "2px 0" }}>
               <span style={{ color: meta.color }} title={meta.label}>{meta.icon}</span>
-              <span style={{ textDecoration: meta.strike ? "line-through" : "none", color: meta.strike ? "#8C9196" : undefined }}>
+              <span style={{ textDecoration: meta.strike ? "line-through" : "none", color: meta.strike ? "var(--tp-text-3)" : undefined }}>
                 {String(it.text ?? "")}
               </span>
             </li>

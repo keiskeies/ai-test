@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from app.core.errors import ApiError, OkOut, Page, paginate
 from app.core.security import dec_key, enc_key, mask_key
@@ -16,6 +16,7 @@ from app.core.service import ServiceResult, service
 from app.modules.model_cfg import probe, schemas
 from app.modules.model_cfg.models import ModelConfig
 from app.shared.fakeuri import fixture_path, is_fake
+from app.shared.filters import _like
 from app.shared.utcnow import utc_now_iso
 
 
@@ -112,6 +113,14 @@ async def model_cfg_list(payload: schemas.CfgListIn, ctx) -> ServiceResult:
     stmt = select(ModelConfig).order_by(ModelConfig.id)
     if payload.model_type:
         stmt = stmt.where(ModelConfig.model_type == payload.model_type)
+    if payload.keyword and payload.keyword.strip():
+        # D260：三列 OR。转义复用 shared.filters._like：用户敲的 % / _ 是字面量，
+        # 不转义就是「搜 100% 变成搜任意串」——那种筛选在界面上看不出坏，只是结果多。
+        kw = payload.keyword.strip()
+        like = f"%{_like(kw)}%"
+        stmt = stmt.where(or_(ModelConfig.name.like(like, escape="\\"),
+                              ModelConfig.model_name.like(like, escape="\\"),
+                              ModelConfig.base_url.like(like, escape="\\")))
     page = await paginate(ctx.db, stmt, cursor_col=ModelConfig.id, row_key=lambda r: r.id,
                           cursor=payload.cursor, size=payload.size)
     return Page(items=[_out(c) for c in page.items], next_cursor=page.next_cursor)

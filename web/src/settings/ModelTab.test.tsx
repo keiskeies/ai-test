@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ModelTab, { capTri, type ModelCfg } from "./ModelTab";
+import { tpv } from "../theme";
 
 // antd 的响应式观察器要用 matchMedia，jsdom 没有（每个测试文件自己补）
 Object.defineProperty(window, "matchMedia", {
@@ -52,6 +53,24 @@ function mockFetch(items: ModelCfg[], usage: unknown = null, listFail: boolean |
     if (listFail && url.includes("/model-cfgs?")) {
       const status = typeof listFail === "number" ? listFail : 403;
       return { ok: false, status, json: async () => ({ code: "boom", message: "拒绝" }) } as unknown as Response;
+    }
+    // D248：登记与删除的写口各自记账，回包只要求形状能过 client 的 json 解析
+    if (url.endsWith("/model-cfgs") && (init?.method ?? "GET").toUpperCase() === "POST") {
+      return { ok: true, status: 201, json: async () => ({ ...items[0], id: "m9" }) } as unknown as Response;
+    }
+    if ((init?.method ?? "").toUpperCase() === "DELETE") {
+      return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+    }
+    // D260：关键字搜索按后端口径（name / model_name / base_url 三列、大小写不敏感）
+    // 现筛——否则「前端把 keyword 送出去了」和「回包收窄后只剩命中卡片」测不开。
+    if (url.includes("/model-cfgs?")) {
+      const q = new URLSearchParams(url.split("?")[1]);
+      const kw = (q.get("keyword") ?? "").toLowerCase();
+      const hit = kw
+        ? items.filter((m) => [m.name, m.model_name, m.base_url]
+          .some((s) => s.toLowerCase().includes(kw)))
+        : items;
+      return { ok: true, status: 200, json: async () => ({ items: hit, next_cursor: null }) };
     }
     return { ok: true, status: 200, json: async () => ({ items, next_cursor: null }) };
   }) as unknown as typeof fetch;
@@ -484,6 +503,85 @@ describe("编辑弹窗载荷（每个把手按下去，PATCH body 必须变）",
   });
 });
 
+// ── D248：模型配置中心补「登记 / 删除」两个后端早已具备的写口 ─────────────────
+describe("D248 登记与删除", () => {
+  it("canCreate=false 不摆登记钮；填完三必填 → POST /model-cfgs 带默认能力位", async () => {
+    mockFetch([cfg()]);
+    const { unmount } = render(<ModelTab canManage />);
+    await screen.findByTestId("model-card");
+    expect(screen.queryByTestId("model-create-btn")).toBeNull(); // 没位就没有门把手
+    unmount();
+
+    const calls = mockFetch([cfg()]);
+    render(<ModelTab canManage canCreate />);
+    await screen.findByTestId("model-card");
+    fireEvent.click(screen.getByTestId("model-create-btn"));
+    await screen.findByTestId("model-create-modal");
+    fireEvent.change(inputOf("model-c-name"), { target: { value: "新模型" } });
+    fireEvent.change(inputOf("model-c-base"), { target: { value: "http://127.0.0.1:9100/v1" } });
+    fireEvent.change(inputOf("model-c-model"), { target: { value: "qwen-max" } });
+    fireEvent.click(okBtn());
+
+    await waitFor(() => expect(
+      calls.some((c) => c.method === "POST" && c.url.endsWith("/model-cfgs"))).toBe(true));
+    const body = JSON.parse(calls.find((c) => c.method === "POST")!.body!) as Record<string, unknown>;
+    // 默认能力位与空 Key 都必须显式随行——少发一条后端就按自己的默认兜，
+    // 「界面看到默认」与「后端落库默认」一旦分叉就是两套口径。
+    expect(body).toMatchObject({
+      name: "新模型", base_url: "http://127.0.0.1:9100/v1", model_name: "qwen-max",
+      model_type: "CHAT", protocol: "OPENAI_COMPAT", api_key: "",
+      context_window: 32768, max_output: 4096,
+      supports_tools: true, supports_thinking: false, thinking_levels: null,
+      supports_vision: false, enabled: true, is_default: false,
+    });
+    await waitFor(() => expect(screen.queryByTestId("model-create-modal")).toBeNull());
+    // 登记成功后必须重拉列表（新卡不是凭空画出来的）
+    await waitFor(() => expect(
+      calls.filter((c) => c.method === "GET" && c.url.includes("/model-cfgs?")).length).toBeGreaterThan(1));
+  });
+
+  it("三必填空着点登记 → 一个 POST 都不发；切向量后思考/档位/视觉控件整卡缺席", async () => {
+    const calls = mockFetch([cfg()]);
+    render(<ModelTab canManage canCreate />);
+    await screen.findByTestId("model-card");
+    fireEvent.click(screen.getByTestId("model-create-btn"));
+    await screen.findByTestId("model-create-modal");
+    fireEvent.click(okBtn());
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+
+    fireEvent.mouseDown(screen.getByTestId("model-c-type").querySelector(".ant-select-selector")!);
+    fireEvent.click(await screen.findByText("向量"));
+    await waitFor(() => expect(screen.queryByTestId("model-c-thinking")).toBeNull());
+    expect(screen.queryByTestId("model-c-levels")).toBeNull();
+    expect(screen.queryByTestId("model-c-vision")).toBeNull();
+    expect(screen.getByTestId("model-c-tools")).not.toBeNull(); // 工具位对向量模型仍成立
+  });
+
+  it("canDelete：确认后 DELETE /model-cfgs/{id}；无位不摆删除", async () => {
+    mockFetch([cfg()]);
+    const { unmount } = render(<ModelTab canManage />);
+    await screen.findByTestId("model-card");
+    expect(screen.queryByTestId("model-delete-btn")).toBeNull();
+    unmount();
+
+    const calls = mockFetch([cfg()]);
+    render(<ModelTab canManage canDelete />);
+    await screen.findByTestId("model-card");
+    fireEvent.click(screen.getByTestId("model-delete-btn"));
+    const ok = await waitFor(() => {
+      const b = document.querySelector(".ant-popconfirm-buttons .ant-btn-primary") as HTMLElement | null;
+      expect(b, "Popconfirm 确定钮没出现").toBeTruthy();
+      return b!;
+    });
+    fireEvent.click(ok);
+    await waitFor(() => expect(
+      calls.some((c) => c.method === "DELETE" && c.url.endsWith("/model-cfgs/m1"))).toBe(true));
+    // 删除后同样必须重拉（卡不能留在墙上冒充还在）
+    await waitFor(() => expect(
+      calls.filter((c) => c.method === "GET" && c.url.includes("/model-cfgs?")).length).toBeGreaterThan(1));
+  });
+});
+
 // ── 差集「fixture ↔ 后端 Out schema」：探测失败红态 ───────────────────────────
 // 后端 model_cfg/services.py:193-195 把 {"ok", "latency_ms", "capabilities",
 // "dimensions", "error", "checked_at"} 原样落库；probe.py 不可达路径回
@@ -500,13 +598,13 @@ describe("探测失败红态（ModelTab.tsx:198-203 的 ok=false / error 缺席 
     expect(line.textContent).toContain("●失败");
     expect(line.textContent).toContain("连接被拒绝"); // error 原话不许吞
     expect(line.textContent).not.toContain("●OK");
-    // 红色语义也钉住：●失败 那一格的着色就是 tp.func.error（把失败涂成 OK 绿同样是谎）。
-    // 期望值随设计系统改版从老红 #cf1322 换成 Token 值 tp.func.error（ModelTab.tsx 不再手抄
-    // 绿红两色，改引 tp.func.success / tp.func.error）——钉的仍是「失败必须是红的那一支」，
-    // 不是放宽：换成任何非 error 色照样红。
+    // 红色语义也钉住：●失败 那一格的着色就是 error 语义色（把失败涂成 OK 绿同样是谎）。
+    // 期望值是 tpv.func.error 而不是某个红 hex：着色写在 React 内联样式里，必须是 var()
+    // 才跟着主题走（深色下的 error 红是提亮过的另一支）。钉的仍是「失败必须是红的那一支」，
+    // 不是放宽：换成任何非 error 语义色照样红。
     const failDot = [...line.querySelectorAll("span")].find((s) => s.textContent === "●失败");
     expect(failDot, "●失败 不是独立着色节点").toBeTruthy();
-    expect((failDot as HTMLElement).style.color).toBe("rgb(176, 58, 51)"); // tp.func.error #B03A33
+    expect((failDot as HTMLElement).style.color).toBe(tpv.func.error);
   });
 
   it("失败但 error 缺席 / latency_ms 缺席：完整文案精确等于「探测●失败 0ms」——不出现孤零零的「·」，缺席延迟画 0ms", async () => {
@@ -522,5 +620,31 @@ describe("探测失败红态（ModelTab.tsx:198-203 的 ok=false / error 缺席 
     expect((line.textContent ?? "").split("·").length - 1).toBe(0);
     // 同一句里的 0ms 钉的正是 pr.latency_ms ?? 0 那一支：latency_ms 键缺席 → 画 0
     expect(line.textContent).toContain(" 0ms");
+  });
+});
+
+describe("D260 关键字搜索（模型池三列）", () => {
+  it("回车/点搜索才发请求：GET 带 keyword，回包收窄后只剩命中卡片；零命中出带词的专属空态", async () => {
+    const calls = mockFetch([PROBED, EMBED]);
+    render(<ModelTab canManage />);
+    await screen.findAllByTestId("model-card");
+    const input = screen.getByTestId("model-search") as HTMLInputElement;
+
+    // 只改输入框不发请求（边敲边发会把卡片墙打成连连看）
+    fireEvent.change(input, { target: { value: "bge" } });
+    expect(calls.filter((c) => c.url.includes("/model-cfgs?")).length).toBe(1);
+    fireEvent.click(document.querySelector(".ant-input-search-button")!);
+
+    await waitFor(() => {
+      const url = calls.filter((c) => c.url.includes("/model-cfgs?")).at(-1)!.url;
+      expect(decodeURIComponent(url)).toContain("keyword=bge");
+    });
+    await waitFor(() => expect(screen.getAllByTestId("model-card")).toHaveLength(1));
+    expect(screen.getByText("bge-向量")).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: "没有这个" } });
+    fireEvent.click(document.querySelector(".ant-input-search-button")!);
+    expect(await screen.findByText(/没有匹配「没有这个」的模型/)).not.toBeNull();
+    expect(screen.queryAllByTestId("model-card")).toHaveLength(0);
   });
 });

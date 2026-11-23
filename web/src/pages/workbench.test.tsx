@@ -3,7 +3,7 @@
 // 「有数据才挂图、空态给 Empty」），把 canvas 留给 e2e。
 // 两条最要紧的诚实断言：通过率 null 画「-」不画 0%；未开放批次的快捷入口是 disabled。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 // antd 的响应式观察器要用 matchMedia，jsdom 没有（每个测试文件自己补）
@@ -96,15 +96,32 @@ function renderPageWithLanding() {
         <Route path="/" element={<Workbench />} />
         <Route path="/scene/:id" element={<div data-testid="landed-scene" />} />
         <Route path="/ui/cases/:id" element={<div data-testid="landed-ui-case" />} />
+        <Route path="/plans/:id" element={<div data-testid="landed-plan" />} />
+        <Route path="/reviews/:id" element={<div data-testid="landed-review" />} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
+// D227：我的待办（两桶 + total 与列表分账）
+const TODO_STATS: WorkbenchStats = {
+  ...EMPTY_STATS,
+  todos: {
+    my_execution_total: 12,
+    my_executions: [
+      { plan_id: "p9", plan_name: "夜间回归", link_id: "lk1", case_id: "fc1",
+        case_name: "支付流程", num: 1, priority: "P1" },
+    ],
+    my_review_total: 1,
+    my_reviews: [{ review_id: "rv1", review_name: "退款评审", num: 7 }],
+  },
+};
+
 const disabled = (id: string) => (screen.getByTestId(id) as HTMLButtonElement).disabled;
 
 beforeEach(() => {
   cleanup();
+  localStorage.clear(); // D272 卡片设置写本机偏好：用例之间必须隔离，否则顺序耦合
   useAuth.setState({
     user: { id: "u1", account: "a", name: "张三", email: null, is_system_admin: false, status: "active" },
     project: PROJECT, ready: true,
@@ -402,5 +419,122 @@ describe("零引用 testid 补账：wb-stats / wb-trend / wb-stats-section", () 
     expect(screen.queryByTestId("wb-stats-section")).toBeNull();
     expect(document.body.textContent).toContain("先在下方选择项目，统计区随项目切换");
     expect(fetchUrls().some((u) => u.includes("/workbench-stats"))).toBe(false);
+  });
+});
+
+describe("我的待办（D227：待我执行 / 待我评审，total 与列表分账）", () => {
+  it("两桶为空画「暂无待办」，计数行如实写 0/0", async () => {
+    mockFetch(EMPTY_STATS);
+    renderPage();
+    const empty = await screen.findByTestId("wb-todos-empty");
+    expect(screen.getByTestId("wb-todos").contains(empty)).toBe(true);
+    expect(screen.getByTestId("wb-todos-counts").textContent).toContain("待我执行 0");
+    expect(screen.getByTestId("wb-todos-counts").textContent).toContain("待我评审 0");
+    expect(screen.queryByTestId("wb-todos-exec")).toBeNull();
+  });
+
+  it("有数据时两桶逐条渲染；total 12 > 列表 1 条必须写「另有 11 条未列出」；点计划/评审真落地", async () => {
+    mockFetch(TODO_STATS);
+    renderPageWithLanding();
+    const exec = await screen.findByTestId("wb-todo-exec-lk1");
+    expect(exec.textContent).toContain("夜间回归");
+    expect(exec.textContent).toContain("支付流程");
+    expect(exec.textContent).toContain("P1");
+    // 分账：列表长度不许冒充总数
+    expect(screen.getByTestId("wb-todo-exec-more").textContent).toBe("另有 11 条未列出");
+    const review = screen.getByTestId("wb-todo-review-rv1");
+    expect(review.textContent).toContain("退款评审");
+    expect(review.textContent).toContain("#7");
+
+    fireEvent.click(within(exec).getByText("夜间回归"));
+    expect(await screen.findByTestId("landed-plan")).not.toBeNull();
+
+    cleanup();
+    mockFetch(TODO_STATS);
+    renderPageWithLanding();
+    fireEvent.click(within(await screen.findByTestId("wb-todo-review-rv1")).getByText("退款评审"));
+    expect(await screen.findByTestId("landed-review")).not.toBeNull();
+  });
+});
+
+// D238：我的关注与创建（只含真有创建者列的两种）
+describe("D238 我的关注与创建", () => {
+  const STATS: WorkbenchStats = {
+    ...EMPTY_STATS,
+    contribution: {
+      functional_case_created: 4, defect_created_7d: 2,
+      followed_plan: 3, followed_functional_case: 5, followed_defect: 1, followed_total: 9,
+    },
+  };
+
+  it("分桶读数与合计都来自后端；不拿资产总数冒充我创建的", async () => {
+    mockFetch(STATS);
+    renderPage();
+    const created = await screen.findByTestId("wb-contrib-created");
+    expect(created.textContent).toContain("功能用例 4");
+    expect(created.textContent).toContain("近 7 天缺陷 2");
+    // 资产总数 12/30/5/3/4 不许出现在「我创建」里（只有两列有 created_by）
+    expect(created.textContent).not.toContain("12");
+    const followed = screen.getByTestId("wb-contrib-followed");
+    expect(followed.textContent).toContain("计划 3");
+    expect(followed.textContent).toContain("功能用例 5");
+    expect(followed.textContent).toContain("缺陷 1");
+    expect(followed.textContent).toContain("共 9");
+    expect(screen.getByTestId("wb-contribution-counts").textContent)
+      .toBe("我关注 9 · 我创建 6");
+  });
+
+  it("老后端没有 contribution 时按全零渲染，不 undefined", async () => {
+    mockFetch(EMPTY_STATS);
+    renderPage();
+    const created = await screen.findByTestId("wb-contrib-created");
+    expect(created.textContent).toContain("功能用例 0");
+    expect(screen.getByTestId("wb-contrib-followed").textContent).toContain("共 0");
+  });
+});
+
+describe("D272 卡片设置（本机视图偏好：显隐 + 顺序）", () => {
+  it("默认五张卡全显示；取消勾选「快捷入口」后该卡隐藏并落 localStorage", async () => {
+    mockFetch(FULL_STATS);
+    renderPage();
+    await screen.findByTestId("wb-quick");
+    fireEvent.click(await screen.findByTestId("wb-card-settings"));
+    fireEvent.click(await screen.findByTestId("wb-card-visible-quick"));
+    await waitFor(() => {
+      const el = screen.getByTestId("wb-quick").parentElement as HTMLElement;
+      expect(el.style.display).toBe("none");
+    });
+    const saved = JSON.parse(localStorage.getItem("tp_workbench_cards") || "[]");
+    expect(saved.find((p: { key: string }) => p.key === "quick").visible).toBe(false);
+  });
+
+  it("上移把「我的待办」排到最前：prefs 顺序变化并持久化，刷新后仍按新顺序", async () => {
+    mockFetch(FULL_STATS);
+    const { unmount } = renderPage();
+    await screen.findByTestId("wb-todos");
+    fireEvent.click(await screen.findByTestId("wb-card-settings"));
+    // 初始序：stats, recent, todos, contribution, quick —— 连点两次把 todos 提到 index 0
+    fireEvent.click(await screen.findByTestId("wb-card-up-todos"));
+    fireEvent.click(await screen.findByTestId("wb-card-up-todos"));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("tp_workbench_cards") || "[]");
+      expect(saved.map((p: { key: string }) => p.key).slice(0, 2)).toEqual(["todos", "stats"]);
+    });
+
+    // 卸载重渲染 = 刷新页面：顺序从 localStorage 恢复
+    unmount();
+    renderPage();
+    await screen.findByTestId("wb-todos");
+    const todosOrder = (screen.getByTestId("wb-todos").parentElement as HTMLElement).style.order;
+    const statsOrder = (screen.getByTestId("wb-stats").parentElement as HTMLElement).style.order;
+    expect(Number(todosOrder)).toBeLessThan(Number(statsOrder));
+  });
+
+  it("坏 JSON / 未知 key 不白屏：退回默认顺序并补全新卡", async () => {
+    localStorage.setItem("tp_workbench_cards", "{oops");
+    mockFetch(FULL_STATS);
+    renderPage();
+    expect(await screen.findByTestId("wb-quick")).toBeTruthy();
+    expect(screen.getByTestId("wb-card-settings")).toBeTruthy();
   });
 });

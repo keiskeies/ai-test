@@ -156,6 +156,9 @@ class UiElementListIn(BaseModel):
     # 行为改变）。全空白 = 没筛选（清空输入框和敲了空格是同一件事）。大小写不敏感由列的
     # utf8mb4_0900_ai_ci 提供（步 4 已取证；它同时重音不敏感，口径同 ApiDefListIn.keyword）。
     keyword: str | None = Field(default=None, description="元素名关键字（大小写不敏感）；全空白=不过滤")
+    # D220：高级搜索条件组（JSON 串，形状见 shared/filter_registry）。与 keyword / module_ids /
+    # recycled 这些顶层轴并行 AND；None 或空串 = 没筛选。字段白名单在 element_services 登记。
+    filter: str | None = None
     recycled: bool = False
     cursor: str | None = None
     # current（D47-b 步 5c）：页码分页入口，MS 页脚的 {current, pageSize, total} 口径。
@@ -281,6 +284,8 @@ class UiCaseListIn(BaseModel):
     # 没有本地过滤要下推，total 与 items 吃同一份条件（步 4b 对接口页的前置要求在这里免费成立）。
     current: int | None = None
     size: int = Field(default=50, ge=1, le=200)
+    # D213：高级搜索条件（JSON 串，字段白名单在 case_services.UI_CASE_LIST_FILTER）。
+    filter: str | None = None
 
 
 class UiCasePurgeIn(BaseModel):

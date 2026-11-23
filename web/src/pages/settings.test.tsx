@@ -128,8 +128,10 @@ describe("设置页 Tab 角色门控（判据第 3 条 UI 面 / §11.4.26 审计
 // 掉即红）。settings-tabs 的钉法：① testid 落在 Tabs 根（同时罩住 tab 栏与面板，挪到
 // 段落上就红）；② destroyInactiveTabPane 是真销毁——切走的 pane 从 DOM 消失（不是
 // -tabpane-hidden 挂着），再切回是重新挂载并重新拉数（请求计数 +1，藏起来的 pane 不会）；
-// ③ Tab 集合由权限推导：非管理员 my_perms ["*"] 也只有「项目成员/角色」两枚（三个平台
-// Tab 全被 isSysAdmin 闸掉，含此前从没被断言过的「模型配置」），系统管理员五枚全在且有序。
+// ③ Tab 集合由权限推导：非管理员 my_perms ["*"] 也只有「项目成员/项目设置/平台运维/模板与字段/角色」
+// 五枚（三个平台 Tab 全被 isSysAdmin 闸掉，含此前从没被断言过的「模型配置」），系统管理员八枚全在且有序。
+// D192：「模板与字段」按 project:template:read 渲染（四枚内置角色的 glob 都盖得住）。
+// D203：「平台运维」按三块登记面的读位渲染（`*:read` 盖得住）。
 
 /** 当前 Tab 栏的标签序列（按 DOM 顺序——items 数组顺序就是它，增删/换序都会红）。 */
 function tabLabels(): string[] {
@@ -200,19 +202,21 @@ describe("settings-tabs：根挂点 / destroyInactiveTabPane 真销毁 / Tab 集
     await waitFor(() => expect(treeGets()).toBe(2)); // 第二次激活 = 第二次请求（销毁重建的铁证）
   });
 
-  it("settings-tabs：非平台管理员即使 my_perms=[\"*\"] 也只有 项目成员/角色 两枚——平台用户/审计日志/模型配置都被 isSysAdmin 闸掉", async () => {
+  it("settings-tabs：非平台管理员即使 my_perms=[\"*\"] 也只有 项目成员/项目设置/平台运维/模板与字段/缺陷状态/角色——平台用户/审计日志/模型配置/MCP/Skills 都被 isSysAdmin 闸掉", async () => {
     setUser(false);
     renderPage(); // PROJECT_ADMIN + ["*"]：system:* 与 model:cfg:* 位「有」，但 isSysAdmin=false
     await screen.findByTestId("tab-members");
     // 有序全量集合：多一枚少一枚换序都红（「模型配置」此前从未被断过，摘掉它的 isSysAdmin 闸这里红）
-    expect(tabLabels()).toEqual(["项目成员", "角色"]);
+    // D267：「缺陷状态」是项目级配置（defect:flow:manage），不跟 isSysAdmin 走——["*"] 角色必须有。
+    expect(tabLabels()).toEqual(["项目成员", "项目设置", "平台运维", "模板与字段", "缺陷状态", "角色"]);
   });
 
-  it("settings-tabs：系统管理员 → 五枚 Tab 全在且按 items 顺序（平台用户/审计日志/模型配置 的 isSysAdmin 真腿）", async () => {
+  it("settings-tabs：系统管理员 → 十一枚 Tab 全在且按 items 顺序（平台用户/审计日志/模型配置/MCP/Skills 的 isSysAdmin 真腿）", async () => {
     setUser(true); // patternsForProject 短路 ["*"]：model:cfg:read 也命中
     renderPage();
     await screen.findByTestId("tab-members");
-    expect(tabLabels()).toEqual(["项目成员", "平台用户", "审计日志", "模型配置", "角色"]);
+    // D270：组织已移出本页，独立成 /orgs（组织管理员非系统管理员也要有入口）。
+    expect(tabLabels()).toEqual(["项目成员", "平台用户", "项目设置", "平台运维", "模板与字段", "缺陷状态", "审计日志", "模型配置", "MCP 服务", "Skills", "角色"]);
     // Tab 在 ≠ 内容在：destroyInactiveTabPane 下未激活的平台用户面板不预先挂载
     expect(screen.queryByTestId("tab-users")).toBeNull();
   });

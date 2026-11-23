@@ -14,8 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ApiError, Page, paginate_desc
 from app.core.service import ensure_project_access, service
 from app.modules.iam import schemas
-from app.modules.iam.models import CustomRole, Project, ProjectMember, RoleTemplate, User
+from app.modules.iam.models import (
+    DEFAULT_ORG_CODE,
+    CustomRole,
+    Org,
+    OrgMember,
+    Project,
+    ProjectMember,
+    RoleTemplate,
+    User,
+)
 from app.modules.iam.roles import BUILTIN_ROLES, match_perm, role_by_code
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 
 FORBIDDEN_BODY = {"code": "forbidden", "message": "无此项目权限", "details": {}}
 
@@ -24,6 +34,21 @@ FORBIDDEN_BODY = {"code": "forbidden", "message": "无此项目权限", "details
 # 鉴权只认 pattern 集合（拒绝优先），所以在唯一的两处解析出口补一条显式拒绝；
 # agent 工具面与 runner 的执行 ctx 同源，因此工具声明与实际执行一起被堵住。
 PLATFORM_DENY = "-system:*"
+
+# D245：项目成员页高级搜索（D47-a 三件套铺到设置页「成员」Tab）。白名单只收表格
+# 里看得见的标量列：账号 / 姓名 / 角色。`user_id` / `id` 是定位键（「我」标记与
+# 移出按钮都按 user_id 走），`project_id` 是作用域参数——由 ensure_member 管，
+# 放开成条件等于让 filter 参与越权把关。成员行没有独立的展示时间列，故不收时刻列。
+MEMBER_LIST_FILTER = ListViewFilter(
+    view_type="member",
+    label="项目成员",
+    fields={
+        "account": FieldDecl(User.account, "text", "账号", nullable=False),
+        "name": FieldDecl(User.name, "text", "姓名", nullable=False),
+        "role_code": FieldDecl(ProjectMember.role_code, "enum", "角色", nullable=False),
+    },
+)
+register(MEMBER_LIST_FILTER)
 
 
 def _project_scoped(perms: set[str]) -> set[str]:
@@ -105,7 +130,9 @@ async def create_project(db: AsyncSession, user: User, payload: schemas.ProjectI
     dup = (await db.execute(select(Project).where(Project.name == payload.name))).scalar_one_or_none()
     if dup is not None:
         raise ApiError("conflict", "项目名称已存在", 409, {"name": payload.name})
-    proj = Project(name=payload.name, description=payload.description, created_by=user.id)
+    org_id = await _resolve_org_for_new_project(db, user, payload.organization_id)
+    proj = Project(name=payload.name, description=payload.description, created_by=user.id,
+                   organization_id=org_id)
     db.add(proj)
     await db.flush()
     db.add(ProjectMember(project_id=proj.id, user_id=user.id, role_code="PROJECT_ADMIN"))
@@ -117,6 +144,23 @@ async def create_project(db: AsyncSession, user: User, payload: schemas.ProjectI
     await db.commit()
     return schemas.ProjectOut(id=proj.id, name=proj.name, description=proj.description, status=proj.status,
                               my_role="PROJECT_ADMIN", my_perms=my_perms)
+
+
+async def _resolve_org_for_new_project(db: AsyncSession, user: User, org_id: str | None) -> str | None:
+    """D269：新项目落哪个组织。显式指定 → 校验存在与成员资格；未指定 → 默认组织（可能不存在）。"""
+    if org_id is None:
+        return (await db.execute(
+            select(Org.id).where(Org.code == DEFAULT_ORG_CODE))).scalar_one_or_none()
+    if (await db.execute(select(Org.id).where(Org.id == org_id))).scalar_one_or_none() is None:
+        raise ApiError("not_found", "组织不存在", 404, {"organization_id": org_id})
+    if user.is_system_admin:
+        return org_id
+    mine = (await db.execute(select(OrgMember.id).where(
+        OrgMember.org_id == org_id, OrgMember.user_id == user.id))).scalar_one_or_none()
+    if mine is None:
+        # 非成员能把项目塞进任意组织 = 组织分组被绕过；403 与项目侧同形。
+        raise ApiError("forbidden", "无此组织权限", 403)
+    return org_id
 
 
 async def list_projects(db: AsyncSession, user: User, *, cursor: str | None, size: int) -> Page[schemas.ProjectOut]:
@@ -206,15 +250,18 @@ def role_of(perms: set[str]) -> str | None:
     return "PROJECT_ADMIN" if "*" in perms else None
 
 
-async def list_members(db: AsyncSession, user: User, project_id: str) -> list[schemas.MemberOut]:
+async def list_members(db: AsyncSession, user: User, project_id: str,
+                       adv_filter: str | None = None) -> list[schemas.MemberOut]:
     await ensure_member(db, user, project_id)
-    rows = (
-        await db.execute(
-            select(ProjectMember, User.account, User.name)
-            .join(User, User.id == ProjectMember.user_id)
-            .where(ProjectMember.project_id == project_id)
-        )
-    ).all()
+    stmt = (
+        select(ProjectMember, User.account, User.name)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(ProjectMember.project_id == project_id)
+    )
+    # D245：条件进 SQL，且始终在项目作用域之内（AND 在 where 之后追加，不替换）；
+    # 空条件 = 常真，等价于没传。
+    stmt = stmt.where(MEMBER_LIST_FILTER.parse(adv_filter))
+    rows = (await db.execute(stmt)).all()
     return [
         schemas.MemberOut(id=m.id, project_id=m.project_id, user_id=m.user_id, role_code=m.role_code, account=acc, name=nm)
         for m, acc, nm in rows

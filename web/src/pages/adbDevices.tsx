@@ -41,6 +41,9 @@ import { adbApi, type AdbDeviceOut, type AdbDevicePurgeDetails,
 import { reportApi } from "../api/report";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
+import { ListToolbar } from "../shared/listToolbar/ListToolbar";
+import { emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import type { FilterDoc } from "../shared/listFilters";
 import type { components } from "../api/schema";
 
 // 本地别名沿用原形状（antd 的 Row 组件占值空间，import 改名会两头撞名）
@@ -232,7 +235,7 @@ function TestResultModal({ name, out, onClose }: { name: string; out: TestOut; o
         )}
         {out.screenshot_b64 ? (
           <img data-testid="adb-test-shot" alt="设备截屏"
-            style={{ maxWidth: 220, borderRadius: 8, border: "1px solid #E4E9E4" }}
+            style={{ maxWidth: 220, borderRadius: 8, border: "1px solid var(--tp-border)" }}
             src={"data:image/png;base64," + out.screenshot_b64} />
         ) : out.ok ? (
           <Typography.Text type="secondary">这次没截到图（screencap 未回 PNG 字节）。</Typography.Text>
@@ -419,6 +422,10 @@ function DevicesWall() {
   const [current, setCurrent] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState<number | null>(null);
+  // D224：高级搜索条件（D47-a 三件套铺到设备页）。卡片墙不是表格——没有可切列的列设置，
+  // 所以不给 allColumns（组件在 allColumns 为空时不渲染那个按钮，不摆一个点了没反应的假钮）；
+  // state 三档仍是页面自己的 Segmented，两条轴在服务端并行 AND。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
 
   // 两类筛选（状态档/回收站开关）只有 patchFilters 这一个写入口，「回第 1 页」钉在唯一
   // 入口处——停在第 7 页改筛选，落的是新条件下无关的切片甚至空页（listPagination.tsx
@@ -442,6 +449,8 @@ function DevicesWall() {
       const q: DeviceListInput = { project_id: pid, size: pageSize, current };
       if (inRecycled) q.recycled = true;
       if (filter !== "全部") q.state = FILTER_TO_STATE[filter]; // 全部 = 不带 state 参数
+      // D224：空条件整个参数不上线（与 filterQuery 同口径）；qs() 负责 URL 编码。
+      if (!isFilterEmpty(advFilter)) q.filter = JSON.stringify(advFilter);
       const r = await adbApi.listDevices(q);
       // 页码模式是替换语义：第 3 页的行就只画第 3 页的，别页的行必须下桌。
       setRows(r.items);
@@ -464,7 +473,7 @@ function DevicesWall() {
         ? { code: e.code, message: e.message }
         : { code: "", message: "设备列表加载失败" });
     } finally { setLoading(false); }
-  }, [pid, inRecycled, filter, current, pageSize]);
+  }, [pid, inRecycled, filter, current, pageSize, advFilter]);
   useEffect(() => { void load(); }, [load]);
 
   // D47-b 步5e：旧「filter 在本地按卡片状态过滤 visible」的 useMemo 已整块删除——
@@ -760,6 +769,13 @@ function DevicesWall() {
   return (
     <div className="tp-fill">
       <div style={{ flex: "0 0 auto" }}>
+      {/* D224：D47-a 三件套（视图保存 / 高级搜索；卡片墙没有列设置）。
+          条件变更与 state/回收站同一口径：回第 1 页——停在第 5 页套新条件，落的是
+          新条件下无关的切片甚至空页（patchFilters 注释同款 hazard）。 */}
+      <ListToolbar projectId={pid} viewType="adb_device"
+        filter={advFilter}
+        onFilterChange={(f) => { setAdvFilter(f); setCurrent(1); }}
+        canSaveView canDeleteView />
       <FilterBar actions={(
         <>
           <Button icon={<ReloadOutlined />} data-testid="adb-device-reload" onClick={() => void load()}>刷新</Button>

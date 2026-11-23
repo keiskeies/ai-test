@@ -4,15 +4,32 @@
 // 「加入项目」本身不是搜索而是授权：PUT 落库角色下拉当前值（默认 MEMBER），对已存在行整体覆盖。
 import { useCallback, useEffect, useState } from "react";
 import AdminTable from "../ui/AdminTable";
-import { Alert, Button, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Modal, Popconfirm, Select, Space, Tag, Tooltip, Typography, message } from "antd";
 import { PlusOutlined, ReloadOutlined, SearchOutlined } from "../ui/icons";
 import type { ColumnsType } from "antd/es/table";
 import { del, get, put, ApiErr } from "../api/client";
 import type { CandidateRow, MemberRow, Page, RoleRow } from "../api/api";
 import { FilterBar, Toolbar } from "../ui/Toolbar";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import {
+  applyColumnPrefs, emptyFilter, isFilterEmpty,
+  type ColumnChoice, type FilterDoc,
+} from "../shared/listFilters";
 
-export default function MembersTab({ projectId, canManage, selfId, onChanged }: {
-  projectId: string; canManage: boolean; selfId: string;
+// D245：列设置面板要露的列（key 与下方 cols 的 key 逐字一致；ops 是操作钮，不可隐藏）。
+const MEMBER_COL_CHOICES: ColumnChoice[] = [
+  { key: "account", label: "账号" },
+  { key: "name", label: "姓名" },
+  { key: "role", label: "角色" },
+];
+
+export default function MembersTab({ projectId, canManage, canSaveView, canDeleteView, selfId, onChanged }: {
+  projectId: string; canManage: boolean;
+  /** D245：视图写入位（search:view:create/delete）。READONLY 只有 *:read，
+   *  保存按钮不该摆给他们——摆了就是点一次 403 的假门。 */
+  canSaveView: boolean; canDeleteView: boolean;
+  selfId: string;
   /** 成员或角色变了就通知外层重取项目 my_perms（改的是自己时按钮必须立刻跟着变） */
   onChanged?: () => void;
 }) {
@@ -30,13 +47,18 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
   const [picked, setPicked] = useState<string | null>(null);
   const [role, setRole] = useState<string>("MEMBER");
   const [saving, setSaving] = useState(false);
+  // D245：高级搜索条件组 + 列设置偏好（视图按项目存；成员表本身在项目作用域内）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("member", MEMBER_COL_CHOICES.map((c) => c.key));
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setFailed(false);
     setDenied(false);
     try {
-      const m = await get<{ items: MemberRow[] }>("/projects/" + projectId + "/members", { silent: true });
+      // D245：空条件不拼参数（URL 里不出现骗人的 filter=），非空才交给后端编 WHERE。
+      const fq = isFilterEmpty(advFilter) ? "" : "?filter=" + encodeURIComponent(JSON.stringify(advFilter));
+      const m = await get<{ items: MemberRow[] }>("/projects/" + projectId + "/members" + fq, { silent: true });
       setRows(m.items);
       const r = await get<{ items: RoleRow[] }>("/roles", { silent: true });
       // D37：自定义角色并进下拉数据源（内置在前）；读失败不拦成员页——
@@ -55,7 +77,7 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
       setDenied(e instanceof ApiErr && e.status === 403);
     }
     finally { setLoading(false); }
-  }, [projectId]);
+  }, [projectId, advFilter]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -98,14 +120,16 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
     } catch { await load(); }
   }
 
+  // D245：key 与 MEMBER_COL_CHOICES 逐字一致——applyColumnPrefs 只按 key 过滤，
+  // 只写 dataIndex 的列永远藏不掉。
   const cols: ColumnsType<MemberRow> = [
-    { title: "账号", dataIndex: "account", render: (v: string | null, r: MemberRow) => (
+    { title: "账号", key: "account", dataIndex: "account", render: (v: string | null, r: MemberRow) => (
       <Space size={6}>
         <Typography.Text data-testid="member-account">{v ?? r.user_id.slice(0, 8)}</Typography.Text>
         {r.user_id === selfId && <Tag color="blue">我</Tag>}
       </Space>) },
-    { title: "姓名", dataIndex: "name", render: (v: string | null) => v ?? "—" },
-    { title: "角色", dataIndex: "role_code", width: 210, render: (v: string, r: MemberRow) => (
+    { title: "姓名", key: "name", dataIndex: "name", render: (v: string | null) => v ?? "—" },
+    { title: "角色", key: "role", dataIndex: "role_code", width: 210, render: (v: string, r: MemberRow) => (
       canManage ? (
         <Select size="small" style={{ width: 180 }} value={v} data-testid="member-role"
           onChange={(c) => void changeRole(r.user_id, c)}
@@ -134,6 +158,13 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
 
   return (
     <div data-testid="tab-members" className="tp-fill-tab">
+      {/* D245：高级搜索三件套。条件是 WHERE（后端 MEMBER_LIST_FILTER），且始终在
+          项目作用域之内；角色候选直接用本页角色词表（内置 + 自定义）。 */}
+      <ListToolbar projectId={projectId} viewType="member"
+        filter={advFilter} onFilterChange={setAdvFilter}
+        allColumns={MEMBER_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        valueOptions={{ role_code: roles.map((x): Option => ({ value: x.code, label: x.name })) }}
+        canSaveView={canSaveView} canDeleteView={canDeleteView} />
       <FilterBar actions={(
         <Toolbar>
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>刷新</Button>
@@ -157,7 +188,8 @@ export default function MembersTab({ projectId, canManage, selfId, onChanged }: 
       )}
       {/* 外壳只有 AdminTable 自己那一层 tp-tablecard：此前外面又包了一层 tp-card tp-tablecard，
           双白卡双描边 + 4px 手抄 padding（2026-11-22 审计定罪）。 */}
-      <AdminTable<MemberRow> rowKey="id" loading={loading} columns={cols} dataSource={rows}
+      <AdminTable<MemberRow> rowKey="id" loading={loading}
+        columns={applyColumnPrefs(cols, colPref)} dataSource={rows}
         locale={{ emptyText: failed
           // catch 里 rows 不清（与 UsersTab 不同），但首拉就失败时 rows 本就是空——
           // 这一格和「项目里真没人」长得一模一样，得说清是哪一种。

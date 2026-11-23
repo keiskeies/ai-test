@@ -16,8 +16,9 @@ notify_channel_ids JSON / last_run JSON）+ 计划点名的「服务面必需要
   project_id 解析权限——表上没有这列，列表/详情查询就无法按项目过滤，等于跨项目渗漏。
 - consecutive_failures 是 §11.4.17 抽屉「连续失败[3]次后通知」的账（计划 T0：
   「总要有人记」）；达阈值后的告警发送归 T3，模型只提供计数位。
-- subject_type 一期只放 scenario（D30）：列本身是复数语义（§4:210），白名单在
-  服务层 422 把关（显式拒绝不静默改值），模型不建枚举约束。
+- subject_type 白名单是 scenario / plan / plan_report（D30 只放 scenario；D226 增 plan =
+  计划定时执行；D229 增 plan_report = 定时生成计划报告并推渠道）：列本身是复数语义
+  （§4:210），白名单在服务层 422 把关（显式拒绝不静默改值），模型不建枚举约束。
 
 kv_setting（§4:237 系统级键值表）挂在本模块的理由（计划 T0/D25）：一期消费方只有
 `_beat_schedule()`/DbScheduler 读「ADB 心跳间隔」一行——消费方住调度域，表就归调度域；
@@ -39,7 +40,7 @@ class ScheduleTask(ProjectScopedMixin, TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200), nullable=False)  # §11.4.17 列表「名称」列
-    subject_type: Mapped[str] = mapped_column(String(24), nullable=False)  # 一期只 scenario（D30，服务层把关）
+    subject_type: Mapped[str] = mapped_column(String(24), nullable=False)  # scenario/plan（D226，服务层把关）
     subject_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     cron: Mapped[str] = mapped_column(String(64), nullable=False)  # 5 段式；入库前 crontab() 校验（取证 ③）
     env_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # 抽屉「环境[▾]」；空 = 场景默认

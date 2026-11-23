@@ -30,7 +30,9 @@ import {
 const OPT = { silent: true } as const;
 const enc = encodeURIComponent;
 
-export interface Option { label: string; value: string }
+// value 收 boolean 是给 kind=bool 的列（如 is_system_admin）用：后端只收真布尔，
+// 前端若把 "true" 当字符串送出去必 400——候选值的类型必须与契约同型。
+export interface Option { label: string; value: string | boolean }
 
 // ── 高级搜索能力元数据 ────────────────────────────────────────────────────────
 // 三态分开是有内容的：加载中的入口画成 disabled + loading，拉挂了必须说「没取到」并给真
@@ -196,7 +198,7 @@ function ValueControl(props: {
   }
   if (opts) {
     return <Select size="small" style={{ minWidth: 176 }} allowClear data-testid="lt-val-one"
-      options={opts} placeholder="选择" value={(value as string) ?? undefined}
+      options={opts} placeholder="选择" value={(value as string | boolean) ?? undefined}
       onChange={(v) => onChange(v)} />;
   }
   return <Input size="small" style={{ width: 176 }} allowClear data-testid="lt-val-text"

@@ -35,6 +35,9 @@ import { ownModuleIds } from "../shared/moduleTree";
 import { uiApi, type ElementRefDetails, type ElementListInput, type UiElementListRow } from "../api/ui";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 import type { components } from "../api/schema";
 
 type Row = UiElementListRow;
@@ -46,6 +49,16 @@ const LOCATOR_COLOR: Record<string, string> = {
   id: "green", css: "blue", xpath: "purple", text: "cyan", name: "orange",
 };
 const LOCATOR_OPTIONS = Object.keys(LOCATOR_COLOR).map((t) => ({ value: t, label: t }));
+
+// D220：列设置面板（正常视图五列）。回收站专属的「删除人/删除时间」不进面板——它们只在
+// 回收站视图出现，是视图态列而不是用户可裁的常态列；操作列同理（藏了就没有入口）。
+const UI_ELEMENT_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "locator_type", label: "定位方式" },
+  { key: "locator", label: "表达式" },
+  { key: "used_by", label: "关联用例数" },
+  { key: "upd", label: "更新时间" },
+];
 
 /** 生成物里 UiModuleNode 的可选字段比 ModNode 宽（?: string|null），归一一下。 */
 function toMod(n: components["schemas"]["UiModuleNode"]): ModNode {
@@ -84,6 +97,11 @@ function ElementsWorkbench() {
   const [current, setCurrent] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState<number | null>(null);
+  // D220：高级搜索条件 + 列偏好（键 ui_element，与后端 view_type 同字）。条件与模块/关键词/
+  // 回收站这些顶层轴并行（后端同一个 WHERE），不是替代关系。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("ui_element",
+    UI_ELEMENT_COL_CHOICES.map((c) => c.key));
   // 三类筛选（模块/已提交关键词/回收站开关）只有 patchFilters 这一个写入口，「回第 1 页」
   // 钉在唯一入口处——停在第 7 页改筛选，落的是新条件下无关的切片甚至空页
   // （listPagination.tsx 注释③同款 hazard）；各 setState 漏接一个回页没人拦得住。
@@ -165,6 +183,9 @@ function ElementsWorkbench() {
       const q: ElementListInput = { project_id: pid, size: pageSize, current };
       if (inRecycled) q.recycled = true;
       if (kw.trim()) q.keyword = kw.trim(); // 空/纯空白 = 不过滤，参数整个不上线
+      // D220：空条件整个参数不上线（不是 filter=）——后端把空串读成「没筛选」只是兜底，
+      // 请求里少一个参数才是「空条件」这一意图的唯一写法。
+      if (!isFilterEmpty(advFilter)) q.filter = JSON.stringify(advFilter);
       if (moduleId) {
         // **直属口径**（ownModuleIds = 只有选中节点自身），不是接口页那个 subtreeIds：
         // UI 树徽标还是直属数（_counts docstring），发子树就是「徽标写 3、列表出 7」的
@@ -196,7 +217,7 @@ function ElementsWorkbench() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "元素列表加载失败");
     } finally { setLoading(false); }
-  }, [pid, inRecycled, kw, moduleId, current, pageSize]);
+  }, [pid, inRecycled, kw, moduleId, current, pageSize, advFilter]);
   useEffect(() => { void load(); }, [load]);
 
   // D47-b 步5d：旧「模块 + 关键词都在本地过滤」的 visible useMemo 已整块删除——
@@ -375,6 +396,16 @@ function ElementsWorkbench() {
         {/* 与左栏同构的一张面板卡：工具条 / 表 / 页码三段都住进卡体，两栏共用上下两条边。 */}
         <Card size="small" styles={{ body: { padding: 0 } }}>
         <div style={{ padding: "12px 12px 0", flex: "0 0 auto" }}>
+        {/* D220：D47-a 三件套（视图保存 / 高级搜索 / 列设置）铺到元素库页。条件与左树
+            模块轴、回收站开关、关键词并行（后三者是取数/视图轴，不是替代关系）。 */}
+        <ListToolbar
+          projectId={pid} viewType="ui_element"
+          filter={advFilter} onFilterChange={(f) => { setAdvFilter(f); setCurrent(1); }}
+          allColumns={UI_ELEMENT_COL_CHOICES}
+          columnPref={colPref} onColumnPrefChange={setColPref}
+          canSaveView canDeleteView
+          valueOptions={{ locator_type: LOCATOR_OPTIONS }}
+        />
         <FilterBar actions={(
           <>
             <Button icon={<ReloadOutlined />} data-testid="ui-element-reload" onClick={() => void load()}>刷新</Button>
@@ -461,8 +492,8 @@ function ElementsWorkbench() {
                     // 真分支逐字不许动——测试与 e2e 都按「点右上角新建元素」这句钉。
                     : canCreate ? "还没有元素，点右上角新建元素" : "还没有元素（你没有新建权限）"} />
           ) }}
-          columns={[
-            { title: "名称", dataIndex: "name", width: 200, render: (v: string) => (
+          columns={applyColumnPrefs([
+            { title: "名称", key: "name", dataIndex: "name", width: 200, render: (v: string) => (
               <span data-testid="ui-element-row-name">{v}</span>) },
             // §11.4.18 回收站「删除人/删除时间」两列——模板整组读 shownRecycled（D180：跟数据走），
             // 单元格再按 r.status 逐行兜底。
@@ -483,13 +514,13 @@ function ElementsWorkbench() {
                     {fmtTime(r.updated_at, { seconds: false }) ?? "—"}
                   </Typography.Text>) : <span>—</span>) },
             ] : []),
-            { title: "定位方式", dataIndex: "locator_type", width: 110, render: (v: string) => (
+            { title: "定位方式", key: "locator_type", dataIndex: "locator_type", width: 110, render: (v: string) => (
               <Tag data-testid={"ui-element-tag-" + v} color={LOCATOR_COLOR[v] ?? "default"}>{v}</Tag>) },
-            { title: "表达式", dataIndex: "locator", ellipsis: true, render: (v: string) => (
+            { title: "表达式", key: "locator", dataIndex: "locator", ellipsis: true, render: (v: string) => (
               // 省略 + hover 复制：定位表达式经常长到读不完，复制是刚需不是装饰
               <Typography.Text style={{ maxWidth: "100%" }} copyable={{ text: v }}
                 ellipsis={{ tooltip: v }}>{v}</Typography.Text>) },
-            { title: "关联用例数", dataIndex: "used_by", width: 110, render: (v: number) => (
+            { title: "关联用例数", key: "used_by", dataIndex: "used_by", width: 110, render: (v: number) => (
               <span data-testid="ui-element-used-by">{v}</span>) },
             { title: "更新时间", key: "upd", width: 150, render: (_, r) => (
               <Typography.Text type="secondary" className="tp-text-sm">
@@ -531,7 +562,7 @@ function ElementsWorkbench() {
                   </Space>
                 )
             ) },
-          ]}
+          ], colPref)}
         />
         {/* D47-b 步5d：共享页码分页器。total 缺键（响应没带 total）时 ListPager 整块不渲染；
             「共 N 条」从此只有服务端这一张嘴——旧脚注拿本地 visible.length / rows.length

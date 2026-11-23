@@ -5,10 +5,10 @@
 //   MEMBER ["*","-*:delete","-*:manage","-system:*"] → create/update 有、delete 被 -*:delete 拒
 //   READONLY ["*:read","-system:*"]                  → create/update/delete 全无（读写三位都不同名）
 // 最后一条钉「按钮跟 my_perms 走、不跟写死的 role 字符串走」：服务端显式补位即按钮回来。
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { ConfigProvider, message } from "antd"; // D74 导出例：spy message.warning 钉「notes 非空不静默」
+import { ConfigProvider, message, Modal } from "antd"; // D74 导出例：spy message.warning 钉「notes 非空不静默」
 
 // antd 的响应式观察器要用 matchMedia，jsdom 没有（每个测试文件自己补）
 Object.defineProperty(window, "matchMedia", {
@@ -46,6 +46,12 @@ function mockRows(items: Row[]) {
       : url.includes("/envs?") ? { items: [{ id: "e9", project_id: "p1", name: "预发环境",
         position: 0, config: null }], next_cursor: null }
       : url.includes("/members") ? { items: [], next_cursor: null }
+      // D261：跨项目复制的项目候选（当前项目 p1 由页面自己过滤掉）
+      : url.includes("/projects?") ? { items: [
+        { id: "p1", name: "履约", my_role: "PROJECT_ADMIN", my_perms: ["*"] },
+        { id: "p2", name: "结算", my_role: "PROJECT_ADMIN", my_perms: ["*"] },
+        { id: "p3", name: "只读项目", my_role: "READONLY", my_perms: ["*:read"] },
+      ], next_cursor: null }
       : { items, next_cursor: null };
     // 每次调用现拷一份全新对象图（真 fetch 每次解析出新的对象——同引用交两次会把
     // 「setRows(同一数组) → React  bail out → load 依赖实际没变」的 rows-进-依赖 回路
@@ -183,6 +189,129 @@ describe("场景页角色门控（判据第 3 条 UI 面）", () => {
   });
 });
 
+// ── D255：场景批量回收/恢复（替代前端 for 循环单删）─────────────────────────
+// 钉：① 批量回收只发一条 batch-delete（不再 N 次 /delete，避免半批成功半批失败）；
+//     ② 回收站里能勾选并批量恢复，body 带勾中的 ids。
+describe("回收站批量（D255）", () => {
+  afterEach(() => { Modal.destroyAll(); cleanup(); });
+
+  function mockBatch(items: Row[]) {
+    const calls: { method: string; url: string; body: unknown }[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : null });
+      const json = url.includes("/scenario-modules") ? { tree: [], recycled: [] }
+        : url.includes("/members") || url.includes("/envs?") ? { items: [], next_cursor: null }
+        : { items, next_cursor: null };
+      return { ok: true, status: 200,
+        json: async () => JSON.parse(JSON.stringify(json)) } as unknown as Response;
+    }) as unknown as typeof fetch;
+    return calls;
+  }
+  const boxes = () => Array.from(document.querySelectorAll(
+    '.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+  const batchCall = (calls: { url: string; body: unknown }[], path: string) =>
+    calls.find((c) => c.url.includes(path));
+
+  it("批量回收只发一条 batch-delete，body 带勾选 ids", async () => {
+    const calls = mockBatch([scene({ id: "s1" }), scene({ id: "s2", name: "下单主链" })]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findAllByTestId("scene-row-name");
+    fireEvent.click(boxes()[0]);
+    fireEvent.click(boxes()[1]);
+    fireEvent.click(await screen.findByTestId("scene-batch-del"));
+    fireEvent.click(await screen.findByTestId("scene-del-ok"));
+
+    await waitFor(() => expect(batchCall(calls, "/scenario-batch-delete")).toBeTruthy());
+    expect(batchCall(calls, "/scenario-batch-delete")!.body).toEqual(
+      { project_id: "p1", scenario_ids: ["s1", "s2"] });
+    // 旧的 N 次单删必须一条都不剩
+    expect(calls.some((c) => c.method === "POST" && /\/scenarios\/[^/]+\/delete$/.test(c.url)))
+      .toBe(false);
+  });
+
+  it("批量复制只发一条 batch-copy，body 带勾选 ids", async () => {
+    const calls = mockBatch([scene({ id: "s1" }), scene({ id: "s2", name: "下单主链" })]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findAllByTestId("scene-row-name");
+    fireEvent.click(boxes()[0]);
+    fireEvent.click(boxes()[1]);
+    fireEvent.click(await screen.findByTestId("scene-batch-copy"));
+
+    await waitFor(() => expect(batchCall(calls, "/scenario-batch-copy")).toBeTruthy());
+    expect(batchCall(calls, "/scenario-batch-copy")!.body).toEqual(
+      { project_id: "p1", scenario_ids: ["s1", "s2"] });
+    expect(calls.some((c) => c.url.includes("/duplicate"))).toBe(false);
+  });
+
+  it("回收站勾选后批量恢复，body 带 ids", async () => {
+    const calls = mockBatch([
+      scene({ id: "s1", status: "recycled", updated_by: "u9" }),
+      scene({ id: "s2", name: "下单主链", status: "recycled", updated_by: "u9" }),
+    ]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findAllByTestId("scene-row-name");
+    fireEvent.click(screen.getByTestId("module-recycled-toggle"));
+    await waitFor(() => expect(boxes().length).toBe(2));
+    fireEvent.click(boxes()[0]);
+    fireEvent.click(await screen.findByTestId("scene-batch-restore"));
+    const dlg = await screen.findByRole("dialog");
+    fireEvent.click(within(dlg).getByRole("button", { name: /恢\s*复/ }));
+
+    await waitFor(() => expect(batchCall(calls, "/scenario-batch-restore")).toBeTruthy());
+    expect(batchCall(calls, "/scenario-batch-restore")!.body).toEqual(
+      { project_id: "p1", scenario_ids: ["s1"] });
+  });
+});
+
+// ── D256：场景回收站批量彻底删除（短语确认；服务端也验）─────────────────────
+describe("回收站批量彻底删除（D256）", () => {
+  afterEach(() => { Modal.destroyAll(); cleanup(); });
+
+  it("未输短语禁用；输对后 POST 带 confirm_word 与 ids", async () => {
+    const calls: { method: string; url: string; body: Record<string, unknown> }[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : {} });
+      const json = url.includes("/scenario-modules") ? { tree: [], recycled: [] }
+        : { items: [scene({ id: "s1", status: "recycled", updated_by: "u9" }),
+          scene({ id: "s2", name: "下单主链", status: "recycled", updated_by: "u9" })],
+        next_cursor: null };
+      return { ok: true, status: 200,
+        json: async () => JSON.parse(JSON.stringify(json)) } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findAllByTestId("scene-row-name");
+    fireEvent.click(screen.getByTestId("module-recycled-toggle"));
+    await waitFor(() => expect(document.querySelectorAll(
+      '.ant-table-tbody tr.ant-table-row input[type="checkbox"]').length).toBe(2));
+    const boxes = Array.from(document.querySelectorAll(
+      '.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+    fireEvent.click(boxes[0]);
+    fireEvent.click(await screen.findByTestId("scene-batch-purge"));
+
+    const summary = await screen.findByTestId("scene-batch-purge-summary");
+    expect(summary.textContent).toContain("无法恢复");
+
+    const okBtns = () => Array.from(document.querySelectorAll(
+      ".ant-modal-footer .ant-btn-primary")) as HTMLButtonElement[];
+    const ok = () => okBtns()[okBtns().length - 1];
+    expect(ok().disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("scene-batch-purge-confirm"),
+      { target: { value: "彻底删除" } });
+    await waitFor(() => expect(ok().disabled).toBe(false));
+    fireEvent.click(ok());
+
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/scenario-batch-purge"))).toBe(true));
+    const sent = calls.find((c) => c.url.includes("/scenario-batch-purge"))!;
+    expect(sent.body).toEqual({ project_id: "p1", scenario_ids: ["s1"], confirm_word: "彻底删除" });
+    await waitFor(() => expect(screen.queryByTestId("scene-batch-bar-recycled")).toBeNull());
+  });
+});
+
 // §11.4.18 回收站「删除人/删除时间」两列：同一份 updated_by 在正常行上是「最后编辑人」，
 // 只有回收站里最后那次写才恰好是回收本身——所以两列**必须**被 inRecycled 守卫圈住，
 // 正常视图里出现这两列就是说谎（变异 B 拆守卫后第二条用例变红）。
@@ -303,8 +432,10 @@ describe("批量执行（D70 反向假门解禁）", () => {
     fireEvent.click(box!);
   }
 
-  it("钮可点；选了覆写环境 → run 以 {project_id, env_id} 逐个调用并有成功反馈", async () => {
-    const run = vi.spyOn(sceneApi, "run").mockResolvedValue({ run_id: "r1", status: "queued" });
+  it("钮可点；选了覆写环境 → 一次 batchRun 投递整批，body 带 {project_id, scenario_ids, env_id} 并有成功反馈", async () => {
+    const batchRun = vi.spyOn(sceneApi, "batchRun")
+      .mockResolvedValue({ ok: true, run_ids: ["r1", "r2"], failed: [] });
+    const run = vi.spyOn(sceneApi, "run");
     mockRows([scene(), scene({ id: "s2", name: "登录接口集" })]);
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await screen.findAllByTestId("scene-row-name"); // 两行 → 两个名字，findBy* 遇多重命中会抛
@@ -318,16 +449,18 @@ describe("批量执行（D70 反向假门解禁）", () => {
     fireEvent.mouseDown(document.querySelector(".ant-modal .ant-select-selector")!);
     fireEvent.click(await screen.findByText("预发环境", { selector: ".ant-select-item-option-content" }));
     fireEvent.click(screen.getByTestId("scene-run-ok"));
-    await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
-    // 入参逐字钉：路径参数 = 场景 id，body = {project_id, env_id: 所选环境}
-    expect(run.mock.calls.map((c) => c[0]).sort()).toEqual(["s1", "s2"]);
-    for (const c of run.mock.calls) expect(c[1]).toEqual({ project_id: "p1", env_id: "e9" });
+    await waitFor(() => expect(batchRun).toHaveBeenCalledTimes(1));
+    // D258：不再逐条 /scenarios/{id}/run，整批一次请求；勾选顺序原样进 scenario_ids
+    expect(batchRun).toHaveBeenCalledWith(
+      { project_id: "p1", scenario_ids: ["s1", "s2"], env_id: "e9" });
+    expect(run).not.toHaveBeenCalled();
     // 成功反馈：话术与相邻「已移动 N 个场景 / 已复制 N 个场景」同构，且说清投递语义
     expect(await screen.findByText(/已入队 2 个执行/)).not.toBeNull();
   });
 
-  it("场景自带环境 + 不选覆写 → 照常入队（env_id=null 即『用场景配置的环境』，与编辑器同口径）", async () => {
-    const run = vi.spyOn(sceneApi, "run").mockResolvedValue({ run_id: "r1", status: "queued" });
+  it("场景自带环境 + 不选覆写 → env_id=null 交给后端逐场景回落（与编辑器同口径）", async () => {
+    const batchRun = vi.spyOn(sceneApi, "batchRun")
+      .mockResolvedValue({ ok: true, run_ids: ["r1"], failed: [] });
     mockRows([withEnv]);
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await screen.findByTestId("scene-row-name");
@@ -337,11 +470,13 @@ describe("批量执行（D70 反向假门解禁）", () => {
     const ok = screen.getByTestId("scene-run-ok") as HTMLButtonElement;
     expect(ok.disabled).toBe(false); // 场景自身 env_id 在 → 无覆写也许可执行
     fireEvent.click(ok);
-    await waitFor(() => expect(run).toHaveBeenCalledWith("s1", { project_id: "p1", env_id: null }));
+    await waitFor(() => expect(batchRun).toHaveBeenCalledWith(
+      { project_id: "p1", scenario_ids: ["s1"], env_id: null }));
   });
 
-  it("无环境可跑（覆写未选且场景自身 env_id 空）→ 点名拦下，run 一次都不发（不许偷偷跑）", async () => {
-    const run = vi.spyOn(sceneApi, "run").mockResolvedValue({ run_id: "r1", status: "queued" });
+  it("无环境可跑（覆写未选且场景自身 env_id 空）→ 点名拦下，一次请求都不发（不许偷偷跑）", async () => {
+    const batchRun = vi.spyOn(sceneApi, "batchRun")
+      .mockResolvedValue({ ok: true, run_ids: [], failed: [] });
     mockRows([scene()]); // env_id 缺省 = 未配置环境
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await screen.findByTestId("scene-row-name");
@@ -351,15 +486,17 @@ describe("批量执行（D70 反向假门解禁）", () => {
     const ok = screen.getByTestId("scene-run-ok") as HTMLButtonElement;
     await waitFor(() => expect(ok.disabled).toBe(true));
     expect(await screen.findByTestId("scene-run-blocked")).not.toBeNull();
-    expect(run).not.toHaveBeenCalled();
+    expect(batchRun).not.toHaveBeenCalled();
   });
 
-  it("第 2 个投递失败 → 报「已入队 1 个」并关窗：enqueue 不幂等，留着弹窗原样重试就是重跑第 1 个", async () => {
-    // 这条钉的是我把 submitBatchRun 的 catch 从「留着弹窗可重试（同 purge）」改掉的理由：
-    // purge 幂等、enqueue 不幂等——半途失败时前面的已经跑起来了。
-    const run = vi.spyOn(sceneApi, "run")
-      .mockResolvedValueOnce({ run_id: "r1", status: "queued" })
-      .mockRejectedValueOnce(Object.assign(new Error("boom"), { code: 500 }));
+  it("部分投递失败 → 按回包 failed[] 报「已入队 1 个，1 个没投递成功」并清勾选", async () => {
+    // D258 把「半途失败」从客户端循环的异常改成服务端 failed[] 回执：预检全有或全无，
+    // 投递逐条 commit，broker 在第 k 条死掉时前 k-1 条已经诞生——回包必须如实分账，
+    // 前端也不能拿勾选数冒充「已启动数」。
+    const batchRun = vi.spyOn(sceneApi, "batchRun").mockResolvedValue({
+      ok: true, run_ids: ["r1"],
+      failed: [{ scenario_id: "s2", code: "executor_unavailable", message: "执行器不可用" }],
+    });
     mockRows([scene({ env_id: "e5" }), scene({ id: "s2", name: "登录接口集", env_id: "e5" })]);
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await screen.findAllByTestId("scene-row-name");
@@ -367,10 +504,9 @@ describe("批量执行（D70 反向假门解禁）", () => {
     fireEvent.click(await screen.findByTestId("scene-batch-run"));
     await screen.findByTestId("scene-run-modal");
     fireEvent.click(screen.getByTestId("scene-run-ok"));
-    expect(await screen.findByText(/已入队 1 个，之后的没投递/)).not.toBeNull();
-    expect(run).toHaveBeenCalledTimes(2); // 第一个真的投递了，不是回滚
-    // 半途失败后必须**清掉勾选**（load() 里 setSel([])）：antd 的 Modal 关掉后 DOM 还在，
-    // 光查 DOM 不算数——真正的保护是「同一批勾选不可能被再点一次」，批量条没了才叫拦住。
+    expect(await screen.findByText(/已入队 1 个，1 个没投递成功/)).not.toBeNull();
+    expect(batchRun).toHaveBeenCalledTimes(1); // 整批一次请求，不是回滚重投
+    // 部分成功也要清掉勾选（load() 里 setSel([])）：同一批勾选不能被再点一次。
     await waitFor(() => expect(screen.queryByTestId("scene-batch-bar")).toBeNull());
   });
 
@@ -382,6 +518,37 @@ describe("批量执行（D70 反向假门解禁）", () => {
     await waitFor(() => expect(screen.getByTestId("scene-batch-bar")).not.toBeNull());
     expect(screen.getByTestId("scene-batch-move")).not.toBeNull(); // update 位在 → 移动在，对照组
     expect(screen.queryByTestId("scene-batch-run")).toBeNull(); // run 位缺 → 执行钮整个不出现
+  });
+
+  it("D261 复制到项目：开窗现拉候选、当前项目不出现、无新建权限的目标禁用；确认后一条 batch-copy 带 target_project_id", async () => {
+    const batchCopy = vi.spyOn(sceneApi, "batchCopy")
+      .mockResolvedValue({ ok: true, created: 1, names: ["履约回归 - 副本"] });
+    mockRows([scene()]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-row-name");
+    checkFirstRow();
+    fireEvent.click(await screen.findByTestId("scene-batch-copy-to"));
+    await screen.findByTestId("scene-copy-to-modal");
+
+    // 候选里不能出现当前项目（p1 履约）——复制给自己是「复制」钮的事
+    fireEvent.mouseDown(document.querySelector(
+      '[data-testid="scene-copy-to-project"] .ant-select-selector')!);
+    const dropdown = document.querySelector(
+      ".ant-select-dropdown:not(.ant-select-dropdown-hidden)") as HTMLElement;
+    expect(within(dropdown).queryByText("履约")).toBeNull();
+    expect(within(dropdown).getByText("结算")).not.toBeNull();
+    // 只读项目标出原因并禁用（真正的门禁在后端，这里只避免点进去才吃 403）
+    const ro = within(dropdown).getByText("只读项目（无场景新建权限）");
+    expect((ro.closest(".ant-select-item-option") as HTMLElement).className)
+      .toContain("ant-select-item-option-disabled");
+
+    fireEvent.click(within(dropdown).getByText("结算"));
+    fireEvent.click(screen.getByTestId("scene-copy-to-ok"));
+    await waitFor(() => expect(batchCopy).toHaveBeenCalledWith({
+      project_id: "p1", scenario_ids: ["s1"], target_project_id: "p2" }));
+    expect(await screen.findByText(/已复制 1 个场景到「结算」/)).not.toBeNull();
+    // 复制成功后清勾选：同一批勾选不能被再点一次
+    await waitFor(() => expect(screen.queryByTestId("scene-batch-bar")).toBeNull());
   });
 });
 
@@ -728,9 +895,10 @@ describe("空白场景弹窗（scene-blank-modal / scene-blank-prio）", () => {
 // 没勾的一个不发（批量条本身就是空选的物理拦截）；中途失败不许谎报「已复制 N 个」。
 // 变异：循环条件改用 rows 全量 → 第一条的 id 集合多一个即红；catch 里照发 success → 第三条红。
 describe("批量复制（scene-batch-copy）", () => {
-  it("勾 s1+s3 → duplicate 恰好各一次，body 带 project_id", async () => {
-    const dup = vi.spyOn(sceneApi, "duplicate")
-      .mockImplementation(async (id: string) => scene({ id }) as never);
+  it("勾 s1+s3 → 一条 batch-copy，body 带勾选 ids（D257 起不再 N 次 duplicate）", async () => {
+    const copy = vi.spyOn(sceneApi, "batchCopy")
+      .mockResolvedValue({ ok: true, created: 2, names: [] } as never);
+    const dup = vi.spyOn(sceneApi, "duplicate").mockResolvedValue({} as never);
     mockRows(THREE);
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await screen.findAllByTestId("scene-row-name");
@@ -739,9 +907,9 @@ describe("批量复制（scene-batch-copy）", () => {
     fireEvent.click(boxes[2]);
     await screen.findByTestId("scene-batch-bar");
     fireEvent.click(screen.getByTestId("scene-batch-copy"));
-    await waitFor(() => expect(dup).toHaveBeenCalledTimes(2));
-    expect(dup.mock.calls.map((c) => c[0]).sort()).toEqual(["s1", "s3"]);
-    for (const c of dup.mock.calls) expect(c[1]).toEqual({ project_id: "p1" });
+    await waitFor(() => expect(copy).toHaveBeenCalledTimes(1));
+    expect(copy.mock.calls[0][0]).toEqual({ project_id: "p1", scenario_ids: ["s1", "s3"] });
+    expect(dup).not.toHaveBeenCalled();
     expect(await screen.findByText(/已复制 2 个场景/)).not.toBeNull();
   });
 
@@ -756,11 +924,10 @@ describe("批量复制（scene-batch-copy）", () => {
     expect(dup).not.toHaveBeenCalled();
   });
 
-  it("第 2 个失败 → 不谎报「已复制 2 个」，success toast 一条都不新增", async () => {
+  it("batch-copy 失败 → 不谎报成功，success toast 一条都不新增，选择保留", async () => {
     const okSpy = vi.spyOn(message, "success").mockImplementation(() => ({}) as never);
-    const dup = vi.spyOn(sceneApi, "duplicate")
-      .mockResolvedValueOnce({} as never)
-      .mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "not_found" }));
+    const copy = vi.spyOn(sceneApi, "batchCopy")
+      .mockRejectedValue(Object.assign(new Error("boom"), { code: "not_found" }));
     mockRows(THREE);
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await waitForRows(3);
@@ -772,11 +939,12 @@ describe("批量复制（scene-batch-copy）", () => {
     const okToasts = () => document.querySelectorAll(".ant-message-notice-success").length;
     const before = okToasts();
     fireEvent.click(screen.getByTestId("scene-batch-copy"));
-    // 先等两次投递都落定（1 成 1 败、循环中止），再验 success 一次没出 —— 顺序反了就是空转假绿
-    await waitFor(() => expect(dup).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(copy).toHaveBeenCalledTimes(1));
     await new Promise((r) => setTimeout(r, 0));
     expect(okSpy).not.toHaveBeenCalled();
     expect(okToasts()).toBe(before);
+    // 选择保留，用户改名单后可重试
+    expect(screen.getByTestId("scene-batch-bar")).not.toBeNull();
   });
 
   it("无 scenario:update → 复制钮不渲染（隐藏而非禁用），移动钮同位缺席由上轮已钉", async () => {
@@ -1837,5 +2005,78 @@ describe("D134 空态按真实筛选态归因（scenes.tsx）", () => {
     await waitFor(() => expect(screen.queryByTestId("scene-row-name")).toBeNull());
     expect(emptyDesc()).toBe("没有匹配的场景，换个关键词试试");
     expect(document.body.textContent).not.toContain("这个模块下没有场景");
+  });
+});
+
+// ── D214：场景列表高级搜索 / 列设置（D47-a 三件套铺到场景页）────────────────────
+describe("D214 场景列表高级搜索 / 列设置", () => {
+  const listUrls: string[] = [];
+  function mockD214(): void {
+    listUrls.length = 0;
+    const resp = (json: unknown, status = 200) =>
+      ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(json)) }) as unknown as Response;
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/scenario-modules")) return resp({ tree: [], recycled: [] });
+      if (url.includes("/members") || url.includes("/envs?")) return resp({ items: [], next_cursor: null });
+      if (url.includes("/filter-meta")) {
+        return resp({
+          view_type: "scenario",
+          fields: [
+            { field: "name", label: "场景名称", kind: "text",
+              ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+            { field: "priority", label: "优先级", kind: "enum",
+              ops: ["IN", "NOT_IN", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+          ],
+          supported_view_types: ["scenario"],
+          unavailable: {},
+        });
+      }
+      if (url.includes("/saved-views")) return resp([]);
+      if (/\/scenarios\?/.test(url)) {
+        listUrls.push(url);
+        return resp({ items: [scene()], next_cursor: null, total: 1 });
+      }
+      return resp({ items: [], next_cursor: null });
+    }) as unknown as typeof fetch;
+  }
+  const sentFilter = (url: string) => {
+    const raw = new URL(url, "http://x").searchParams.get("filter");
+    return raw === null ? null : JSON.parse(raw);
+  };
+
+  it("空条件不拼 filter；应用「名称包含 履约」后下一次列表请求带条件 JSON", async () => {
+    mockD214();
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await waitForRows(1);
+    expect(sentFilter(listUrls[0])).toBeNull();
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const row = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(row).getByTestId("lt-val-text"), { target: { value: "履约" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listUrls.length).toBe(2));
+    expect(sentFilter(listUrls[1])).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "履约" }],
+    });
+  });
+
+  it("列设置勾掉「优先级」只藏那一列（其余表头原样）", async () => {
+    localStorage.clear();
+    mockD214();
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await waitForRows(1);
+    const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("优先级");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "模块", "优先级", "最近结果", "步骤数", "定时", "负责人", "更新时间"]);
+    fireEvent.click(boxes[labels.indexOf("优先级")]);
+    await waitFor(() => expect(thead()).not.toContain("优先级"));
+    expect(thead()).toContain("步骤数");
   });
 });

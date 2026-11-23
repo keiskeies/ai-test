@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { metrics, tp } from "./theme";
+import { metrics, tp, tpDark } from "./theme";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CSS = join(HERE, "styles.css");
@@ -56,8 +56,22 @@ function cssVars(): Record<string, string> {
 
 const vars = cssVars();
 
+/**
+ * 抠深色块声明的变量：变量名 → 大写值。深色块只写要覆盖的项，所以它是 tpDark 的**子集**，
+ * 比对方向与浅色不同（浅色要求「CSS 里每个变量都在 theme.ts 有同名 Token」）。
+ */
+function darkCssVars(): Record<string, string> {
+  const block = [...css.matchAll(/:root\[data-theme="dark"\]\s*\{([^}]*)\}/g)];
+  if (block.length === 0) throw new Error('styles.css 里找不到深色 `:root[data-theme="dark"]` 块');
+  const out: Record<string, string> = {};
+  for (const b of block) {
+    for (const m of b[1].matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) out[m[1]] = m[2].trim().toUpperCase();
+  }
+  return out;
+}
+
 /** theme.ts 的 token 展开成「CSS 变量名 → 期望值」。数字一律折成 px。 */
-function expectedVars(): Record<string, string> {
+function expectedVars(from: typeof tp = tp): Record<string, string> {
   const out: Record<string, string> = {};
   const px = (v: number) => `${v}PX`;
   const put = (name: string, v: unknown) => {
@@ -65,7 +79,7 @@ function expectedVars(): Record<string, string> {
     else if (typeof v === "number") out[name] = px(v);
   };
   const kebab = (k: string) => k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
-  for (const [group, val] of Object.entries(tp)) {
+  for (const [group, val] of Object.entries(from)) {
     if (typeof val === "string") { put(`--tp-${kebab(group)}`, val); continue; }
     for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
       if (typeof v === "string" || typeof v === "number") {
@@ -84,7 +98,8 @@ function expectedVars(): Record<string, string> {
   return out;
 }
 
-const expected = expectedVars();
+const expected = expectedVars(tp);
+const darkExpected = expectedVars(tpDark);
 
 /** theme.ts 的 hex 转成 `rgb(r g b)` 前缀，用来核对 keyframes 里的分量写法。 */
 function rgbTriple(hex: string): string {
@@ -121,6 +136,22 @@ describe("--tp-* CSS 变量 ↔ theme.ts Token", () => {
     expect(v("--tp-text-1")).not.toBe(tp.text[1].toUpperCase());
     expect(v("--tp-bg-layout")).not.toBe(tp.bg.layout.toUpperCase());
     expect(v("--tp-func-processing")).not.toBe(tp.func.processing.toUpperCase());
+  });
+
+  it("深色块的每个 --tp-* 都能在 tpDark 找到同值（两处各写一遍就会漂）", () => {
+    // 浅色方向是「CSS ⊆ theme.ts」；深色是反过来的子集关系（深色块只写要覆盖的项）。
+    // 2026-11-22 的实例：深色块把 --tp-primary-50..700 换成了反向梯度，tpDark.primary 却
+    // 靠 ...tp 留着浅色那份——同一个 token 名在 CSS 里是深墨绿、在 React 内联里是浅米绿。
+    const darkVars = darkCssVars();
+    expect(Object.keys(darkVars).length, "深色块一个变量都没抠到，本条会假绿").toBeGreaterThan(20);
+    const unknown = Object.entries(darkVars)
+      .filter(([k]) => !(k in darkExpected))
+      .map(([k, v]) => `${k}=${v}`);
+    expect(unknown, "深色块新增了 tpDark 里没有的 --tp-*（深色覆盖项必须先进 theme.ts）").toEqual([]);
+    const mismatched = Object.entries(darkVars)
+      .filter(([k, v]) => k in darkExpected && darkExpected[k] !== v)
+      .map(([k, v]) => `${k}: css=${v} tpDark=${darkExpected[k]}`);
+    expect(mismatched, "styles.css 深色块与 tpDark 不同值").toEqual([]);
   });
 
   it("呼吸光环与 reduced-motion 描边都是 func.processing（同一个「运行中」不能两个蓝）", () => {

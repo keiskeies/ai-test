@@ -87,6 +87,21 @@ function mockBackend(pages: { normal: Row[]; recycled: Row[]; total?: number | n
         ? { items, next_cursor: null }
         : { items, next_cursor: null, total: pages.total });
     }
+    // D213：高级搜索元数据 + 个人视图（工具条首载两请求）。
+    if (url.includes("/filter-meta") && method === "GET") {
+      return resp({
+        view_type: "ui_case", fields: [
+          { field: "name", label: "用例名称", kind: "text",
+            ops: ["CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+          { field: "priority", label: "优先级", kind: "enum",
+            ops: ["IN", "NOT_IN", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+          { field: "last_run_status", label: "最近执行结果", kind: "enum",
+            ops: ["IN", "NOT_IN", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+        ],
+        supported_view_types: ["ui_case"], unavailable: {},
+      });
+    }
+    if (url.includes("/saved-views") && method === "GET") return resp([]);
     throw new Error("未 mock 的请求: " + method + " " + url);
   }) as unknown as typeof fetch;
 }
@@ -729,5 +744,52 @@ describe("D180 切回收站的竞态窗口（模板滞后于数据，不是滞�
     dfd.resolve(okResp({ items: [], next_cursor: null }));
     // 正对照：真取回空回收站后同一句必须改口，否则这条腿只是「永远不说」
     await waitFor(() => expect(emptyDesc()).toContain("回收站是空的"));
+  });
+});
+
+describe("D213 UI 用例列表高级搜索 / 列设置", () => {
+  const sentFilter = () => {
+    const raw = qsOf(listUrls.at(-1)!).get("filter");
+    return raw === null ? null : JSON.parse(raw);
+  };
+
+  it("应用「名称包含 冒烟」后下一次列表请求带条件 JSON，空条件时首次请求不带 filter", async () => {
+    mockBackend({ normal: [uiCase("c1")], recycled: [], total: 1 });
+    render(<MemoryRouter><UiCasesPage /></MemoryRouter>);
+    await screen.findByTestId("ui-case-row-name");
+    expect(qsOf(listUrls[0]).get("filter")).toBeNull();
+
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const row = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(row).getByTestId("lt-val-text"), { target: { value: "冒烟" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listUrls).toHaveLength(2));
+    expect(sentFilter()).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "冒烟" }],
+    });
+    // 高级搜索与回收站开关并行：条件在场不影响 recycled 轴
+    fireEvent.click(screen.getByTestId("ui-case-recycled"));
+    await waitFor(() => expect(qsOf(listUrls.at(-1)!).get("recycled")).toBe("true"));
+    expect(sentFilter()).not.toBeNull();
+  });
+
+  it("列设置勾掉「优先级」只藏那一列（其余表头与行操作原样）", async () => {
+    mockBackend({ normal: [uiCase("c1")], recycled: [], total: 1 });
+    render(<MemoryRouter><UiCasesPage /></MemoryRouter>);
+    await screen.findByTestId("ui-case-row-name");
+    const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("优先级");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "优先级", "启用", "最近结果", "负责人", "更新时间"]);
+    fireEvent.click(boxes[labels.indexOf("优先级")]);
+    await waitFor(() => expect(thead()).not.toContain("优先级"));
+    expect(thead()).toContain("最近结果");
+    expect(screen.getByTestId("ui-case-del")).not.toBeNull();
   });
 });

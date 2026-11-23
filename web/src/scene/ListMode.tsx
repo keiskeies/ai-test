@@ -11,6 +11,7 @@ import { childrenOf, findByKey, isValidKey } from "./graphOps";
 import { DND_KIND, DND_NAME, DND_NODE, DND_REF } from "./Canvas";
 import { CONTAINER_KINDS, kindMeta, labelOf, type Kind, type StepNode } from "./stepTypes";
 import { mergeIssues, useSceneStore } from "./store";
+import { tpv } from "../theme";
 
 interface Row {
   node: StepNode;
@@ -79,7 +80,7 @@ function Toolbar(props: { q: string; setQ: (v: string) => void }) {
   return (
     <div style={{ display: "flex", gap: 8, padding: "4px 12px 8px", alignItems: "center" }}>
       <Input data-testid="list-search" allowClear size="small" style={{ width: 200 }}
-        prefix={<SearchOutlined style={{ color: "#B4BBC2" }} />}
+        prefix={<SearchOutlined style={{ color: tpv.text[3] }} />}
         placeholder="搜索步骤（名称 / key）" value={props.q} onChange={(e) => props.setQ(e.target.value)} />
       {/* D146：添加/粘贴是写把手，只读隐藏（§11.5.1）；搜索是读把手，留着 */}
       {!readOnly && (<>
@@ -217,7 +218,7 @@ export default function ListMode() {
             style={{
               display: "flex", gap: 8, alignItems: "center", padding: "8px 12px", cursor: "pointer",
               paddingLeft: 12 + r.depth * 16,
-              background: n.key === selectedKey ? "#EAF6F1" : undefined,
+              background: n.key === selectedKey ? tpv.bg.selected : undefined,
               opacity: n.disable ? 0.55 : 1,
             }}>
             <Checkbox data-testid={"list-enable-" + n.key}

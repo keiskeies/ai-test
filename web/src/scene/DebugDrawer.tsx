@@ -11,6 +11,7 @@ import { reportApi } from "../api/report";
 import { sceneApi } from "../api/scene";
 import { openRunStream } from "../shared/sse";
 import { STEP_STATUSES, STATUSES } from "../shared/runVocab";
+import { tpv } from "../theme";
 import { walk, toGraphV1 } from "./graphOps";
 import { selectDirty, useSceneStore, type RunStepState } from "./store";
 
@@ -149,7 +150,7 @@ export default function DebugDrawer() {
           setHeight(Math.min(maxH, Math.max(MIN_H, dh)));
         }}
         onPointerUp={() => { dragRef.current = null; }}
-        style={{ height: 6, cursor: "ns-resize", background: "#F2F6F4", flexShrink: 0 }} />
+        style={{ height: 6, cursor: "ns-resize", background: tpv.bg.hover, flexShrink: 0 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--tp-split)" }}>
         <Typography.Text className="tp-text-md" strong>
           {trigger === "debug" ? "调试（未保存草稿）" : "执行（已保存场景）"}
@@ -192,7 +193,7 @@ export default function DebugDrawer() {
               onClick={() => void pickStep(key, st)}
               style={{
                 display: "flex", gap: 8, alignItems: "center", padding: "8px 12px", cursor: "pointer",
-                background: detail?.step_key === key ? "#EAF6F1" : undefined,
+                background: detail?.step_key === key ? tpv.bg.selected : undefined,
               }}>
               <Typography.Text className="tp-text-sm" style={{ flex: 1, minWidth: 0 }}
                 ellipsis={{ tooltip: key }}>{names.get(key) ?? key}</Typography.Text>

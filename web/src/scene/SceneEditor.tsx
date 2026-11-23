@@ -9,7 +9,8 @@ import {
   Alert, Button, Modal, Select, Space, Spin, Tooltip, Typography, message,
 } from "antd";
 import {
-  ArrowLeftOutlined, BugOutlined, RedoOutlined, SaveOutlined, StopOutlined, UndoOutlined,
+  ArrowLeftOutlined, BugOutlined, HistoryOutlined, RedoOutlined, SaveOutlined, StopOutlined,
+  UndoOutlined,
 } from "../ui/icons";
 import ProjectGate from "../layout/ProjectGate";
 import PermEmpty from "../components/PermEmpty";
@@ -23,6 +24,7 @@ import { sceneApi } from "../api/scene";
 import IssuePanel from "./IssuePanel";
 import ListMode from "./ListMode";
 import PropsPanel from "./PropsPanel";
+import RevisionDrawer from "./RevisionDrawer";
 import { canRedo, canUndo } from "./graphOps";
 import { selectDirty, useSceneStore, type ListFailure } from "./store";
 
@@ -71,6 +73,8 @@ function Editor() {
   const runPhase = useSceneStore((s) => s.run.phase);
   const cancelRequested = useSceneStore((s) => s.run.cancelRequested);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  // D262：变更历史是只读面（scenario:read 即可），所以入口留在只读组之外。
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // 取消（T21）：run_cancel 在步骤边界生效；409 already_finished（已终态）如实展示。
   const cancelRun = async () => {
@@ -175,7 +179,7 @@ function Editor() {
         <Typography.Text strong className="tp-text-lg">{scenario.name}</Typography.Text>
         <Typography.Text className="tp-text-sm" type="secondary">v{scenario.version}</Typography.Text>
         {dirty && <span data-testid="scene-dirty-dot" title="有未保存修改" style={{
-          display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#D48806",
+          display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "var(--tp-func-warning)",
         }} />}
         <Space size={0} style={{ border: "1px solid var(--tp-border)", borderRadius: 6, overflow: "hidden" }}>
           <Button data-testid="scene-mode-canvas" size="small"
@@ -185,6 +189,9 @@ function Editor() {
             type={mode === "list" ? "primary" : "text"}
             onClick={() => setMode("list")}>列表</Button>
         </Space>
+        <Button data-testid="scene-history" icon={<HistoryOutlined />}
+          title="查看谁在什么时候改了什么（只读）"
+          onClick={() => setHistoryOpen(true)}>变更历史</Button>
         <Select data-testid="scene-env" allowClear style={{ minWidth: 140 }} disabled={readOnly}
           placeholder={envPlaceholder(envsFailed, envs.length)}
           value={envId ?? undefined}
@@ -253,6 +260,8 @@ function Editor() {
       </div>
       <DebugDrawer />
       <ConflictModal />
+      <RevisionDrawer open={historyOpen} onClose={() => setHistoryOpen(false)}
+        projectId={pid} scenarioId={scenario.id} />
       <Modal centered open={leaveOpen} data-testid="leave-guard-modal" title="有未保存的修改"
         okText="放弃修改并离开" okButtonProps={{ danger: true, "data-testid": "leave-go" }}
         cancelText="留下继续编辑" cancelButtonProps={{ "data-testid": "leave-stay" }}

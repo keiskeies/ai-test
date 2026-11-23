@@ -50,7 +50,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.errors import ApiError
-from app.core.service import ctx_from_actor, ensure_project_access, service
+from app.core.service import ctx_from_actor, ensure_project_access, service, trigger_from_entry
 from app.modules.adb_test.case_services import _case
 from app.modules.adb_test.models import STATUS_NORMAL, STATUS_RECYCLED, AdbCase, AdbDevice
 from app.modules.execution.adb_lock import (
@@ -758,7 +758,7 @@ async def adb_case_run(payload: AdbCaseRunIn, ctx) -> AdbRunEnqueueOut:
     # 设备占用也不拦——后台 run 排队等设备是 §6.4 的默认承诺。
     rec = await new_run(ctx.db, project_id=payload.project_id, subject_type="adb_case",
                         subject_id=c.id, subject_name=c.name, env_id=None, env_name=None,
-                        trigger="agent" if ctx.entry == "agent" else "manual",
+                        trigger=trigger_from_entry(ctx.entry),
                         created_by=ctx.user_id,
                         max_runtime_ms=get_settings().adb_default_max_runtime_ms)
     rid = rec.id

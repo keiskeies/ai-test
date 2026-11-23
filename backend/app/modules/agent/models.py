@@ -71,6 +71,7 @@ class AgentApproval(Base):
     tool_call_id: Mapped[str] = mapped_column(String(64), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
     args: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    decision: Mapped[str | None] = mapped_column(String(16), nullable=True)  # approve/deny/NULL=pending
+    # once=仅放行本次 / session=本会话该工具免再批 / deny=拒绝 / NULL=待批（D263 审批门）
+    decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
     comment: Mapped[str | None] = mapped_column(String(500), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)

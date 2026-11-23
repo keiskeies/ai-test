@@ -7,9 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.core.errors import ApiError, Page, paginate
-from app.core.service import ServiceResult, ensure_project_access, service
+from app.core.service import ServiceResult, ensure_project_access, service, trigger_from_entry
 from app.modules.api_test import schemas
 from app.modules.api_test.models import ApiCase, ApiDefinition, DataSet
+from app.modules.execution.services import save_run
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.visibility import assert_row_visible, visible_clause
 
 if TYPE_CHECKING:  # 只给类型检查器看：运行期不需要，也别把 db 层拉进依赖图
@@ -18,6 +20,24 @@ if TYPE_CHECKING:  # 只给类型检查器看：运行期不需要，也别把 d
 # 覆盖层可触及的请求键（§7.5：整键替换，不做深合并）
 # 单一口径来自 schemas：合并、校验、取消覆盖三处必须看到同一份键名
 OVERLAY_KEYS = schemas.OVERLAY_KEYS
+
+# D223：数据集列表的可筛面（D47-a 三件套铺到数据集页）。白名单只收 `data_set` 上真实
+# 存在的列：name / created_at / updated_at。刻意不进的四项：
+# - `columns` / `rows` 是 JSON 表格内容，不是表格属性（按「第几列叫什么」筛没有语义）；
+# - `row_count` 是出参里 len(rows) 现算的、不是列（SQL 里没有可比的对象）；
+# - `used_by` / `scenario_held` 是列表时现算的引用计数与拦截标记，同样不是列；
+# - `project_id` 是越权正门，由 ensure_project_access 管（filter_registry 模块 docstring）。
+# 项目内唯一名（uq_dataset_project_name）让 name 的 EQUALS 恰好只中一行，IN 也才可枚举。
+DATASET_LIST_FILTER = ListViewFilter(
+    view_type="dataset",
+    label="数据集",
+    fields={
+        "name": FieldDecl(DataSet.name, "text", "数据集名称", nullable=False),
+        "created_at": FieldDecl(DataSet.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(DataSet.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(DATASET_LIST_FILTER)
 
 
 def merge_request(defn: ApiDefinition, case: ApiCase | None) -> dict | None:
@@ -208,6 +228,32 @@ async def api_case_get(payload: schemas.CaseGetIn, ctx) -> schemas.CaseOut:
     assert ctx.db is not None
     c = await _visible_case(ctx.db, ctx, payload.project_id, payload.case_id)
     return await _case_out(ctx.db, c)
+
+
+@service(
+    perm="api:case:run", effect="write", name="api_case_run",
+    description="执行接口用例：真实发送一次请求并落 run（trigger 按入口记 manual/schedule；"
+                "与调试共用 _execute_case 执行链；计划执行经此投递接口用例——D228）",
+    http={"method": "POST", "path": "/api-cases/{case_id}/run", "tags": ["api_test"]},
+)
+async def api_case_run(payload: schemas.ApiCaseRunIn, ctx) -> schemas.ApiCaseRunOut:
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("api:case:run")
+    assert ctx.db is not None
+    from app.modules.api_test.services import _execute_case
+
+    result, req, env_name, case_name = await _execute_case(
+        ctx, payload.project_id, payload.case_id, payload.env_id)
+    rec = await save_run(
+        ctx.db, project_id=payload.project_id, subject_type="api_case",
+        subject_id=payload.case_id, subject_name=case_name,
+        env_id=payload.env_id, env_name=env_name,
+        # 事实口径：UI 手动 = manual、定时计划 = schedule、Agent = agent；调试另有其入口。
+        trigger=trigger_from_entry(ctx.entry),
+        result=result, request_snapshot=req, created_by=ctx.user_id)
+    await ctx.db.commit()
+    return schemas.ApiCaseRunOut(run_id=rec.id, ok=result.ok,
+                                 passed=result.passed(), status=result.status)
 
 
 @service(
@@ -445,7 +491,11 @@ async def data_set_list(payload: schemas.DatasetListIn, ctx) -> ServiceResult:
     await ensure_project_access(ctx, payload.project_id)
     ctx.require("api:dataset:read")
     assert ctx.db is not None
-    stmt = select(DataSet).where(DataSet.project_id == payload.project_id).order_by(DataSet.id)
+    stmt = select(DataSet).where(DataSet.project_id == payload.project_id)
+    # D223：高级搜索条件组进同一个 WHERE，位置在 order_by / paginate 之前——白名单外
+    # 400 带本页清单（ListViewFilter.parse 的文案）；游标续页仍吃同一份条件。
+    stmt = stmt.where(DATASET_LIST_FILTER.parse(payload.filter))
+    stmt = stmt.order_by(DataSet.id)
     page = await paginate(ctx.db, stmt, cursor_col=DataSet.id, row_key=lambda r: r.id,
                           cursor=payload.cursor, size=payload.size)
     used = await _used_by(ctx.db, [d.id for d in page.items])

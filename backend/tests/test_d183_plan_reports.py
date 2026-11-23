@@ -576,22 +576,26 @@ async def test_report_perm_gates_deny_real_roles(client, session, make_user) -> 
     assert d2.status_code == 403 and d2.json()["details"]["perm"] == "testplan:report:read"
 
 
-def test_report_services_declare_exactly_three_bits_no_manage_no_update() -> None:
+def test_report_services_declare_exactly_four_bits_no_manage() -> None:
     """静态钉（镜像不是守护，诚实条款同 test_link_services_declare_no_manage_bit）：
-    报告面只注册 read/create/delete 三位；没有 :manage（MEMBER 的 -*:manage 天然挡不住
-    任何报告动作，所以**没有**任何报告门禁走 :manage——本刀没有归档类单向门）；
-    也没有 :update（本刀没有任何 update 服务——不凭空注册没人实现的位，判据 1 用在权限位上）。
+
+    报告面只注册 read/create/delete/update 四位；没有 :manage（MEMBER 的 -*:manage 天然
+    挡不住任何报告动作，所以**没有**任何报告门禁走 :manage——本刀没有归档类单向门）。
+    :update 自 D210 起只服务**改名**（plan_report_rename，只写 name 一列，不碰内容快照）——
+    这不是把「没有 update」改成「随便 update」，内容列仍没有列外写入方（D210 用例钉）。
     """
     from app.core.registry import REGISTRY
 
     for name, verb in (("plan_report_list", "read"), ("plan_report_get", "read"),
-                       ("plan_report_create", "create"), ("plan_report_delete", "delete")):
+                       ("plan_report_create", "create"), ("plan_report_delete", "delete"),
+                       ("plan_report_rename", "update")):
         spec = REGISTRY.get(name)
         assert spec is not None, "注册表没有 " + name
         assert spec.perm == "testplan:report:" + verb, name + " 的位不是 testplan:report:" + verb
-    assert all("manage" not in REGISTRY.get(n).perm and "update" not in REGISTRY.get(n).perm
-               for n in ("plan_report_list", "plan_report_get", "plan_report_create", "plan_report_delete")), \
-        "报告面长出了 :manage 或 :update（本刀裁决：没有单向门、没有 update 服务）"
+    assert all("manage" not in REGISTRY.get(n).perm
+               for n in ("plan_report_list", "plan_report_get", "plan_report_create",
+                         "plan_report_delete", "plan_report_rename")), \
+        "报告面长出了 :manage（报告没有单向门，D183 §五裁决）"
 
 
 # ══════════ 9. 页码判据（D47-b 全套） ══════════
@@ -672,10 +676,11 @@ async def test_report_cross_project_verbatim_and_shared_readable(client, session
 async def test_generated_rows_are_immutable_stamp(client, session, make_user) -> None:
     """两张新表的 updated_at 必须逐行 == created_at（行不可变 ⇒ 二者恒等）。
 
-    PlanReport/PlanReportItem 的 docstring 里 updated_at 的诚实条款说：它没有第二个写入方，
-    存在的意义是「没有任何路径动过这行」的断言载体（快照逐字节用例消费 payload 里的
-    时间列）。这条从库侧钉同一件事；若将来给报告加 update 服务，这条与那句 docstring
-    同提交一起改。读走 _db_scalar（另开连接，理由见那个函数）。
+    PlanReport/PlanReportItem 的 docstring 里 updated_at 的诚实条款说：**未改名的行**没有
+    第二个写入方，存在的意义是「没有任何路径动过这行内容」的断言载体（快照逐字节用例消费
+    payload 里的时间列）。D210 起改名（plan_report_rename）会写 updated_at；本条仍钉
+    「生成后未改名 ⇒ 两戳恒等」，改名只动 name/updated_at 由 D210 用例反面钉住。
+    读走 _db_scalar（另开连接，理由见那个函数）。
     """
     boss, hb = await make_user("d183s4i", admin=True)
     pid = await _proj(client, hb, "D183时间戳")

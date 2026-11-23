@@ -2,7 +2,7 @@
 // 详情抽屉复用 DebugPanel：调试页看到的断言卡与响应体，在记录里必须是同一套渲染，
 // 否则「现场」与「档案」给出两种结论，用户不知道该信谁。
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Drawer, Empty, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
+import { Alert, Button, Card, Drawer, Empty, Select, Space, Tag, Tooltip, Typography } from "antd";
 import { ReloadOutlined } from "../ui/icons";
 import type { ColumnsType } from "antd/es/table";
 import { useSearchParams } from "react-router-dom";
@@ -17,6 +17,25 @@ import { ListPager } from "../shared/listPagination";
 import { SELECTABLE_TRIGGERS, STATUSES, SUBJECT_TYPES, TRIGGERS, vocabMeta } from "../shared/runVocab";
 import type { Page, RunRow } from "../api/api";
 import { useAuth } from "../auth/store";
+import { can, patternsForProject } from "../auth/perms";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import {
+  applyColumnPrefs, emptyFilter, isFilterEmpty,
+  type ColumnChoice, type FilterDoc,
+} from "../shared/listFilters";
+
+// D242：列设置面板要露的列（key 与下方 columns 的 key 逐字一致；ops 是操作钮，不可隐藏）。
+const RUN_COL_CHOICES: ColumnChoice[] = [
+  { key: "time", label: "时间" },
+  { key: "subject", label: "对象" },
+  { key: "trigger", label: "触发" },
+  { key: "status", label: "状态" },
+  { key: "code", label: "响应码" },
+  { key: "elapsed", label: "耗时" },
+  { key: "env", label: "环境" },
+  { key: "operator", label: "执行人" },
+];
 
 // 触发来源与状态的展示词表在 shared/runVocab（与后端 Field(pattern=...) 同源，
 // 由 runVocab.test.ts 钉死）：原先这两张表写死在本文件里，漂到过「筛选项里有 case、
@@ -70,8 +89,9 @@ export function pickDeepLinkHit<T extends { id: string }>(rows: T[], target: str
 }
 
 function RunsWorkbench() {
-  const { project } = useAuth();
+  const { project, user } = useAuth();
   const pid = project!.id;
+  const perms = patternsForProject(project, user?.is_system_admin);
   const [items, setItems] = useState<RunRow[]>([]);
   // D47-b：页码分页（current/size/total）替换「加载更多」游标追加。一页只许有一个
   // 「我在第几页」的真相——按钮和页码并存就是两把尺子，后端拿 400 禁的正是这个。
@@ -86,6 +106,10 @@ function RunsWorkbench() {
   // 和换档位是同一个 hazard（listPagination.tsx 注释③）。三个筛选只有 patch 这一个写入口，
   // 回页就钉在这唯一入口处，测试从第 3 页改筛选钉它。
   const patch = (p: Partial<typeof f>): void => { setF((old) => ({ ...old, ...p })); setCurrent(1); };
+  // D242：高级搜索条件组 + 列设置偏好。筛选只有 patch 与 setAdvFilter 两个写入口，
+  // 两处都回第 1 页（同下方快捷轴的口径）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("run", RUN_COL_CHOICES.map((c) => c.key));
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -121,6 +145,8 @@ function RunsWorkbench() {
       if (f.status) q.set("status", f.status);
       // R112：UI 运行会出现在列表里——没有这个筛选，它就只能混在全量里看
       if (f.subjectType) q.set("subject_type", f.subjectType);
+      // D242：空条件不拼参数（URL 里不出现骗人的 filter=），非空才交给后端编 WHERE。
+      if (!isFilterEmpty(advFilter)) q.set("filter", JSON.stringify(advFilter));
       // 请求永不带 cursor：current+cursor 同传后端直接 400，一页两把尺子正是被禁的那件事
       const r = await get<Page<RunRow>>("/runs?" + q.toString(), { silent: true });
       // 页码模式是替换语义：第 3 页的行就只画第 3 页的，别页的行必须下桌。
@@ -135,7 +161,7 @@ function RunsWorkbench() {
       setItems([]);
       setTotal(null);
     } finally { setLoading(false); }
-  }, [pid, f, current, pageSize]);
+  }, [pid, f, advFilter, current, pageSize]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -144,14 +170,16 @@ function RunsWorkbench() {
     try { setDetail(await get<RunDetail>("/runs/" + id + "?project_id=" + encodeURIComponent(pid))); }
     catch { /* client 已 toast，抽屉不打开 */ }
   }
+  // D242：key 与 RUN_COL_CHOICES 逐字一致——applyColumnPrefs 只按 key 过滤，
+  // 只写 dataIndex 的列永远藏不掉（列设置会变成「勾了没反应」的假开关）。
   const cols: ColumnsType<RunRow> = [
-    { title: "时间", dataIndex: "created_at", width: 168, render: (v: string | null) => (
+    { title: "时间", key: "time", dataIndex: "created_at", width: 168, render: (v: string | null) => (
       // UTC 存储 / Asia/Shanghai 展示（§3.4-6）：换算在 shared/timefmt，页面不碰字符串切片。
       // 老写法 slice(0,19) 显示的是 UTC 钟点，比真实时间早 8 小时，而形状正则测不出来（R68）。
       <Typography.Text className="tp-text-sm" data-testid="run-time">
         {fmtTime(v) ?? "—"}
       </Typography.Text>) },
-    { title: "对象", dataIndex: "subject_name", render: (v: string, r: RunRow) => (
+    { title: "对象", key: "subject", dataIndex: "subject_name", render: (v: string, r: RunRow) => (
       <Space size={4}>
         {/* D141：旧兜底 `v ?? 「…已删除」` 删了——subject_name 是 NOT NULL 快照列
             （execution/models.py:22，「对象删除后仍可读」），既不可达、语义也是假的：
@@ -166,24 +194,42 @@ function RunsWorkbench() {
           </Tag>
         </Tooltip>
       </Space>) },
-    { title: "触发", dataIndex: "trigger", width: 92, render: (v: string) => <TriggerTag value={v} /> },
-    { title: "状态", dataIndex: "status", width: 104, render: (v: string) => {
+    { title: "触发", key: "trigger", dataIndex: "trigger", width: 92, render: (v: string) => <TriggerTag value={v} /> },
+    { title: "状态", key: "status", dataIndex: "status", width: 104, render: (v: string) => {
       const m = vocabMeta(STATUSES, v);
       return <Tag data-testid="run-status" color={m.color}>{m.label}</Tag>;
     } },
-    { title: "码", dataIndex: "status_code", width: 74, render: (v: number | null) => (
+    { title: "码", key: "code", dataIndex: "status_code", width: 74, render: (v: number | null) => (
       <Tag data-testid="run-code" color={statusColor(v)}>{v ?? "—"}</Tag>) },
-    { title: "耗时", dataIndex: "elapsed_ms", width: 88, render: (v: number | null) => (
+    { title: "耗时", key: "elapsed", dataIndex: "elapsed_ms", width: 88, render: (v: number | null) => (
       <Typography.Text className="tp-text-sm">{v == null ? "—" : v + " ms"}</Typography.Text>) },
-    { title: "环境", dataIndex: "env_name", width: 100, render: (v: string | null) => v ?? "—" },
-    { title: "执行人", dataIndex: "created_by_name", width: 100, render: (v: string | null) => v ?? "—" },
+    { title: "环境", key: "env", dataIndex: "env_name", width: 100, render: (v: string | null) => v ?? "—" },
+    { title: "执行人", key: "operator", dataIndex: "created_by_name", width: 100, render: (v: string | null) => v ?? "—" },
     { title: "", key: "ops", width: 66, render: (_: unknown, r: RunRow) => (
       <Button size="small" type="link" data-testid="run-detail" onClick={() => void openDetail(r.id)}>详情</Button>) },
   ];
 
+  // 高级搜索下拉候选：三轴直接用页面同一份词表（runVocab 是唯一真相）。
+  // 触发**只给可承诺项**（与上方快捷筛选同口径）：webhook 零写入方，摆进下拉就是假门。
+  // created_by 不给候选（本页不拉成员列表）：id 控件仍可手填，不演「没有这一项」。
+  const filterValueOptions: Record<string, Option[]> = {
+    subject_type: Object.entries(SUBJECT_TYPES).map(([value, v]) => ({ value, label: v.label })),
+    trigger: Object.entries(SELECTABLE_TRIGGERS).map(
+      ([value, v]) => ({ value, label: v.icon + " " + v.label })),
+    status: Object.entries(STATUSES).map(([value, v]) => ({ value, label: v.label })),
+  };
+
   return (
     <div className="tp-fill tp-fill-body" data-testid="runs-body">
       <div style={{ flex: "0 0 auto" }}>
+      {/* D242：高级搜索。条件是 WHERE（后端 RUN_LIST_FILTER），与下方三条快捷轴
+          并行 AND；筛选一变回第 1 页。 */}
+      <ListToolbar projectId={pid} viewType="run"
+        filter={advFilter} onFilterChange={(f) => { setAdvFilter(f); setCurrent(1); }}
+        allColumns={RUN_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        valueOptions={filterValueOptions}
+        canSaveView={can(perms, "search:view:create")}
+        canDeleteView={can(perms, "search:view:delete")} />
       <Space style={{ marginBottom: 12 }} wrap data-testid="runs-filters">
         <Select allowClear placeholder="对象类型" style={{ width: 140 }} value={f.subjectType}
           onChange={(v) => patch({ subjectType: v })} data-testid="runs-filter-subject-type"
@@ -230,7 +276,7 @@ function RunsWorkbench() {
       <AdminTable<RunRow>
         rowKey="id"
         loading={loading}
-        columns={cols}
+        columns={applyColumnPrefs(cols, colPref)}
         dataSource={items}
         pagination={false}
         scroll={{ x: 980 }}

@@ -9,6 +9,27 @@ from app.core.security import hash_password, verify_password
 from app.core.service import ServiceResult, service
 from app.modules.iam import schemas, user_importers
 from app.modules.iam.models import User
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
+
+# D244：平台用户页高级搜索（D47-a 三件套铺到本页）。白名单只收页面上看得见的
+# 标量列：账号 / 姓名 / 邮箱 / 类型（是否平台管理员）/ 状态 / 创建时间。
+# - `password_hash` 是凭据材料，连「按哈希子串筛」的入口都不该存在（等于给口令
+#   哈希一个可探测的比对面）；`prefs` 是用户偏好 JSON；`id` 是定位键。
+# - 平台用户表没有 project_id，filter-meta 的 project_id 只做作用域校验，
+#   不参与数据过滤——各项目看到的平台用户集合相同是设计。
+USER_LIST_FILTER = ListViewFilter(
+    view_type="user",
+    label="平台用户",
+    fields={
+        "account": FieldDecl(User.account, "text", "账号", nullable=False),
+        "name": FieldDecl(User.name, "text", "姓名", nullable=False),
+        "email": FieldDecl(User.email, "text", "邮箱"),
+        "is_system_admin": FieldDecl(User.is_system_admin, "bool", "平台管理员", nullable=False),
+        "status": FieldDecl(User.status, "enum", "状态", nullable=False),
+        "created_at": FieldDecl(User.created_at, "time", "创建时间", nullable=False),
+    },
+)
+register(USER_LIST_FILTER)
 
 
 def _out(u: User) -> schemas.UserOut:
@@ -32,6 +53,8 @@ async def user_list(payload: schemas.UserListIn, ctx) -> ServiceResult:
     ctx.require("system:user:read")
     assert ctx.db is not None
     stmt = select(User).order_by(User.id)
+    # D244：条件进 SQL，在游标分页之前；空条件 = 没传。
+    stmt = stmt.where(USER_LIST_FILTER.parse(payload.filter))
     page = await paginate(ctx.db, stmt, cursor_col=User.id, row_key=lambda r: r.id,
                           cursor=payload.cursor, size=payload.size)
     return Page(items=[_out(u) for u in page.items], next_cursor=page.next_cursor)

@@ -131,11 +131,11 @@ export default function DebugPanel({ result, subject, requestLine, assertionsKno
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
           {rows.map((a, i) => (
             <Card data-testid="assertion-card" key={i} size="small"
-              style={{ background: a.passed ? "#F0FBF6" : "#FEF3F1" }}>
+              style={{ background: a.passed ? "var(--tp-tag-green-bg)" : "var(--tp-tag-red-bg)" }}>
               <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
                 {a.passed
-                  ? <CheckCircleFilled style={{ color: "#2BA47D" }} />
-                  : <CloseCircleFilled style={{ color: "#E5484D" }} />}
+                  ? <CheckCircleFilled style={{ color: "var(--tp-func-success)" }} />
+                  : <CloseCircleFilled style={{ color: "var(--tp-func-error)" }} />}
                 <Typography.Text strong>{a.type}</Typography.Text>
                 {a.path && <Typography.Text code>{a.path}</Typography.Text>}
                 <Typography.Text type="secondary">期望 {JSON.stringify(a.expected ?? null)}</Typography.Text>

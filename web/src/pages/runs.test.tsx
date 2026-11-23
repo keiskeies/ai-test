@@ -15,7 +15,7 @@
 // fetch 全 mock，同 reports.test.tsx / schedules.test.tsx 手法；
 // client.ts:77 给所有请求前缀 /api/v1，断言 URL 一律带上该前缀。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 Object.defineProperty(window, "matchMedia", {
@@ -63,6 +63,23 @@ const DETAIL = {
 const PROJECT = { id: "p1", name: "履约", description: null, status: "normal",
   my_role: "PROJECT_ADMIN", my_perms: ["*"] };
 
+// D242：高级搜索三件套的依赖。字段与后端 RUN_LIST_FILTER 同名同 kind——表单照 meta
+// 渲染，前端不自己列字段名。
+const FILTER_META = {
+  view_type: "run", view_label: "运行记录",
+  supported_view_types: ["run"],
+  fields: [
+    { field: "subject_name", label: "对象名称", kind: "text",
+      ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS"] },
+    { field: "status", label: "状态", kind: "enum",
+      ops: ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"] },
+    { field: "trigger", label: "触发方式", kind: "enum",
+      ops: ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"] },
+    { field: "created_at", label: "创建时间", kind: "time", ops: ["BETWEEN", "GT", "LT"] },
+  ],
+  unavailable: {},
+};
+
 const calls: { url: string; method: string; body: unknown }[] = [];
 
 /** D47-b 页码模式响应：total 可选——缺键就是后端游标式响应的真实形状，不是显式 null。 */
@@ -84,6 +101,9 @@ function mockBackend(over: BackendOpts = {}): BackendOpts {
     // 桩不许比真接口更好说话。
     const resp = (status: number, json: unknown) =>
       ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(json)) as unknown }) as unknown as Response;
+    // D242：ListToolbar 挂载即拉元数据与个人视图（未 mock 会 throw，整页红成取数失败）
+    if (url.includes("/filter-meta?")) return resp(200, FILTER_META);
+    if (url.includes("/saved-views?")) return resp(200, []);
     if (/\/runs\/[^/?]+\?/.test(url)) return resp(200, backend.detail ?? DETAIL);
     if (url.includes("/runs?")) {
       if (backend.listStatus) {
@@ -558,6 +578,12 @@ describe("零引用 testid 补账：runs-body / runs-filters / runs-empty", () =
     global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       calls.push({ url, method: (init?.method ?? "GET").toUpperCase(), body: undefined });
+      if (url.includes("/filter-meta?")) {
+        return { ok: true, status: 200, json: async () => FILTER_META } as unknown as Response;
+      }
+      if (url.includes("/saved-views?")) {
+        return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+      }
       const q = new URL(url, "http://x").searchParams;
       const items = ROWS.filter((r) => (["subject_type", "trigger", "status"] as const)
         .every((k) => !q.get(k) || r[k] === q.get(k)));
@@ -651,6 +677,58 @@ describe("零引用 testid 补账：runs-body / runs-filters / runs-empty", () =
 // （useSearchParams 全页 grep = 0），参数被静默吞掉。现在 runs 是诚实消费者：行在第一页
 // → 高亮 + 点名横幅；不在 → 「不在这页里」明说；没参数 → 什么都不多渲染。
 // 形状同 schedules/notifyChannels 的 ?q= 落点（pickDeepLinkHit 同款纯函数同套钉法）。
+describe("D242 高级搜索 + 列设置（三件套铺到运行记录）", () => {
+  const listReqs = () => calls.filter((c) => c.url.includes("/runs?"));
+  const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+
+  it("空条件不拼 filter；应用「对象名称包含 登录」后请求带条件 JSON，且从第 3 页回第 1 页", async () => {
+    // 变异靶：load 不接 advFilter（第二条请求无 filter）· 条件变化不回第 1 页
+    //（current 仍为 3）· 空条件也拼 filter=（第一条请求带 filter=）
+    mockBackend({ pages: [
+      { items: [run("a"), run("b")], next_cursor: null, total: 60 },
+      { items: [run("c")], next_cursor: null, total: 60 },
+    ] });
+    render(<MemoryRouter><RunsPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByTestId("run-row").length).toBe(2));
+    expect(listReqs()[0].url).not.toContain("filter="); // 「没筛选」不该写成骗人的 filter=
+    // 先到第 3 页，证明条件变化真有「回第 1 页」这件事可做
+    fireEvent.click(screen.getByTestId("list-pager").querySelector(".ant-pagination-item-3 a") as Element);
+    await waitFor(() => expect(new URL(listReqs()[listReqs().length - 1].url, "http://x")
+      .searchParams.get("current")).toBe("3"));
+    const before = listReqs().length;
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    // 字段名来自后端 meta 的第一项（subject_name），前端不自列字段
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "登录" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listReqs().length).toBe(before + 1));
+    const q = new URL(listReqs()[listReqs().length - 1].url, "http://x").searchParams;
+    expect(JSON.parse(q.get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "subject_name", operator: "CONTAINS", value: "登录" }],
+    });
+    expect(q.get("current")).toBe("1"); // 条件一变必回第 1 页
+  });
+
+  it("列设置勾掉「环境」只藏那一列（其余表头原样）", async () => {
+    // 变异靶：columns 不包 applyColumnPrefs（勾了没反应）· key 与 CHOICES 漂移（藏错列）
+    mockBackend();
+    render(<MemoryRouter><RunsPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByTestId("run-row").length).toBe(3));
+    expect(thead()).toContain("环境");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["时间", "对象", "触发", "状态", "响应码", "耗时", "环境", "执行人"]);
+    fireEvent.click(boxes[labels.indexOf("环境")]);
+    await waitFor(() => expect(thead()).not.toContain("环境"));
+    expect(thead()).toContain("执行人");
+  });
+});
+
 describe("pickDeepLinkHit（?run=<id> 认行的纯判断，无 DOM）", () => {
   it("id 在已加载行里才认；不在/为空/列表没加载完一律 null", () => {
     expect(pickDeepLinkHit(ROWS, "r2")).toBe("r2");
@@ -707,6 +785,7 @@ describe("?run=<id> 深链落点（adbCaseDetail 执行后的跳转真有人接�
   });
 
   it("翻页补上真身（D47-b 页码版）：miss 横幅在第 3 页的行出现后翻成「就在下表」并高亮——横幅不赖在假话上", async () => {
+
     // 第 1 页没有 zz，第 3 页才是 zz；变异靶：认行只跑一次（一次性 latch）→ 翻页后不重认，红
     mockBackend({ pages: [
       { items: [run("a"), run("b")], next_cursor: null, total: 60 },

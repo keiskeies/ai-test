@@ -5,7 +5,7 @@
 //      {project_id, model_id, thinking, mode}——任何一键改名都是后端契约静默断裂；
 //   ② 消息 POST body 逐字 {content}（不是 text）；SSE 只在会话建成后开一次（s1）；
 //   ③ RUN_END 终态分档（:75-88 注释）：WAIT_APPROVAL → 等待审批且中断钮必须活着
-//      （S0 无页面审批，中断是唯一出口）；ERROR → 出错（崩掉的 run 不许洗成绿「空闲」）；
+//      （D263 起审批卡也可回传，中断是另一条随时可走的出口）；ERROR → 出错（崩掉的 run 不许洗成绿「空闲」）；
 //      DONE/CANCELLED/未知 → 空闲且 run 清空（中断钮消失）；
 //      APPROVAL_REQ（:91）同样进等待审批；
 //   ④ 诚实失败：发消息 500 → 状态回落到发起前那一刻的状态（绝不假「运行中」）、输入不丢、
@@ -21,7 +21,7 @@
 //   ⑦ 重新开始/卸载必关旧 SSE 句柄（流泄漏 = 断线重连风暴）；
 //   ⑧ 挂起态（等待审批）与运行中同口径忙：send/sendText/cardCtx.busy 共用中断钮那一个
 //      判定（挂起时后端 messages 必 409）；任何发送失败 = 还原调用前状态——挂起不被洗成
-//      「空闲」，中断钮（唯一出口）不拆。
+//      「空闲」，中断钮与审批卡都不拆。
 //   ⑨ D179 世代守卫：以上⑧是「同一条腿的同步还原」，表达不出**迟到**的收尾。SSE 比
 //      POST messages 回包先到是真事（快 run 的 RUN_END 在途窗口里就能推来），于是：
 //      迟到的失败 catch 把「等待审批」洗成发起前的「空闲」（中断钮拆掉）；迟到的 run_id
@@ -177,6 +177,9 @@ beforeEach(() => {
         return cfg.message503 ? fail(503, "engine_down", "执行链路不可用") : fail(400, "invalid_input", "输入不合法");
       return resp({ run_id: cfg.runIdByCall[i] ?? cfg.runId });
     }
+    // D263 审批回传：路径逐字 /agent/runs/{run}/approval，body {tool_call_id, decision}
+    if (method === "POST" && /^\/api\/v1\/agent\/runs\/[^/]+\/approval$/.test(url))
+      return resp({ ok: true });
     if (method === "POST" && /^\/api\/v1\/agent\/sessions\/s1\/interrupt$/.test(url))
       return fail(404, "run_gone", "运行已结束"); // 钉 silent catch：任何错都不许吵出 toast
     throw new Error("未 mock 的请求: " + method + " " + url);
@@ -641,15 +644,35 @@ it("RUN_END {status:\"CANCELLED\"} →「空闲」不是「已取消」：中断
   expect(screen.queryByTestId("bench-interrupt")).toBeNull(); // run 清空：没东西可中断
 });
 
-it("APPROVAL_REQ 事件：状态即跳「等待审批」，审批卡说清「暂不支持在页面上批准」，中断钮在", async () => {
+it("APPROVAL_REQ 事件：状态即跳「等待审批」，审批卡摊开工具与参数，中断钮在", async () => {
   await startSession();
   await sendMessage("帮我改数据库结构");
-  sseEmit(0, ev(3, "APPROVAL_REQ", { tool_name: "create_api_case", args: { name: "订单查询" } }));
+  sseEmit(0, ev(3, "APPROVAL_REQ",
+    { run_id: "r1", tool_call_id: "tc1", tool_name: "create_api_case", args: { name: "订单查询" } }));
   await waitFor(() => expect(statusText()).toBe("等待审批"));
   const card = screen.getByTestId("approval-card");
   expect(card.textContent).toContain("create_api_case");
-  expect(card.textContent).toContain("暂不支持在页面上批准");
+  expect(card.textContent).toContain("订单查询");
   expect(screen.getByTestId("bench-interrupt")).not.toBeNull(); // 等待审批也算 running（:153）
+});
+
+it("审批卡三档回传：POST 路径与 body 逐字；决策事件把卡翻成只读", async () => {
+  cfg.runId = "r88";
+  await startSession();
+  await sendMessage("建个用例");
+  await waitClaimed();
+  sseEmit(0, ev(3, "APPROVAL_REQ",
+    { run_id: "r88", tool_call_id: "tc9", tool_name: "create_api_case", args: { name: "x" } }));
+  await waitFor(() => expect(screen.getByTestId("approval-once")).not.toBeNull());
+  fireEvent.click(screen.getByTestId("approval-once"));
+  await waitFor(() => expect(
+    callsTo("POST", /^\/api\/v1\/agent\/runs\/r88\/approval$/).length).toBe(1));
+  expect(postBody(callsTo("POST", /\/approval$/)[0]))
+    .toEqual({ tool_call_id: "tc9", decision: "once" });
+  // APPROVAL_DECISION 一到（回放/直播同一条路），卡片变只读徽标，按钮不再重复可点
+  sseEmit(0, ev(4, "APPROVAL_DECISION", { tool_call_id: "tc9", decision: "once" }));
+  await waitFor(() => expect(screen.queryByTestId("approval-once")).toBeNull());
+  expect(screen.getByTestId("approval-decided").textContent).toContain("已批准");
 });
 
 it("挂起态（等待审批）拒发：Ctrl+Enter 一条消息都不发，状态不被洗、中断钮留在屏上、草稿不吞", async () => {

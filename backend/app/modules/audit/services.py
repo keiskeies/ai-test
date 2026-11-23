@@ -16,6 +16,7 @@ from sqlalchemy.sql import column, table
 from app.core.errors import ApiError, Page, paginate_desc
 from app.core.service import ServiceResult, ensure_project_access, service
 from app.modules.audit.models import AuditLog
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 
 
 async def record(
@@ -42,6 +43,27 @@ _APP_USER = table("app_user", column("id"), column("name"))
 # 展示时区（§3.4-6）：与 workbench.services.DISPLAY_TZ 同值不同源——audit 是领域模块，
 # 不 import composition 层（import-linter 契约 1 的形状纪律），3 行常量的重复换零跨模块边。
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
+
+# D246：审计日志页高级搜索（D47-a 三件套铺到设置页「审计」Tab）。白名单只收表格里
+# 看得见的标量列：时间 / 操作人 / 入口 / 动作 / 目标 / 结果。
+# - `diff` 是 before/after 快照 JSON，比较它没有稳定语义；`id` 是定位键；
+#   `user_id` 不单列——操作人已经在表里以姓名展示，且按 id 筛是给机器用的口径
+#   （快捷筛选仍保留 user_id 参数，那是既有行为，不在白名单里重复一份）。
+# - `target` 在项目级列表里恒等于 project_id（写入口统一口径），但仍然是人看得懂
+#   的对象标识，保留为可筛列。
+AUDIT_LIST_FILTER = ListViewFilter(
+    view_type="audit",
+    label="审计日志",
+    fields={
+        "ts": FieldDecl(AuditLog.ts, "time", "时间", nullable=False),
+        "user_name": FieldDecl(_APP_USER.c.name, "text", "操作人"),
+        "entry": FieldDecl(AuditLog.entry, "enum", "入口", nullable=False),
+        "action": FieldDecl(AuditLog.action, "text", "动作", nullable=False),
+        "target": FieldDecl(AuditLog.target, "text", "目标"),
+        "ok": FieldDecl(AuditLog.ok, "bool", "结果", nullable=False),
+    },
+)
+register(AUDIT_LIST_FILTER)
 
 
 def _day_start_utc(d: date) -> datetime:
@@ -82,6 +104,9 @@ def _parse_bound(value: str | None, *, end: bool) -> tuple[datetime, bool] | Non
 
 class AuditListIn(BaseModel):
     project_id: str | None = None
+    # D246：高级搜索条件（JSON 串，形状同 shared/filters.py）；空/缺省 = 全量。
+    # 与下面五条快捷轴（entry/action/user_id/ok/ts_*）并行 AND。
+    filter: str | None = None
     entry: str | None = Field(default=None, pattern="^(http|agent|schedule)$")
     action: str | None = Field(default=None, max_length=128)
     user_id: str | None = None
@@ -147,6 +172,9 @@ async def audit_list(payload: AuditListIn, ctx) -> ServiceResult:
         stmt = stmt.where(AuditLog.user_id == payload.user_id)
     if payload.ok is not None:
         stmt = stmt.where(AuditLog.ok.is_(payload.ok))
+    # D246：条件进 SQL，且始终叠加在 project 作用域之后（只收窄不扩权）；
+    # 写在 order_by / 分页之前，游标页与总数口径同一条。
+    stmt = stmt.where(AUDIT_LIST_FILTER.parse(payload.filter))
     # 最新在前；ts 是秒级 DATETIME，同秒并列用 id 兜底保证翻页不重不漏（同 run_record 契约）
     stmt = stmt.order_by(AuditLog.ts.desc(), AuditLog.id.desc())
     page = await paginate_desc(

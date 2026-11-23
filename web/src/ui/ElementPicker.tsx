@@ -167,7 +167,7 @@ export default function ElementPicker({ value, onPick, testIdBase = "el-pick" }:
       {canCreate && creating && (
         // 内联展开的新建表单（§11.4.11 的字段口径：名称/类型/表达式；备注留给元素库页）
         <div data-testid={testIdBase + "-new-form"}
-          style={{ border: "1px dashed #d9d9d9", borderRadius: 6, padding: 8 }}>
+          style={{ border: "1px dashed var(--tp-border)", borderRadius: 6, padding: 8 }}>
           <Space direction="vertical" size={6} style={{ width: "100%" }}>
             <Input data-testid={testIdBase + "-new-name"} size="small" maxLength={200} value={cName} autoFocus
               placeholder="元素名（项目内唯一）" onChange={(e) => setCName(e.target.value)} />

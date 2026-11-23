@@ -33,6 +33,7 @@ from app.modules.ui_test.commands import validate_commands
 from app.modules.ui_test.element_services import _user_names
 from app.modules.ui_test.models import STATUS_RECYCLED, UiCase, UiElement
 from app.modules.ui_test.module_services import _ui_module
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.visibility import assert_row_visible, visible_clause
 
 
@@ -145,6 +146,31 @@ async def _gate(db, project_id: str, steps: Any) -> int:
     return len(steps) if isinstance(steps, list) else 0
 
 
+# D213：UI 用例列表的可筛面（D47-a 三件套从 api/plan 铺到 ui_case 页）。字段全是
+# ui_case 上真实存在的业务列；project_id / status 之外的取数开关（cursor/current/
+# recycled/module_id/unfiled_only）仍是顶层参数——它们一个管可见性、一个管视图，
+# 进了 filter 就等于让两套开关抢同一个名字。
+UI_CASE_LIST_FILTER = ListViewFilter(
+    view_type="ui_case",
+    label="UI 用例",
+    fields={
+        "name": FieldDecl(UiCase.name, "text", "用例名称", nullable=False),
+        "priority": FieldDecl(UiCase.priority, "enum", "优先级", nullable=False),
+        "enabled": FieldDecl(UiCase.enabled, "bool", "是否启用", nullable=False),
+        "module_id": FieldDecl(UiCase.module_id, "id", "所属模块"),
+        "env_id": FieldDecl(UiCase.env_id, "id", "所属环境"),
+        "owner_id": FieldDecl(UiCase.owner_id, "id", "负责人"),
+        "step_count": FieldDecl(UiCase.step_count, "number", "步骤数", nullable=False),
+        "last_run_at": FieldDecl(UiCase.last_run_at, "time", "最近执行时间"),
+        "last_run_status": FieldDecl(UiCase.last_run_status, "enum", "最近执行结果"),
+        "updated_by": FieldDecl(UiCase.updated_by, "id", "更新人"),
+        "created_at": FieldDecl(UiCase.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(UiCase.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(UI_CASE_LIST_FILTER)
+
+
 @service(
     perm="ui:case:read", effect="read", name="ui_case_list",
     description="列出项目下的 UI 用例（默认不含回收站；§11.5.4 六列的最近结果读冗余列，不 N+1 查 run_record）",
@@ -156,7 +182,8 @@ async def ui_case_list(payload: schemas.UiCaseListIn, ctx) -> ServiceResult:
     assert ctx.db is not None
     stmt = select(UiCase).where(UiCase.project_id == payload.project_id,
                                 visible_clause(UiCase, ctx),
-                                UiCase.status == (STATUS_RECYCLED if payload.recycled else "normal"))
+                                UiCase.status == (STATUS_RECYCLED if payload.recycled else "normal"),
+                                UI_CASE_LIST_FILTER.parse(payload.filter))
     if payload.unfiled_only:
         stmt = stmt.where(UiCase.module_id.is_(None))
     elif payload.module_id:

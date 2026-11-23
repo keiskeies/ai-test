@@ -4,7 +4,7 @@
 // 真实人数、全页不出现「预计」）+ 权限位缺按钮就**不渲染**（不是 disabled）。fetch 全 mock，
 // 同 workbench.test.tsx 手法。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import { MemoryRouter } from "react-router-dom";
 
@@ -139,6 +139,20 @@ describe("agoLabel（「最后心跳3m前」）", () => {
 const PROJECT = { id: "p1", name: "履约", description: null, status: "normal",
   my_role: "PROJECT_ADMIN", my_perms: ["*"] };
 
+// D224：设备页工具栏要的 /filter-meta。supported_view_types 必须含 adb_device，
+// 否则工具栏会把「桩没 mock 到」演成「本页不支持」——那是拿故障演事实。
+const ADB_DEVICE_META = {
+  view_type: "adb_device",
+  fields: [
+    { field: "name", label: "设备名", kind: "text",
+      ops: ["CONTAINS", "EQUALS", "IN", "NOT_CONTAINS", "NOT_EQUALS", "NOT_IN"] },
+    { field: "enabled", label: "启用", kind: "bool", ops: ["EQUALS", "NOT_EQUALS"] },
+  ],
+  supported_view_types: ["adb_device"],
+  view_label: "设备管理",
+  operators: [], labels: {}, kinds: {}, unavailable: {},
+};
+
 const OCCUPIED = device({ id: "d2", name: "小米13", serial: "192.168.1.21:5555",
   occupation: rowOcc({ occupied: true, holder: "run:r9:1:host", queued: 2 }),
   last_state: { model: "小米 13", os: "14", online: true, battery_level: 40,
@@ -193,6 +207,9 @@ function mockBackend(items: Row[], opts: {
     ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(json)) }) as unknown as Response;
   global.fetch = vi.fn(stormyFetch(async (input: RequestInfo | URL) => {
     const url = String(input);
+    // D224：工具栏的两条配置读（不参与「列表请求」计数）
+    if (url.includes("/filter-meta")) return resp(ADB_DEVICE_META);
+    if (url.includes("/saved-views")) return resp([]);
     if (/\/adb-devices\?/.test(url)) {
       listUrls.push(url);
       if (opts.listStatus) {
@@ -1112,5 +1129,50 @@ describe("D125 删除文案：引后端原话，解绑说「任一空闲不报�
     // 不钉的话，下一轮「精简文案」会把这半句优化成一张新的空头支票。
     expect(document.body.textContent).toContain("「任一空闲」自己也挑不出");
     expect(document.body.textContent).not.toContain("默认设备未绑定");
+  });
+});
+
+// ── D224：设备卡片墙的 D47-a 三件套（视图保存 / 高级搜索） ─────────────────
+describe("D224 高级搜索", () => {
+  it("空条件不拼 filter；应用「设备名包含 登录」后列表请求带条件 JSON（卡片墙不渲染列设置）", async () => {
+    const h = mockBackend([device(), OCCUPIED]);
+    render(<MemoryRouter><AdbDevicesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("adb-device-card-d1")).not.toBeNull());
+    expect(lastListQ(h).has("filter")).toBe(false);
+    // 卡片墙没有可切列的表格：列设置按钮不渲染（不摆点了没反应的假钮）
+    expect(screen.queryByTestId("lt-cols")).toBeNull();
+
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "登录" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+
+    await waitFor(() => expect(lastListQ(h).get("filter")).toBeTruthy());
+    expect(JSON.parse(lastListQ(h).get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "登录" }],
+    });
+    // 条件变更回第 1 页（与 state/回收站同一个口径）
+    expect(lastListQ(h).get("current")).toBe("1");
+  });
+
+  it("与 state 三档并行：先切「空闲」再应用条件，两个参数同时在请求里", async () => {
+    const h = mockBackend([device(), OCCUPIED, OFFLINE]);
+    render(<MemoryRouter><AdbDevicesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("adb-device-card-d1")).not.toBeNull());
+    fireEvent.click(within(screen.getByTestId("adb-device-filter")).getByText("空闲"));
+    await waitFor(() => expect(lastListQ(h).get("state")).toBe("idle"));
+
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "Pixel" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+
+    await waitFor(() => expect(lastListQ(h).get("filter")).toBeTruthy());
+    expect(lastListQ(h).get("state")).toBe("idle");
   });
 });

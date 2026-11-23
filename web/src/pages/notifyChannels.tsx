@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
-  Alert, Button, Drawer, Input, Modal, Select, Space, Table, Tag, Tooltip, Typography, message,
+  Alert, Button, Drawer, Input, Modal, Select, Space, Tag, Tooltip, Typography, message,
 } from "antd";
 import { PlusOutlined, ReloadOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
@@ -28,6 +28,12 @@ import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
 import { tp, tpv } from "../theme";
 import { FilterBar, Toolbar } from "../ui/Toolbar";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import {
+  applyColumnPrefs, emptyFilter, isFilterEmpty,
+  type ColumnChoice, type FilterDoc,
+} from "../shared/listFilters";
 import type { components } from "../api/schema";
 
 type Row = components["schemas"]["ChannelOut"];
@@ -67,6 +73,14 @@ export const TYPE_META: Record<ChannelType, { label: string; color: string }> = 
   EMAIL: { label: "邮箱", color: "orange" },
 };
 export const CHANNEL_TYPES = Object.keys(TYPE_META) as ChannelType[];
+
+// D243：列设置面板要露的列（key 与下方 columns 的 key 逐字一致；ops 是操作钮，不可隐藏）。
+const CHANNEL_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "type", label: "类型" },
+  { key: "config", label: "关键配置" },
+  { key: "last_send", label: "最近发送" },
+];
 
 export interface ConfigField {
   key: string;
@@ -282,6 +296,10 @@ function ChannelsPanel() {
   const [pageSize, setPageSize] = useState(100);
   const [total, setTotal] = useState<number | null>(null);
   const [typeFilter, setTypeFilter] = useState<string | undefined>();
+  // D243：高级搜索条件组 + 列设置偏好。筛选写入口只有 applyTypeFilter 与 setAdvFilter，
+  // 两处都回第 1 页（与类型筛选同一口径）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("channel", CHANNEL_COL_CHOICES.map((c) => c.key));
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<{ editing: Row | null } | null>(null);
@@ -323,7 +341,9 @@ function ChannelsPanel() {
     setLoadError(null);
     try {
       const q = new URLSearchParams({ size: String(pageSize), current: String(current),
-        ...(typeFilter ? { type: typeFilter } : {}) });
+        ...(typeFilter ? { type: typeFilter } : {}),
+        // D243：空条件不拼参数（URL 里不出现骗人的 filter=），非空才交给后端编 WHERE。
+        ...(isFilterEmpty(advFilter) ? {} : { filter: JSON.stringify(advFilter) }) });
       const page = await get<Page<Row>>("/notify-channels?" + q.toString(), { silent: true });
       setRows(page.items);
       // total 只从响应来，永不由 items.length 客户端现攒（页内行数不是总数）。
@@ -335,7 +355,7 @@ function ChannelsPanel() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "渠道列表加载失败");
     } finally { setLoading(false); }
-  }, [typeFilter, current, pageSize]);
+  }, [typeFilter, advFilter, current, pageSize]);
   useEffect(() => { void load(); }, [load]);
 
   const upsert = (row: Row) => setRows((prev) => {
@@ -428,9 +448,22 @@ function ChannelsPanel() {
       ) },
   ];
 
+  // 高级搜索下拉候选：类型用页面同一份 TYPE_META 词表（唯一真相，不再抄一份）。
+  const filterValueOptions: Record<string, Option[]> = {
+    type: CHANNEL_TYPES.map((t) => ({ value: t, label: `${TYPE_META[t].label}（${t}）` })),
+  };
+
   return (
     <div className="tp-fill tp-fill-body">
       <div style={{ flex: "0 0 auto" }}>
+      {/* D243：高级搜索三件套。条件是 WHERE（后端 CHANNEL_LIST_FILTER），与下方
+          类型快捷筛选并行 AND；筛选一变回第 1 页。渠道是平台级配置，视图按当前项目存。 */}
+      <ListToolbar projectId={project!.id} viewType="channel"
+        filter={advFilter} onFilterChange={(f) => { setAdvFilter(f); setCurrent(1); }}
+        allColumns={CHANNEL_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        valueOptions={filterValueOptions}
+        canSaveView={can(perms, "search:view:create")}
+        canDeleteView={can(perms, "search:view:delete")} />
       <FilterBar actions={(
         <Toolbar>
           {/* 刷新 = 重发当前页（load() 读 current），不回第 1 页：把用户从第 3 页弹回
@@ -459,7 +492,8 @@ function ChannelsPanel() {
           onClose={() => setHitId(null)} />
       )}
       </div>
-      <AdminTable rowKey="id" loading={loading} dataSource={rows} columns={columns}
+      <AdminTable rowKey="id" loading={loading} dataSource={rows}
+          columns={applyColumnPrefs(columns, colPref)}
           rowClassName={(r: Row) => (r.id === hitId ? "tp-row-hit" : "")}
           pagination={false}
           expandable={{

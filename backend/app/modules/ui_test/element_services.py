@@ -26,6 +26,7 @@ from app.core.service import ServiceResult, ensure_project_access, service
 from app.modules.ui_test import schemas
 from app.modules.ui_test.models import STATUS_RECYCLED, UiCase, UiElement
 from app.modules.ui_test.module_services import _ui_module
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.filters import _like
 from app.shared.visibility import assert_row_visible, visible_clause
 
@@ -33,6 +34,32 @@ from app.shared.visibility import assert_row_visible, visible_clause
 # 形状照 workbench/model_usage.py:46 与 execution/timefmt.py:13：同一段 3 列小表反射，
 # 各自域内留一份，重复三处是这套契约的既定代价，抽 shared 反而要动已交付面。
 APP_USER = table("app_user", column("id"), column("name"))
+
+# D220：元素库列表的可筛面（D47-a 三件套铺到元素库页）。字段全是 ui_element 上真实存在的
+# 列，白名单外 400 带本页清单。四个轴刻意不进条件组：
+# - `recycled` 是视图开关（正常/回收站同一端点），进条件组会造出「正常视图里再筛回收站」
+#   这种自相矛盾的查询；
+# - `module_id` / `module_ids` / `unfiled_only` 是左树的取数轴（本页口径=直属），与条件组
+#   是两个入口，混进来会让「左树选中的范围」被条件悄悄换掉；
+# - `status` 是视图状态（normal/recycled），业务上不可筛；
+# - `used_by`（关联用例数）是列表时现算的引用计数、不是列——SQL 筛不了，摆进白名单就是
+#   假筛选项；`current`/`size`/`cursor`/`keyword` 同属取数机制参数。
+UI_ELEMENT_LIST_FILTER = ListViewFilter(
+    view_type="ui_element",
+    label="元素库",
+    fields={
+        "name": FieldDecl(UiElement.name, "text", "元素名", nullable=False),
+        "locator_type": FieldDecl(UiElement.locator_type, "enum", "定位方式", nullable=False),
+        "locator": FieldDecl(UiElement.locator, "text", "定位表达式", nullable=False),
+        "comment": FieldDecl(UiElement.comment, "text", "备注"),
+        "owner_id": FieldDecl(UiElement.owner_id, "id", "负责人"),
+        "project_public": FieldDecl(UiElement.project_public, "bool", "项目内公开", nullable=False),
+        "updated_by": FieldDecl(UiElement.updated_by, "id", "更新人"),
+        "created_at": FieldDecl(UiElement.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(UiElement.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(UI_ELEMENT_LIST_FILTER)
 
 
 async def _user_names(db, user_ids: set[str]) -> dict[str, str]:
@@ -192,6 +219,9 @@ async def ui_element_list(payload: schemas.UiElementListIn, ctx) -> ServiceResul
     if payload.keyword and payload.keyword.strip():
         kw = payload.keyword.strip()
         stmt = stmt.where(UiElement.name.like(f"%{_like(kw)}%", escape="\\"))
+    # D220：高级搜索条件组进同一个 WHERE（OR 组自带括号，吃不掉 project/visible/recycled
+    # 那几个谓词）。谓词写在 paginate_page 之前——total 与 items 吃同一份条件。
+    stmt = stmt.where(UI_ELEMENT_LIST_FILTER.parse(payload.filter))
     stmt = stmt.order_by(UiElement.id)
     # D47-b 步 5c：cursor 与 current 二选一（逐字照姊妹刀 ui_case_list 步 5a）。
     # 「我在哪」的两套真相一起到场是调用方的 bug，静默择一会把错位藏进翻页里，所以大声 400。

@@ -12,9 +12,19 @@ import { parseTabular } from "../api/csv";
 import type { PasteResult } from "../api/csv";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import { applyColumnPrefs, emptyFilter, filterQuery } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 
 // 粘贴示例：TSV（Excel 复制出来就是 Tab 分隔），首行是列名
 const PASTE_SAMPLE = ["order_id\tstatus", "1\tPAID", "2\tNEW"].join("\n");
+
+// D223：列设置面板（列表两列，操作列不在内）。「引用」这一列同时展示两个数
+// （used_by 徽标 + scenario_held 锁标记），所以不能拆成两列藏。
+const DATASET_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "used", label: "引用" },
+];
 
 function DatasetsWorkbench() {
   const { project, user } = useAuth();
@@ -33,6 +43,10 @@ function DatasetsWorkbench() {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [saving, setSaving] = useState(false);
+  // D223：高级搜索条件 + 列偏好（键 dataset，与后端 view_type 同字）。
+  // 条件是列表的 WHERE，与右侧编辑器无关：改条件只重拉左列，不碰正在编辑的内容。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("dataset", DATASET_COL_CHOICES.map((c) => c.key));
 
   // 边粘边解析：预览与告警必须在点「导入」之前就看到，导入后才发现行宽不齐只能重来
   const parsed = useMemo(() => (pasteOpen ? parseTabular(pasteText) : null), [pasteOpen, pasteText]);
@@ -41,11 +55,13 @@ function DatasetsWorkbench() {
     setLoading(true);
     setFailed(false);
     try {
-      const r = await get<Page<DatasetRow>>("/datasets?project_id=" + encodeURIComponent(pid), { silent: true });
+      // D223：空条件不拼 filter（filterQuery 负责），后端把空串读成「没筛选」只是兜底。
+      const r = await get<Page<DatasetRow>>(
+        "/datasets?project_id=" + encodeURIComponent(pid) + filterQuery(advFilter), { silent: true });
       setItems(r.items);
     } catch { setItems([]); setFailed(true); } finally { setLoading(false); }
   }
-  useEffect(() => { void load(); }, [pid]);
+  useEffect(() => { void load(); }, [pid, advFilter]);
 
   function open(d: DatasetRow | "new"): void {
     if (d === "new") {
@@ -102,7 +118,7 @@ function DatasetsWorkbench() {
   const addRow = (): void => setRows([...rows, columns.map(() => "")]);
   const delRow = (i: number): void => setRows(rows.filter((_, k) => k !== i));
   const cols: ColumnsType<DatasetRow> = [
-    { title: "名称", dataIndex: "name", render: (v: string, r: DatasetRow) => (
+    { title: "名称", key: "name", dataIndex: "name", render: (v: string, r: DatasetRow) => (
       <span>{v} <Tag data-testid="ds-rows-tag">{r.row_count} 行</Tag></span>
     ) },
     { title: "引用", key: "used", width: 84, render: (_: unknown, r: DatasetRow) => (
@@ -114,7 +130,7 @@ function DatasetsWorkbench() {
         </Tooltip>
         {r.scenario_held && (
           <Tooltip title="绑定它的用例还被未回收场景引用：就算这里显示 0，删除也会被拦下。要先在场景里改掉引用，或彻底删除那些用例">
-            <LockOutlined data-testid="ds-held" style={{ color: "var(--wp-warn, #d48806)" }} />
+            <LockOutlined data-testid="ds-held" style={{ color: "var(--tp-func-warning)" }} />
           </Tooltip>
         )}
       </Space>
@@ -156,10 +172,22 @@ function DatasetsWorkbench() {
     ) });
   }
   return (
-    // 分栏与 api.tsx:678/722 同口径（Row gutter + Col flex），替换手写 Space+div。
-    // 左栏 320→360：旧 wrapper 实测 318 = 名称188+引用84+操作46 零余量，名称列毫无伸展；
-    // 360 下名称列（唯一不定宽）吃到 ~228。引用 84 = Tag+锁钮、操作 46 = 单图标钮，维持既有值。
-    // flex 基准必须是 0（`auto` 拿右表 max-content 当基准会整块折行，api.tsx:720 实测注释）。
+    // D223：工具栏放全文宽，而不是塞进 360px 的左栏——视图选择器 + 高级搜索 + 列设置
+    // 在 360px 里必然折行，且条件作用于整页列表，摆在分栏之上才读得出「筛的是左边这列」。
+    <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style={{ flex: "0 0 auto" }}>
+      <ListToolbar
+        projectId={pid} viewType="dataset"
+        filter={advFilter} onFilterChange={setAdvFilter}
+        allColumns={DATASET_COL_CHOICES}
+        columnPref={colPref} onColumnPrefChange={setColPref}
+        canSaveView canDeleteView
+      />
+    </div>
+    {/* 分栏与 api.tsx:678/722 同口径（Row gutter + Col flex），替换手写 Space+div。
+    左栏 320→360：旧 wrapper 实测 318 = 名称188+引用84+操作46 零余量，名称列毫无伸展；
+    360 下名称列（唯一不定宽）吃到 ~228。引用 84 = Tag+锁钮、操作 46 = 单图标钮，维持既有值。
+    flex 基准必须是 0（`auto` 拿右表 max-content 当基准会整块折行，api.tsx:720 实测注释）。 */}
     <Row gutter={16} wrap={false} style={{ flex: "1 1 auto", minHeight: 0 }}>
       <Col flex="360px" className="tp-fill-body tp-fill-side">
         <Card size="small" styles={{ body: { padding: 0 } }}>
@@ -188,7 +216,7 @@ function DatasetsWorkbench() {
                 image={Empty.PRESENTED_IMAGE_SIMPLE} />
             </div>
           ) }}
-          columns={cols}
+          columns={applyColumnPrefs(cols, colPref)}
         />
         {items.length > 0 && (
           <Typography.Text type="secondary" className="tp-text-sm" style={{ padding: "12px 12px", flex: "0 0 auto" }}>
@@ -274,6 +302,7 @@ function DatasetsWorkbench() {
         )}
       </Modal>
     </Row>
+    </div>
   );
 }
 

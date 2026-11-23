@@ -65,7 +65,9 @@ function qs(o: Record<string, unknown>): string {
 // （current / state，state 词表与后端 Literal["offline","occupied","idle"] 逐字对齐），
 // 收尾整份重画 OpenAPI 时统一还（先例：ui.ts 的 ElementListInput / CaseListInput 同款补键）。
 export type DeviceListInput = Pick<DeviceListQuery, "project_id"> & Partial<Omit<DeviceListQuery, "project_id">>
-  & { current?: number; state?: "offline" | "occupied" | "idle" };
+  // D224：filter 同为已知漂移的显式补键（schema.d.ts 尚未重画），字段名与后端
+  // AdbDeviceListIn.filter 逐字一致：高级搜索条件组的 JSON 串。
+  & { current?: number; state?: "offline" | "occupied" | "idle"; filter?: string };
 
 /** 409 in_use（purge 被引用硬拦，device_services.py:339-344）：details.referring_cases
  * 就是用例清单——界面必须点名是哪几条，不许只报一句「被占用」。 */

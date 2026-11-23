@@ -5,6 +5,8 @@ description = "TestPilot 测试平台后端（S0 金线纵切）"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",
+  # D195：multipart 上传（Form/File）
+  "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.30",
   "pydantic>=2.8",
   "pydantic-settings>=2.4",
@@ -18,6 +20,9 @@ dependencies = [
   "bcrypt>=4.1",
   "pyjwt>=2.9",
   "cryptography>=42.0",
+  # D265（二期）：MCP 客户端（stdio/SSE/StreamableHTTP）。官方 SDK 覆盖三种 transport；
+  # 启动时 app.modules.mcp.services 会 import，未装即起不来——因此是硬依赖。
+  "mcp>=2.3",
   # 1C UI 执行（§6.3）。**精确等号不是保守，是功能要求**：playwright 自带的
   # chromium revision 必须与前端 playwright-core 的那份相等，否则 CI 与业主机器
   # 要下两份浏览器（几百 MB / 离线演示直接失败）。tests/test_ui_deps.py 把两份
@@ -82,6 +87,10 @@ modules = [
   "app.modules.api_test",
   "app.modules.audit",
   "app.modules.model_cfg",
+  # D265：MCP 服务登记/运行时（配置域，与 model_cfg 同族；供 agent 正向调用）。
+  "app.modules.mcp",
+  # D266：Skill 目录同步/启停（配置域；agent 的 read_skill 正向读取）。
+  "app.modules.skill",
   # 1B：新模块必须显式登记，否则「4 kept」是漏数撑出来的假绿（计划风险 #7 点名过）。
   # scenario 只正向依赖 core/shared/execution，与其余领域模块零横向 import（已实测）。
   "app.modules.scenario",
@@ -101,6 +110,23 @@ modules = [
   # D187 步 1：defect 是领域模块（缺陷本体 + 关联用例），同款登记。
   # 漏登记 = 本契约对它零扫描而清单照样「kept」（R64 假绿坑），不是「少一条约束」那么轻。
   "app.modules.defect",
+  # D192：project_meta（模板/自定义字段/取号）是项目级元数据域；缺陷/用例经 REGISTRY 调它的
+  # 内部服务，零横向 import。漏登记 = 不扫。
+  "app.modules.project_meta",
+  # D193：functional（功能用例本体 + 第 5 份模块树）是领域模块；模板/取号走 REGISTRY。
+  "app.modules.functional",
+  # D194：review（用例评审）是领域模块；functional_case 走表名反射、取号走 REGISTRY。
+  "app.modules.review",
+  # D195：filelib（文件库/附件）是领域模块；上传/下载住自己的 router，其余走 @service。
+  "app.modules.filelib",
+  # D196：taskcenter（任务中心）是领域模块；run_record 走表名反射。
+  "app.modules.taskcenter",
+  # D199：project_settings（应用开关/误报库）是领域模块。
+  "app.modules.project_settings",
+  # D201：mock（API Mock）是领域模块。
+  "app.modules.mock",
+  # D202：share（分享链接）是领域模块。
+  "app.modules.share",
 ]
 
 [[tool.importlinter.contracts]]
@@ -118,6 +144,10 @@ source_modules = [
   "app.modules.api_test",
   "app.modules.audit",
   "app.modules.model_cfg",
+  # D265：MCP 配置域不得认识 agent（agent 正向调用它）。
+  "app.modules.mcp",
+  # D266：Skill 配置域不得认识 agent（agent 正向读取它）。
+  "app.modules.skill",
   # 1B 登记：场景引擎不得认识 agent（agent 是编排层，业务模块要能被 agent 之外的一切复用）
   "app.modules.scenario",
   # 1B T22：search 是 composition 模块（与 agent 同类，可正向读领域模型），
@@ -139,6 +169,22 @@ source_modules = [
   "app.modules.testplan",
   # D187 步 1：defect 是领域模块（不是 composition 层），同款登记（漏登记 = 不扫）。
   "app.modules.defect",
+  # D192：project_meta 是领域模块（不是 composition 层），同款登记。
+  "app.modules.project_meta",
+  # D193：functional 是领域模块（不是 composition 层），同款登记。
+  "app.modules.functional",
+  # D194：review 是领域模块（不是 composition 层），同款登记。
+  "app.modules.review",
+  # D195：filelib 是领域模块（不是 composition 层），同款登记。
+  "app.modules.filelib",
+  # D196：taskcenter 是领域模块（不是 composition 层），同款登记。
+  "app.modules.taskcenter",
+  # D199：project_settings 是领域模块（不是 composition 层），同款登记。
+  "app.modules.project_settings",
+  # D201：mock 是领域模块（不是 composition 层），同款登记。
+  "app.modules.mock",
+  # D202：share 是领域模块（不是 composition 层），同款登记。
+  "app.modules.share",
 ]
 forbidden_modules = ["app.modules.agent"]
 [[tool.importlinter.contracts]]

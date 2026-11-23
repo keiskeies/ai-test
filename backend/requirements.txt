@@ -1,4 +1,8 @@
 fastapi>=0.115
+# D195：multipart 上传（/files/upload 的 Form/File）
+python-multipart>=0.0.9
+# D205：功能用例 Excel 导入/导出（成熟库，不手搓 xlsx）
+openpyxl>=3.1
 uvicorn[standard]>=0.30
 pydantic>=2.8
 pydantic-settings>=2.4
@@ -13,6 +17,8 @@ celery>=5.4
 bcrypt>=4.1
 pyjwt>=2.9
 cryptography>=42.0
+# D265（二期）：MCP 客户端（stdio/SSE/StreamableHTTP）
+mcp>=2.3
 # 1C：与前端 playwright-core 的 chromium revision 配对（1255），
 # 必须精确等号——见 pyproject 同条目注释与 tests/test_ui_deps.py（R97）
 playwright==1.65.2

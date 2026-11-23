@@ -75,3 +75,45 @@ def render(summary: Mapping[str, Any]) -> str:
     if run_id:
         lines.append("[打开报告](/reports/" + str(run_id) + ")")
     return "\n".join(lines)
+
+
+# 计划报告展示态（D229）：与 testplan/schemas.PLAN_DISPLAY_STATUSES 同源，词表外渲染原文
+# （同 runVocab 的纪律：陌生值宁可生码，不编友好话）。
+REPORT_STATUS_LABEL = {"archived": "已归档", "not_started": "未开始",
+                       "completed": "已完成", "in_progress": "进行中"}
+
+
+def _fmt_ratio(rate: Any) -> str:
+    """0..1 的比率 → 百分数；None → 「算不出」（同 _fmt_rate 的尺，用于计划报告）。"""
+    if not isinstance(rate, (int, float)):
+        return "算不出"
+    return f"{float(rate) * 100:.1f}%"
+
+
+def render_report(report: Mapping[str, Any]) -> str:
+    """计划报告摘要（D229 定时报告）：键控渲染，缺什么不显什么，永不抛。
+
+    入参字段 = schedule._fire_report 从 PlanReportOut 抄出来的**白名单**（id/plan_name/
+    name/status/total/passed/failed/executed/not_executed/pass_rate/execute_rate）。
+    绝对 URL 不拼（平台没有外部 base_url，同 render 的口径）：只给前端相对路径。
+    """
+    name = str(report.get("name") or "计划报告")
+    status = str(report.get("status") or "")
+    lines = ["### TestPilot 计划报告 · " + name]
+    if report.get("plan_name"):
+        lines.append("- 计划：" + str(report["plan_name"]))
+    if status:
+        lines.append("- 状态：" + REPORT_STATUS_LABEL.get(status, status))
+    counts = []
+    for key, label in (("total", "总数"), ("passed", "通过"), ("failed", "未通过"),
+                       ("not_executed", "未执行")):
+        if isinstance(report.get(key), int):
+            counts.append(f"{label} {report[key]}")
+    if counts:
+        lines.append("- 用例：" + " · ".join(counts))
+    lines.append("- 通过率：" + _fmt_ratio(report.get("pass_rate"))
+                 + " · 执行率：" + _fmt_ratio(report.get("execute_rate")))
+    rid = report.get("id")
+    if rid:
+        lines.append("[打开报告](/plan-reports/" + str(rid) + ")")
+    return "\n".join(lines)

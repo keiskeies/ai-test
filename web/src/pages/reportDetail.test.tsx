@@ -34,11 +34,10 @@ import ReportDetailPage from "./reportDetail";
 import type { ReportDetail } from "../api/report";
 import { useAuth } from "../auth/store";
 import { useSceneStore } from "../scene/store";
-import { tp } from "../theme";
+import { tpv } from "../theme";
 
 // jsdom 会把 rgba 规范化成 `rgba(31, 40, 51, 0.45)`：去空格 + 补零对齐后与 token 对表，
 // 比的仍是 theme.ts 的原值而不是手抄字面量。
-const normColor = (s: string) => s.replace(/\s+/g, "").replace(/,0\./g, ",.");
 
 const PROJECT = { id: "p1", name: "履约", description: null, status: "normal",
   my_role: "PROJECT_ADMIN", my_perms: ["*"] };
@@ -448,7 +447,7 @@ describe("报告详情 Pilot 出口的失败态门（D143）", () => {
 });
 
 // 蓝图 :1544「截图灯箱全屏遮罩,S3」：点缩略图必须开**页内灯箱**（role=dialog +
-// tp.mask 遮罩 + tp.shadow.s3），不是 window.open 新标签页。断言全部在灯箱节点
+// tpv.mask 遮罩 + tpv.shadow.s3），不是 window.open 新标签页。断言全部在灯箱节点
 // 内部查 img——只断「函数被调」的测试换不回这条蓝图。
 describe("报告详情截图灯箱（:1544 全屏遮罩 + S3）", () => {
   it("点缩略图 → 页内灯箱打开：dialog 内包着 src=制品 objectURL 的 img；不开新标签页", async () => {
@@ -462,18 +461,16 @@ describe("报告详情截图灯箱（:1544 全屏遮罩 + S3）", () => {
     expect(lb.getAttribute("aria-label")).toContain("fail.png");
     // 灯箱必须是全屏遮罩 + S3 阴影（值与 theme 对表，不是像但不是的近似值）
     expect(lb.style.position).toBe("fixed");
-    expect(normColor(lb.style.background)).toBe(normColor(tp.mask));
-    // 遮罩色与阴影在同一节点树内：shadow 挂在灯箱内的图上（getComputedStyle 在 jsdom
-    // 不解析行内 boxShadow 速写，故比对行内串对 theme token）
+    // 对表 tpv.mask 而不是 tp.mask：遮罩画在 React 内联样式里，必须是 var(--tp-mask)，
+    // 引具体浅色值会让深色主题下遮罩仍是浅灰纱（钉的是「跟主题走」，不只是「别写近似色」）。
+    expect(lb.style.background).toBe(tpv.mask);
+    // 遮罩色与阴影在同一节点树内：shadow 挂在灯箱内的图上。
     const shot = screen.getByTestId("report-artifact-lightbox-img");
     expect(shot.closest("[data-testid='report-artifact-lightbox']")).toBe(lb);
-    // jsdom 会重排 boxShadow 速写（色前置、0→0px）：按 s3 的三个构件对表——
-    // 独属 s3 的 .14 透明度 + 12px/32px 偏移（s1/s2 的 .05/.08 挡在这一条外）
-    const bs = normColor((shot.parentElement as HTMLElement).style.boxShadow);
-    const s3 = tp.shadow.s3;
-    expect(bs).toContain(normColor(s3.slice(s3.indexOf("rgba"))));
-    expect(bs).toContain("12px");
-    expect(bs).toContain("32px");
+    // 蓝图要的是 S3：行内值必须引 s3 那个 var（写成 s1/s2 的 var 名不同，照样红）。
+    // 「--tp-shadow-s3 真的是 12px/32px」不在这里证——那是 theme.drift.test.ts 对表
+    // CSS var ↔ theme.ts 的职责；行内一旦改成 var()，jsdom 就只能看到 var 名，看不到几何。
+    expect((shot.parentElement as HTMLElement).style.boxShadow).toBe(tpv.shadow.s3);
     expect(shot.getAttribute("src")).toBe(ARTIFACT_URL);
     expect(openSpy).not.toHaveBeenCalled();
     openSpy.mockRestore();

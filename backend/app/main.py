@@ -45,15 +45,22 @@ _SERVICE_MODULES = (
     "app.modules.api_test.services",
     "app.modules.audit.services",
     "app.modules.env.services",
+    "app.modules.env.group_services",
     "app.modules.execution.artifacts",
     "app.modules.execution.report_services",
     "app.modules.execution.services",
     "app.modules.iam.project_services",
+    # D269：组织层（组织 CRUD / 成员 / 项目归属）。口径见 org_services 文件头。
+    "app.modules.iam.org_services",
     "app.modules.iam.services",
     "app.modules.iam.user_services",
     # D37（1G）：自定义角色服务面（§11.4.21 从模板复制 + 权限菜单树裁剪 + 引用检测删除）。
     "app.modules.iam.role_services",
     "app.modules.model_cfg.services",
+    # D265（二期）：MCP 服务登记/探测/启停（治理位仅系统管理员）。
+    "app.modules.mcp.services",
+    # D266（二期）：Skills 目录同步/启停/查看（治理位仅系统管理员）。
+    "app.modules.skill.services",
     # D74（1G）：场景导出备份（scenario_export → 只读快照；HTTP 面照 api_export 的路径风格）。
     "app.modules.scenario.export_services",
     "app.modules.scenario.module_services",
@@ -80,6 +87,28 @@ _SERVICE_MODULES = (
     # 1E T2：notify 的服务面（§11.4.26 渠道 CRUD + 测试发送）。发送器是纯出站 I/O，
     # 只有这里 import 到服务层；自动通知的终态钩子归 T3（core 钩子注册表形状）。
     "app.modules.notify.service",
+    # D191：缺陷域服务面（D190 裁定的 25 条可做端点：核心 CRUD/回收站/关联/评论/关注/导出）。
+    "app.modules.defect.services",
+    # D192：项目级元数据（模板 / 自定义字段 / 取号）；缺陷创建依赖它的两个内部服务。
+    "app.modules.project_meta.services",
+    # D193：功能用例本体 + 第 5 份模块树（模板/取号经 REGISTRY 调 project_meta）。
+    "app.modules.functional.services",
+    # D194：用例评审（评审/评审模块树/评审内用例与结论历史）。
+    "app.modules.review.services",
+    # D195：文件库/附件（元数据与链接；上传/下载走独立 router）。
+    "app.modules.filelib.services",
+    # D196：任务中心（run_record 观测、排队位次、停止与重跑；无新表）。
+    "app.modules.taskcenter.services",
+    # D198：个人中心 / API Key（自助资料、最近项目、我的资产、密钥）。
+    "app.modules.iam.personal_services",
+    # D199：项目应用开关 + 误报库。
+    "app.modules.project_settings.services",
+    # D201：API Mock（服务/规则；公开路由走独立 router）。
+    "app.modules.mock.services",
+    # D202：分享链接（公开只读路由走独立 router）。
+    "app.modules.share.services",
+    # D203：平台运维登记面（服务集成 / 资源池 / 插件 / 系统信息）。
+    "app.modules.platform_ops.services",
     # 1E T1：schedule 的服务面（§11.4.17 定时任务 CRUD + 草稿 cron 预览）。读表调度器
     # 住 app/beat.py（beat 进程 import），fire 任务体住 app/worker.py——都不进本清单。
     "app.modules.schedule.service",
@@ -101,6 +130,7 @@ def create_app() -> FastAPI:
     from app.core.service import (
         set_audit_writer,
         set_perms_resolver,
+        set_report_notify_hook,
         set_run_finalized_hook,
     )
     from app.modules.audit import services as audit_services
@@ -112,6 +142,8 @@ def create_app() -> FastAPI:
     # 1E T3：run 终态 → 通知（core 钩子注册表，set_audit_writer 同款形状——
     # core 只调钩子不认识 notify，契约 1 由 lint-imports 守着）。
     set_run_finalized_hook(notify_hooks.on_run_finalized)
+    # D229：定时计划报告 → 通知渠道（同一套 core 钩子形状：core 只调钩子不认识 notify）。
+    set_report_notify_hook(notify_hooks.on_report_notified)
 
     app = FastAPI(
         title="TestPilot",
@@ -125,10 +157,14 @@ def create_app() -> FastAPI:
     from app.core.db import get_db
     from app.core.service import build_router
     from app.modules.agent.routes import router as agent_router
+    from app.modules.filelib.routes import build_file_router
+    from app.modules.functional.routes import build_functional_router
     from app.modules.iam.deps import get_current_user
     from app.modules.iam.models import User
     from app.modules.iam.routes import router as iam_router
+    from app.modules.mock.routes import build_mock_router
     from app.modules.scenario.routes import build_scenario_router
+    from app.modules.share.routes import build_share_router
 
     app.include_router(iam_router, prefix="/api/v1")
     app.include_router(agent_router, prefix="/api/v1")
@@ -137,6 +173,20 @@ def create_app() -> FastAPI:
         build_scenario_router(get_db_dep=get_db, get_user_dep=get_current_user,
                               user_model=User), prefix="/api/v1"
     )
+    # 文件上传/下载：multipart 与流式返回走不了注册表投影，依赖由装配层注入。
+    app.include_router(
+        build_file_router(get_db_dep=get_db, get_user_dep=get_current_user, user_model=User),
+        prefix="/api/v1",
+    )
+    # 功能用例 Excel 导入/导出：multipart + 文件流同样走不了注册表投影（D205）。
+    app.include_router(
+        build_functional_router(get_db_dep=get_db, get_user_dep=get_current_user, user_model=User),
+        prefix="/api/v1",
+    )
+    # Mock 公开入口不在 /api/v1 下：外部调用方要的是短 URL /mock/{service_id}/...
+    app.include_router(build_mock_router(get_db_dep=get_db))
+    # 分享公开读取：不需要用户，但要能读到目标数据
+    app.include_router(build_share_router(get_db_dep=get_db), prefix="/api/v1")
     app.include_router(
         build_router(get_db_dep=get_db, get_user_dep=get_current_user, user_model=User), prefix="/api/v1"
     )

@@ -7,7 +7,7 @@
 //    的钉已随假门一起撤——后端对非系统管理员连读都 403，那条行为本身就是假门样本）；
 // ④ 「发送测试」点击真的打 POST /notify-channels/{id}/test 并回显成败与原话。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Modal, message } from "antd";
 
@@ -48,7 +48,24 @@ const FIVE = [
 const PROJECT = { id: "p1", name: "履约", description: null, status: "normal",
   my_role: "PROJECT_ADMIN", my_perms: ["*"] };
 
+// D243：高级搜索三件套的依赖。字段与后端 CHANNEL_LIST_FILTER 同名同 kind。
+const FILTER_META = {
+  view_type: "channel", view_label: "通知渠道",
+  supported_view_types: ["channel"],
+  fields: [
+    { field: "name", label: "名称", kind: "text",
+      ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS"] },
+    { field: "type", label: "类型", kind: "enum",
+      ops: ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"] },
+  ],
+  unavailable: {},
+};
+
 const calls: { url: string; init?: RequestInit }[] = [];
+/** D243：ListToolbar 也往 calls 里记账（filter-meta / saved-views），
+ *  「第几条列表请求」的口径必须只数 /notify-channels 这一族，不能数全量。 */
+const listReqs = (): { url: string; init?: RequestInit }[] =>
+  calls.filter((c) => c.url.includes("/notify-channels?"));
 
 /** 每次调用现拷一份：真 fetch 每次解析出一棵**全新的对象图**。桩若把同一个对象/数组反复
  *  交出，setRows(同一引用) 会被 React 按同一性直接跳过，「取数落地把 load 的依赖改脏 →
@@ -63,6 +80,13 @@ function mockBackend(items: Row[]) {
   global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
+    // D243：ListToolbar 挂载即拉元数据与个人视图（未 mock 会 throw，整页红成取数失败）
+    if (url.includes("/filter-meta?")) {
+      return { ok: true, status: 200, json: async () => deepCopied(FILTER_META) } as unknown as Response;
+    }
+    if (url.includes("/saved-views?")) {
+      return { ok: true, status: 200, json: async () => deepCopied([]) } as unknown as Response;
+    }
     if (url.includes("/notify-channels?")) {
       return { ok: true, status: 200, json: async () => deepCopied({ items, next_cursor: null }) } as unknown as Response;
     }
@@ -90,6 +114,12 @@ function mockListRoutes(routes: Record<string, ListResp | ListResp[]>) {
   global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
+    if (url.includes("/filter-meta?")) {
+      return { ok: true, status: 200, json: async () => deepCopied(FILTER_META) } as unknown as Response;
+    }
+    if (url.includes("/saved-views?")) {
+      return { ok: true, status: 200, json: async () => deepCopied([]) } as unknown as Response;
+    }
     if (url.includes("/notify-channels?")) {
       const qs = new URL(url, "http://t.test").searchParams;
       const key = (qs.get("type") ?? "") + "|" + (qs.get("current") ?? "");
@@ -363,7 +393,7 @@ describe("notify-channel-reload（刷新 = 重发当前页且列表换成新 fix
     });
     render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
     await waitFor(() => expect(shownRows()).toEqual(["p1a", "p1b"]));
-    const before = calls.length;
+    const before = listReqs().length;
 
     fireEvent.click(screen.getByTestId("notify-channel-reload"));
     await waitFor(() => expect(shownRows()).toEqual(["r9"]));
@@ -499,13 +529,13 @@ describe("notify-channel-more 已退役（D47-b 页码分页 ListPager 接班）
     mockListRoutes(PAGED3);
     render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
     await waitFor(() => expect(shownRows()).toEqual(["p1a", "p1b"]));
-    const before = calls.length;
+    const before = listReqs().length;
     clickPage(3);
     await waitFor(() => expect(shownRows()).toEqual(["p3d"]));
     // 替换语义：p1a/p1b 必须下桌（append 变异这里是 3 行、首页还挂着）
     expect(screen.queryByTestId("notify-channel-config-p1a")).toBeNull();
-    await waitFor(() => expect(calls.length).toBe(before + 1)); // 迟到/多余请求都抓
-    const q = new URL(calls[calls.length - 1].url, "http://t.test").searchParams;
+    await waitFor(() => expect(listReqs().length).toBe(before + 1)); // 迟到/多余请求都抓
+    const q = new URL(listReqs()[listReqs().length - 1].url, "http://t.test").searchParams;
     expect(q.get("current")).toBe("3");
     expect(q.has("cursor")).toBe(false);
     // 受控闭环：current 回写到 3，高亮跟过来
@@ -516,11 +546,11 @@ describe("notify-channel-more 已退役（D47-b 页码分页 ListPager 接班）
     mockListRoutes({ ...PAGED3, "FEISHU|1": { items: [channel("c4", "FEISHU", { name: "飞书发布群" })], total: 1 } });
     render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
     await waitFor(() => expect(shownRows()).toEqual(["p1a", "p1b"]));
-    const atPage3 = calls.length;
+    const atPage3 = listReqs().length;
     clickPage(3);
     const landed = await lastListQuery(atPage3);
     expect(landed.get("current")).toBe("3"); // 正对照：确实停在第 3 页，reset 才有东西可回
-    const before = calls.length;
+    const before = listReqs().length;
     await pickFilter("飞书（FEISHU）");
     const q = await lastListQuery(before);
     expect(q.get("current")).toBe("1"); // 改筛选后落回第 1 页
@@ -534,14 +564,14 @@ describe("notify-channel-more 已退役（D47-b 页码分页 ListPager 接班）
     mockListRoutes(PAGED3);
     render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
     await waitFor(() => expect(shownRows()).toEqual(["p1a", "p1b"]));
-    const atPage3 = calls.length;
+    const atPage3 = listReqs().length;
     clickPage(3);
     const landed = await lastListQuery(atPage3);
     expect(landed.get("current")).toBe("3"); // 正对照：刷新前先确实停在第 3 页
-    const before = calls.length;
+    const before = listReqs().length;
     fireEvent.click(screen.getByTestId("notify-channel-reload"));
-    await waitFor(() => expect(calls.length).toBe(before + 1));
-    const q = new URL(calls[calls.length - 1].url, "http://t.test").searchParams;
+    await waitFor(() => expect(listReqs().length).toBe(before + 1));
+    const q = new URL(listReqs()[listReqs().length - 1].url, "http://t.test").searchParams;
     expect(q.get("current")).toBe("3");
     // 刷新不许顺手把用户弹回第 1 页：页码高亮原地不动
     expect(pager().querySelector(".ant-pagination-item-3.ant-pagination-item-active")).toBeTruthy();
@@ -553,14 +583,14 @@ describe("notify-channel-more 已退役（D47-b 页码分页 ListPager 接班）
     mockListRoutes(PAGED3);
     render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
     await waitFor(() => expect(shownRows()).toEqual(["p1a", "p1b"]));
-    const atPage3 = calls.length;
+    const atPage3 = listReqs().length;
     clickPage(3);
     const landed = await lastListQuery(atPage3);
     expect(landed.get("current")).toBe("3"); // 正对照：换档位前确实停在第 3 页
-    const before = calls.length;
+    const before = listReqs().length;
     await pickPagerSize("20");
-    await waitFor(() => expect(calls.length).toBe(before + 1));
-    const q = new URL(calls[calls.length - 1].url, "http://t.test").searchParams;
+    await waitFor(() => expect(listReqs().length).toBe(before + 1));
+    const q = new URL(listReqs()[listReqs().length - 1].url, "http://t.test").searchParams;
     expect(q.get("size")).toBe("20");
     expect(q.get("current")).toBe("1");
   });
@@ -606,6 +636,12 @@ function mockInUseDelete(details: Record<string, unknown>) {
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     calls.push({ url });
+    if (url.includes("/filter-meta?")) {
+      return { ok: true, status: 200, json: async () => deepCopied(FILTER_META) } as unknown as Response;
+    }
+    if (url.includes("/saved-views?")) {
+      return { ok: true, status: 200, json: async () => deepCopied([]) } as unknown as Response;
+    }
     if (url.includes("/notify-channels?")) {
       return { ok: true, status: 200, json: async () => deepCopied({ items: FIVE, next_cursor: null }) } as unknown as Response;
     }
@@ -672,5 +708,56 @@ describe("删除 409 in_use：count 全量 vs 明细截断的诚实口径", () =
     expect(screen.queryAllByTestId("notify-inuse-task").length).toBe(0);
     // 0 行是权限隐瞒不是截断：说「仅列前 0 条」是另一种假话
     expect(screen.queryByTestId("notify-inuse-truncated")).toBeNull();
+  });
+});
+
+// ── D243：高级搜索 + 列设置（三件套铺到通知渠道）──────────────────────────────
+describe("D243 高级搜索 + 列设置（三件套铺到通知渠道）", () => {
+  const listReqs = () => calls.filter((c) => c.url.includes("/notify-channels?"));
+  const lastQ = () => new URL(listReqs()[listReqs().length - 1].url, "http://t.test").searchParams;
+  const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+
+  it("空条件不拼 filter；应用「名称包含 第一页」后请求带条件 JSON，且从第 3 页回第 1 页", async () => {
+    // 变异靶：load 不接 advFilter（第二条请求无 filter）· 条件变化不回第 1 页
+    //（current 仍为 3）· 空条件也拼 filter=（第一条请求带 filter=）
+    mockListRoutes({
+      "|1": { items: PAGE1, total: 350 },
+      "|3": { items: PAGE2, total: 350 },
+    });
+    render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
+    await waitFor(() => expect(shownRows().length).toBe(2));
+    expect(listReqs()[0].url).not.toContain("filter="); // 「没筛选」不该写成骗人的 filter=
+    fireEvent.click(screen.getByTestId("list-pager").querySelector(".ant-pagination-item-3 a") as Element);
+    await waitFor(() => expect(lastQ().get("current")).toBe("3"));
+    const before = listReqs().length;
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    // 字段名来自后端 meta 的第一项（name），前端不自列字段
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "第一页" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listReqs().length).toBe(before + 1));
+    expect(JSON.parse(lastQ().get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "第一页" }],
+    });
+    expect(lastQ().get("current")).toBe("1"); // 条件一变必回第 1 页
+  });
+
+  it("列设置勾掉「关键配置」只藏那一列（其余表头原样）", async () => {
+    // 变异靶：columns 不包 applyColumnPrefs（勾了没反应）· key 与 CHOICES 漂移（藏错列）
+    mockBackend(FIVE);
+    render(<MemoryRouter><NotifyChannelsPage /></MemoryRouter>);
+    await waitFor(() => expect(shownRows().length).toBe(5));
+    expect(thead()).toContain("关键配置");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "类型", "关键配置", "最近发送"]);
+    fireEvent.click(boxes[labels.indexOf("关键配置")]);
+    await waitFor(() => expect(thead()).not.toContain("关键配置"));
+    expect(thead()).toContain("最近发送");
   });
 });

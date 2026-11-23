@@ -106,7 +106,7 @@ export default function UiDebugPanel({ result, running, error, note, projectId, 
           setHeight(Math.min(maxH, Math.max(MIN_H, dh)));
         }}
         onPointerUp={() => { dragRef.current = null; }}
-        style={{ height: 6, cursor: "ns-resize", background: "#F2F6F4", flexShrink: 0 }} />
+        style={{ height: 6, cursor: "ns-resize", background: "var(--tp-bg-hover)", flexShrink: 0 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
         borderBottom: "1px solid var(--tp-split)", flexShrink: 0 }}>
         <Typography.Text className="tp-text-md" strong>调试</Typography.Text>
@@ -155,7 +155,7 @@ export default function UiDebugPanel({ result, running, error, note, projectId, 
             {rows.map((r) => (
               <div key={r.id} data-testid="debug-cmd-row" data-id={r.id} data-status={r.status}
                 style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap",
-                  padding: "8px 8px", borderBottom: "1px dashed #F0F2F4" }}>
+                  padding: "8px 8px", borderBottom: "1px dashed var(--tp-split)" }}>
                 <Typography.Text className="tp-text-sm" style={{ width: DEBUG_ROW.idW }}>{r.id}</Typography.Text>
                 <Typography.Text className="tp-text-sm" style={{ width: DEBUG_ROW.typeW }}>{r.type}</Typography.Text>
                 <Tag style={{ marginInlineEnd: 0 }}

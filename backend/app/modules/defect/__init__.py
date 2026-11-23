@@ -1,4 +1,4 @@
-"""缺陷域（D187 批次 B 第三刀，步 1 = 表 + 状态词表）。
+"""缺陷域（D187 步 1 = 表 + 状态词表；D191 = 24 个 @service 的服务面 + 关注/评论两张子表）。
 
 命名边界：上游产品的活表叫 `bug` / `bug_relation_case`（取证
 `backend/.tmp/d187-forensics/ms-bug-survey.md` §A–§D），license 边界禁止照抄它的

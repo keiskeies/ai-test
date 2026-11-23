@@ -24,6 +24,10 @@
 // ⑦ 删除是物理删、不可恢复：确认文案只说后端答过的事实（plan_report_delete 现核——报告头与
 //    该报告的明细行同事务删、级联只按 report_id、别的报告的明细不动），不编别的细节；
 //    删成功直接导航回所属计划详情页，**不留在原地画一行「已删除」**（那是假状态）。
+// ⑧ D230 导出：GET /plan-reports/{id}/export 返回 {filename, media_type, content}，
+//    content 是后端渲染好的**快照 HTML**（读的还是报告行与明细副本，零现算零 join）。
+//    页面只做 Blob 落地（downloadBlob），不拼内容、不补数、不换算率——导出文件里的
+//    每个数与页面上的每个数同源（同一份 PlanReportOut）。按钮由本页读门兜着，不另设位。
 // 契约（nav.spec 将来钉）：根节点 data-testid="page-plan-report-detail" + PageHead 标题「计划报告详情」。
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -39,6 +43,7 @@ import { can, patternsForProject } from "../auth/perms";
 import { ApiErr } from "../api/client";
 import PermEmpty from "../components/PermEmpty";
 import { planApi } from "../api/plan";
+import { downloadBlob } from "../api/ImportWizard";
 import type { components } from "../api/schema";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
@@ -46,6 +51,7 @@ import { LINK_RESULTS, SUBJECT_TYPES, vocabMeta } from "../shared/runVocab";
 import { ratePct } from "../shared/passRate"; // 同源理由见 planDetail.tsx 同处注释
 import { planDisplayMeta } from "./plans";
 import { PassRing } from "./reports";
+import ShareButton from "../ui/ShareButton";
 import { tp, tpv } from "../theme";
 
 type PlanReportOut = components["schemas"]["PlanReportOut"];
@@ -95,6 +101,7 @@ function Detail() {
   const perms = patternsForProject(project, user?.is_system_admin);
   const mayRead = can(perms, "testplan:report:read");
   const canDelete = can(perms, "testplan:report:delete");
+  const canShare = can(perms, "share:link:create");
 
   // 主读（GET /plan-reports/{id}）的四态：在读 / 读到了 / 403（PermEmpty）/ 404·410（原话）/ 其它失败。
   const [report, setReport] = useState<PlanReportOut | null>(null);
@@ -107,6 +114,7 @@ function Detail() {
   const [current, setCurrent] = useState(1);
   const [pageSize, setPageSize] = useState(50); // = 后端 PlanReportItemListIn size 默认
   const [itemsError, setItemsError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   // load* 一律读 current/pageSize 放进依赖、自己绝不写它们（D127 守卫，planDetail.tsx 同款）。
 
@@ -158,6 +166,19 @@ function Detail() {
         } catch { /* toast 已在 client 弹 */ }
       },
     });
+  }
+
+  /** D230：导出 = 把后端返回的**快照 HTML 文本**落地成文件（页面不拼内容、不补数）。 */
+  async function exportReport(): Promise<void> {
+    if (!report) return;
+    setExporting(true);
+    try {
+      const out = await planApi.exportReport(report.id, projectId);
+      downloadBlob(new Blob([out.content], { type: out.media_type }), out.filename);
+      message.success("已导出 " + out.item_count + " 条明细（" + out.filename + "）");
+    } catch { /* client 已 toast */ } finally {
+      setExporting(false);
+    }
   }
 
   const itemColumns: ColumnsType<PlanReportItemOut> = [
@@ -243,6 +264,12 @@ function Detail() {
         <Space>
           <Button icon={<ReloadOutlined />} data-testid="plan-report-detail-reload"
             onClick={() => { void loadReport(); void loadItems(); }}>刷新</Button>
+          {/* D230：导出按钮由页面的读门兜着（本页能渲染 = 有 testplan:report:read，
+              后端导出端点同一个位）——内容与格式全由后端给，前端只负责落地。 */}
+          <Button data-testid="plan-report-detail-export" loading={exporting}
+            onClick={() => void exportReport()}>导出 HTML</Button>
+          {canShare && <ShareButton projectId={projectId} targetType="plan_report"
+            targetId={report.id} title={report.name} />}
           {/* 删除钮缺 :delete **不渲染**（不是禁用）；确认与善后见 removeReport（口径 ⑦）。 */}
           {canDelete && (
             <Button danger data-testid="plan-report-detail-delete" onClick={removeReport}>删除报告</Button>

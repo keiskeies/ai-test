@@ -14,12 +14,12 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
-  Button, Card, Col, Empty, Form, Input, List, Modal, Row, Space, Spin, Statistic, Tag,
-  Tooltip, Typography, message,
+  Button, Card, Checkbox, Col, Drawer, Empty, Form, Input, List, Modal, Row, Space, Spin,
+  Statistic, Tag, Tooltip, Typography, message,
 } from "antd";
 import {
-  AndroidOutlined, ApiOutlined, ImportOutlined, NodeIndexOutlined, PlusOutlined,
-  RobotOutlined, DesktopOutlined,
+  AndroidOutlined, ApiOutlined, ArrowDownOutlined, ArrowUpOutlined, ImportOutlined,
+  NodeIndexOutlined, PlusOutlined, RobotOutlined, DesktopOutlined, SettingOutlined,
 } from "../ui/icons";
 import { useNavigate } from "react-router-dom";
 import { get, post } from "../api/client";
@@ -61,7 +61,38 @@ export interface WorkbenchStats {
   }>;
   my_recent_edits: Array<{ id: string; name: string; type: string; updated_at: string | null }>;
   my_recent_edits_types: string[];
+  // D227 我的待办：待我执行（计划内指派给我、尚无结论的功能用例）+ 待我评审（我是评审人
+  // 且名下有 pending 用例的评审）。total 是全部，列表至多 10 条——卡上读数与列表长度
+  // 不一致时必须能说出「另有 N 条」。可选：老后端/老桩没有这一段时按空待办渲染。
+  todos?: {
+    my_execution_total: number;
+    my_executions: Array<{
+      plan_id: string; plan_name: string; link_id: string; case_id: string;
+      case_name: string; num: number | null; priority: string | null;
+    }>;
+    my_review_total: number;
+    my_reviews: Array<{ review_id: string; review_name: string; num: number }>;
+  };
+  // D238 我的关注与创建：只含本仓有创建者列的两种（功能用例 / 缺陷）——接口/场景/UI/ADB
+  // 资产表没有 created_by，不拿资产总数冒充「我创建的」。可选：老后端没有这一段时按全零渲染。
+  contribution?: {
+    functional_case_created: number;
+    defect_created_7d: number;
+    followed_plan: number;
+    followed_functional_case: number;
+    followed_defect: number;
+    followed_total: number;
+  };
 }
+
+const EMPTY_CONTRIBUTION: NonNullable<WorkbenchStats["contribution"]> = {
+  functional_case_created: 0, defect_created_7d: 0,
+  followed_plan: 0, followed_functional_case: 0, followed_defect: 0, followed_total: 0,
+};
+
+const EMPTY_TODOS: NonNullable<WorkbenchStats["todos"]> = {
+  my_execution_total: 0, my_executions: [], my_review_total: 0, my_reviews: [],
+};
 
 /** 「没有读数」的画法：null（无有效分母 / 没取到）→「-」，绝不画 0% 或 0。 */
 const NO_DATA = "-";
@@ -99,6 +130,51 @@ const QUICK: Array<{ key: string; label: string; icon: ReactNode; to?: string; n
   { key: "pilot", label: "问 Pilot", icon: <RobotOutlined />, to: "/bench" },
 ];
 
+// ── 卡片设置（审计 A 档工作台那一格唯一的新差异：MS 的 cardSettingDrawer 可增删卡片）──
+// 口径：这是**本机视图偏好**，不进库（换浏览器不跟随）；顺序与显隐一起存一个键。
+// 读的时候对坏 JSON、未知 key、重复 key 都降级到「默认全显示」或跳过该项——偏好坏掉
+// 不该让整个工作台白屏。后续版本新增的卡默认可见，自动补在末尾。
+type CardKey = "stats" | "trend" | "recent" | "edits" | "todos" | "contribution" | "quick";
+const CARD_DEFS: Array<{ key: CardKey; label: string }> = [
+  { key: "stats", label: "统计卡与趋势" },
+  { key: "recent", label: "最近执行 / 我最近编辑" },
+  { key: "todos", label: "我的待办" },
+  { key: "contribution", label: "我的关注与创建" },
+  { key: "quick", label: "快捷入口" },
+];
+const CARD_PREF_KEY = "tp_workbench_cards";
+type CardPref = { key: CardKey; visible: boolean };
+
+export function loadCardPrefs(): CardPref[] {
+  try {
+    const raw = localStorage.getItem(CARD_PREF_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const known = new Set(CARD_DEFS.map((d) => d.key));
+        const seen = new Set<CardKey>();
+        const out: CardPref[] = [];
+        for (const it of arr) {
+          const k = it && it.key as CardKey;
+          if (known.has(k) && !seen.has(k)) {
+            seen.add(k);
+            out.push({ key: k, visible: it.visible !== false });
+          }
+        }
+        for (const d of CARD_DEFS) if (!seen.has(d.key)) out.push({ key: d.key, visible: true });
+        return out;
+      }
+    }
+  } catch {
+    // 坏 JSON / 存储被禁用：按默认，不抛
+  }
+  return CARD_DEFS.map((d) => ({ key: d.key, visible: true }));
+}
+
+function saveCardPrefs(prefs: CardPref[]): void {
+  try { localStorage.setItem(CARD_PREF_KEY, JSON.stringify(prefs)); } catch { /* 隐私模式 */ }
+}
+
 function StatsSection({ project }: { project: ProjectOut }) {
   const nav = useNavigate();
   const [st, setSt] = useState<WorkbenchStats | null>(null);
@@ -119,14 +195,73 @@ function StatsSection({ project }: { project: ProjectOut }) {
   // 请求失败（silent 之下 api() 不弹 toast）必须自己显形：否则 st=null && !loading 会
   // 让四张卡把「没取到」画成 0/0/-/「无」——四个数冒充实测结果。
   const failed = st === null && !loading;
+  const todos = st?.todos ?? EMPTY_TODOS;
+  const contrib = st?.contribution ?? EMPTY_CONTRIBUTION;
   const editTypeLabel = ASSET_TYPE_NAMES;
   // 「→ 打开」的目标路由（app.tsx 实有：/scene/:id、/ui/cases/:id）。后端 my_recent_edits
   // 只发这两类（services.py docstring 口径），表外类型前端渲染纯文本——宁缺毋伪。
   // 没有 api 条目不是漏写：api_definition/api_case 表上确实没有编辑者列。
   const EDIT_ROUTES: Record<string, string> = { scenario: "/scene/", ui_case: "/ui/cases/" };
 
+  // 卡片设置（本机偏好）：order 只改视觉顺序，不动任何取数——隐藏卡片不触发请求变化。
+  const [prefs, setPrefs] = useState<CardPref[]>(loadCardPrefs);
+  const [cardsOpen, setCardsOpen] = useState(false);
+  const prefIndex = new Map(prefs.map((p, i) => [p.key, i]));
+  const prefVisible = new Map(prefs.map((p) => [p.key, p.visible]));
+  const cardStyle = (key: CardKey): React.CSSProperties => ({
+    order: prefIndex.get(key) ?? 0,
+    display: prefVisible.get(key) ? undefined : "none",
+  });
+  function applyPrefs(next: CardPref[]): void {
+    setPrefs(next);
+    saveCardPrefs(next);
+  }
+  function toggleCard(key: CardKey, visible: boolean): void {
+    applyPrefs(prefs.map((p) => (p.key === key ? { ...p, visible } : p)));
+  }
+  function moveCard(index: number, delta: number): void {
+    const target = index + delta;
+    if (target < 0 || target >= prefs.length) return;
+    const next = [...prefs];
+    [next[index], next[target]] = [next[target], next[index]];
+    applyPrefs(next);
+  }
+
   return (
     <Spin spinning={loading}>
+      {/* 卡片设置：本机视图偏好（顺序 + 显隐），不进库；隐藏不停止取数，避免重开时再闪一次。 */}
+      <Space style={{ marginBottom: 8 }}>
+        <Button data-testid="wb-card-settings" icon={<SettingOutlined />}
+          onClick={() => setCardsOpen(true)}>卡片设置</Button>
+      </Space>
+      <Drawer title="卡片设置" open={cardsOpen} onClose={() => setCardsOpen(false)} width={380}
+        data-testid="wb-card-drawer">
+        <Typography.Paragraph type="secondary" className="tp-text-sm">
+          勾选要显示的卡片，用上下箭头调整顺序；设置只保存在本机浏览器，不影响他人。
+        </Typography.Paragraph>
+        <List size="small" dataSource={prefs} rowKey={(p) => p.key}
+          renderItem={(p, idx) => {
+            const def = CARD_DEFS.find((d) => d.key === p.key);
+            return (
+              <List.Item data-testid={"wb-card-setting-" + p.key}
+                actions={[
+                  <Button key="up" size="small" type="text" icon={<ArrowUpOutlined />}
+                    data-testid={"wb-card-up-" + p.key} disabled={idx === 0}
+                    onClick={() => moveCard(idx, -1)} />,
+                  <Button key="down" size="small" type="text" icon={<ArrowDownOutlined />}
+                    data-testid={"wb-card-down-" + p.key} disabled={idx === prefs.length - 1}
+                    onClick={() => moveCard(idx, 1)} />,
+                ]}>
+                <Checkbox checked={p.visible} data-testid={"wb-card-visible-" + p.key}
+                  onChange={(e) => toggleCard(p.key, e.target.checked)}>
+                  {def?.label ?? p.key}
+                </Checkbox>
+              </List.Item>
+            );
+          }} />
+      </Drawer>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+      <div style={cardStyle("stats")}>
       {/* tp-wall：列数跟容器实测宽走，视口断点量不到本项目容器（见 styles.css 注释）。
           --tp-wall-min=320：首卡副行自然宽实测约 191，据口径 +左右内边距 40 ≈ 231 是不绕行下限；
           320 是列数取值——944 容器避开 3+1 孤卡（3 列要 min≤304）；1552 封顶容器出 4 列各 376、5 列要 min≤301，封顶 4 列。
@@ -188,7 +323,9 @@ function StatsSection({ project }: { project: ProjectOut }) {
           </Suspense>
         ) : null}
       </Card>
+      </div>
 
+      <div style={cardStyle("recent")}>
       {/* 同排两卡各挂 .tp-list-window（定高 344）：两侧列表都 ≤10 条（后端 limit(10)），
           按内容撑高时 10 条的 452 对 2 条的 101，右卡下悬空 351（2026-11-22 审计实测）。
           定高 + 窗内滚后两卡恒等，空态在窗内垂直居中。 */}
@@ -271,7 +408,131 @@ function StatsSection({ project }: { project: ProjectOut }) {
           </Card>
         </Col>
       </Row>
+      </div>
 
+      <div style={cardStyle("todos")}>
+      {/* D227 我的待办：两块各数「指派给我且还没交结论」的事。total 与列表分账——
+          「待我执行 12」而列表 10 条时必须写出「另有 2 条」，不许让列表长度冒充总数。 */}
+      <Card size="small" title="我的待办" style={{ marginTop: 16 }} data-testid="wb-todos"
+        extra={st && (
+          <Typography.Text type="secondary" className="tp-text-sm" data-testid="wb-todos-counts">
+            待我执行 {todos.my_execution_total} · 待我评审 {todos.my_review_total}
+          </Typography.Text>
+        )}>
+        {failed ? (
+          <Typography.Text type="secondary">统计未加载</Typography.Text>
+        ) : !st ? (
+          <div className="tp-list-window tp-list-window--empty" style={{ minHeight: 80 }} />
+        ) : todos.my_execution_total === 0 && todos.my_review_total === 0 ? (
+          <div className="tp-list-window tp-list-window--empty">
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无待办"
+              data-testid="wb-todos-empty" />
+          </div>
+        ) : (
+          <Row gutter={[16, 8]}>
+            <Col xs={24} lg={12} data-testid="wb-todos-exec">
+              <Typography.Text strong>待我执行</Typography.Text>
+              <Typography.Text type="secondary" className="tp-text-sm">
+                （计划内指派给我、尚未记录结论的功能用例）
+              </Typography.Text>
+              {todos.my_executions.length === 0 ? (
+                <div className="tp-text-sm">
+                  <Typography.Text type="secondary">暂无</Typography.Text>
+                </div>
+              ) : (
+                <List size="small" dataSource={todos.my_executions} rowKey={(r) => r.link_id}
+                  renderItem={(r) => (
+                    <List.Item data-testid={"wb-todo-exec-" + r.link_id}>
+                      <Space size={8} wrap>
+                        <Typography.Link onClick={() => nav("/plans/" + r.plan_id)}>
+                          {r.plan_name}
+                        </Typography.Link>
+                        <Typography.Text ellipsis style={{ maxWidth: 240 }}>{r.case_name}</Typography.Text>
+                        {r.priority && <Tag>{r.priority}</Tag>}
+                      </Space>
+                    </List.Item>
+                  )} />
+              )}
+              {todos.my_execution_total > todos.my_executions.length && (
+                <Typography.Text type="secondary" className="tp-text-sm" data-testid="wb-todo-exec-more">
+                  另有 {todos.my_execution_total - todos.my_executions.length} 条未列出
+                </Typography.Text>
+              )}
+            </Col>
+            <Col xs={24} lg={12} data-testid="wb-todos-review">
+              <Typography.Text strong>待我评审</Typography.Text>
+              <Typography.Text type="secondary" className="tp-text-sm">
+                （我是评审人、且名下有未出结论的用例）
+              </Typography.Text>
+              {todos.my_reviews.length === 0 ? (
+                <div className="tp-text-sm">
+                  <Typography.Text type="secondary">暂无</Typography.Text>
+                </div>
+              ) : (
+                <List size="small" dataSource={todos.my_reviews} rowKey={(r) => r.review_id}
+                  renderItem={(r) => (
+                    <List.Item data-testid={"wb-todo-review-" + r.review_id}>
+                      <Space size={8} wrap>
+                        <Typography.Link onClick={() => nav("/reviews/" + r.review_id)}>
+                          {r.review_name}
+                        </Typography.Link>
+                        <Tag>#{r.num}</Tag>
+                      </Space>
+                    </List.Item>
+                  )} />
+              )}
+              {todos.my_review_total > todos.my_reviews.length && (
+                <Typography.Text type="secondary" className="tp-text-sm" data-testid="wb-todo-review-more">
+                  另有 {todos.my_review_total - todos.my_reviews.length} 条未列出
+                </Typography.Text>
+              )}
+            </Col>
+          </Row>
+        )}
+      </Card>
+      </div>
+
+      <div style={cardStyle("contribution")}>
+      {/* D238：我的关注与创建。只点名真有创建者列的两种（功能用例 / 缺陷）；
+          接口/场景/UI/ADB 没有 created_by，不能拿资产总数冒充「我创建的」。 */}
+      <Card size="small" title="我的关注与创建" style={{ marginTop: 16 }} data-testid="wb-contribution"
+        extra={st && (
+          <Typography.Text type="secondary" className="tp-text-sm" data-testid="wb-contribution-counts">
+            我关注 {contrib.followed_total} · 我创建 {contrib.functional_case_created
+              + contrib.defect_created_7d}
+          </Typography.Text>
+        )}>
+        {failed ? (
+          <Typography.Text type="secondary">统计未加载</Typography.Text>
+        ) : !st ? (
+          <div className="tp-list-window tp-list-window--empty" style={{ minHeight: 60 }} />
+        ) : (
+          <Row gutter={[16, 8]}>
+            <Col xs={24} lg={12} data-testid="wb-contrib-created">
+              <Typography.Text strong>我创建</Typography.Text>
+              <Typography.Text type="secondary" className="tp-text-sm">
+                （只算有创建者列的：功能用例与缺陷）
+              </Typography.Text>
+              <div className="tp-text-sm">
+                功能用例 {contrib.functional_case_created} · 近 7 天缺陷 {contrib.defect_created_7d}
+              </div>
+            </Col>
+            <Col xs={24} lg={12} data-testid="wb-contrib-followed">
+              <Typography.Text strong>我关注</Typography.Text>
+              <Typography.Text type="secondary" className="tp-text-sm">
+                （计划 / 功能用例 / 缺陷三张关注表）
+              </Typography.Text>
+              <div className="tp-text-sm">
+                计划 {contrib.followed_plan} · 功能用例 {contrib.followed_functional_case}
+                {" · "}缺陷 {contrib.followed_defect}（共 {contrib.followed_total}）
+              </div>
+            </Col>
+          </Row>
+        )}
+      </Card>
+      </div>
+
+      <div style={cardStyle("quick")}>
       <Card size="small" title="快捷入口" style={{ marginTop: 16 }} data-testid="wb-quick">
         <Space wrap>
           {QUICK.map((q) => {
@@ -289,6 +550,8 @@ function StatsSection({ project }: { project: ProjectOut }) {
         <ImportWizard projectId={project.id} open={wizardOpen} onClose={() => setWizardOpen(false)}
           onImported={() => nav("/api")} />
       </Card>
+      </div>
+      </div>
     </Spin>
   );
 }

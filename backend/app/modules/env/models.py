@@ -26,3 +26,27 @@ class GlobalConfig(ProjectScopedMixin, TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     scope_type: Mapped[str] = mapped_column(String(16), nullable=False)  # VAR/HEADER/ASSERT/EXTRACT
     items: Mapped[list] = mapped_column(JSON, nullable=False, default=list)  # [[k,v],...] 或 [obj,...]
+
+
+class EnvironmentGroup(ProjectScopedMixin, TimestampMixin, Base):
+    """环境组（C1）：把多个环境打包，供计划/场景一键选环境。"""
+
+    __tablename__ = "environment_group"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_env_group_project_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class EnvironmentGroupItem(Base):
+    __tablename__ = "environment_group_item"
+
+    group_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    env_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

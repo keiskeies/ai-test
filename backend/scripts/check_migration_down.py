@@ -40,6 +40,41 @@ EXPECT: dict[str, list[str]] = {
     "0025": ["plan_case_link"],
     "0026": ["plan_report", "plan_report_item"],
     "0027": ["defect", "defect_case_link"],
+    "0028": ["defect_follower", "defect_comment"],
+    "0029": ["num_sequence", "project_template", "project_custom_field",
+             "project_custom_field_option", "project_template_field", "defect_custom_field"],
+    "0030": ["functional_module", "functional_case", "functional_case_custom_field"],
+    "0031": ["case_review_module", "case_review", "case_review_case",
+             "case_review_reviewer", "case_review_result"],
+    "0032": ["file_blob", "file_folder", "file_entry", "file_link"],
+    "0033": ["functional_case_comment", "functional_case_relation"],
+    "0034": ["user_api_key"],
+    "0035": ["project_application", "fake_error"],
+    "0036": ["environment_group", "environment_group_item", "public_script"],
+    "0037": ["mock_service", "mock_rule"],
+    "0038": ["share_link"],
+    "0039": ["service_integration", "resource_pool", "plugin"],
+    "0040": ["plan_functional_exec", "plan_functional_exec_history"],
+    # 0041 是纯加列（plan_case_link 的 executor_id/sort_order）+ 组合索引，没有新表；
+    # 空清单不是漏登记——脚本会跳过「查表」这一步，只验 up→down→up 版本链能重放。
+    "0041": [],
+    # 0042 建 plan_module 一张表 + 给 plan_record 加 module_id 一列 + 索引；
+    # down 必须把表与列一起脱掉（脚本查表清单只列新表，列由 up→down→up 能重放兜底）。
+    "0042": ["plan_module"],
+    "0043": ["plan_follower"],
+    "0044": ["functional_case_follower"],
+    "0045": ["scenario_revision"],
+    "0046": ["mcp_server"],
+    "0047": ["skill"],
+    "0048": ["defect_status", "defect_status_transition"],
+    "0049": ["functional_minder_note"],
+    # 0050 是 org 扩列 + 新建 org_member + project.organization_id；
+    # 查表只列新表，列由 up→down→up 重放兜底。
+    "0050": ["org_member"],
+    # 0051 建 org_user_group + org_user_group_member 两张表（D270 组织用户组）。
+    "0051": ["org_user_group", "org_user_group_member"],
+    # 0052 建 org_defect_status + org_defect_status_transition 两张表（D271 组织级状态流模板）。
+    "0052": ["org_defect_status", "org_defect_status_transition"],
 }
 
 
@@ -80,7 +115,12 @@ def main(rev: str) -> int:
                            database=schema, autocommit=True)
 
     def ui_tables() -> list[str]:
-        """按 EXPECT 点名的表查在场情况（名字沿用 ui_tables 是历史包袱，它早就不只装 ui_*）。"""
+        """按 EXPECT 点名的表查在场情况（名字沿用 ui_tables 是历史包袱，它早就不只装 ui_*）。
+
+        空清单 = 这条迁移只加列/索引、没有新表：直接回 []，不拼非法的 `IN ()`。
+        """
+        if not expected:
+            return []
         with conn.cursor() as c:
             c.execute(
                 "SELECT table_name FROM information_schema.tables "

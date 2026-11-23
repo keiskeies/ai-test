@@ -13,6 +13,8 @@ type ScenarioUpdateBody = components["schemas"]["scenario_update_body"];
 type ScenarioOut = components["schemas"]["ScenarioOut"];
 type ScenarioDuplicateBody = components["schemas"]["scenario_duplicate_body"];
 type ScenarioBatchMoveIn = components["schemas"]["ScenarioBatchMoveIn"];
+// D255：批量回收/恢复的入参（schema.d.ts 未重生成前先手写镜像，字段与后端 ScenarioBatchIn 一致）
+type ScenarioBatchIn = { project_id: string; scenario_ids: string[] };
 type ScenarioReferencesOut = components["schemas"]["ScenarioReferencesOut"];
 type ScenarioModuleCreateIn = components["schemas"]["ScenarioModuleCreateIn"];
 type ScenarioModuleNode = components["schemas"]["ScenarioModuleNode"];
@@ -62,6 +64,18 @@ export type ScenarioExportOut = {
   notes: string[];
 };
 
+// D262 变更历史（手写镜像，字段名与后端 schemas.ScenarioRevisionOut 逐字一致）。
+// changed 里 variables 只有键名、step_graph 只有步骤数——后端就没存敏感值，前端也别补。
+export type ScenarioRevisionRow = {
+  id: string;
+  scenario_id: string;
+  version: number;
+  actor_id: string | null;
+  actor_name: string | null;
+  changed: { field: string; before: unknown; after: unknown }[];
+  created_at: string | null;
+};
+
 function qs(o: Record<string, unknown>): string {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(o)) {
@@ -77,8 +91,10 @@ function qs(o: Record<string, unknown>): string {
 // ——gen:api 会自起后端抢 8321（业主 demo 在那），本刀禁跑，这笔漂移记在 D47-b 计划 §六，
 // 收尾整份重画 OpenAPI 时统一还。照本文件头的手写镜像约定，在派生类型上交显式类型，
 // 字段名与后端 list 签名逐字一致，下次 gen 合流不漂移。
+// D214：filter（高级搜索条件组 JSON）与 current/keyword/module_ids 同一层，键名与后端
+// ScenarioListIn.filter 逐字一致。
 export type ScenarioListQuery = Pick<ListQuery, "project_id"> & Partial<Omit<ListQuery, "project_id">>
-  & { current?: number; keyword?: string; module_ids?: string[] };
+  & { current?: number; keyword?: string; module_ids?: string[]; filter?: string };
 
 export const sceneApi = {
   /** 场景列表（recycled=true 只看回收站；页码模式带 current+size，与 cursor 互斥）。
@@ -104,6 +120,13 @@ export const sceneApi = {
   update: (scenarioId: string, body: ScenarioUpdateBody) =>
     patch<ScenarioOut>("/scenarios/" + enc(scenarioId), body),
 
+  /** D262：场景变更历史（最新在前；cursor 翻页）。回收站中的场景 404（与详情同尺）。 */
+  revisions: (projectId: string, scenarioId: string,
+    params?: { cursor?: string; size?: number }) =>
+    get<Page<ScenarioRevisionRow>>(
+      "/scenarios/" + enc(scenarioId) + "/revisions?"
+      + qs({ project_id: projectId, ...params })),
+
   /** 软删进回收站（已回收再删 404）。 */
   remove: (projectId: string, scenarioId: string) =>
     post<OkOut>("/scenarios/" + enc(scenarioId) + "/delete", { project_id: projectId }),
@@ -123,6 +146,26 @@ export const sceneApi = {
 
   /** 批量移动到模块（module_id=null → 根/未分类；回收站中的场景 404）。 */
   batchMove: (body: ScenarioBatchMoveIn) => post<OkOut>("/scenario-batch-move", body),
+
+  /** D255：批量放入回收站（全有或全无；替代页面里的 for 循环单删）。 */
+  batchDelete: (body: ScenarioBatchIn) => post<OkOut>("/scenario-batch-delete", body),
+
+  /** D255：批量从回收站恢复（全有或全无）。 */
+  batchRestore: (body: ScenarioBatchIn) => post<OkOut>("/scenario-batch-restore", body),
+
+  /** D256：批量彻底删除（物理删除；服务端验 confirm_word="彻底删除"，全有或全无）。 */
+  batchPurge: (body: ScenarioBatchIn & { confirm_word: string }) =>
+    post<OkOut>("/scenario-batch-purge", body),
+
+  /** D257：批量复制（名称自动加「 - 副本」后缀；回包带最终名，created 为条数）。
+   *  D261：`target_project_id` 不同 = 跨项目复制，环境清空、模块缺省落目标未分类。 */
+  batchCopy: (body: ScenarioBatchIn & { module_id?: string | null; target_project_id?: string | null }) =>
+    post<{ ok: boolean; created: number; names: string[] }>("/scenario-batch-copy", body),
+
+  /** D258：批量执行（预检全有或全无；投递逐条，failed[] 逐条回报——不能拿勾选数冒充已启动数）。 */
+  batchRun: (body: ScenarioBatchIn & { env_id?: string | null }) =>
+    post<{ ok: boolean; run_ids: string[]; failed: { scenario_id: string; code: string; message: string }[] }>(
+      "/scenario-batch-run", body),
 
   /** 导出备份（D74，§11.4.8 批量条）：ids 传了只导这几条；缺省 = 项目内全部非回收可见场景。
    *  只读快照不可回灌（场景域无导入解析器，口径见后端 export_services 模块头）。 */

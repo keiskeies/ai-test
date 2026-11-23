@@ -98,14 +98,16 @@ def test_the_reopen_edges_are_the_q4_subject() -> None:
     assert reopenable == {"closed", "rejected"}, f"可重开的终态变了：{reopenable}（连带 Q4 要重谈）"
 
 
-def test_link_vocab_excludes_functional_until_d185_lands() -> None:
-    """关联词表**不含** `functional` —— 这是计划 §二 那条「有表没写入方」防线的本体。
+def test_link_vocab_matches_the_landed_case_domains() -> None:
+    """关联词表 = **已经真有主体的那几类**（D207：功能用例 D193 落地后补入）。
 
-    功能用例落地的同一刀里要连带加这里 + 前端词表（R112）。这条测试是那条决定的
-    可执行版本：谁提前把 functional 加进来，它就红，逼那次改动去看一眼 §二。
+    D187 当时钉的是「不含 functional」——那条防线守的是「有表没写入方」。
+    功能用例已于 D193 落地（表 + 服务 + 前端），防线随之解除：本条改成钉
+    「词表恰为这五类」，谁少加/多加一类都要过业主裁并同步前端词表（R112）。
     """
-    assert "functional" not in DEFECT_CASE_TYPES, "功能用例还不存在（D185 只有计划文档）——见计划 §二"
-    assert set(DEFECT_CASE_TYPES) <= {"api_case", "scenario", "ui_case", "adb_case"}
+    assert DEFECT_CASE_TYPES == (
+        "api_case", "scenario", "ui_case", "adb_case", "functional_case",
+    ), "词表长了少了都要过业主裁（前四类 + D193 落地的功能用例）"
     assert "api_definition" not in DEFECT_CASE_TYPES, "定义不是「用例」那一层（plan_case_link 同口径）"
 
 
@@ -119,25 +121,36 @@ def test_priority_vocab_matches_the_repo_existing_three_copies() -> None:
 
 
 def test_model_columns_match_the_migration_source() -> None:
-    """模型声明的列名 == 0027 里 create_table 的列名，双向。
+    """模型声明的列名 == 迁移源码的列名（create_table + 后续 add_column），双向。
 
     **这一条是纯文本比对，不需要库**，所以它能进「定向单测」那一档、跑得跟内存一样快。
     与下一条（真库反射）合起来覆盖三段链路：模型 ↔ 迁移源码 ↔ 库。
     只有模型有 = insert 报 Unknown column；只有迁移有 = 模型读不到它，
     而「服务层 SQL 里手写字段名」能把它糊过去，所以两段都要比对。
+
+    D191 起 0028 用 `alter_column` + `add_column` 扩了 `defect`，所以列集必须把
+    迁移链上所有对该表的增列一起算——只读 0027 会把 tags/delete_user/delete_time
+    误判成「模型有、迁移没有」。
     """
     import pathlib
     import re
 
-    mig = pathlib.Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0027_defect.py"
-    src = mig.read_text(encoding="utf-8")
-    assert src, f"读不到迁移文件：{mig}"
+    versions = pathlib.Path(__file__).resolve().parents[1] / "migrations" / "versions"
+    src = (versions / "0027_defect.py").read_text(encoding="utf-8")
+    src28 = (versions / "0028_defect_services.py").read_text(encoding="utf-8")
+    src29 = (versions / "0029_project_meta.py").read_text(encoding="utf-8")
+    assert src and src28 and src29, "读不到 0027/0028/0029 迁移文件"
 
     for table, model in (("defect", Defect), ("defect_case_link", DefectCaseLink)):
         # 抠 `op.create_table("table", ...)` 那一段里的 sa.Column("x"
         block = re.search(r'op\.create_table\(\s*"' + table + r'"(.*?)\n    \)', src, re.S)
         assert block, f"0027 里抠不出 op.create_table(\"{table}\") 那一段"
         in_migration = set(re.findall(r'sa\.Column\(\s*"([a-z_]+)"', block.group(1)))
+        # 0028 只对 defect 增列（follower/comment 是独立新表，不在本用例范围）
+        in_migration |= set(re.findall(
+            r'op\.add_column\(\s*"' + table + r'",\s*sa\.Column\(\s*"([a-z_]+)"', src28))
+        in_migration |= set(re.findall(
+            r'op\.add_column\(\s*"' + table + r'",\s*sa\.Column\(\s*"([a-z_]+)"', src29))
         in_model = {c.key for c in model.__table__.columns}
         assert in_model - in_migration == set(), f"{table}: 模型有、迁移没有 → insert 报 Unknown column：{sorted(in_model - in_migration)}"
         assert in_migration - in_model == set(), f"{table}: 迁移有、模型没有 → 模型读不到这一列：{sorted(in_migration - in_model)}"
@@ -145,7 +158,10 @@ def test_model_columns_match_the_migration_source() -> None:
 
 
 async def test_migration_0027_is_on_the_head_of_the_chain() -> None:
-    """链头唯一 + 0027 的父是 0026（多头 = alembic 各升各的，表象是「库莫名其妙少一张表」）。"""
+    """链头唯一 + 0028 的父是 0027（多头 = alembic 各升各的，表象是「库莫名其妙少一张表」）。
+
+    本用例名保留 0027（它守的是 0027 那一段），D191 加 0028 后链头跟着后移。
+    """
     import pathlib
     import re
 
@@ -162,9 +178,26 @@ async def test_migration_0027_is_on_the_head_of_the_chain() -> None:
         parents[rev.group(1)] = None if raw == "None" else raw.strip('"')
 
     assert parents["0027"] == "0026", f"0027 的父是 {parents['0027']}，应是 0026"
+    assert parents["0028"] == "0027", f"0028 的父是 {parents['0028']}，应是 0027"
+    assert parents["0029"] == "0028", f"0029 的父是 {parents['0029']}，应是 0028"
+    # D203/D204/D206 接棒链头：同款先例，改期望值不改判定逻辑
+    assert parents["0039"] == "0038"
+    assert parents["0040"] == "0039"
+    assert parents["0041"] == "0040"
+    assert parents["0042"] == "0041"
+    assert parents["0044"] == "0043"
+    # D263/D265/D266/D267/D268/D269 依次接棒链头（本断言是链头守卫，不关心各刀内容）
+    assert parents["0045"] == "0044"
+    assert parents["0046"] == "0045"
+    assert parents["0047"] == "0046"
+    assert parents["0048"] == "0047"
+    assert parents["0049"] == "0048"
+    assert parents["0050"] == "0049"
+    assert parents["0051"] == "0050"
+    assert parents["0052"] == "0051"
     chain = set(parents.values()) - {None}
     heads = set(revs) - chain
-    assert heads == {"0027"}, f"链头应为唯一 0027，实际 {sorted(heads)}"
+    assert heads == {"0052"}, f"链头应为唯一 0052，实际 {sorted(heads)}"
 
 
 async def test_tables_actually_exist_in_the_migrated_db(conn) -> None:
@@ -210,7 +243,7 @@ async def test_defaults_are_the_honest_ones(session, two_projects) -> None:
     而创建接口照样返回成功 —— 静默失效只能在这里钉。
     """
     pid, _ = two_projects
-    d = Defect(project_id=pid, title="登录 500")
+    d = Defect(project_id=pid, num=100001, template_id="tpl1", title="登录 500")
     session.add(d)
     await session.commit()
 
@@ -232,7 +265,8 @@ async def test_same_title_is_allowed_in_one_project(session, two_projects) -> No
     这条钉的是决定：哪天要给标题加唯一键，得先改掉它并说明「按标题找人」是谁在用。
     """
     pid, _ = two_projects
-    session.add_all([Defect(project_id=pid, title="登录失败"), Defect(project_id=pid, title="登录失败")])
+    session.add_all([Defect(project_id=pid, num=100001, template_id="tpl1", title="登录失败"),
+                     Defect(project_id=pid, num=100002, template_id="tpl1", title="登录失败")])
     await session.commit()  # 不抛 = 同项目同名可行
 
 
@@ -242,7 +276,7 @@ async def test_link_unique_key_blocks_the_exact_duplicate_only(session, two_proj
     MS 无此约束 ⇒ 同一对可重复插（取证 §D），重复关联会让「关联用例数」这个徽标虚高。
     """
     pid, _ = two_projects
-    d = Defect(project_id=pid, title="关联测试")
+    d = Defect(project_id=pid, num=100001, template_id="tpl1", title="关联测试")
     session.add(d)
     await session.commit()
     # ⚠ **id 必须在预期失败之前抠进局部变量**：`session.rollback()` 会 expire 全部持久对象，
@@ -265,7 +299,7 @@ async def test_link_unique_key_blocks_the_exact_duplicate_only(session, two_proj
     await session.commit()
 
     # 不同缺陷关联同一用例必须放行
-    d2 = Defect(project_id=pid, title="另一个缺陷")
+    d2 = Defect(project_id=pid, num=100002, template_id="tpl1", title="另一个缺陷")
     session.add(d2)
     await session.commit()
     session.add(DefectCaseLink(project_id=pid, defect_id=d2.id, case_id="c-1", case_type="api_case"))
@@ -294,13 +328,11 @@ def test_no_columns_without_a_writer() -> None:
         "handle_users",    # MS 的死列（写两次、全仓无一处读，取证 §G1）
         "platform",        # 不做第三方同步
         "platform_bug_id",
-        "template_id",     # 没有模板系统（MS 那边它是 NOT NULL 硬前置，取证 §B）
-        "num",             # 短编号需要并发取号路径，本仓零先例
-        "delete_user",     # 读取方是还不存在的列表页 → 留给步 4 与读取方同提交
-        "delete_time",
         "version",         # R104：与 ApiCase/UiCase/Scenario 同口径不做乐观锁
-        "tags",            # 本仓零先例（现查 models.py 无 tags 列）
         "status_flow_id",  # 状态在源码常量里，不在库里
+        # D191 已给 tags / delete_user / delete_time 接上写入方与读取方
+        # （create/update/batch-update + 回收站列表）。
+        # D192 已给 template_id / num 接上模板地基与跨域取号器，故同批移出。
     }
     assert not (cols & absent), f"这些列没有写入方，建了就是判据 1 的病：{sorted(cols & absent)}"
     # 反向：两个轴都得在场

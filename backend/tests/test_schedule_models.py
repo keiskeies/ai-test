@@ -128,11 +128,37 @@ async def test_migration_0021_is_on_the_head_of_the_chain() -> None:
     assert parents["0025"] == "0024", f"0025 的父是 {parents['0025']}，应是 0024"
     # 0026（D183 plan_report 两表）接棒链头：同款先例，改期望值不改判定逻辑
     assert parents["0026"] == "0025", f"0026 的父是 {parents['0026']}，应是 0025"
-    # 0027（D187 defect 两表）接棒链头：同款先例，改期望值不改判定逻辑
+    # 0027（D187 defect 两表）→ 0028（D191 缺陷服务面）接棒链头：同款先例，改期望值不改判定逻辑
     assert parents["0027"] == "0026"
+    assert parents["0028"] == "0027"
+    assert parents["0029"] == "0028"
+    assert parents["0030"] == "0029"
+    assert parents["0031"] == "0030"
+    assert parents["0032"] == "0031"
+    assert parents["0033"] == "0032"
+    assert parents["0034"] == "0033"
+    assert parents["0035"] == "0034"
+    assert parents["0036"] == "0035"
+    assert parents["0037"] == "0036"
+    assert parents["0038"] == "0037"
+    # D203/D204/D206 接棒链头：同款先例，改期望值不改判定逻辑
+    assert parents["0039"] == "0038"
+    assert parents["0040"] == "0039"
+    assert parents["0041"] == "0040"
+    assert parents["0042"] == "0041"
+    assert parents["0044"] == "0043"
+    # D262→D269 接棒链头：同款先例，改期望值不改判定逻辑
+    assert parents["0045"] == "0044"
+    assert parents["0046"] == "0045"
+    assert parents["0047"] == "0046"
+    assert parents["0048"] == "0047"
+    assert parents["0049"] == "0048"
+    assert parents["0050"] == "0049"
+    assert parents["0051"] == "0050"
+    assert parents["0052"] == "0051"
     chain = set(parents.values()) - {None}
     heads = set(revs) - chain
-    assert heads == {"0027"}, f"链头应为唯一 0027，实际 {sorted(heads)}（多头 = 各升各的）"
+    assert heads == {"0052"}, f"链头应为唯一 0052，实际 {sorted(heads)}（多头 = 各升各的）"
 
 
 async def test_down_check_script_knows_the_head() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, SmallInteger, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, SmallInteger, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base, ProjectScopedMixin, TimestampMixin, new_id
@@ -55,6 +55,26 @@ class ScenarioModule(ProjectScopedMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=STATUS_NORMAL)
+
+
+class ScenarioRevision(ProjectScopedMixin, Base):
+    """场景变更历史（D262）：append-only 流水，一次成功的 update 落一行。
+
+    `version` = 变更后的版本号（与 Scenario.version 同口径）；查询按 (version, id) 倒序，
+    所以历史永远是「最新在前」，且同一版本不会重复（订单号式游标）。
+    `changed` = 变更字段摘要列表（[{field, before, after}]），**只记非敏感摘要**：
+    variables 只留键名、step_graph 只留步骤数——节点 config 与变量值里可能有 token/密码。
+    行不可变：没有 update/delete 服务，级联只随场景彻底删除（purge）显式删净。
+    """
+
+    __tablename__ = "scenario_revision"
+    __table_args__ = (Index("ix_scenario_revision_scenario_version", "scenario_id", "version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scenario_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    changed: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 def sc_now() -> datetime:

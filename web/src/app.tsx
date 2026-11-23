@@ -4,7 +4,7 @@ import zhCN from "antd/locale/zh_CN";
 import { Navigate, RouterProvider, createHashRouter } from "react-router-dom";
 import "antd/dist/reset.css";
 import "./styles.css";
-import { antdThemeFor } from "./ui/antdTheme";
+import { useAntdTheme } from "./ui/antdTheme";
 import { initTheme, useTheme } from "./ui/themeMode";
 import { getToken } from "./api/client";
 import { useAuth } from "./auth/store";
@@ -18,12 +18,20 @@ import ScenesPage from "./pages/scenes";
 import ReportsPage from "./pages/reports";
 import PlansPage from "./pages/plans";
 import SettingsPage from "./pages/settings";
+import OrgsPage from "./pages/orgs";
 import UiElementsPage from "./pages/uiElements";
 import UiCasesPage from "./pages/uiCases";
 import AdbDevicesPage from "./pages/adbDevices";
 import AdbCasesPage from "./pages/adbCases";
 import NotifyChannelsPage from "./pages/notifyChannels";
 import SchedulesPage from "./pages/schedules";
+import DefectsPage from "./pages/defects";
+import FunctionalCasesPage from "./pages/functionalCases";
+import CaseReviewsPage from "./pages/caseReviews";
+import FilesPage from "./pages/files";
+import TaskCenterPage from "./pages/taskCenter";
+import MePage from "./pages/me";
+import MockPage from "./pages/mock";
 import Shell from "./layout/shell";
 
 // 画布页路由级懒加载：它静态引着 monaco/xyflow/elk（monaco chunk 4.5MB），
@@ -45,6 +53,14 @@ const ScenePreviewPage = lazy(() => import("./pages/scenePreview"));
 const UiCaseDetailPage = lazy(() => import("./pages/uiCaseDetail"));
 // ADB 用例详情同族：步骤编辑器引 StepListEditor/参数表单，与 UI 详情同口径走懒载。
 const AdbCaseDetailPage = lazy(() => import("./pages/adbCaseDetail"));
+// D191：缺陷详情（评论/关联用例/关注）。非画布页但同族走懒载，保持首屏不背详情组件。
+const DefectDetailPage = lazy(() => import("./pages/defectDetail"));
+// D193：功能用例详情（动态字段）。同族懒载。
+const FunctionalCaseDetailPage = lazy(() => import("./pages/functionalCaseDetail"));
+// D194：评审详情。
+const CaseReviewDetailPage = lazy(() => import("./pages/caseReviewDetail"));
+// D202：公开分享页（不登录），独立于 RequireAuth/Shell。
+const ShareViewPage = lazy(() => import("./pages/shareView"));
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, ready, bootstrap } = useAuth();
@@ -70,6 +86,35 @@ const router = createHashRouter([
       { path: "runs", element: <RunsPage /> },
       // D183 步 6a：测试计划列表（任务中心）。只引 antd，无重依赖，静态挂载（同 runs/reports）。
       { path: "plans", element: <PlansPage /> },
+      // D191：缺陷管理（列表 + 详情）；详情懒载，形状同 plans/:id。
+      { path: "defects", element: <DefectsPage /> },
+      { path: "defects/:id", element: (
+        <Suspense fallback={<Spin style={{ display: "block", margin: "20vh auto" }} />}>
+          <DefectDetailPage />
+        </Suspense>
+      ) },
+      // D193：功能用例本体（列表 + 详情）；详情懒载。
+      { path: "functional/cases", element: <FunctionalCasesPage /> },
+      { path: "functional/cases/:id", element: (
+        <Suspense fallback={<Spin style={{ display: "block", margin: "20vh auto" }} />}>
+          <FunctionalCaseDetailPage />
+        </Suspense>
+      ) },
+      // D194：用例评审（列表 + 详情）。
+      { path: "reviews", element: <CaseReviewsPage /> },
+      // D195：项目文件库。
+      { path: "files", element: <FilesPage /> },
+      // D196：任务中心（运行/排队/停止/重跑）。
+      { path: "task-center", element: <TaskCenterPage /> },
+      // D198：个人中心（不依赖项目）。
+      { path: "me", element: <MePage /> },
+      // D201：API Mock（服务/规则/公开入口）。
+      { path: "mock", element: <MockPage /> },
+      { path: "reviews/:id", element: (
+        <Suspense fallback={<Spin style={{ display: "block", margin: "20vh auto" }} />}>
+          <CaseReviewDetailPage />
+        </Suspense>
+      ) },
       // D183 步 6b：计划详情。懒载 + Suspense/Spin 逐字对齐 reports/:id。
       { path: "plans/:id", element: (
         <Suspense fallback={<Spin style={{ display: "block", margin: "20vh auto" }} />}>
@@ -101,6 +146,10 @@ const router = createHashRouter([
         </Suspense>
       ) },
       { path: "settings", element: <SettingsPage /> },
+      { path: "settings/mcp", element: <SettingsPage /> },
+      { path: "settings/skills", element: <SettingsPage /> },
+      // D270：组织页（平台级，不依赖当前项目；组织管理员也有入口）。
+      { path: "orgs", element: <OrgsPage /> },
       { path: "ui/elements", element: <UiElementsPage /> },
       { path: "ui/cases", element: <UiCasesPage /> },
       { path: "ui/cases/:id", element: (
@@ -122,6 +171,13 @@ const router = createHashRouter([
       { path: "schedules", element: <SchedulesPage /> },
     ],
   },
+  // D202：公开分享页。必须在 catch-all 之前、且在 RequireAuth 之外——
+  // 链接是给没登录的人看的，任何鉴权壳都会把它弹回登录页。
+  { path: "/share/:token", element: (
+    <Suspense fallback={<Spin style={{ display: "block", margin: "20vh auto" }} />}>
+      <ShareViewPage />
+    </Suspense>
+  ) },
   { path: "*", element: <Navigate to="/" replace /> },
 ]);
 
@@ -129,9 +185,10 @@ export default function App() {
   // 主题：首帧由 index.html 内联脚本先落 data-theme，挂载后 store 再同步一次并监听系统切换。
   // token 按当前 mode 现算——深浅各一套映射，不走 antd 的算法推导。
   const mode = useTheme((s) => s.mode);
+  const theme = useAntdTheme(mode);
   useEffect(() => initTheme(), []);
   return (
-    <ConfigProvider theme={antdThemeFor(mode)} locale={zhCN}>
+    <ConfigProvider theme={theme} locale={zhCN}>
       <AntApp>
         <RouterProvider router={router} />
       </AntApp>

@@ -2,7 +2,8 @@
 
 钉的契约（一条判断一条用例，命名即判据；步 2 三条业主裁的判断逐条有靶）：
 
-1. **表形状 = 迁移形状**（test_plan_case_link_shape...）：列集恰好十字，反面清单点名
+1. **表形状 = 迁移形状**（test_plan_case_link_shape...）：列集恰好十二列（D206 加
+   指派执行人与排序位），反面清单点名
    「执行结论摘要」一族（last_result/latest_run/pass_count…——§三 2 的 MS 三件套不许在）；
    三个索引 + uq(plan_id, subject_type, subject_id) 在场；表名族不许冒出 MS 的 `test_plan*`
    （license 边界）。走真 information_schema（模型声明了不等于库里有）。
@@ -139,7 +140,8 @@ async def test_plan_case_link_shape_is_exactly_the_migration(conn) -> None:
     got = await conn.run_sync(_read)
     assert "plan_case_link" in got["tables"], "迁移没建表（alembic 没跑到 0025）"
     assert set(got["cols"]) == {"id", "project_id", "plan_id", "subject_type", "subject_id",
-                                "subject_name", "env_id", "created_by", "created_at", "updated_at"}, \
+                                "subject_name", "env_id", "executor_id", "sort_order",
+                                "created_by", "created_at", "updated_at"}, \
         "列集变了 = 有人加了没写方/没读方的列（§六 1）：" + str(sorted(got["cols"]))
     assert not ({"last_result", "latest_run_id", "last_run_at", "report_id", "pass_count",
                  "status", "owner_id", "project_public"} & set(got["cols"])), \
@@ -148,8 +150,9 @@ async def test_plan_case_link_shape_is_exactly_the_migration(conn) -> None:
         "MS 的活表名进来了（license 边界）"
     assert ("uq_plan_case_link_plan_subject", ("plan_id", "subject_id", "subject_type")) in got["uq"], \
         "同计划重复挂没有唯一键兜底（步 3 执行率分母会重复计数）"
-    for i in ("ix_plan_case_link_project_id", "ix_plan_case_link_plan_id", "ix_plan_case_link_subject_id"):
-        assert i in got["idx"], "缺索引 " + i + "：级联按 plan_id、subject 反查按 subject_id"
+    for i in ("ix_plan_case_link_project_id", "ix_plan_case_link_plan_id", "ix_plan_case_link_subject_id",
+              "ix_plan_case_link_plan_sort"):
+        assert i in got["idx"], "缺索引 " + i + "：级联按 plan_id、subject 反查按 subject_id（D206 加排序位组合索引）"
     assert got["cols"]["subject_name"]["nullable"] is False
     assert got["cols"]["env_id"]["nullable"] is True, "api/adb 抄不到环境，env_id 必须可空"
 
@@ -190,8 +193,9 @@ async def test_four_subject_types_written_and_read(client, session, make_user) -
     lst = await _links(client, hb, pid, pl["id"], size=50)
     assert lst["total"] == 4
     assert set(lst["items"][0]) == {"id", "project_id", "plan_id", "subject_type", "subject_id",
-                                    "subject_name", "env_id", "created_by", "created_at", "updated_at"}, \
-        "列表行键恰好十字——多出来的键没有读方，缺的键说明有列没被读（判据 1 读侧）"
+                                    "subject_name", "env_id", "executor_id", "sort_order",
+                                    "created_by", "created_at", "updated_at"}, \
+        "列表行键恰好十二字——多出来的键没有读方，缺的键说明有列没被读（判据 1 读侧；D206 加执行人/排序）"
 
     # 快照名的存在意义：对象被删（这里直接删行，模拟对象生命周期终点），关联行仍可读。
     gone = await session.get(Scenario, "subj-scenario")
@@ -212,10 +216,13 @@ async def test_word_list_rejects_everything_else(client, session, conn, make_use
     inline 挂进计划会匹配到所有 inline run（它的 subject_id 是常量 "inline"，
     api_test/services.py:476）——那条关联永远说不清自己指的是谁；默默收下 = 造一条
     永远显示「未执行」的关联行（判据 1 一类病的对偶）。词表元组本身钉死：
-    四种合法值的收口由用例 2 逐个证明，这里钉「不多不少」。
+    合法值的收口由用例 2 逐个证明，这里钉「不多不少」。
+    D204 起词表多了第五种 functional_case（人工执行，结论落 plan_functional_exec，
+    不进 run_record）——它走自己的执行/列表端点，本用例照旧只证明它被词表收下。
     """
-    assert set(PLAN_LINK_SUBJECT_TYPES) == {"api_case", "scenario", "ui_case", "adb_case"}, \
-        "词表长了少了都要过业主裁（run_record 的六个 subject_type 里只有这四个是『用例』）"
+    assert set(PLAN_LINK_SUBJECT_TYPES) == {"api_case", "scenario", "ui_case", "adb_case",
+                                            "functional_case"}, \
+        "词表长了少了都要过业主裁（前四个是 run_record 的『用例』；functional_case 是 D204 人工执行）"
     boss, hb = await make_user("d183lk3", admin=True)
     pid = await _proj(client, hb, "D183词表")
     pl = await _create_plan(client, hb, pid, "词表计划")

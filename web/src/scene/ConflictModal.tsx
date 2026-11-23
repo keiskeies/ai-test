@@ -58,11 +58,11 @@ export default function ConflictModal() {
       <div style={{ display: "flex", gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Typography.Text strong>我的（未保存）</Typography.Text>
-          <pre className="tp-text-sm" data-testid="conflict-mine" style={{ maxHeight: 360, overflow: "auto", background: "#FBEBEA", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>{conflict.mine}</pre>
+          <pre className="tp-text-sm" data-testid="conflict-mine" style={{ maxHeight: 360, overflow: "auto", background: "var(--tp-tag-red-bg)", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>{conflict.mine}</pre>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Typography.Text strong>服务器（当前）</Typography.Text>
-          <pre className="tp-text-sm" data-testid="conflict-server" style={{ maxHeight: 360, overflow: "auto", background: "#EDF3FE", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>{conflict.server}</pre>
+          <pre className="tp-text-sm" data-testid="conflict-server" style={{ maxHeight: 360, overflow: "auto", background: "var(--tp-tag-blue-bg)", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap" }}>{conflict.server}</pre>
         </div>
       </div>
     </Modal>

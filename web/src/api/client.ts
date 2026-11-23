@@ -79,7 +79,10 @@ async function rawFetch(path: string, opts: RequestInit, headers: Record<string,
 
 export async function api<T = unknown>(path: string, opts: RequestInit & { silent?: boolean } = {}): Promise<T> {
   const headers: Record<string, string> = { ...(opts.headers as Record<string, string>) };
-  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  // FormData 由浏览器自己带 boundary，手写 application/json 会把 multipart 弄坏。
+  if (opts.body && !(opts.body instanceof FormData) && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   let res = await rawFetch(path, opts, headers);
   const refreshable = !NO_REFRESH_PATHS.some((p) => path.startsWith(p)) && !!getToken();
   if (res.status === 401 && refreshable && (await refreshOnce())) {
@@ -116,6 +119,33 @@ export const patch = <T>(path: string, body?: unknown) =>
 // DELETE 也带 JSON body：后端入参模型统一从 body 读 project_id 等字段
 export const del = <T>(path: string, body?: unknown) =>
   api<T>(path, { method: "DELETE", ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+/** multipart：FormData 交给浏览器定 boundary（api 已按 instanceof 跳过 JSON 头）。 */
+export const postForm = <T = unknown>(path: string, form: FormData) =>
+  api<T>(path, { method: "POST", body: form });
+
+/** 二进制下载（Excel 导出/模板）：走与 api 相同的 401 刷新与错误信封，只是成功时取 blob。
+ *  单独一个函数而不是给 api 加泛型：json 与 blob 的返回形态无法用同一签名诚实表达。 */
+export async function getBlob(path: string): Promise<Blob> {
+  let res = await rawFetch(path, {}, {});
+  const refreshable = !NO_REFRESH_PATHS.some((p) => path.startsWith(p)) && !!getToken();
+  if (res.status === 401 && refreshable && (await refreshOnce())) {
+    res = await rawFetch(path, {}, {});
+  }
+  if (!res.ok) {
+    let body: unknown; // 两条路都会赋值（同 api 的写法，避免 no-useless-assignment）
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    const b = (body ?? {}) as { code?: string; message?: string; details?: unknown };
+    const err = new ApiErr(b.code ?? "http_" + res.status, b.message ?? "下载失败", res.status, b.details);
+    message.error(err.message);
+    if (res.status === 401) onUnauthorized();
+    throw err;
+  }
+  return res.blob();
+}
 
 /** 登出：让后端清掉 HttpOnly 的 refresh Cookie。静默、失败不拦本地登出
  * （本地态已清，服务端 Cookie 清不掉只影响这台浏览器还能不能再 refresh）。 */

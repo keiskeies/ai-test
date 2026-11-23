@@ -33,6 +33,11 @@ interface Props {
   // 里出现过「徽标写 5、列表只有 4 行」的真冲突（演示项目：4 元素 + 1 用例），
   // 界面上一个字不解释，看着就像计数坏了。徽标是共用组件画的，解释也放在这里。
   countTip?: string;
+  // 可选：本页模块回收是「非空拒绝」而不是「资产转未分类」时，用这句话替换默认承诺，
+  // 免得确认框说「资产不会删」而后端回 409（假承诺）。默认 undefined = 沿用原行为。
+  deleteHint?: string;
+  // 回执里的计数键（文件库目录回执叫 purged_folders；其余树叫 purged_modules）
+  purgeCountKey?: "purged_modules" | "purged_folders";
   // 第二十六轮：父页取树失败时把错传进来。三棵树的数据都由父组件加载，失败时
   // recycled 停在初始 [] —— 空回收站那一句「回收站是空的」于是是**故障**说的，
   // 不是数据库说的（父页刷新失败刻意不清行，但首屏就挂时无行可清，只剩这句假话）。
@@ -76,7 +81,7 @@ export default function ModuleTree(p: Props) {
     Modal.confirm({
       centered: true,
       title: "模块进回收站？",
-      content: "「" + label + "」连子孙一起进回收站；" + noun + "不会被删，恢复后原样回归。",
+      content: p.deleteHint ?? ("「" + label + "」连子孙一起进回收站；" + noun + "不会被删，恢复后原样回归。"),
       okText: "放入回收站", okButtonProps: { danger: true }, cancelText: "取消",
       onOk: async () => {
         try {
@@ -106,7 +111,10 @@ export default function ModuleTree(p: Props) {
       // 回执键名三棵树各不同（definitions/scenarios/elements），全部接住——只认前两把
       // 时 UI 树的「N 个元素转为未分类」会被静默算成 0（moduleTree.ts 有钉死的单测）。
       const detached = purgeDetachedClauses(r, noun);
-      message.success("已彻底删除 " + r.purged_modules + " 个模块"
+      const purged = (r as unknown as Record<string, number>)[p.purgeCountKey ?? "purged_modules"]
+        ?? r.purged_modules ?? 0;
+      message.success("已彻底删除 " + purged
+        + (p.purgeCountKey === "purged_folders" ? " 个目录" : " 个模块")
         + (detached.length ? "，" + detached.join("，") : ""));
       setPurge(null); setPurgeName("");
       if (p.selected === purge.id) p.onSelect(null);

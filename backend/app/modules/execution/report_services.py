@@ -21,6 +21,33 @@ from app.core.service import ServiceResult, ensure_project_access, service
 from app.modules.execution.models import RunArtifact, RunRecord, RunStepResult
 from app.modules.execution.services import RUN_STATUS_PATTERN, SUBJECT_TYPE_PATTERN, settle_dead_run
 from app.modules.execution.timefmt import APP_USER, iso_dt
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
+
+# D215：报告中心的可筛面（D47-a 三件套铺到报告页）。字段全是 run_record 上真实存在的
+# 业务列；project_id / include_debug / since / until / cursor / current / size 仍是顶层
+# 参数——前三个管越权与视图口径，后四个是取数机制，进了 filter 就是让两套开关抢同一个名字。
+# env_name 是执行时快照（RunRecord.env_name），与 env_id 并列给出：按 id 精确筛，按名字
+# 做人话核对，两者不互相替代（快照名可能与人话环境列表不同步，但报告本就该如实回放当时）。
+REPORT_LIST_FILTER = ListViewFilter(
+    view_type="report",
+    label="报告中心",
+    fields={
+        "subject_name": FieldDecl(RunRecord.subject_name, "text", "对象名称", nullable=False),
+        "subject_type": FieldDecl(RunRecord.subject_type, "enum", "对象类型", nullable=False),
+        "trigger": FieldDecl(RunRecord.trigger, "enum", "触发方式", nullable=False),
+        "status": FieldDecl(RunRecord.status, "enum", "执行结果", nullable=False),
+        "env_id": FieldDecl(RunRecord.env_id, "id", "环境"),
+        "env_name": FieldDecl(RunRecord.env_name, "text", "环境名称"),
+        "created_by": FieldDecl(RunRecord.created_by, "id", "执行人"),
+        "status_code": FieldDecl(RunRecord.status_code, "number", "响应码"),
+        "elapsed_ms": FieldDecl(RunRecord.elapsed_ms, "number", "耗时(ms)"),
+        "started_at": FieldDecl(RunRecord.started_at, "time", "开始时间"),
+        "finished_at": FieldDecl(RunRecord.finished_at, "time", "结束时间"),
+        "created_at": FieldDecl(RunRecord.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(RunRecord.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(REPORT_LIST_FILTER)
 
 
 # 报告列表页字段（1A run_record_list 是"运行记录页"，这里多统计口径与调试开关）
@@ -40,6 +67,9 @@ class ReportListIn(BaseModel):
     until: str | None = None   # COALESCE(started_at, created_at) <= until
     # 调试开关：默认过滤 trigger=debug（Review Focus 11——报告是结论，调试过程去运行记录页看）
     include_debug: bool = False
+    # D215：高级搜索条件（JSON 串，形状与 shared/filters.py 一致）。与上面各顶层筛选
+    # 并行 AND；空串=没筛选，坏条件 400 且带本页可筛清单。
+    filter: str | None = None
     cursor: str | None = None
     # current（D47-b）：页码分页入口，MS 页脚的 {current, pageSize, total} 口径。
     # 与 cursor 是互斥而非优先级：键集只能往前走，「跳到第 5 页」没有上一批末位可续，
@@ -182,6 +212,9 @@ async def report_list(payload: ReportListIn, ctx) -> ServiceResult:
         select(RunRecord, APP_USER.c.name)
         .outerjoin(APP_USER, RunRecord.created_by == cast(APP_USER.c.id, String(36)))
         .where(RunRecord.project_id == payload.project_id)
+        # D215：高级搜索条件与项目/可见性谓词同一条 SQL（AND）。返回的是**单个**谓词组，
+        # OR 模式自带括号，不会把 project_id 或 include_debug 的谓词吃进 OR 里。
+        .where(REPORT_LIST_FILTER.parse(payload.filter))
     )
     if not payload.include_debug:
         # Review Focus 11：报告中心默认过滤 debug（调试过程去运行记录页看，不污染结论）

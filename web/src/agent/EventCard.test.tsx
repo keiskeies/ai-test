@@ -89,44 +89,26 @@ describe("EventCard 的工具效果徽标", () => {
   });
 });
 
-// 审批卡文案（D126）：每个分句都必须是此刻按得动的按钮。「切 FULL 模式重试」在会话内
-// 按不到——模式选择器 disabled={running || sessionId !== null}，挂起态本身就禁着它，
-// 唯一出路是「重新开始」另起会话。文案许诺同屏禁止的操作 = 又一句假话。
+// 审批卡（D263）：ASK 的写工具在此挂起。卡片只陈述事实并给出回传按钮；
+// 「中断/重新开始」是页顶的钮，不在这张卡里许诺（卡片许诺同屏禁用/不存在的钮=假门）。
 describe("APPROVAL_REQ 审批卡", () => {
-  const approval = () =>
+  const approval = (extra: Partial<Parameters<typeof EventCard>[0]> = {}) =>
     render(
       <EventCard
         effects={{}}
         cardCtx={ctx}
-        ev={{ seq: 1, ts: null, type: "APPROVAL_REQ", payload: { tool_name: "case_delete", args: { id: 1 } } }}
+        ev={{ seq: 1, ts: null, type: "APPROVAL_REQ",
+          payload: { run_id: "r1", tool_call_id: "tc1", tool_name: "case_delete", args: { id: 1 } } }}
+        {...extra}
       />,
     );
 
-  it("挂起提示 + 工具名 + 参数在卡上", () => {
+  it("挂起提示 + 工具名 + 参数在卡上；没接回传时只说「需要页面确认」", () => {
     approval();
     const card = screen.getByTestId("approval-card");
-    expect(card.textContent).toContain("暂不支持在页面上批准");
+    expect(card.textContent).toContain("需要你在页面上确认");
     expect(card.textContent).toContain("case_delete");
-  });
-
-  it("出路两句都可执行：「中断」结束本轮 + 换模式须走「重新开始」，不出现「切 FULL 模式重试」", () => {
-    approval();
-    const card = screen.getByTestId("approval-card");
-    expect(card.textContent).toContain("中断");
-    expect(card.textContent).toContain("重新开始"); // 会话内切模式的真前提
-    expect(card.textContent).not.toContain("或切 FULL 模式重试");
-  });
-
-  it("出路说成有序两步：先「中断」（此刻「重新开始」是灰的），中断后它才可点", () => {
-    // 这张卡存在的唯一状态下 status=等待审批，bench.tsx:113 的 running 把「重新开始」
-    // 按死（:198 disabled）。旧文案「先点『重新开始』另起会话」许诺了一颗当帧禁用的钮
-    // = 假门：用户必须先「中断」离开等待审批，那颗钮才会亮。
-    approval();
-    const t = screen.getByTestId("approval-card").textContent!;
-    expect(t).toContain("先点「中断」"); // 第一步点名，且带「先」字
-    expect(t).toContain("中断后"); // 第二步的时序连词：中断是「重新开始」变可点的前提
-    expect(t).toContain("「重新开始」是灰的"); // 当场摊牌：同帧那颗钮按不动
-    expect(t.indexOf("中断")).toBeLessThan(t.indexOf("重新开始")); // 顺序不许倒装
+    expect(card.textContent).toContain("id");
   });
 });
 
@@ -199,5 +181,47 @@ describe("工具 chip（徽标下线的替代口径）", () => {
     render(<EventCard effects={{}} ev={ev2({ text: "先看看有哪些环境" }, "THINKING")} />);
     expect(screen.queryByTestId("event-kind")).toBeNull();
     expect(screen.getByTestId("event-card").textContent).toContain("思考中");
+  });
+});
+
+// ── D263 审批门：三档回传 / 已决只读 / 没接宿主不画假门 ─────────────────────
+describe("EventCard 的审批门（D263）", () => {
+  const req = (payload: Record<string, unknown> = {}): AgentEvent => ({
+    seq: 1, ts: null, type: "APPROVAL_REQ",
+    payload: {
+      run_id: "r1", tool_call_id: "tc1", tool_name: "api_definition_create",
+      args: { name: "订单查询" }, ...payload,
+    },
+  });
+
+  it("待批 + 宿主接了回传 → 三档按钮，tool_call_id 与决策逐字回传", () => {
+    const got: [string, string][] = [];
+    render(<EventCard effects={{}} ev={req()}
+      onApproval={(id, d) => got.push([id, d])} />);
+    fireEvent.click(screen.getByTestId("approval-once"));
+    fireEvent.click(screen.getByTestId("approval-session"));
+    fireEvent.click(screen.getByTestId("approval-deny"));
+    expect(got).toEqual([["tc1", "once"], ["tc1", "session"], ["tc1", "deny"]]);
+  });
+
+  it("已决（回放里有 APPROVAL_DECISION）→ 只读徽标，不再画按钮", () => {
+    render(<EventCard effects={{}} ev={req()} onApproval={() => undefined}
+      approvalDecision="deny" />);
+    expect(screen.getByTestId("approval-decided").textContent).toContain("已拒绝");
+    expect(screen.queryByTestId("approval-once")).toBeNull();
+    expect(screen.queryByTestId("approval-deny")).toBeNull();
+  });
+
+  it("宿主没接审批（旧宿主/只读预览）→ 不画假按钮，只陈述需要页面确认", () => {
+    render(<EventCard effects={{}} ev={req()} />);
+    expect(screen.queryByTestId("approval-once")).toBeNull();
+    expect(screen.getByTestId("approval-card").textContent).toContain("需要你在页面上确认");
+  });
+
+  it("回传在途（approvalBusy）→ 三档按钮全禁用，防连点", () => {
+    render(<EventCard effects={{}} ev={req()} onApproval={() => undefined} approvalBusy />);
+    for (const id of ["approval-once", "approval-session", "approval-deny"]) {
+      expect((screen.getByTestId(id) as HTMLButtonElement).disabled).toBe(true);
+    }
   });
 });

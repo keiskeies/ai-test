@@ -36,8 +36,8 @@ function KeyField({ kspec, kind, value, testId, disabled, onPatch, onRemove }: {
   const req = kspec.startsWith("!");
   const row = (control: React.ReactNode) => (
     <Space size={8} align="center" wrap style={{ width: "100%" }}>
-      <span className="tp-text-sm" style={{ width: 108, display: "inline-block", color: "#5B6670" }}>
-        {label}{req && <span style={{ color: "#C4565C" }}> *</span>}
+      <span className="tp-text-sm" style={{ width: 108, display: "inline-block", color: "var(--tp-text-2)" }}>
+        {label}{req && <span style={{ color: "var(--tp-func-error)" }}> *</span>}
       </span>
       {control}
     </Space>

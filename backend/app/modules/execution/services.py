@@ -16,6 +16,7 @@ from app.core.errors import ApiError, Page, paginate_desc, paginate_page
 from app.core.service import ServiceResult, ensure_project_access, service
 from app.modules.execution.models import RunRecord
 from app.modules.execution.timefmt import APP_USER, iso_dt
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 
 # 跨模块协议：与 scenario.engine.events.lease_key 的构造必须逐字相等（测试钉死）
 LEASE_KEY_PREFIX = "run.lease."
@@ -26,6 +27,36 @@ RUN_STATUS_PATTERN = "^(queued|running|passed|failed|error|cancelled)$"
 # 「出现在列表里却筛不出来」。词表与前端 shared/runVocab 的 SUBJECT_TYPES 同源
 # （runVocab.test.ts 从本文件抠 pattern 对表）。1D T7：adb_case 加入（同一课重演一次）。
 SUBJECT_TYPE_PATTERN = "^(api_definition|api_case|scenario|ui_case|adb_case)$"
+
+# D242：运行记录页高级搜索（D47-a 三件套铺到本页）。白名单只收 run_record 上
+# **页面上看得见 / 用户说得清**的标量列：
+# - `id`/`subject_id` 是取数定位键，页头没有按 id 找的入口；放进条件组会出现
+#   「两个机制搜同一列、结果却不一样」的镜面。
+# - `project_id` 是作用域参数，由 ensure_project_access 管，绝不能成为业务筛选项。
+# - request_snapshot / response_snapshot / assertions / stats / summary_graph 是 JSON
+#   快照列，`max_runtime_ms` / `lease_owner` / `cancel_requested` 是执行机制列——
+#   它们要么不是人能一眼读的属性，要么页面上根本不展示；给了就是「筛了也看不见」。
+# 与报告中心的 report 白名单是两份：两页的可筛面各自演进（报告多 env_id/updated_at），
+# 共用一份会让改一页顺手改掉另一页。
+RUN_LIST_FILTER = ListViewFilter(
+    view_type="run",
+    label="运行记录",
+    fields={
+        "subject_name": FieldDecl(RunRecord.subject_name, "text", "对象名称", nullable=False),
+        "subject_type": FieldDecl(RunRecord.subject_type, "enum", "对象类型", nullable=False),
+        "trigger": FieldDecl(RunRecord.trigger, "enum", "触发方式", nullable=False),
+        "status": FieldDecl(RunRecord.status, "enum", "状态", nullable=False),
+        "status_code": FieldDecl(RunRecord.status_code, "number", "响应码"),
+        "elapsed_ms": FieldDecl(RunRecord.elapsed_ms, "number", "耗时(ms)"),
+        "env_name": FieldDecl(RunRecord.env_name, "text", "环境名称"),
+        "error": FieldDecl(RunRecord.error, "text", "错误信息"),
+        "created_by": FieldDecl(RunRecord.created_by, "id", "执行人"),
+        "created_at": FieldDecl(RunRecord.created_at, "time", "创建时间", nullable=False),
+        "started_at": FieldDecl(RunRecord.started_at, "time", "开始时间"),
+        "finished_at": FieldDecl(RunRecord.finished_at, "time", "结束时间"),
+    },
+)
+register(RUN_LIST_FILTER)
 
 
 class RunListIn(BaseModel):
@@ -39,6 +70,9 @@ class RunListIn(BaseModel):
     # 1C T11：对象类型筛选（R112）；非法值 422，不静默忽略——静默忽略等于用户
     # 以为筛过了，列表却还是全量，那是「筛了个寂寞」的假绿。
     subject_type: str | None = Field(default=None, pattern=SUBJECT_TYPE_PATTERN)
+    # D242：高级搜索条件（JSON 串，形状同 shared/filters.py）。与上面三条快捷轴并行
+    # AND；空串 = 没筛选，坏条件 400 且 message 带本页可筛清单。
+    filter: str | None = None
     cursor: str | None = None
     # current（D47-b）：页码分页入口，MS 页脚的 {current, pageSize, total} 口径。
     # None = 键集/游标路径（徽标 size=1、api.tsx 逐行取最近一次都走这条，形状不许变）；
@@ -139,6 +173,9 @@ async def run_record_list(payload: RunListIn, ctx) -> ServiceResult:
         stmt = stmt.where(RunRecord.trigger == payload.trigger)
     if payload.status:
         stmt = stmt.where(RunRecord.status == payload.status)
+    # D242：条件进 SQL（不在页内过滤），所以下面的 total 与翻页都吃同一份集合；
+    # 空条件 = 常量 true，等价于没传。
+    stmt = stmt.where(RUN_LIST_FILTER.parse(payload.filter))
     # 最新在前：列表徽标取 size=1 即最近一次；同秒记录用 id 兜底，翻页不重不漏
     stmt = stmt.order_by(RunRecord.created_at.desc(), RunRecord.id.desc())
     # D47-b：cursor 与 current 二选一（同 report_list）。「我在哪」的两套真相一起到场

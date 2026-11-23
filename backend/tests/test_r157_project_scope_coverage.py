@@ -70,6 +70,14 @@ _WHITELIST: dict[str, str] = {
     "ui_case_refs": "批量引用查询（T10 删除保护内部件）：委托链路同上，无独立数据访问",
     "adb_case_references": "单条引用查询：委托 scenario_case_refs（同 project_id 带门），本体无独立数据访问",
     "adb_case_refs": "批量引用查询（T8 删除保护内部件）：委托链路同上，无独立数据访问",
+    # 以下五条都是 `http=None, tool=False, dynamic_perm=True` 的内部服务：
+    # 入口只有已带项目门的外层写/读服务（同一事务、同一 project_id），本体再查一次库
+    # 也只是重复同一道门；单独加 ensure_project_access 反而会把「外层已授权」变成两套真相。
+    "project_num_next": "内部取号：只被已带门的创建服务在同事务内调用（缺陷/功能用例编号）",
+    "project_template_resolve": "内部模板解析：只被已带门的创建/导入服务调用，无独立 HTTP 面",
+    "project_application_enabled": "内部开关读取：调用方是已带门的项目设置/用例服务",
+    "file_target_purge": "内部附件清理：由缺陷/用例的已带门删除服务在同一事务内调用",
+    "review_case_auto_re_review": "内部重提审：由功能用例的已带门更新服务触发（受项目开关控制）",
 }
 
 # 已知带门锚点（反假绿①：这些必然存在且带门——REGISTRY 空了/判定被架空/锚点改名，本例先红）

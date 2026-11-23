@@ -51,6 +51,11 @@ class SearchToolsIn(BaseModel):
     keyword: str = Field(min_length=1, max_length=100)
 
 
+class ReadSkillIn(BaseModel):
+    # name 与 skills/<name>/SKILL.md 的目录名一致；错误时 detail 里带可用清单自纠
+    name: str = Field(min_length=1, max_length=64)
+
+
 class ProposeScenarioPlansIn(BaseModel):
     project_id: str
     # T2 的门：每个 plan 的 graph 先过 scenario/graph.py 结构校验再出卡——
@@ -120,6 +125,8 @@ _METATOOLS: tuple[tuple[str, str, type[BaseModel], str], ...] = (
      SearchTestAssetsIn, META_READ_PERM),
     ("search_tools", "按关键词检索工具声明子集，供当轮载入（§9.2 一期最小实现，T1）",
      SearchToolsIn, META_READ_PERM),
+    ("read_skill", "读取指定 Skill 全文（D266 渐进披露；allowed-tools 会限缩本轮工具）",
+     ReadSkillIn, META_READ_PERM),
     ("propose_scenario_plans", "产出 ≥2 个候选场景方案卡（graph 过结构校验，T2 实现）",
      ProposeScenarioPlansIn, PLAN_WRITE_PERM),
     ("ask_user", "向用户提问并给出选项（不挂起运行，D32，T2 实现）",

@@ -25,6 +25,20 @@ export const tp = {
     error: "#B03A33", errorBg: "#FBEBEA",
     skip: "#8B8E94", skipBg: "#F2F3F4",
     notRun: "#C0C6CC",
+    // 按下态字色（antd 的 colorXxxActive 一族）。浅色这三档是 antd 由浅色色板反推、
+    // 实测过线的现值，写下来只为与深色成对（两套都必须有值，见 tpDark 的 func）：
+    // antdTheme 直接引 token，就不必在主题文件里手抄 hex。
+    infoActive: "#3665C2", warningActive: "#734500", errorActive: "#8A2321",
+    // 悬停态字色（colorXxxTextHover / 文本按钮的 hover 字色）。antd 不钉就往**浅**走
+    // （errorTextHover=#bd5e55 选中底 3.87、infoTextHover=#78aaf5 只有 2.14），
+    // 浅底上「悬停即模糊」。浅色这一族现场重取：同相、比基色深一档、
+    // 六张浅色表面上最差值仍 ≥4.5（error 6.22 / warning 5.80 / info 5.94）。
+    // success 不另开键——它的悬停就是 primary 梯度 700，两套各自反向，直接引 t.primary[700]。
+    // 深色方向相反（往亮走，error 7.60 / warning 9.47 / info 8.42）。
+    infoHover: "#2E5AAE", warningHover: "#855402", errorHover: "#A3322B",
+    // 实心 danger 按钮（Popconfirm「回收」那类 okButtonProps.danger）的字色：
+    // 浅色白字压 #B03A33 = 6.0；深色底是提亮红 #F08B84，白字只有 2.41 → 换深墨红 7.30。
+    onDanger: "#FFFFFF",
   },
   // 功能域色（§11.6.3）：画布左边条/域标签都从这里取。
   // logic 与 skip 同值（#8B8E94）但**语义不同**——一个是「这是逻辑控件」，一个是「这步没跑」，
@@ -93,6 +107,16 @@ export const tp = {
 // 不必等两套主题各自漂（值都比 as const 宽，字面量精度在这里没有用处）。
 export const tpDark: typeof tp = {
   ...tp,
+  // 主色梯度深色下整体反向：50–200 是**底**（选中/hover/浅面），300–700 是**前景**（链接/文字/描边）。
+  // 不重映射的代价实测过两次：① styles.css 深色块里 --tp-primary-* 早已是反向梯度，TS 侧没跟着换
+  // → 同一个 primary[50] 在 CSS 里是深墨绿、在 React 内联里是浅米绿；② antdTheme 里任何
+  // colorPrimaryXxx: t.primary[n] 都把浅色底写回深色主题。值与 styles.css 深色块逐一对齐
+  // （改一处必须同步另一处）；800/900 仍继承浅色——深色没有「更深的绿」可表达，梯度到 700 为止。
+  primary: {
+    ...tp.primary,
+    50: "#122A23", 100: "#1E3D32", 200: "#2C5443", 300: "#6FD3AC", 400: "#52B391",
+    500: "#3FBF95", 600: "#5BC49C", 700: "#8ADBB9",
+  },
   func: {
     success: "#5BC49C", successBg: "rgba(91,196,156,.14)",
     processing: "#7FA8F5", processingBg: "rgba(127,168,245,.14)",
@@ -100,6 +124,15 @@ export const tpDark: typeof tp = {
     error: "#F08B84", errorBg: "rgba(240,139,132,.14)",
     skip: "#9AA6AF", skipBg: "rgba(154,166,175,.12)",
     notRun: "#5A646C",
+    // 按下态往**更亮**走（浅色往更深）：深底上降对比就是消失。antd 反推来的
+    // #3A8C72/#C96865/#6184CF 在选中底 #122A23 只有 3.75/4.09/4.13，不及 4.5。
+    infoActive: "#6E97EE", warningActive: "#D9A63E", errorActive: "#E07A73",
+    // 悬停同方向（往亮走，但不能盖过按下态）：antd 推来的 #FCBBB3/#FFE7A3/#D6E7FF
+    // 虽然亮，却比按下态更浅——悬停比按下更强调，鼠标一按反而变暗，方向是反的。
+    // 这三档卡在基色与按下态之间（选中底 7.60 / 9.47 / 8.42）。
+    infoHover: "#A3C2F8", warningHover: "#F0C768", errorHover: "#F4A29C",
+    // 深底的 danger 实心按钮是**亮红底**，白字只有 2.41：换深墨红才是实心按钮该有的读法。
+    onDanger: "#2B1210",
   },
   domain: { api: "#7FA8F5", ui: "#BBA3E8", adb: "#6FC98A", logic: "#9AA6AF", pilot: "#4FC9C9" },
   code: { bg: "#0A0F13", border: "#1E282F", text: "#E7EBEE", subtle: "#8A98A3" },
@@ -181,6 +214,21 @@ export const tpv = {
   bg: {
     layout: "var(--tp-bg-layout)", container: "var(--tp-bg-container)", elevated: "var(--tp-bg-elevated)",
     tableHead: "var(--tp-bg-table-head)", hover: "var(--tp-bg-hover)", selected: "var(--tp-bg-selected)",
+  },
+  // Tag 三段色的变量形态：键与 tp.tag 完全一致（11 预设 × fg/bg/bd）。
+  // 缺这一组时想用 Tag 色的地方只能引 tp.tag.*——那是浅色的具体值，深色下浅粉底压近白字。
+  tag: {
+    green: { fg: "var(--tp-tag-green-fg)", bg: "var(--tp-tag-green-bg)", bd: "var(--tp-tag-green-bd)" },
+    cyan: { fg: "var(--tp-tag-cyan-fg)", bg: "var(--tp-tag-cyan-bg)", bd: "var(--tp-tag-cyan-bd)" },
+    blue: { fg: "var(--tp-tag-blue-fg)", bg: "var(--tp-tag-blue-bg)", bd: "var(--tp-tag-blue-bd)" },
+    geekblue: { fg: "var(--tp-tag-geekblue-fg)", bg: "var(--tp-tag-geekblue-bg)", bd: "var(--tp-tag-geekblue-bd)" },
+    purple: { fg: "var(--tp-tag-purple-fg)", bg: "var(--tp-tag-purple-bg)", bd: "var(--tp-tag-purple-bd)" },
+    magenta: { fg: "var(--tp-tag-magenta-fg)", bg: "var(--tp-tag-magenta-bg)", bd: "var(--tp-tag-magenta-bd)" },
+    gold: { fg: "var(--tp-tag-gold-fg)", bg: "var(--tp-tag-gold-bg)", bd: "var(--tp-tag-gold-bd)" },
+    orange: { fg: "var(--tp-tag-orange-fg)", bg: "var(--tp-tag-orange-bg)", bd: "var(--tp-tag-orange-bd)" },
+    volcano: { fg: "var(--tp-tag-volcano-fg)", bg: "var(--tp-tag-volcano-bg)", bd: "var(--tp-tag-volcano-bd)" },
+    red: { fg: "var(--tp-tag-red-fg)", bg: "var(--tp-tag-red-bg)", bd: "var(--tp-tag-red-bd)" },
+    default: { fg: "var(--tp-tag-default-fg)", bg: "var(--tp-tag-default-bg)", bd: "var(--tp-tag-default-bd)" },
   },
   split: "var(--tp-split)", border: "var(--tp-border)", borderHover: "var(--tp-border-hover)", mask: "var(--tp-mask)",
   radius: tp.radius,

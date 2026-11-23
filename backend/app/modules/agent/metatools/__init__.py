@@ -19,6 +19,7 @@ from __future__ import annotations
 from app.modules.agent.metatools import (
     card_tools,  # noqa: F401  T2 五件真 handler 自登记
     read_tools,  # noqa: F401  T1 三件真 handler 自登记
+    skill_tools,  # noqa: F401  D266 read_skill 真 handler 自登记
 )
 from app.modules.agent.metatools.spec import META_TOOL_NAMES, register_metatools
 

@@ -11,7 +11,7 @@
 //    有 run_id（还在跑）只有 fired_at/run_id + 「执行结果未回」；没 run_id（未投递/
 //    投递失败，回执压根没建 run）说「未产生执行，不会回结果」——两种都不许出现绿/红 Tag；
 // ⑧ cron 人话化只说后端 cron.py（celery crontab）说得准的形状，说不了就 raw 兜底；
-// ⑨ 主体列用页体那一份场景列表（全程只请求一次 /scenarios），名单外 id 画截断 id；
+// ⑨ 主体列用页体那一份场景/计划列表（各只请求一次 /scenarios、/plans），名单外 id 画截断 id；
 // ⑩ D76 尾账「计划」三选：反解 parsePlan 是 humanizeCron 的严格逆运算（选择器拼不出
 //    原文的一律落自定义，如 `0 2 * * 1-5`）；POST/PATCH 断的是最终 cron 原文；
 //    每天/每周可拼集合 round-trip（拼串→人话→反解回同态同值）；切态不静默清用户 cron。
@@ -81,6 +81,8 @@ const calls: { url: string; method: string; body: unknown }[] = [];
 const RESP = {
   page: (items: unknown[]) => ({ items, next_cursor: null }),
   scenarios: { items: [{ id: "s1", name: "履约场景A" }], next_cursor: null },
+  // D226：计划候选（主体类型 = plan 时抽屉/主体列共用）
+  plans: { items: [{ id: "p9", name: "夜间回归计划" }], next_cursor: null },
   envs: { items: [{ id: "e1", name: "测试环境" }], next_cursor: null },
   channels: { items: [{ id: "c1", name: "钉钉值班群" }], next_cursor: null },
   NEXT5: { cron: "*/5 * * * *", times: ["2026-11-16T10:05:00+08:00", "2026-11-16T10:10:00+08:00",
@@ -132,6 +134,24 @@ function mockBackend(over: BackendOpts = {}) {
       // （reports.tsx 的 load 依赖里一度真的多了 items；桩比真接口更好说话=把 bug 藏进桩里）。
       json: async () => JSON.parse(JSON.stringify(json)) as unknown,
     }) as unknown as Response;
+    // D240：高级搜索三件套的依赖（元数据 / 个人视图）。不 mock 的话未 mock 请求直接 throw，
+    // 「本测试没 mock」会被演成「筛选功能故障」。
+    if (url.includes("/filter-meta?")) {
+      return resp(200, {
+        view_type: "schedule", view_label: "定时任务",
+        supported_view_types: ["schedule"],
+        fields: [
+          { field: "name", label: "任务名称", kind: "text",
+            ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS"] },
+          { field: "subject_type", label: "主体类型", kind: "enum",
+            ops: ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"] },
+          { field: "enabled", label: "启用（1/0）", kind: "number",
+            ops: ["EQUALS", "NOT_EQUALS", "GT", "LT", "BETWEEN"] },
+        ],
+        unavailable: {},
+      });
+    }
+    if (url.includes("/saved-views?")) return resp(200, []);
     if (url.includes("/schedule-tasks/next-5") && method === "POST") {
       if (over.previewStatus === 422) return resp(422, RESP.CRON422);
       if (over.previewFailCron && (body as { cron?: string })?.cron === over.previewFailCron) {
@@ -169,6 +189,7 @@ function mockBackend(over: BackendOpts = {}) {
       return resp(200, { ...row, ...body });
     }
     if (url.includes("/scenarios?")) return resp(200, RESP.scenarios);
+    if (url.includes("/plans?")) return resp(200, RESP.plans);
     if (url.includes("/envs?")) return resp(200, RESP.envs);
     if (url.includes("/notify-channels?")) {
       if (over.channelsStatus === 403) {
@@ -804,29 +825,119 @@ describe("Ctrl+K 落点 ?q=<id> 高亮", () => {
 //    断言全部落在 body JSON、URL 参数、请求次数
 //    与渲染出的服务端回执上，不钉「testid 存在」这种点不动也绿的壳。──────────────
 
-describe("主体类型控件（D30 一期只有 scenario：显示值与提交值同源，且不放开第二选项）", () => {
-  it("下拉禁用、显示「场景（scenario）」，POST body 的 subject_type 与显示值同源", async () => {
+describe("主体类型控件（D226 两值：场景 / 测试计划，显示值与提交值同源）", () => {
+  it("默认场景；切到测试计划后环境框消失、候选换 /plans、POST body subject_type=plan 且 env_id=null", async () => {
     mockBackend();
     render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
     await waitFor(() => expect(screen.getByTestId("schedule-create")).not.toBeNull());
     fireEvent.click(screen.getByTestId("schedule-create"));
     await waitFor(() => expect(screen.getByTestId("schedule-field-subject_type")).not.toBeNull());
     const root = screen.getByTestId("schedule-field-subject_type");
-    // 一期白名单：控件被焊死（disabled），点开也不许冒出第二个候选
-    expect(root.className).toContain("ant-select-disabled");
     expect(root.querySelector(".ant-select-selection-item")?.textContent).toBe("场景（scenario）");
-    fireEvent.mouseDown(root.querySelector(".ant-select-selector") as HTMLElement);
-    expect(document.querySelector(
-      ".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-content"))
-      .toBeNull();
-    // 显示值 ⇄ 提交值同源：body 里的 subject_type 必须就是这一项的 value
+    // 场景态：环境框在（任务级环境只属于场景）
+    expect(screen.queryByTestId("schedule-field-env_id")).not.toBeNull();
+
+    openSelectByTestId("schedule-field-subject_type");
+    await clickOption("测试计划（plan）");
+    await waitFor(() =>
+      expect(root.querySelector(".ant-select-selection-item")?.textContent).toBe("测试计划（plan）"));
+    // plan 不绑任务级环境：控件整块不渲染（不是灰着，是不存在）
+    expect(screen.queryByTestId("schedule-field-env_id")).toBeNull();
+
+    // 候选来自 /plans（页体拉一次那份）
+    expect(calls.some((c) => c.url.includes("/plans?") && c.url.includes("project_id=p1"))).toBe(true);
     fireEvent.change(screen.getByTestId("schedule-field-name"), { target: { value: "夜间回归" } });
     openSelectByTestId("schedule-field-subject_id");
-    await clickOption("履约场景A");
+    await clickOption("夜间回归计划");
     fireEvent.click(screen.getByTestId("schedule-save"));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/schedule-tasks") && c.method === "POST")).toBe(true));
     const body = calls.find((c) => c.url.endsWith("/schedule-tasks") && c.method === "POST")!.body as Record<string, unknown>;
-    expect(body.subject_type).toBe("scenario"); // D30 白名单唯一值进 body（控件焊死在 scenario，别处来不了）
+    expect(body.subject_type).toBe("plan");
+    expect(body.subject_id).toBe("p9");
+    expect(body.env_id).toBeNull(); // 切主体后旧环境不许带进 body
+  });
+
+  it("主体列按类型各查各的名单：plan 行显示计划名，不拿场景表去猜", async () => {
+    mockBackend({ extraRows: [task("t11", { name: "计划任务", subject_type: "plan",
+      subject_id: "p9" })] });
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-subject-t11")).not.toBeNull());
+    expect(screen.getByTestId("schedule-subject-t11").textContent).toContain("夜间回归计划");
+    // 场景行不受影响
+    expect(screen.getByTestId("schedule-subject-t1").textContent).toContain("履约场景A");
+  });
+
+  it("D229 计划报告：环境框消失、候选换 /plans、POST body subject_type=plan_report 且 env_id=null", async () => {
+    mockBackend();
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-create")).not.toBeNull());
+    fireEvent.click(screen.getByTestId("schedule-create"));
+    await waitFor(() => expect(screen.getByTestId("schedule-field-subject_type")).not.toBeNull());
+    const root = screen.getByTestId("schedule-field-subject_type");
+
+    openSelectByTestId("schedule-field-subject_type");
+    await clickOption("计划报告（plan_report）");
+    await waitFor(() =>
+      expect(root.querySelector(".ant-select-selection-item")?.textContent).toBe("计划报告（plan_report）"));
+    // 计划类主体不绑环境：控件整块不渲染
+    expect(screen.queryByTestId("schedule-field-env_id")).toBeNull();
+    // 候选来自 /plans（subject_id 也是 plan_id）
+    expect(calls.some((c) => c.url.includes("/plans?") && c.url.includes("project_id=p1"))).toBe(true);
+
+    fireEvent.change(screen.getByTestId("schedule-field-name"), { target: { value: "每晚报告" } });
+    openSelectByTestId("schedule-field-subject_id");
+    await clickOption("夜间回归计划");
+    fireEvent.click(screen.getByTestId("schedule-save"));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/schedule-tasks") && c.method === "POST")).toBe(true));
+    const body = calls.find((c) => c.url.endsWith("/schedule-tasks") && c.method === "POST")!.body as Record<string, unknown>;
+    expect(body.subject_type).toBe("plan_report");
+    expect(body.subject_id).toBe("p9");
+    expect(body.env_id).toBeNull();
+  });
+
+  it("主体列：plan_report 行同样用 /plans 名单显示计划名", async () => {
+    mockBackend({ extraRows: [task("t12", { name: "报告任务", subject_type: "plan_report",
+      subject_id: "p9" })] });
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-subject-t12")).not.toBeNull());
+    expect(screen.getByTestId("schedule-subject-t12").textContent).toContain("夜间回归计划");
+  });
+});
+
+// D229：plan_report 的回执没有 run（不产生执行），但**产生了一份报告**——
+// 必须画「已生成报告 + 链接 + 计数 + 未推送原因」，不许演成「未产生执行，不会回结果」。
+describe("最近结果：计划报告回执（D229）", () => {
+  it("有 report_id：画已生成报告与计数，不画「未产生执行」", async () => {
+    mockBackend({ extraRows: [task("t21", { name: "每晚报告", subject_type: "plan_report",
+      subject_id: "p9",
+      last_run: { ok: true, plan_id: "p9", report_id: "pr1", report_name: "夜间回归计划 报告",
+        status: "not_started", total: 5, passed: 3, notified: false,
+        reason: "未绑定通知渠道", fired_at: "2026-11-23T08:00:00+08:00" } })] });
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-last-report")).not.toBeNull());
+    const cell = screen.getByTestId("schedule-result-t21");
+    expect(cell.textContent).toContain("已生成报告");
+    expect(cell.textContent).toContain("夜间回归计划 报告");
+    expect(cell.textContent).toContain("总数 5");
+    expect(cell.textContent).toContain("通过 3");
+    expect(cell.textContent).toContain("未推送：未绑定通知渠道");
+    expect(cell.textContent).not.toContain("未产生执行");
+    // 链接落到计划报告详情
+    const link = screen.getByTestId("schedule-last-report").querySelector("a");
+    expect(link?.getAttribute("href")).toBe("/plan-reports/pr1");
+  });
+
+  it("没有 report_id 的失败回执：画「本次未生成报告」，不冒用 run 的「未产生执行」", async () => {
+    mockBackend({ extraRows: [task("t22", { name: "报告失败", subject_type: "plan_report",
+      subject_id: "p9",
+      last_run: { ok: false, reason: "计划不存在，未生成报告",
+        fired_at: "2026-11-23T08:00:00+08:00" } })] });
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-result-t22")).not.toBeNull());
+    const cell = screen.getByTestId("schedule-result-t22");
+    expect(cell.textContent).toContain("本次未生成报告");
+    expect(cell.textContent).toContain("计划不存在，未生成报告");
+    expect(cell.textContent).not.toContain("未产生执行");
   });
 });
 
@@ -1319,5 +1430,47 @@ describe("保存失败的回显与关闭（schedule-save-error）", () => {
     await waitFor(() => expect(
       calls.filter((c) => c.method === "POST" && c.url.endsWith("/schedule-tasks"))).toHaveLength(1));
     expect(screen.queryByTestId("schedule-save-error")).toBeNull();
+  });
+});
+
+// ── D240：高级搜索 + 列设置（D47-a 三件套铺到定时任务页）─────────────────────
+// 与 taskCenter.test.tsx 的 D239 同法：空条件整个参数不上线；应用条件后断**线上的
+// filter JSON**（字段名来自后端 meta 第一项，前端不自列）；列设置只藏被勾掉的那一列。
+describe("D240 高级搜索与列设置", () => {
+  it("空条件不拼 filter；应用「任务名称包含 夜间」后列表请求带条件 JSON", async () => {
+    mockBackend();
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-view-t1")).not.toBeNull());
+    expect(listReqs()[0].url).not.toContain("filter="); // 空条件整个参数不上线（不是 filter=）
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "夜间" } });
+    const before = listReqs().length; // 基线在点「应用」之前取：fetch 在桩里同步入队
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listReqs().length).toBe(before + 1));
+    const raw = new URLSearchParams(listReqs().at(-1)!.url.slice(listReqs().at(-1)!.url.indexOf("?") + 1))
+      .get("filter");
+    expect(JSON.parse(raw!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "夜间" }],
+    });
+  });
+
+  it("列设置勾掉「调度」只藏那一列（其余表头原样，操作列不可隐藏）", async () => {
+    mockBackend();
+    render(<MemoryRouter><SchedulesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("schedule-view-t1")).not.toBeNull());
+    const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("调度");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "主体", "调度", "启用", "最近结果", "连续失败"]);
+    fireEvent.click(boxes[labels.indexOf("调度")]);
+    await waitFor(() => expect(thead()).not.toContain("调度"));
+    expect(thead()).toContain("最近结果");
   });
 });

@@ -48,6 +48,8 @@ class UserCreateIn(BaseModel):
 
 
 class UserListIn(BaseModel):
+    # D244：高级搜索条件（JSON 串，形状同 shared/filters.py）；空串 = 没筛选。
+    filter: str | None = None
     cursor: str | None = None
     size: int = Field(default=50, ge=1, le=200)
 
@@ -195,6 +197,8 @@ class UserImportCommitOut(BaseModel):
 class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
+    # D269：归档到哪个组织。不传 = 默认组织（迁移 0050 建的那个），找不到就留空。
+    organization_id: str | None = None
 
 
 class ProjectUpdateIn(BaseModel):

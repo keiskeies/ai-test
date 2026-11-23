@@ -8,7 +8,7 @@ import type { QuestionPayload } from "./types";
 export default function QuestionCard({ payload, ctx }: { payload: QuestionPayload; ctx: CardContext }) {
   const options = Array.isArray(payload.options) ? payload.options : [];
   return (
-    <div data-testid="question-card" style={{ border: "1px solid #D6E4FF", borderRadius: 8, padding: "10px 12px", background: "#F7FAFF" }}>
+    <div data-testid="question-card" style={{ border: "1px solid var(--tp-tag-blue-bd)", borderRadius: 8, padding: "10px 12px", background: "var(--tp-tag-blue-bg)" }}>
       <Typography.Text className="tp-text-md" strong>
         {/* 禁止 emoji 混入 UI（§11.6.6 红线）：原来的 <span role="img">❓</span> 是彩色象形 emoji，
             role="img" 就是「我在充当图标」的自供——换成同职责的线性图标，读屏文案不变。 */}

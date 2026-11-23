@@ -168,3 +168,39 @@ async def _send_alert(db, channel_ids: list[str], task_name: str, failures: int,
         channels_out.append({"channel_id": cid, "name": chan.name, "alert": True,
                              "ok": res.ok, "error": res.error})
     return any_ok
+
+
+# ── D229：定时计划报告 → 通知渠道（core.set_report_notify_hook 的唯一实现） ─────────
+
+
+async def on_report_notified(db, *, project_id: str, report: dict[str, Any],
+                             channel_ids: list[str]) -> list[dict[str, Any]]:
+    """把一份计划报告摘要发往任务绑定的渠道，逐渠道落 last_send 并返回回执。
+
+    四条口径：
+    - **空 channel_ids → []**：任务没绑渠道就是没发——回执 channels=[] 与「绑了但全失败」
+      （逐条 ok=False）是两种形状，前端分得清。
+    - **渠道行已删 → ok=False「渠道不存在」**：不编名字、不静默跳过（与 _handle 同款）。
+    - **发送失败照实回**：senders.send 的契约是永不抛；真抛按 _send_one 的纪律先落账、
+      收集后在末尾上抛——唯一吞点在 core.notify_report，本模块不私自吞。
+    - project_id 目前只进日志（渠道表是平台级的，没有 project_id 列）：留着是为了让
+      钩子签名与 run 终态钩子同形，将来按项目限渠道时不用改调用方。
+    """
+    del project_id  # 见 docstring 第 4 条
+    md = template.render_report(report or {})
+    out: list[dict[str, Any]] = []
+    failures: list[Exception] = []
+    for raw in channel_ids or []:
+        cid = str(raw)
+        chan = (await db.execute(
+            select(NotifyChannel).where(NotifyChannel.id == cid))).scalar_one_or_none()
+        if chan is None:
+            out.append({"channel_id": cid, "ok": False, "error": "渠道不存在"})
+            continue
+        res = await _send_one(db, chan, md, failures)
+        out.append({"channel_id": cid, "name": chan.name, "ok": res.ok, "error": res.error})
+    if failures:
+        # 账（last_send）已落会话，交唯一吞点：那里返回 [] 之前调用方已按顺序拿不到回执，
+        # 但 last_send 仍在 fire 的同一个事务里提交——「发了但回执丢了」比「假装成功」诚实。
+        raise failures[0]
+    return out

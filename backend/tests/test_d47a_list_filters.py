@@ -714,9 +714,32 @@ def test_registry_rejects_duplicate_view_type() -> None:
 
 
 def test_registry_view_types_are_registered_pages() -> None:
-    """已登记页面清单是前端「哪些页面有高级搜索」的真相；本轮只开了 api 一页。
+    """已登记页面清单是前端「哪些页面有高级搜索」的真相；当前 = adb_case + adb_device + api + audit + case_review + channel + custom_field + dataset + defect + env_group + file + functional_case + member + mock_rule + plan + public_script + report + run + scenario + schedule + task_center + template + ui_case + ui_element + user。
 
-    第二页（scenario/report）接进来时这一条会红——那是**故意**的：加一页要同时加它的
-    筛选行为测试，不能只改一行登记就当交付了。
+    这条**故意**在加页时会红：加一页要同时加它的筛选行为测试（D212 的
+    test_d212_plan_advanced_search.py / D213 的 test_d213_ui_case_advanced_search.py /
+    D214 的 test_d214_scenario_advanced_search.py / D215 的
+    test_d215_report_advanced_search.py / D216 的
+    test_d216_defect_advanced_search.py / D217 的
+    test_d217_adb_case_advanced_search.py / D219 的
+    test_d219_functional_case_advanced_search.py / D220 的
+    test_d220_ui_element_advanced_search.py / D221 的
+    test_d221_case_review_advanced_search.py / D222 的
+    test_d222_file_advanced_search.py / D223 的
+    test_d223_dataset_advanced_search.py / D224 的
+    test_d224_adb_device_advanced_search.py / D239 的
+    test_d239_task_center_advanced_search.py / D240 的
+    test_d240_schedule_advanced_search.py / D241 的
+    test_d241_mock_rule_advanced_search.py / D242 的
+    test_d242_run_advanced_search.py / D246 的
+    test_d246_audit_advanced_search.py / D247 的
+    test_d247_project_meta_advanced_search.py / D249 的
+    test_d249_env_group_advanced_search.py / D250 的
+    test_d250_public_script_advanced_search.py 就是两端随行用例），不能只改一行
+    登记就当交付了。
     """
-    assert view_types() == ["api"]
+    assert view_types() == ["adb_case", "adb_device", "api", "audit", "case_review", "channel",
+                            "custom_field", "dataset", "defect", "env_group", "file",
+                            "functional_case", "member", "mock_rule", "plan", "public_script",
+                            "report", "run", "scenario", "schedule", "task_center", "template",
+                            "ui_case", "ui_element", "user"]

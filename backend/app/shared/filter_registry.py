@@ -40,15 +40,20 @@ class FieldDecl:
     `nullable=False` 的列**拿不到 EMPTY / NOT_EMPTY**：非空列上「为空」永远筛不出行，
     摆进下拉就是假筛选项（选了没反应 = 骗人）。这一位是白名单里唯一由数据库决定的部分，
     所以它由登记方显式写出来，而不是让前端猜列的可空性。
+
+    `column` 可以是一个**表达式**（如相关标量子查询），`ops_override` 给定时收窄操作符
+    子集：表达式拼出来的值有些操作符没有诚实语义，全集摆出来就是假筛选项（见
+    `shared.filters.FieldSpec` 的同名说明）。
     """
 
     column: Any
     kind: str
     label: str
     nullable: bool = True
+    ops_override: frozenset[str] | None = None
 
     def ops(self) -> list[str]:
-        allowed = set(kind_ops(self.kind))
+        allowed = set(self.ops_override if self.ops_override is not None else kind_ops(self.kind))
         if not self.nullable:
             allowed -= {"EMPTY", "NOT_EMPTY"}
         return sorted(allowed)
@@ -57,7 +62,9 @@ class FieldDecl:
         # nullable 必须一路传到底：它同时管两件事——能不能有 EMPTY/NOT_EMPTY（上面 ops()），
         # 以及否定谓词要不要补 `OR col IS NULL`（filters._neg）。在这里丢掉，
         # 非空列就会带上永假的死条件，而「这列到底能不能为空」在调用点看不出来。
-        return FieldSpec(column=self.column, kind=self.kind, nullable=self.nullable)
+        return FieldSpec(column=self.column, kind=self.kind, nullable=self.nullable,
+                         ops=self.ops_override)
+
 
 
 @dataclass(frozen=True)

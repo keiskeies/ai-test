@@ -345,6 +345,70 @@ async def api_definition_delete(payload: schemas.ApiDefDeleteIn, ctx) -> BaseMod
 @service(
     perm="api:def:delete",
     effect="destructive",
+    name="api_definition_batch_delete",
+    description="批量放入回收站（全有或全无：任一不存在/已回收 → 404 整批不动；"
+                "任一被未回收场景引用 → 409 整批不动，不提供批量 force）",
+    http={"method": "POST", "path": "/api-definitions/batch-delete", "tags": ["api_test"]},
+    resident=False,
+)
+async def api_definition_batch_delete(payload: schemas.ApiDefBatchDeleteIn, ctx) -> BaseModel:
+    """MS `/api/definition/delete/batch` 的等价面，纪律与 plan_batch_delete 同款。
+
+    - 重复 id → 422：同一接口删两次没有第二种语义，说明调用方拼错了列表。
+    - 任一不存在/已回收 → 404 + 列出缺的 ids，**整批一行都不动**；「删一半再报错」
+      是最坏的一种成功（调用方以为失败，数据已经少了一块）。
+    - 引用检查先全查完再改状态：任一被引用 → 409 + blocked 清单，仍是零写入。
+    - **不提供批量 force**：单删的 force 建立在「你已看见这一个接口的引用清单」之上；
+      批量里 N 份清单叠在一起，一键连带断掉的可能是 N 个别人的场景步骤——
+      要强删就逐个删，每个都过一遍那段确认。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("api:def:delete")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.definition_ids))
+    if len(uniq) != len(payload.definition_ids):
+        raise ApiError("validation_failed", "definition_ids 不能重复", 422,
+                       {"definition_ids": payload.definition_ids})
+    rows = (await ctx.db.execute(select(ApiDefinition).where(
+        ApiDefinition.project_id == payload.project_id,
+        ApiDefinition.id.in_(uniq),
+    ).order_by(ApiDefinition.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    # 已回收与不存在同码：单删（api_definition_delete）的口径，批量不许另开一种
+    missing = [i for i in uniq if i not in found or found[i].status == "recycled"]
+    if missing:
+        raise ApiError("not_found", "接口定义不存在", 404, {"definition_ids": missing})
+    for r in rows:
+        assert_row_visible(r, ctx, what="接口定义不存在")
+    blocked: list[dict] = []
+    for r in rows:
+        ref = await _definition_scenario_refs(ctx, payload.project_id, r.id)
+        if ref:
+            item: dict = {"definition_id": r.id, "name": r.name,
+                          "count": ref["count"], "scenarios": ref["scenarios"]}
+            if ref["hidden"]:
+                item["hidden"] = True
+            blocked.append(item)
+    if blocked:
+        names = "、".join("「" + b["name"] + "」" for b in blocked[:5])
+        more = " 等 " + str(len(blocked)) + " 个接口" if len(blocked) > 5 else ""
+        details: dict = {"blocked": blocked}
+        if any(b.get("hidden") for b in blocked):
+            details["reason"] = "missing_scenario_read"
+        raise ApiError(
+            "referenced_by_scenario",
+            "有 " + str(len(blocked)) + " 个接口的用例被未回收场景引用：" + names + more
+            + "；整批一行未动。批量不提供 force——确认要连带断掉场景步骤请逐个回收",
+            409, details)
+    for r in rows:
+        r.status = "recycled"
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="api:def:delete",
+    effect="destructive",
     name="api_definition_purge",
     description="彻底删除回收站中的接口定义（物理删除，连带其用例；接口名随之释放，不可恢复）",
     http={"method": "POST", "path": "/api-definitions/{definition_id}/purge", "tags": ["api_test"]},
@@ -401,6 +465,44 @@ async def api_definition_restore(payload: schemas.ApiDefGetIn, ctx) -> BaseModel
     return _out(e, owner_name=names.get(e.owner_id or ""))
 
 
+@service(
+    perm="api:def:update",
+    effect="write",
+    name="api_definition_batch_restore",
+    description="批量从回收站恢复接口定义（全有或全无：任一不在回收站 → 404 整批不动）",
+    http={"method": "POST", "path": "/api-definitions/batch-restore", "tags": ["api_test"]},
+    resident=False,
+)
+async def api_definition_batch_restore(payload: schemas.ApiDefBatchRestoreIn, ctx) -> BaseModel:
+    """与批量回收对称的出口。
+
+    - 重复 id → 422；任一不存在或**不在回收站** → 404 + 列 ids，整批一行不动。
+      单条 restore 对「不在回收站」也是 404 not_found，这里沿用同码同文案。
+    - 恢复状态逐行按「有没有 request」定 complete/draft——不是一律 complete。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("api:def:update")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.definition_ids))
+    if len(uniq) != len(payload.definition_ids):
+        raise ApiError("validation_failed", "definition_ids 不能重复", 422,
+                       {"definition_ids": payload.definition_ids})
+    rows = (await ctx.db.execute(select(ApiDefinition).where(
+        ApiDefinition.project_id == payload.project_id,
+        ApiDefinition.id.in_(uniq),
+    ).order_by(ApiDefinition.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    bad = [i for i in uniq if i not in found or found[i].status != "recycled"]
+    if bad:
+        raise ApiError("not_found", "有接口不存在或不在回收站", 404, {"definition_ids": bad})
+    for r in rows:
+        assert_row_visible(r, ctx, what="接口定义不存在")
+    for r in rows:
+        r.status = "complete" if r.request else "draft"
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
 # —— 调试执行（T8）：传输钩子仅供测试注入（与 tasks.set_gateway_factory 同款） ——
 _transport_factory: Callable[[], Any] | None = None
 
@@ -419,6 +521,55 @@ async def _resolve_via_registry(ctx, project_id: str, env_id: str | None):
         raise ApiError("internal_error", "env_resolve 未注册（服务尚未初始化完成）", 500)
     out = await spec.handler(spec.model.model_validate({"project_id": project_id, "env_id": env_id}), ctx)
     return dict(out.model_dump())
+
+
+async def _execute_case(ctx, project_id: str, case_id: str, env_id: str | None,
+                        extra_vars: dict[str, str] | None = None):
+    """用例 → 一次真实执行（调试与「运行用例」共用，D228）。
+
+    返回 (result, 请求快照, 环境名, 用例名)。步骤与 api_debug(case_id) 原本逐行相同：
+    可见性 → 定义回收检查 → 分层合并 → 数据集首行 → 环境变量/请求头/超时 → 发送。
+    抽出来是为了让 **api_case_run** 与调试用同一条执行链——两套「用例怎么跑」的实现
+    会在变量层或超时默认值上各自漂移，而 DEBUG 面已被大量用例钉住，抄一份必然走样。
+    """
+    from app.modules.api_test.case_services import _visible_case, merge_request
+    from app.modules.api_test.models import ApiDefinition as _AD
+
+    assert ctx.db is not None
+    cs = await _visible_case(ctx.db, ctx, project_id, case_id)
+    if cs.status != "normal":
+        raise ApiError("not_found", "用例不存在", 404, {"case_id": cs.id})
+    defn = await ctx.db.get(_AD, cs.definition_id)
+    if defn is None or defn.status == "recycled":
+        raise ApiError("not_found", "用例所属接口在回收站", 404, {"case_id": cs.id})
+    eff = merge_request(defn, cs)
+    if eff is None:
+        raise ApiError("validation_failed", "用例不可执行：定义无请求对象且用例未覆盖 url", 422)
+    req = eff
+    explicit_timeout = "timeout_ms" in req
+    dataset_row: dict[str, str] = {}
+    if cs.dataset_id:
+        ds = await ctx.db.get(DataSet, cs.dataset_id)
+        if ds is not None and ds.rows:
+            # 数据驱动首行层：高于环境、低于调用方临时变量（1B 场景循环时全行驱动）
+            dataset_row = {str(k): str(v) for k, v in zip(ds.columns, ds.rows[0], strict=False)}
+    env = await _resolve_via_registry(ctx, project_id, env_id)
+    variables = merge_vars(dict((k, v) for k, v in env["vars"]), dataset_row, extra_vars or {})
+    own = [[str(k), str(v)] for k, v in (req.get("headers") or [])]
+    own_keys = {k.lower() for k, _v in own}
+    req["headers"] = [h for h in env["headers"] if h[0].lower() not in own_keys] + own
+    if env["timeout_ms"] and not explicit_timeout:
+        req["timeout_ms"] = env["timeout_ms"]
+    transport = _transport_factory() if _transport_factory else None
+    try:
+        result = await run_api(req, variables=variables, transport=transport)
+    except MissingVar as e:
+        raise ApiError("validation_error", "缺少变量：" + e.name, 422, {"var": e.name}) from e
+    except ValueError as e:
+        # D172 form 垃圾 body 与 RequestAuthError（ValueError 子类）同路：执行核抛的
+        # 已是人话（D157 纪律），原样转 422，不落裸 500。MissingVar 非 ValueError，顺序无碍。
+        raise ApiError("validation_error", str(e), 422) from e
+    return result, req, env["env_name"], cs.name
 
 
 @service(
@@ -448,26 +599,23 @@ async def api_debug(payload: schemas.ApiDebugIn, ctx) -> schemas.DebugOut:
         explicit_timeout = True  # 定义内 request 已含显式 timeout 默认值
         subject_type, subject_id, subject_name = "api_definition", e.id, e.name
     elif payload.case_id is not None:
-        from app.modules.api_test.case_services import _visible_case, merge_request
-        from app.modules.api_test.models import ApiDefinition as _AD
-
-        cs = await _visible_case(ctx.db, ctx, payload.project_id, payload.case_id)
-        if cs.status != "normal":
-            raise ApiError("not_found", "用例不存在", 404, {"case_id": cs.id})
-        defn = await ctx.db.get(_AD, cs.definition_id)
-        if defn is None or defn.status == "recycled":
-            raise ApiError("not_found", "用例所属接口在回收站", 404, {"case_id": cs.id})
-        eff = merge_request(defn, cs)
-        if eff is None:
-            raise ApiError("validation_failed", "用例不可执行：定义无请求对象且用例未覆盖 url", 422)
-        req = eff  # 先判 None 再交给 req：直接赋值会让 req 的类型里留着 None
-        explicit_timeout = "timeout_ms" in req
-        subject_type, subject_id, subject_name = "api_case", cs.id, cs.name
-        if cs.dataset_id:
-            ds = await ctx.db.get(DataSet, cs.dataset_id)
-            if ds is not None and ds.rows:
-                # 数据驱动首行层：高于环境、低于调试临时（1B 场景循环时全行驱动）
-                dataset_row = {str(k): str(v) for k, v in zip(ds.columns, ds.rows[0], strict=False)}
+        # D228：用例执行链抽成 _execute_case，与 api_case_run 共用（一次真实发送 + 落 run）
+        result, req, env_name, subject_name = await _execute_case(
+            ctx, payload.project_id, payload.case_id, payload.env_id, payload.variables)
+        assert ctx.db is not None
+        rec = await save_run(
+            ctx.db, project_id=payload.project_id, subject_type="api_case",
+            subject_id=payload.case_id, subject_name=subject_name,
+            env_id=payload.env_id, env_name=env_name,
+            trigger="agent" if ctx.entry == "agent" else "debug",
+            result=result, request_snapshot=req, created_by=ctx.user_id)
+        await ctx.db.commit()
+        return schemas.DebugOut(run_id=rec.id, ok=result.ok, passed=result.passed(),
+                                status=result.status, headers=result.headers,
+                                body_text=result.body_text, truncated=result.truncated,
+                                body_size=result.body_size, elapsed_ms=result.elapsed_ms,
+                                error=result.error, assertions=result.assertions,
+                                env_name=env_name)
     else:
         ro = payload.request
         assert ro is not None

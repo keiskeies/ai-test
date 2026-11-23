@@ -92,6 +92,19 @@ export const SUBJECT_TYPES: Record<string, { label: string; color: TagProps["col
 };
 
 /**
+ * 计划关联词表（D204）：在运行态词表上多一个 functional_case。
+ *
+ * **不并进 SUBJECT_TYPES**：那份词表与执行域 `subject_type` pattern 逐字对表
+ * （runVocab.test.ts 从后端源码抠值），功能用例是人工执行、不写 run_record，
+ * 后端 pattern 里没有它；并进去会让那条对表测试红，也会让运行列表「筛选对象类型」
+ * 多出一个永远筛不出东西的选项。计划侧用自己的叠加词表，两处各自诚实。
+ */
+export const PLAN_SUBJECT_TYPES: Record<string, { label: string; color: TagProps["color"] }> = {
+  ...SUBJECT_TYPES,
+  functional_case: { label: "功能用例", color: "magenta" },
+};
+
+/**
  * 测试计划展示态（D183 步 6a）。四态与后端 testplan/schemas.py 的 PLAN_DISPLAY_STATUSES
  * 元组**逐字同源**（runVocab.test.ts 从后端源码抠出来对表）；产出口是 services._plan_display
  * ——库里没有这一列，每次查询现算。两个口径要记着：

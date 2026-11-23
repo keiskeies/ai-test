@@ -17,16 +17,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import column, select, table
+from sqlalchemy import column, delete, select, table
 
-from app.core.errors import ApiError, Page, paginate, paginate_page
+from app.core.errors import ApiError, Page, paginate, paginate_desc, paginate_page
 from app.core.permissions import match_perm
-from app.core.service import ServiceResult, ensure_project_access, service
+from app.core.service import ServiceResult, ensure_project_access, service, trigger_from_entry
 from app.modules.scenario import schemas
 from app.modules.scenario.graph import iter_nodes, validate
-from app.modules.scenario.models import STATUS_RECYCLED, Scenario
+from app.modules.scenario.models import STATUS_RECYCLED, Scenario, ScenarioRevision
 from app.modules.scenario.module_services import _mod
 from app.shared.assertions import prune_rows
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.filters import _like
 from app.shared.visibility import assert_row_visible, visible_clause
 
@@ -76,6 +77,27 @@ def _iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
     return (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt).isoformat()
+
+
+def _revision_digest(s: Scenario) -> dict[str, Any]:
+    """D262：变更历史快照（只取可安全落盘的摘要）。
+
+    敏感值一律降级成摘要：`variables` 只留键名（值可能是 token/密码），`step_graph`
+    只留步骤数（节点 config 里可能内嵌鉴权头）。其余标量字段本身不含密钥，按值记录。
+    前后两份 digest 逐键比较即得到 changed；键集合在这里一处定义，读写两侧不会分叉。
+    """
+    return {
+        "name": s.name,
+        "priority": s.priority,
+        "module_id": s.module_id,
+        "fail_fast": bool(s.fail_fast),
+        "max_runtime_ms": s.max_runtime_ms,
+        "env_id": s.env_id,
+        "project_public": bool(s.project_public),
+        "step_graph": {"step_count": s.step_count},
+        "variables": {"keys": sorted((s.variables or {}).keys())},
+        "common_assertions": {"count": len(s.common_assertions or [])},
+    }
 
 
 def _out(s: Scenario, *, issues: list[dict] | None = None, produced: bool = False) -> schemas.ScenarioOut:
@@ -140,6 +162,33 @@ async def _validate_and_count(graph: dict | None) -> int:
     return _step_count(graph)
 
 
+# D214：场景列表的可筛面（D47-a 三件套从 api/plan/ui_case 铺到场景页）。字段全是
+# Scenario 上真实存在的业务列；project_id / recycled / module_id / module_ids / keyword
+# 仍是顶层参数——前两个管越权与视图，后三个是页面既有入口（模块树 / 快捷搜索），
+# 进了 filter 就是让两套开关抢同一个名字。
+SCENARIO_LIST_FILTER = ListViewFilter(
+    view_type="scenario",
+    label="场景编排",
+    fields={
+        "name": FieldDecl(Scenario.name, "text", "场景名称", nullable=False),
+        "priority": FieldDecl(Scenario.priority, "enum", "优先级", nullable=False),
+        "module_id": FieldDecl(Scenario.module_id, "id", "所属模块"),
+        "env_id": FieldDecl(Scenario.env_id, "id", "所属环境"),
+        "owner_id": FieldDecl(Scenario.owner_id, "id", "负责人"),
+        "fail_fast": FieldDecl(Scenario.fail_fast, "bool", "失败即停", nullable=False),
+        "max_runtime_ms": FieldDecl(Scenario.max_runtime_ms, "number", "超时上限(ms)"),
+        "project_public": FieldDecl(Scenario.project_public, "bool", "项目内公开", nullable=False),
+        "step_count": FieldDecl(Scenario.step_count, "number", "步骤数", nullable=False),
+        "last_run_at": FieldDecl(Scenario.last_run_at, "time", "最近执行时间"),
+        "last_run_status": FieldDecl(Scenario.last_run_status, "enum", "最近执行结果"),
+        "updated_by": FieldDecl(Scenario.updated_by, "id", "更新人"),
+        "created_at": FieldDecl(Scenario.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(Scenario.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(SCENARIO_LIST_FILTER)
+
+
 @service(
     perm="scenario:read", effect="read", name="scenario_list",
     description="列出项目下的场景（默认不含回收站；recycled=true 只看已回收；最近结果来自冗余列，不 N+1 查运行记录）",
@@ -164,7 +213,8 @@ async def scenario_list(payload: schemas.ScenarioListIn, ctx) -> ServiceResult:
     #   全空白 = 没筛选（清空输入框和敲了空格是同一件事）。
     stmt = select(Scenario).where(Scenario.project_id == payload.project_id,
                                   visible_clause(Scenario, ctx),
-                                  Scenario.status == (STATUS_RECYCLED if payload.recycled else "normal"))
+                                  Scenario.status == (STATUS_RECYCLED if payload.recycled else "normal"),
+                                  SCENARIO_LIST_FILTER.parse(payload.filter))
     if payload.module_id:
         stmt = stmt.where(Scenario.module_id == payload.module_id)
     if payload.module_ids is not None:
@@ -258,6 +308,8 @@ async def scenario_update(payload: schemas.ScenarioUpdateIn, ctx) -> schemas.Sce
     if s.version != payload.version:
         raise ApiError("conflict", "版本冲突：他人已修改，请刷新后重试", 409,
                        {"current_version": s.version, "your_version": payload.version})
+    # D262：变更历史的前像必须在任何赋值之前取（s 是 ORM 行，改字段就是改它）。
+    before = _revision_digest(s)
     if payload.name is not None:
         if payload.name != s.name:
             dup = (await ctx.db.execute(select(Scenario).where(
@@ -296,8 +348,55 @@ async def scenario_update(payload: schemas.ScenarioUpdateIn, ctx) -> schemas.Sce
         s.project_public = payload.project_public
     s.version += 1
     s.updated_by = ctx.user_id
+    # D262：一次成功 update 落一行历史（version = 变更后的版本号）。没有字段差异也落：
+    # version 确实前进了，历史出现空档会让「v5 是谁改的」永久无法回答；changed=[] 就是
+    # 「这次保存只推进了版本」的如实记录。
+    after = _revision_digest(s)
+    ctx.db.add(ScenarioRevision(
+        project_id=payload.project_id, scenario_id=s.id, version=s.version,
+        actor_id=ctx.user_id,
+        changed=[{"field": k, "before": before[k], "after": after[k]}
+                 for k in before if before[k] != after[k]],
+    ))
     await ctx.db.commit()
     return _out(s, issues=[])
+
+
+@service(
+    perm="scenario:read", effect="read", name="scenario_revisions",
+    description="场景变更历史（append-only，最新在前；variables 只回键名、step_graph 只回步骤数，不回敏感原文）",
+    http={"method": "GET", "path": "/scenarios/{scenario_id}/revisions", "tags": ["scenario"]},
+    resident=False,
+)
+async def scenario_revisions(payload: schemas.ScenarioRevisionListIn, ctx) -> ServiceResult:
+    """D262：场景变更历史。
+
+    可见性口径与 scenario_get 逐字一致（同项目 + 行级可见；回收站中的场景 404）：
+    历史里可能含旧名称/旧环境等已不可见的元信息，不能成为绕过「场景在回收站」的第二扇门。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("scenario:read")
+    assert ctx.db is not None
+    s = await _scen(ctx.db, payload.project_id, payload.scenario_id)
+    assert_row_visible(s, ctx, what="场景不存在")
+    if s.status == STATUS_RECYCLED:
+        raise ApiError("not_found", "场景不存在（在回收站）", 404, {"scenario_id": s.id})
+    stmt = (select(ScenarioRevision)
+            .where(ScenarioRevision.project_id == payload.project_id,
+                   ScenarioRevision.scenario_id == s.id)
+            .order_by(ScenarioRevision.version.desc(), ScenarioRevision.id.desc()))
+    page = await paginate_desc(
+        ctx.db, stmt, key_cols=[ScenarioRevision.version, ScenarioRevision.id],
+        row_key=lambda r: [r.version, r.id],
+        decode_key=lambda parts: [int(parts[0]), str(parts[1])],
+        cursor=payload.cursor, size=payload.size,
+    )
+    names = await _user_names(ctx.db, {r.actor_id for r in page.items if r.actor_id})
+    return Page(items=[schemas.ScenarioRevisionOut(
+        id=r.id, scenario_id=r.scenario_id, version=r.version,
+        actor_id=r.actor_id, actor_name=names.get(r.actor_id) if r.actor_id else None,
+        changed=list(r.changed or []), created_at=_iso(r.created_at),
+    ) for r in page.items], next_cursor=page.next_cursor)
 
 
 @service(
@@ -361,6 +460,9 @@ async def scenario_purge(payload: schemas.ScenarioPurgeIn, ctx) -> BaseModel:
     if payload.confirm_name != s.name:
         raise ApiError("name_mismatch", "确认名称与场景名不一致，未删除", 409,
                        {"scenario_id": s.id})
+    # D262：历史随场景彻底删除显式删净（全库无外键，级联必须写出来；否则留孤儿行
+    # 占库且永远无法通过任何入口读到）。
+    await ctx.db.execute(delete(ScenarioRevision).where(ScenarioRevision.scenario_id == s.id))
     await ctx.db.delete(s)
     await ctx.db.commit()
     return schemas.OkOut(ok=True)
@@ -399,6 +501,117 @@ async def scenario_duplicate(payload: schemas.ScenarioDuplicateIn, ctx) -> schem
 
 
 @service(
+    perm="scenario:update", effect="write", name="scenario_batch_copy",
+    description="批量复制场景（名称自动追加「 - 副本」并按需加数字后缀；回收站中的场景拒 404）；"
+                "target_project_id 不同时跨项目复制，另需目标项目的 scenario:create，"
+                "环境清空、模块落到目标项目（项目私有资产不跟随）",
+    http={"method": "POST", "path": "/scenario-batch-copy", "tags": ["scenario"]},
+)
+async def scenario_batch_copy(payload: schemas.ScenarioBatchCopyIn, ctx) -> BaseModel:
+    """D257：把前端 N 次 single duplicate 循环收成一次事务。
+
+    与单条 duplicate 的两点差异（都在 schemas 的类注释里）：
+    - 撞名不再 409，自动找下一个可用后缀——批量里有一个重名就全批失败不可接受；
+    - 回包带最终名清单，前端 toast 才能说明「叫什么的副本被建出来了」。
+
+    D261：`target_project_id` 不同 = 跨项目复制。读源要源项目权限，落副本要目标项目的
+    `scenario:create`；环境与模块都是项目私有资产，跨项目时 env_id 清空、module_id
+    缺省落到目标项目未分类（不能跟随源模块 id，那在目标项目里是另一个/不存在的模块）。
+    """
+    target = payload.target_project_id or payload.project_id
+    cross = target != payload.project_id
+    await ensure_project_access(ctx, payload.project_id)  # 读源场景的权限
+    assert ctx.db is not None
+    if not cross:
+        ctx.require("scenario:update")
+        if payload.module_id is not None:
+            await _mod(ctx.db, payload.project_id, payload.module_id)
+        rows = await _batch_rows(ctx, payload.project_id, payload.scenario_ids,
+                                 "normal", "不存在（在回收站中的不可复制）")
+    else:
+        # 源行的可见性必须按**源项目**身份判定：ensure_project_access(target) 会把
+        # ctx.perms 换成目标项目的位，先切后查的话，「目标项目管理员、源项目普通成员」
+        # 就能看见源项目里别人私有的场景（可见性谓词读的是 ctx.perms）。
+        rows = await _batch_rows(ctx, payload.project_id, payload.scenario_ids,
+                                 "normal", "不存在（在回收站中的不可复制）")
+        await ensure_project_access(ctx, target)
+        ctx.require("scenario:create")
+        if payload.module_id is not None:
+            await _mod(ctx.db, target, payload.module_id)  # 模块必须属于**落点**项目
+    taken = {n for n in (await ctx.db.execute(select(Scenario.name).where(
+        Scenario.project_id == target))).scalars().all()}
+    created: list[str] = []
+    for src in rows:
+        base = src.name + " - 副本"
+        name, i = base, 2
+        while name in taken:
+            name, i = base + " " + str(i), i + 1
+        taken.add(name)
+        if cross:
+            module_id = payload.module_id          # 缺省 = 目标项目未分类
+            env_id = None                          # 环境是项目私有资产（D181）
+        else:
+            module_id = (payload.module_id if payload.module_id is not None
+                         else src.module_id)
+            env_id = src.env_id
+        dup = Scenario(project_id=target, module_id=module_id,
+                       name=name, priority=src.priority, step_graph=src.step_graph,
+                       variables=dict(src.variables or {}), fail_fast=bool(src.fail_fast),
+                       max_runtime_ms=src.max_runtime_ms, env_id=env_id,
+                       common_assertions=list(src.common_assertions or []),
+                       owner_id=ctx.user_id, project_public=src.project_public, version=1,
+                       step_count=src.step_count, updated_by=ctx.user_id)
+        ctx.db.add(dup)
+        created.append(name)
+    await ctx.db.commit()
+    return schemas.ScenarioBatchCopyOut(created=len(created), names=created)
+
+
+@service(
+    perm="scenario:run", effect="write", name="scenario_batch_run",
+    description="批量执行场景：预检全有或全无，投递逐条进行并逐条回报失败",
+    http={"method": "POST", "path": "/scenario-batch-run", "tags": ["scenario"]},
+)
+async def scenario_batch_run(payload: schemas.ScenarioBatchRunIn, ctx) -> BaseModel:
+    """D258：替代前端 N 次单跑。
+
+    - 预检（重复/存在/状态/统一环境可解析）全有或全无：任何一条不合格 → 一个 run
+      都不建；
+    - 投递阶段逐条 enqueue（它自己 commit，攒批会拖垮 broker 失败时的清理），
+      中途 broker 挂掉时回包用 `failed` 逐条说明，不假装整批成功。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("scenario:run")
+    assert ctx.db is not None
+    if payload.env_id:
+        await _env_name_for(ctx, payload.project_id, payload.env_id)  # 环境不可用当场 404
+    rows = await _batch_rows(ctx, payload.project_id, payload.scenario_ids,
+                             "normal", "不存在（在回收站中的不可执行）")
+    from app.modules.scenario.orchestration import enqueue
+
+    trigger = trigger_from_entry(ctx.entry)
+    transport = _transport_factory() if _transport_factory else None
+    # 先取标量：enqueue 内部 commit，之后不能再摸 ORM 属性（同 T9 的「先取标量」坑）
+    items = [(s.id, s.name, s.env_id, s.max_runtime_ms) for s in rows]
+    run_ids: list[str] = []
+    failed: list[schemas.ScenarioBatchRunFailed] = []
+    for sid, sname, s_env, s_max in items:
+        env_id = payload.env_id or s_env
+        try:
+            env_name = await _env_name_for(ctx, payload.project_id, env_id)
+            rec = await enqueue(ctx.db, project_id=payload.project_id, subject_id=sid,
+                                subject_name=sname, trigger=trigger, created_by=ctx.user_id,
+                                env_id=env_id, env_name=env_name,
+                                max_runtime_ms=s_max, actor=_actor_from(ctx),
+                                transport=transport)
+            run_ids.append(rec.id)
+        except ApiError as e:
+            failed.append(schemas.ScenarioBatchRunFailed(
+                scenario_id=sid, code=e.code, message=e.message))
+    return schemas.ScenarioBatchRunOut(run_ids=run_ids, failed=failed)
+
+
+@service(
     perm="scenario:update", effect="write", name="scenario_batch_move",
     description="批量移动场景到某模块（module_id=None 移到根/未分类；回收站中的场景被拒 404）",
     http={"method": "POST", "path": "/scenario-batch-move", "tags": ["scenario"]},
@@ -418,6 +631,99 @@ async def scenario_batch_move(payload: schemas.ScenarioBatchMoveIn, ctx) -> Base
         if s.status != "normal":
             raise ApiError("not_found", "部分场景在回收站中，不能批量移动", 404, {"scenario_id": s.id})
         s.module_id = payload.module_id
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+async def _batch_rows(ctx, project_id: str, ids: list[str], want_status: str,
+                      what: str) -> list:
+    """批量取行并校验状态；任一不合规 → 404 + 具体 ids（整批不动）。
+
+    `what` 是给用户看的短语：「不存在或已回收」/「不存在或不在回收站」。
+    """
+    uniq = list(dict.fromkeys(ids))
+    if len(uniq) != len(ids):
+        raise ApiError("validation_failed", "scenario_ids 不能重复", 422,
+                       {"scenario_ids": ids})
+    rows = (await ctx.db.execute(select(Scenario).where(
+        Scenario.project_id == project_id, Scenario.id.in_(uniq)))).scalars().all()
+    found = {s.id: s for s in rows}
+    bad = [i for i in uniq if i not in found or found[i].status != want_status]
+    if bad:
+        raise ApiError("not_found", "有场景" + what, 404, {"scenario_ids": bad})
+    for s in rows:
+        assert_row_visible(s, ctx, what="场景不存在")
+    return rows
+
+
+@service(
+    perm="scenario:delete", effect="destructive", name="scenario_batch_delete",
+    description="批量放入回收站（全有或全无：任一不存在/已回收 → 404 整批不动）",
+    http={"method": "POST", "path": "/scenario-batch-delete", "tags": ["scenario"]},
+    resident=False,
+)
+async def scenario_batch_delete(payload: schemas.ScenarioBatchIn, ctx) -> BaseModel:
+    """替代前端 N 次单删循环：要么整批进回收站，要么一行都没动。
+
+    `updated_by` 逐行写删除人——回收站「删除人」列读的就是它（同单删）。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("scenario:delete")
+    assert ctx.db is not None
+    rows = await _batch_rows(ctx, payload.project_id, payload.scenario_ids,
+                             "normal", "不存在或已在回收站")
+    for s in rows:
+        s.status = STATUS_RECYCLED
+        s.updated_by = ctx.user_id
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="scenario:update", effect="write", name="scenario_batch_restore",
+    description="批量从回收站恢复（全有或全无：任一不存在/不在回收站 → 404 整批不动）",
+    http={"method": "POST", "path": "/scenario-batch-restore", "tags": ["scenario"]},
+    resident=False,
+)
+async def scenario_batch_restore(payload: schemas.ScenarioBatchIn, ctx) -> BaseModel:
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("scenario:update")
+    assert ctx.db is not None
+    rows = await _batch_rows(ctx, payload.project_id, payload.scenario_ids,
+                             STATUS_RECYCLED, "不存在或不在回收站")
+    for s in rows:
+        s.status = "normal"
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="scenario:delete", effect="destructive", name="scenario_batch_purge",
+    description="批量彻底删除回收站中的场景（物理删除；服务端验固定确认短语）",
+    http={"method": "POST", "path": "/scenario-batch-purge", "tags": ["scenario"]},
+    tool=False, resident=False,
+)
+async def scenario_batch_purge(payload: schemas.ScenarioBatchPurgeIn, ctx) -> BaseModel:
+    """D256：回收站批量物理删除。
+
+    单条 purge 的护栏是「逐字输入场景名」；批量里 N 个名字逐个输不现实，降级为固定
+    短语「彻底删除」——但**服务端必须验**，不能只靠前端禁用按钮。先验短语再验行，
+    保证「短语错」不会被行不存在/状态不对的错误掩盖。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("scenario:delete")
+    assert ctx.db is not None
+    if payload.confirm_word != "彻底删除":
+        raise ApiError("confirm_word_mismatch",
+                       "请逐字输入「彻底删除」以确认，未执行任何删除", 409,
+                       {"expected": "彻底删除"})
+    rows = await _batch_rows(ctx, payload.project_id, payload.scenario_ids,
+                             STATUS_RECYCLED, "不存在或不在回收站")
+    # D262：批量彻底删除同样显式清历史（与单条 purge 同一口径，一次 IN 删净）。
+    await ctx.db.execute(delete(ScenarioRevision).where(
+        ScenarioRevision.scenario_id.in_([s.id for s in rows])))
+    for s in rows:
+        await ctx.db.delete(s)
     await ctx.db.commit()
     return schemas.OkOut(ok=True)
 
@@ -612,8 +918,9 @@ async def scenario_run(payload: schemas.ScenarioRunIn, ctx) -> schemas.RunEnqueu
         raise ApiError("not_found", "场景不存在（在回收站）", 404, {"scenario_id": s.id})
     env_id = payload.env_id or s.env_id
     env_name = await _env_name_for(ctx, payload.project_id, env_id)
-    # trigger 是事实记录（裁定⑥）：入口是什么就写什么；schedule/webhook 链路 1B 不存在。
-    trigger = "agent" if ctx.entry == "agent" else "manual"
+    # trigger 是事实记录（裁定⑥）：入口是什么就写什么；schedule 是第三种真实入口
+    # （计划定时执行经本服务建子 run，entry="schedule" → trigger="schedule"）。
+    trigger = trigger_from_entry(ctx.entry)
     rec = await enqueue(ctx.db, project_id=payload.project_id, subject_id=s.id,
                         subject_name=s.name, trigger=trigger, created_by=ctx.user_id,
                         env_id=env_id, env_name=env_name,

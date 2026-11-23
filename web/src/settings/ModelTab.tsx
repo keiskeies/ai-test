@@ -2,12 +2,18 @@
 // 逐能力展开 + [设为默认]；向量模型隐藏思考/视觉位、显示 embed_dimensions 与 [维度探测]。
 // unknown ≠ ✗ 是后端的假阴性红线在前端的延续：probe_result.capabilities 里 null =
 // 「没测出来」，必须渲染成与 ✗ 视觉可区分的 ? （探测失败 ≠ 不支持）。
+// D248：补上「登记模型」与「删除」两个入口——此前后端 5 个 @service 都在，界面只能看/改，
+// 新模型只能靠种子导入、删模型只能直接动库。
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Col, Input, InputNumber, Modal, Row, Select, Space, Switch, Tag, Tooltip, Typography } from "antd";
-import { ApiErr, get, patch, post } from "../api/client";
+import {
+  Alert, Button, Card, Col, Input, InputNumber, Modal, Popconfirm, Row, Select, Space,
+  Switch, Tag, Tooltip, Typography, message,
+} from "antd";
+import { PlusOutlined } from "../ui/icons";
+import { ApiErr, del, get, patch, post } from "../api/client";
 import { modelUsageApi } from "../api/modelUsage";
 import type { ModelUsageOut } from "../api/modelUsage";
-import { tp } from "../theme";
+import { tpv } from "../theme";
 import StateView from "../ui/StateView";
 
 export interface ModelCfg {
@@ -89,7 +95,28 @@ function toForm(c: ModelCfg): FormState {
   };
 }
 
-export default function ModelTab({ canManage }: { canManage: boolean }) {
+/** D248 登记表单：编辑表单的字段 + 类型/协议/默认三键（后两者创建后不可改，改型就是另一个模型）。 */
+interface CreateState extends FormState {
+  model_type: "CHAT" | "EMBEDDING";
+  protocol: "OPENAI_COMPAT" | "ANTHROPIC";
+  is_default: boolean;
+}
+
+const blankCreate = (): CreateState => ({
+  name: "", base_url: "", model_name: "", api_key: "",
+  context_window: 32768, max_output: 4096, temperature_default: null,
+  enabled: true, supports_tools: true, supports_thinking: false,
+  thinking_levels: [], supports_vision: false,
+  model_type: "CHAT", protocol: "OPENAI_COMPAT", is_default: false,
+});
+
+export default function ModelTab({ canManage, canCreate = false, canDelete = false }: {
+  canManage: boolean;
+  /** model:cfg:create —— 不摆假门：没位就不渲染「登记模型」。 */
+  canCreate?: boolean;
+  /** model:cfg:delete —— 后端仅系统管理员放行（R19），由调用方按 isSysAdmin 传。 */
+  canDelete?: boolean;
+}) {
   const [items, setItems] = useState<ModelCfg[]>([]);
   const [failed, setFailed] = useState(false);
   // 括号里那句「仅平台管理员可读」过去挂在每一次失败上。但这个 Tab 只对
@@ -102,12 +129,21 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [editing, setEditing] = useState<ModelCfg | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
+  // D248：登记与删除。busy 复用同一把锁（值是 id 或 "__create"），同刻只放一个写动作。
+  const [createForm, setCreateForm] = useState<CreateState | null>(null);
+  const [createErr, setCreateErr] = useState<string | null>(null);
   // D39 §6.8「用量 N 会话」：取不到就整列缺省（卡片画「—」），不拿 0 冒充已统计。
   const [usage, setUsage] = useState<ModelUsageOut | null>(null);
+  // D260：模型池关键字。`kw` 是**已提交**的搜索词（进请求），`kwDraft` 是输入框现值——
+  // 分开的理由同场景页：边敲边发请求会把 200 张卡片墙打成连连看，回车/点搜索才收窄。
+  const [kw, setKw] = useState("");
+  const [kwDraft, setKwDraft] = useState("");
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const r = await get<{ items: ModelCfg[] }>("/model-cfgs?size=200", { silent: true });
+      // 后端 keyword 只打 name / model_name / base_url 三列（用户认模型的就是这三样）。
+      const q = kw ? "&keyword=" + encodeURIComponent(kw) : "";
+      const r = await get<{ items: ModelCfg[] }>("/model-cfgs?size=200" + q, { silent: true });
       setItems(r.items);
       setFailed(false);
       setDenied(false);
@@ -119,7 +155,7 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
     try {
       setUsage(await modelUsageApi.stats());
     } catch { setUsage(null); }
-  }, []);
+  }, [kw]);
   useEffect(() => { void load(); }, [load]);
 
   const probeOne = useCallback(async (id: string): Promise<void> => {
@@ -159,6 +195,48 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
       await load();
     } finally { setBusy(null); }
   }, [editing, form, load]);
+
+  // 三个必填框先在前端拦一道（后端 422 也能兜，但空表单不该打一趟网络）。
+  // type/protocol 只在这里给——CfgUpdateIn 没有这两键（改型 = 换一个模型配置）。
+  const submitCreate = useCallback(async (): Promise<void> => {
+    const f = createForm;
+    if (!f) return;
+    if (!f.name.trim() || !f.base_url.trim() || !f.model_name.trim()) {
+      message.warning("名称 / base_url / 模型名必填");
+      return;
+    }
+    setBusy("__create");
+    setCreateErr(null);
+    try {
+      await post("/model-cfgs", {
+        name: f.name.trim(), model_type: f.model_type, protocol: f.protocol,
+        base_url: f.base_url.trim(), model_name: f.model_name.trim(), api_key: f.api_key,
+        context_window: f.context_window, max_output: f.max_output,
+        temperature_default: f.temperature_default, enabled: f.enabled,
+        supports_tools: f.supports_tools,
+        // 向量模型没有思考位：勾选残留不许偷渡（与编辑弹窗同一口径）
+        supports_thinking: f.model_type === "EMBEDDING" ? false : f.supports_thinking,
+        thinking_levels: f.model_type !== "EMBEDDING" && f.supports_thinking
+          ? f.thinking_levels : null,
+        supports_vision: f.model_type === "EMBEDDING" ? false : f.supports_vision,
+        is_default: f.is_default,
+      });
+      message.success("模型已登记");
+      setCreateForm(null);
+      await load();
+    } catch (e) {
+      if (e instanceof ApiErr) setCreateErr(e.message);
+    } finally { setBusy(null); }
+  }, [createForm, load]);
+
+  const removeOne = useCallback(async (id: string): Promise<void> => {
+    setBusy(id);
+    try {
+      await del("/model-cfgs/" + id);
+      message.success("模型已删除");
+      await load();
+    } finally { setBusy(null); }
+  }, [load]);
 
   const renderCard = (c: ModelCfg) => {
     const isEmbed = c.model_type === "EMBEDDING";
@@ -200,7 +278,7 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
               <Typography.Text data-testid="model-probe-line" className="tp-text-sm">
                 {/* 老绿红（#389e0d / #cf1322）不在 Token 表里，改引功能色：
                     成功的语义色 tp.func.success、失败 tp.func.error。 */}
-                探测{pr.ok ? <span style={{ color: tp.func.success }}>●OK</span> : <span style={{ color: tp.func.error }}>●失败</span>}
+                探测{pr.ok ? <span style={{ color: tpv.func.success }}>●OK</span> : <span style={{ color: tpv.func.error }}>●失败</span>}
                 {" "}{pr.latency_ms ?? 0}ms
                 {pr.error ? " · " + pr.error : ""}
               </Typography.Text>
@@ -222,6 +300,15 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
             {canManage && (
               <Button size="small" type="link" data-testid="model-edit-btn"
                 onClick={() => { setEditing(c); setForm(toForm(c)); }}>编辑</Button>
+            )}
+            {canDelete && (
+              <Popconfirm
+                title={"删除模型「" + c.name + "」？"}
+                description="会话历史不受影响；若它是默认模型，默认位会补给同型最早启用的模型。"
+                okText="确定" cancelText="取消" onConfirm={() => void removeOne(c.id)}>
+                <Button size="small" danger type="link" data-testid="model-delete-btn"
+                  loading={busy === c.id}>删除</Button>
+              </Popconfirm>
             )}
           </Space>
           {exp && (
@@ -245,6 +332,21 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
 
   return (
     <div data-testid="tab-model" className="tp-fill-tab">
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+        <Input.Search allowClear placeholder="搜名字 / 模型标识 / 网关地址"
+          value={kwDraft} data-testid="model-search"
+          onChange={(e) => setKwDraft(e.target.value)}
+          onSearch={(v) => { setKwDraft(v); setKw(v.trim()); }}
+          style={{ maxWidth: 360 }} />
+      </div>
+      {canCreate && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <Button type="primary" icon={<PlusOutlined />} data-testid="model-create-btn"
+            onClick={() => { setCreateErr(null); setCreateForm(blankCreate()); }}>
+            登记模型
+          </Button>
+        </div>
+      )}
       {failed && <Alert type="warning" showIcon style={{ marginBottom: 12 }}
         message={denied
           ? "模型列表没取到：这个账号现在没有 model:cfg:read（界面还留着管理员工号，后端权限已被收走）"
@@ -257,7 +359,9 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
         {items.map(renderCard)}
       </div>
       {!failed && items.length === 0 && (
-        <StateView title="还没有登记模型（出厂种子经 .env 注入网关地址后自动出现）" />
+        kw
+          ? <StateView title={"没有匹配「" + kw + "」的模型（搜名字 / 模型标识 / 网关地址）"} />
+          : <StateView title="还没有登记模型（出厂种子经 .env 注入网关地址后自动出现）" />
       )}
       {/* D39 §6.8 按用户/按会话用量：数据就是上面 load() 取回的那份 /model-usage 响应，
           不另发请求也不造按钮——两个表只是把 users/sessions 两组行摆出来。
@@ -332,6 +436,75 @@ export default function ModelTab({ canManage }: { canManage: boolean }) {
               <span>启用 <Switch data-testid="model-f-enabled" checked={form.enabled}
                 onChange={(v) => setForm({ ...form, enabled: v })} /></span>
             </Space>
+          </Space>
+        </Modal>
+      )}
+      {createForm && (
+        <Modal centered open data-testid="model-create-modal" title="登记模型" width={680}
+          confirmLoading={busy === "__create"} okText="登记" onOk={() => void submitCreate()}
+          onCancel={() => setCreateForm(null)}>
+          <Space direction="vertical" style={{ width: "100%" }} size={8}>
+            <Space wrap>
+              <Select data-testid="model-c-type" style={{ width: 130 }}
+                value={createForm.model_type}
+                onChange={(v) => setCreateForm({
+                  ...createForm, model_type: v,
+                  ...(v === "EMBEDDING"
+                    ? { supports_thinking: false, thinking_levels: [], supports_vision: false }
+                    : {}),
+                })}
+                options={[{ value: "CHAT", label: "对话" }, { value: "EMBEDDING", label: "向量" }]} />
+              <Select data-testid="model-c-protocol" style={{ width: 170 }}
+                value={createForm.protocol}
+                onChange={(v) => setCreateForm({ ...createForm, protocol: v })}
+                options={[{ value: "OPENAI_COMPAT", label: "OpenAI 兼容" },
+                  { value: "ANTHROPIC", label: "Anthropic" }]} />
+            </Space>
+            <Input data-testid="model-c-name" addonBefore="名称" value={createForm.name}
+              onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })} />
+            <Input data-testid="model-c-base" addonBefore="base_url" placeholder="https://…/v1"
+              value={createForm.base_url}
+              onChange={(e) => setCreateForm({ ...createForm, base_url: e.target.value })} />
+            <Input data-testid="model-c-model" addonBefore="模型名" placeholder="gpt-4o-mini"
+              value={createForm.model_name}
+              onChange={(e) => setCreateForm({ ...createForm, model_name: e.target.value })} />
+            <Input.Password data-testid="model-c-key" addonBefore="API Key"
+              placeholder="留空表示该模型不需要密钥" value={createForm.api_key}
+              onChange={(e) => setCreateForm({ ...createForm, api_key: e.target.value })} />
+            <Space wrap>
+              <InputNumber data-testid="model-c-ctx" addonBefore="上下文" min={1024}
+                value={createForm.context_window}
+                onChange={(v) => setCreateForm({ ...createForm, context_window: Number(v) })} />
+              <InputNumber data-testid="model-c-out" addonBefore="最大输出" min={1}
+                value={createForm.max_output}
+                onChange={(v) => setCreateForm({ ...createForm, max_output: Number(v) })} />
+              <InputNumber data-testid="model-c-temp" addonBefore="温度" min={0} max={2} step={0.1}
+                value={createForm.temperature_default}
+                onChange={(v) => setCreateForm({
+                  ...createForm, temperature_default: v === null ? null : Number(v) })} />
+            </Space>
+            <Space wrap size={12}>
+              <span>工具 <Switch data-testid="model-c-tools" checked={createForm.supports_tools}
+                onChange={(v) => setCreateForm({ ...createForm, supports_tools: v })} /></span>
+              {createForm.model_type !== "EMBEDDING" && <>
+                <span>思考 <Switch data-testid="model-c-thinking" checked={createForm.supports_thinking}
+                  onChange={(v) => setCreateForm({ ...createForm, supports_thinking: v })} /></span>
+                <Select mode="multiple" allowClear data-testid="model-c-levels"
+                  style={{ minWidth: 180 }} placeholder="档位（含 medium 才有默认档）"
+                  disabled={!createForm.supports_thinking} value={createForm.thinking_levels}
+                  onChange={(v) => setCreateForm({ ...createForm, thinking_levels: v })}
+                  options={["low", "medium", "high"].map((v) => ({ value: v, label: v }))} />
+                <span>视觉 <Switch data-testid="model-c-vision" checked={createForm.supports_vision}
+                  onChange={(v) => setCreateForm({ ...createForm, supports_vision: v })} /></span>
+              </>}
+              <span>启用 <Switch data-testid="model-c-enabled" checked={createForm.enabled}
+                onChange={(v) => setCreateForm({ ...createForm, enabled: v })} /></span>
+              <span>设为默认 <Switch data-testid="model-c-default" checked={createForm.is_default}
+                onChange={(v) => setCreateForm({ ...createForm, is_default: v })} /></span>
+            </Space>
+            {createErr && (
+              <Alert type="error" showIcon data-testid="model-create-err" message={createErr} />
+            )}
           </Space>
         </Modal>
       )}

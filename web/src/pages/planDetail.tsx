@@ -35,35 +35,37 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  Alert, Button, Card, Descriptions, Input, Modal, Select, Space, Spin, Table, Tag,
+  Alert, Button, Card, Descriptions, Drawer, Input, Modal, Select, Space, Spin, Table, Tag,
   Tooltip, Typography, message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined, ReloadOutlined } from "../ui/icons";
+import { ArrowDownOutlined, ArrowUpOutlined, PlusOutlined, ReloadOutlined, StarOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
 import { ApiErr, get } from "../api/client";
 import PermEmpty from "../components/PermEmpty";
-import { planApi, type PlanLinkUpdateBody, type PlanReportListRow } from "../api/plan";
-import type { CaseRow, EnvRow, Page } from "../api/api";
+import { planApi, type PlanDetail, type PlanLinkRow, type PlanLinkUpdateBody, type PlanReportListRow,
+  type PlanFunctionalCaseRow, type PlanFunctionalResult, type PlanBugRow,
+  type PlanFunctionalHistoryRow, type PlanExecuteResult } from "../api/plan";
+import { statusMeta as defectStatusMeta } from "../api/defect";
+import { functionalApi } from "../api/functional";
+import type { CaseRow, EnvRow, MemberRow, Page } from "../api/api";
 import type { components } from "../api/schema";
 import { sceneApi } from "../api/scene";
 import { uiApi } from "../api/ui";
 import { adbCaseApi } from "../api/adbCase";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
-import { LINK_RESULTS, SUBJECT_TYPES, vocabMeta } from "../shared/runVocab";
+import { LINK_RESULTS, PLAN_SUBJECT_TYPES, vocabMeta } from "../shared/runVocab";
 // ratePct 不再各页各写一份：小数→百分数这条算式先前在 4 个文件里各有副本，
 // 断言只钉得住其中一处时，改坏另一处照样全绿（6b V1 变异的形状）。见 shared/passRate.ts。
 import { ratePct } from "../shared/passRate";
 import { planDisplayMeta } from "./plans";
 import { PassRing } from "./reports";
-import { tp, tpv } from "../theme";
+import { tpv } from "../theme";
 
-type PlanOut = components["schemas"]["PlanOut"];
 type PlanStatusOut = components["schemas"]["PlanStatusOut"];
-type PlanLinkOut = components["schemas"]["PlanLinkOut"];
 type PlanLinkStatusOut = components["schemas"]["PlanLinkStatusOut"];
 
 /** 名单外的 id 截断显示（宁可生码，不留白、不编名——schedules.tsx:296 同款）。 */
@@ -111,15 +113,114 @@ function LinkResultCell({ st, rowId }: { st: PlanLinkStatusOut | undefined; rowI
   );
 }
 
+// ── D204：功能用例的人工结论（四值；与后端 models.PLAN_FUNCTIONAL_RESULTS 对齐） ──
+
+const FUNC_RESULTS: Record<PlanFunctionalResult, { label: string; color: string }> = {
+  pass: { label: "通过", color: "success" },
+  fail: { label: "失败", color: "error" },
+  blocked: { label: "阻塞", color: "warning" },
+  skip: { label: "跳过", color: "default" },
+};
+
+/** 功能用例行画**精确**结论（none 画「未执行」）。
+ *  为什么不复用 LinkResultCell：/status 只有 passed/failed 两轴（通过率口径），
+ *  把 blocked 画成「未通过」会让界面看不出是阻塞；这一格读的是 functional-cases 的
+ *  原值 result，status 那格照旧只答「通过率口径下算不算过」。 */
+function FuncResultCell({ row, linkId }: { row: PlanFunctionalCaseRow | undefined; linkId: string }) {
+  if (!row) {
+    return (
+      <Tooltip title="这条功能用例的结论没取到（GET /functional-cases 失败，或它不在本轮前 200 条里）。后端没答过，不编一个结论。">
+        <Typography.Text type="secondary" data-testid={"plan-func-result-" + linkId}
+          data-result="unknown">—</Typography.Text>
+      </Tooltip>
+    );
+  }
+  if (!row.executed) {
+    return <Tag data-testid={"plan-func-result-" + linkId} data-result="none">未执行</Tag>;
+  }
+  const m = FUNC_RESULTS[row.result as PlanFunctionalResult];
+  return (
+    <Tag color={m?.color ?? "default"} data-testid={"plan-func-result-" + linkId}
+      data-result={row.result} title={row.comment ?? undefined}>
+      {m?.label ?? row.result}
+    </Tag>
+  );
+}
+
+function FuncExecModal({ open, row, planId, projectId, onClose, onDone }: {
+  open: boolean;
+  row: PlanLinkRow | null;
+  planId: string;
+  projectId: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [result, setResult] = useState<PlanFunctionalResult>("pass");
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) { setResult("pass"); setComment(""); setErr(null); }
+  }, [open]);
+
+  async function submit(): Promise<void> {
+    if (!row) return;
+    setBusy(true); setErr(null);
+    try {
+      await planApi.executeFunctional(planId, {
+        project_id: projectId, link_ids: [row.id], result,
+        comment: comment.trim() || undefined,
+      });
+      onDone();
+    } catch (e: unknown) {
+      setErr(e instanceof ApiErr ? e.message : "结论没写成功");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <Modal open={open} onCancel={onClose} centered width={480} destroyOnHidden
+      title={`记录执行结论——${row?.subject_name ?? ""}`}
+      okText="保存结论" cancelText="取消" confirmLoading={busy}
+      okButtonProps={{ "data-testid": "plan-func-exec-ok" }}
+      onOk={() => void submit()}>
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div>
+          <Typography.Text strong>结论</Typography.Text>
+          <Select<PlanFunctionalResult> data-testid="plan-func-exec-result"
+            style={{ width: "100%" }} value={result}
+            onChange={(v) => setResult(v)}
+            options={(Object.keys(FUNC_RESULTS) as PlanFunctionalResult[]).map((k) => ({
+              value: k, label: FUNC_RESULTS[k].label,
+            }))} />
+        </div>
+        <div>
+          <Typography.Text strong>备注（可选）</Typography.Text>
+          <Input.TextArea data-testid="plan-func-exec-comment" rows={3} value={comment}
+            maxLength={2000} onChange={(e) => setComment(e.target.value)}
+            placeholder="失败/阻塞时写清原因与现场，例如：登录接口 500，工单 #123" />
+        </div>
+        <Typography.Text className="tp-text-sm" type="secondary">
+          每次保存都会覆盖当前结论并追加一条历史；计划状态与通过率随之现算。
+        </Typography.Text>
+        {err && (
+          <Alert type="error" showIcon data-testid="plan-func-exec-error"
+            message="后端拒绝（原话回显）" description={<EchoBlock text={err} />} />
+        )}
+      </Space>
+    </Modal>
+  );
+}
+
 // ── 「加关联」选择器（口径 ⑥） ───────────────────────────────────────────────
 
 interface PickerRow { id: string; name: string }
 
 /** 四种 subject 的读法：perm 位逐条对后端注册表现核
- *  （api:case:read / scenario:read / ui:case:read / adb:case:read），fetch 全部
- *  recycled=false + size=200（200 是各端点 size 上限，不是拍的）；只有 scenario 传
- *  keyword——另外三个的入参模型里没有这个键，传了也会被 pydantic 静默丢掉，
- *  摆了就是假门。 */
+ *  （api:case:read / scenario:read / ui:case:read / adb:case:read / functional:case:read），
+ *  fetch 全部 recycled=false + size=200（200 是各端点 size 上限，不是拍的）；scenario 与
+ *  functional_case 的入参模型有 keyword（实测 schemas.CaseListIn），其余三个没有——
+ *  传了也会被 pydantic 静默丢掉，摆了就是假门。 */
 const PICKERS: Record<string, { perm: string; serverSearch: boolean;
   fetch: (pid: string, keyword?: string) => Promise<PickerRow[]> }> = {
   api_case: {
@@ -149,6 +250,14 @@ const PICKERS: Record<string, { perm: string; serverSearch: boolean;
     perm: "adb:case:read", serverSearch: false,
     fetch: async (pid) => {
       const r = await adbCaseApi.listCases({ project_id: pid, recycled: false, size: 200 });
+      return r.items.map((c) => ({ id: c.id, name: c.name }));
+    },
+  },
+  functional_case: {
+    perm: "functional:case:read", serverSearch: true,
+    fetch: async (pid, kw) => {
+      const r = await functionalApi.listCases({ project_id: pid, recycled: false,
+        current: 1, size: 200, keyword: kw || undefined });
       return r.items.map((c) => ({ id: c.id, name: c.name }));
     },
   },
@@ -247,7 +356,7 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
           <Select data-testid="plan-picker-type" style={{ width: "100%" }} value={subjectType}
             onChange={(v: string) => setSubjectType(v)}
             options={Object.keys(PICKERS).map((t) => ({
-              value: t, label: (SUBJECT_TYPES[t]?.label ?? t) + "（" + t + "）",
+              value: t, label: (PLAN_SUBJECT_TYPES[t]?.label ?? t) + "（" + t + "）",
             }))} />
         </div>
         <div>
@@ -328,6 +437,87 @@ function LinkPickerModal({ open, planId, projectId, perms, canEnvRead, envs, env
   );
 }
 
+// ── D218：功能用例的结论历史（append-only 流水，页码分页） ─────────────────────
+//
+// D204 只把每次改判落库，没有入口把旧账摆出来——「历史」这个词在界面上不成立。
+// 独立 Drawer 而非塞进记录结论弹窗：弹窗装表单，历史装分页，挤进一个容器必然把
+// 「改判」和「翻旧账」混成同一屏。行类型是手写镜像（端点标注 ServiceResult，
+// PlanFunctionalHistoryOut 不进 OpenAPI），字段与后端逐字一致。
+
+function FunctionalHistoryDrawer({ target, planId, projectId, executorName, onClose }: {
+  target: PlanLinkRow | null;
+  planId: string;
+  projectId: string;
+  executorName: (uid: string) => string;
+  onClose: () => void;
+}) {
+  const [current, setCurrent] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [rows, setRows] = useState<PlanFunctionalHistoryRow[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  // 换一条用例就回第 1 页（D47-b 的同一纪律：条件变了还停在旧页 = 落在无关切片）
+  useEffect(() => { setCurrent(1); }, [target?.id]);
+
+  useEffect(() => {
+    if (!target) return;
+    let cancelled = false; // 关掉/换行后旧响应不许回填（竞态下会拿 A 的历史画在 B 上）
+    setLoading(true);
+    setFailed(false);
+    planApi.functionalHistory(planId, target.id, {
+      project_id: projectId, current, size: pageSize,
+    })
+      .then((p) => {
+        if (cancelled) return;
+        setRows(p.items);
+        setTotal(p.total ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // 失败不留谎：列表与总数一起清空，不在空表上挂一条陈旧的「共 N 条」
+        setRows([]);
+        setTotal(null);
+        setFailed(true);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [target, planId, projectId, current, pageSize]);
+
+  const cols: ColumnsType<PlanFunctionalHistoryRow> = [
+    { title: "#", dataIndex: "seq", key: "seq", width: 56 },
+    { title: "结论", dataIndex: "result", key: "result", width: 92, render: (v: string) => {
+        // 词表外值照原样画（R112）：历史是事实复读，不认识不等于可以改写
+        const m = FUNC_RESULTS[v as PlanFunctionalResult];
+        return m ? <Tag color={m.color}>{m.label}</Tag> : <Tag>{v}</Tag>;
+      } },
+    { title: "备注", dataIndex: "comment", key: "comment", render: (v: string | null) => v ?? "—" },
+    { title: "执行人", dataIndex: "executed_by", key: "by", width: 110,
+      render: (v: string | null) => (v ? executorName(v) : "—") },
+    { title: "时间", dataIndex: "created_at", key: "at", width: 168,
+      render: (v: string | null) => (
+        <Typography.Text className="tp-text-sm">{fmtTime(v) ?? "—"}</Typography.Text>) },
+  ];
+
+  return (
+    <Drawer open={target !== null} onClose={onClose} width={640} destroyOnClose
+      title={"结论历史" + (target?.subject_name ? "——" + target.subject_name : "")}
+      data-testid="plan-func-history">
+      {failed && (
+        <Alert type="error" showIcon style={{ marginBottom: 12 }}
+          message="结论历史没取到"
+          description="请求失败，表格已清空；这不代表这条用例没有改判记录。" />
+      )}
+      <Table rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
+        pagination={false} data-testid="plan-func-history-table" />
+      <ListPager current={current} pageSize={pageSize} total={total}
+        onPage={(c) => setCurrent(c)}
+        onPageSize={(s) => { setPageSize(s); setCurrent(1); }} />
+    </Drawer>
+  );
+}
+
 // ── 页体 ─────────────────────────────────────────────────────────────────────
 
 function Detail() {
@@ -343,12 +533,23 @@ function Detail() {
   const canLinkDelete = can(perms, "testplan:link:delete");
   const canReportRead = can(perms, "testplan:report:read");
   const canReportCreate = can(perms, "testplan:report:create");
+  // D210：改名（:update）与删除（:delete）各按自己的位渲染——缺位不摆钮，不演禁用假门。
+  const canReportUpdate = can(perms, "testplan:report:update");
+  const canReportDelete = can(perms, "testplan:report:delete");
   // 归档权限位是 :manage——拿 :update 当归档门是 6a 文件头点过的那位最贵的错，这里同尺。
   const canManage = can(perms, "testplan:plan:manage");
   const canEnvRead = can(perms, "env:config:read");
+  // D204：人工结论的写门是 testplan:functional:execute（读走 link:read）。
+  const canFuncExec = can(perms, "testplan:functional:execute");
+  // D225：执行计划是独立权限位（不是 :update）——「改计划配置」与「把计划跑一遍」是两件事。
+  const canExecute = can(perms, "testplan:plan:execute");
+  // D231：关注是写副作用，门是 :update（后端 plan_follow/plan_unfollow 同一位）；缺位不摆钮。
+  const canUpdate = can(perms, "testplan:plan:update");
 
   // 主读（GET /plans/{id}）的四态：在读 / 读到了 / 403（PermEmpty）/ 404·410（原话）/ 其它失败。
-  const [plan, setPlan] = useState<PlanOut | null>(null);
+  const [plan, setPlan] = useState<PlanDetail | null>(null);
+  // D231：关注钮的忙态（与归档/执行各自独立——互不相干的写动作不共用一个 busy）。
+  const [followBusy, setFollowBusy] = useState(false);
   const [planDenied, setPlanDenied] = useState<ApiErr | null>(null);
   const [notFoundMsg, setNotFoundMsg] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -356,12 +557,26 @@ function Detail() {
   const [status, setStatus] = useState<PlanStatusOut | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  const [links, setLinks] = useState<PlanLinkOut[]>([]);
+  // D225：执行结果的逐条回执（null = 没执行过/已关掉）。投递不等于跑完，
+  // 这里只报「投出去几条、几条没投出去及原因」，跑的结果去报告中心看。
+  const [execResult, setExecResult] = useState<PlanExecuteResult | null>(null);
+  const [execBusy, setExecBusy] = useState(false);
+
+  const [links, setLinks] = useState<PlanLinkRow[]>([]);
   const [linkTotal, setLinkTotal] = useState<number | null>(null);
   const [linkCurrent, setLinkCurrent] = useState(1);
   const [linkPageSize, setLinkPageSize] = useState(50); // = 后端 PlanLinkListIn size 默认
   const [linksError, setLinksError] = useState<string | null>(null);
   const [busyLinkId, setBusyLinkId] = useState<string | null>(null);
+  // D206：勾选行（批量摘除）+ 项目成员名单（执行人下拉；拉不到就画短 id，不编名字）。
+  const [picked, setPicked] = useState<string[]>([]);
+  const [members, setMembers] = useState<MemberRow[]>([]);
+  // 功能用例的**精确结论**（none/pass/fail/blocked/skip）单独取一份：/status 只有
+  // passed/failed 两轴，画不出「阻塞」与「跳过」。取不到就画「—」，不拿 status 冒充。
+  const [funcMap, setFuncMap] = useState<Map<string, PlanFunctionalCaseRow>>(new Map());
+  const [execTarget, setExecTarget] = useState<PlanLinkRow | null>(null);
+  // D218：结论历史 Drawer 的目标行（null=关；打开即按这条 link 取第 1 页）
+  const [histTarget, setHistTarget] = useState<PlanLinkRow | null>(null);
 
   const [reports, setReports] = useState<PlanReportListRow[]>([]);
   const [reportTotal, setReportTotal] = useState<number | null>(null);
@@ -369,6 +584,13 @@ function Detail() {
   const [reportPageSize, setReportPageSize] = useState(50);
   const [reportsError, setReportsError] = useState<string | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
+
+  // D207：计划缺陷清单（只读聚合；读门同 link:read）。
+  const [bugs, setBugs] = useState<PlanBugRow[]>([]);
+  const [bugTotal, setBugTotal] = useState<number | null>(null);
+  const [bugCurrent, setBugCurrent] = useState(1);
+  const [bugPageSize, setBugPageSize] = useState(50);
+  const [bugsError, setBugsError] = useState<string | null>(null);
 
   const [envs, setEnvs] = useState<EnvRow[]>([]);
   const [envsError, setEnvsError] = useState(false);
@@ -409,6 +631,8 @@ function Detail() {
         { project_id: projectId, current: linkCurrent, size: linkPageSize });
       setLinks(page.items);
       setLinkTotal(page.total ?? null); // total 只从响应来；缺键 → null → ListPager 整块不渲染
+      // 翻页后勾选只剩本页还存在的行：跨页勾选不能悄悄留着一批看不见的 id（批量摘除会误伤）。
+      setPicked((prev) => prev.filter((pid) => page.items.some((l) => l.id === pid)));
       setLinksError(null);
     } catch (e: unknown) {
       setLinks([]); setLinkTotal(null);
@@ -416,6 +640,38 @@ function Detail() {
     }
   }, [projectId, id, linkCurrent, linkPageSize]);
   useEffect(() => { if (mayRead && canLinkRead) void loadLinks(); }, [mayRead, canLinkRead, loadLinks]);
+
+  /** D206：执行人下拉的名单（只读页面也拉：没有名单就把「已指派」画成短 id，不编名字）。
+   *  拉不到不报错——成员名单是展示增强，不是这一节的读门（读门仍是 link:read）。 */
+  const loadMembers = useCallback(async (): Promise<void> => {
+    try {
+      const r = await get<{ items: MemberRow[] }>(
+        "/projects/" + encodeURIComponent(projectId) + "/members", { silent: true });
+      setMembers(r.items);
+    } catch { setMembers([]); }
+  }, [projectId]);
+  useEffect(() => {
+    if (mayRead && canLinkRead) void loadMembers();
+  }, [mayRead, canLinkRead, loadMembers]);
+
+  /** 只在本页**确实有功能用例行**时发这条请求（size 取后端上限 200；本页关联页大小
+   *  默认 50，覆盖得住）。失败一律空 Map → 画「—」，不猜结论。 */
+  const loadFunctional = useCallback(async (): Promise<void> => {
+    if (!id || !links.some((l) => l.subject_type === "functional_case")) {
+      setFuncMap(new Map());
+      return;
+    }
+    try {
+      const r = await planApi.listFunctional(id,
+        { project_id: projectId, current: 1, size: 200 });
+      setFuncMap(new Map(r.items.map((x) => [x.link_id, x])));
+    } catch {
+      setFuncMap(new Map());
+    }
+  }, [id, projectId, links]);
+  useEffect(() => {
+    if (mayRead && canLinkRead) void loadFunctional();
+  }, [mayRead, canLinkRead, loadFunctional]);
 
   const loadReports = useCallback(async (): Promise<void> => {
     if (!id) return;
@@ -431,6 +687,21 @@ function Detail() {
     }
   }, [projectId, id, reportCurrent, reportPageSize]);
   useEffect(() => { if (mayRead && canReportRead) void loadReports(); }, [mayRead, canReportRead, loadReports]);
+
+  const loadBugs = useCallback(async (): Promise<void> => {
+    if (!id) return;
+    try {
+      const page = await planApi.listBugs(id,
+        { project_id: projectId, current: bugCurrent, size: bugPageSize });
+      setBugs(page.items);
+      setBugTotal(page.total ?? null);
+      setBugsError(null);
+    } catch (e: unknown) {
+      setBugs([]); setBugTotal(null);
+      setBugsError(e instanceof ApiErr ? e.message : "缺陷清单加载失败");
+    }
+  }, [projectId, id, bugCurrent, bugPageSize]);
+  useEffect(() => { if (mayRead && canLinkRead) void loadBugs(); }, [mayRead, canLinkRead, loadBugs]);
 
   // 环境清单只在「真的会摆 env 控件」时拉（缺 update 或缺 env 读位就不发这条请求）。
   const loadEnvs = useCallback(async (): Promise<void> => {
@@ -452,6 +723,49 @@ function Detail() {
   const envName = useCallback((envId: string): string =>
     envs.find((e) => e.id === envId)?.name ?? shortId(envId), [envs]);
 
+  // D206：执行人显示名与下拉选项（名单外的 id 画短 id——生码是证据，编名是撒谎）。
+  const executorName = useCallback((uid: string): string => {
+    const m = members.find((x) => x.user_id === uid);
+    return m?.name || m?.account || shortId(uid);
+  }, [members]);
+  const memberOptions = useMemo(
+    () => members.map((m) => ({ value: m.user_id, label: m.name || m.account || shortId(m.user_id) })),
+    [members],
+  );
+  // 排序只在「本页装得下计划内全部关联」时摆把手：后端要求 link_ids 覆盖全部（422 incomplete_sort），
+  // 跨页时摆一个只能排前 50 条的把手 = 假门。
+  const canSortLinks = canLinkUpdate && linkTotal !== null && links.length > 1
+    && linkTotal === links.length;
+
+  // D225：执行计划。不弹二次确认——动作可逆（最多是多跑了几个 run，重跑是常态），
+  // 且回执会把「投了谁/没投谁」全列出来，确认框只会挡住真正的信息。
+  async function executePlan(): Promise<void> {
+    if (!plan || execBusy) return;
+    setExecBusy(true);
+    try {
+      const r = await planApi.execute(plan.id, { project_id: projectId, plan_id: plan.id });
+      setExecResult(r);
+      // 投递改变了「执行中」的态与逐条结论：状态卡与关联表都必须重取（6b 口径 ⑤）。
+      void loadStatus();
+      if (canLinkRead) void loadLinks();
+    } catch { /* toast 已在 client 弹（403/404/409 都是后端原话） */ }
+    finally { setExecBusy(false); }
+  }
+
+  // D231：关注/取关。回执里两问都是后端现查的结果（幂等），页面照抄，不在本地 ±1
+  // ——「别人也在关注」这件事只有后端答得准。
+  async function toggleFollow(): Promise<void> {
+    if (!plan || followBusy) return;
+    setFollowBusy(true);
+    try {
+      const out = plan.followed
+        ? await planApi.unfollow(plan.id, { project_id: projectId })
+        : await planApi.follow(plan.id, { project_id: projectId });
+      setPlan({ ...plan, followed: out.following, follower_count: out.follower_count });
+      message.success(out.following ? "已关注" : "已取消关注");
+    } catch { /* toast 已在 client 弹 */ } finally { setFollowBusy(false); }
+  }
+
   function archiveOne(): void {
     if (!plan) return;
     Modal.confirm({
@@ -461,7 +775,10 @@ function Detail() {
       cancelText: "取消", centered: true,
       onOk: async () => {
         try {
-          setPlan(await planApi.archive(plan.id, { project_id: projectId }));
+          const next = await planApi.archive(plan.id, { project_id: projectId });
+          // 归档回执是 PlanOut（不回答关注两问）：合并保留已读到的 followed/count，
+          // 不让归档顺手把星标抹成未关注（那不是后端答的）。
+          setPlan((prev) => (prev ? { ...prev, ...next } : next));
           message.success("已归档");
           void loadStatus(); // 展示态是现算的，归档后 status 取 archived
         } catch { /* toast 已在 client 弹 */ }
@@ -469,7 +786,7 @@ function Detail() {
     });
   }
 
-  function removeLink(row: PlanLinkOut): void {
+  function removeLink(row: PlanLinkRow): void {
     Modal.confirm({
       title: `从计划摘除「${row.subject_name}」？`,
       content: "摘挂只删关联行，用例对象本身毫发无损；已生成的报告是快照副本，也不动。",
@@ -489,7 +806,7 @@ function Detail() {
 
   /** env 编辑的互斥两路（422「env_id 与 clear_env 不能同时给」由类型堵死，见
    *  PlanLinkUpdateBody）：选了环境发 {env_id}，清空发 {clear_env:true}，永远只带一个。 */
-  async function saveLinkEnv(row: PlanLinkOut, next: string | undefined): Promise<void> {
+  async function saveLinkEnv(row: PlanLinkRow, next: string | undefined): Promise<void> {
     setBusyLinkId(row.id);
     const body: PlanLinkUpdateBody = next === undefined
       ? { project_id: projectId, clear_env: true }
@@ -499,6 +816,53 @@ function Detail() {
       setLinks((prev) => prev.map((l) => (l.id === out.id ? out : l)));
       message.success("环境已更新");
     } catch { /* toast 已在 client 弹 */ } finally { setBusyLinkId(null); }
+  }
+
+  /** D206：指派/取消指派执行人（null = 取消；后端会验「是本项目成员」）。 */
+  async function saveLinkExecutor(row: PlanLinkRow, uid: string | undefined): Promise<void> {
+    setBusyLinkId(row.id);
+    try {
+      await planApi.assignLinks(row.plan_id, {
+        project_id: projectId, link_ids: [row.id], executor_id: uid ?? null,
+      });
+      setLinks((prev) => prev.map((l) => (l.id === row.id ? { ...l, executor_id: uid ?? null } : l)));
+      message.success(uid ? "执行人已更新" : "已取消指派");
+    } catch { /* toast 已在 client 弹 */ } finally { setBusyLinkId(null); }
+  }
+
+  /** D206：上移/下移一格——重排本页 id 列表后整批提交（后端要求全覆盖）。 */
+  async function moveLink(row: PlanLinkRow, delta: number): Promise<void> {
+    const idx = links.findIndex((l) => l.id === row.id);
+    const to = idx + delta;
+    if (idx < 0 || to < 0 || to >= links.length) return;
+    const ids = links.map((l) => l.id);
+    [ids[idx], ids[to]] = [ids[to], ids[idx]];
+    setBusyLinkId(row.id);
+    try {
+      await planApi.sortLinks(row.plan_id, { project_id: projectId, link_ids: ids });
+      await loadLinks(); // 以服务端返回的权威序重画（不拿本地猜测当结果）
+      message.success("顺序已保存");
+    } catch { /* toast 已在 client 弹 */ } finally { setBusyLinkId(null); }
+  }
+
+  /** D206：批量摘除（勾选行；只删关联行与该行人工结论，用例本体不动）。 */
+  function removePicked(): void {
+    if (!id || picked.length === 0) return;
+    Modal.confirm({
+      title: `从计划批量摘除 ${picked.length} 条关联？`,
+      content: "只删关联行和这一行的人工结论/历史，用例对象本身毫发无损；已生成的报告是快照副本，也不动。",
+      okText: "摘除", okButtonProps: { danger: true, "data-testid": "plan-link-batch-remove-ok" },
+      cancelText: "取消", centered: true,
+      onOk: async () => {
+        try {
+          await planApi.batchDeleteLinks(id, { project_id: projectId, link_ids: picked });
+          setPicked([]);
+          message.success("已摘除");
+          void loadLinks();
+          void loadStatus(); // 分母变了
+        } catch { /* toast 已在 client 弹 */ }
+      },
+    });
   }
 
   function generateReport(): void {
@@ -513,13 +877,63 @@ function Detail() {
       .finally(() => setReportBusy(false));
   }
 
-  const linkColumns: ColumnsType<PlanLinkOut> = [
+  // D210：改名 = 只改标题（后端 plan_report_rename 只写 name 一列），不重新生成、不动快照。
+  // 输入框用 Modal.confirm 内联（不引第二套表单组件）；空名在本地拦下（不把一次必然 422 的
+  // 请求发出去），失败保持弹窗（Promise.reject）让用户改。
+  function renameReport(row: PlanReportListRow): void {
+    let next = row.name;
+    Modal.confirm({
+      centered: true,
+      title: `重命名报告「${row.name}」`,
+      content: (
+        <Input defaultValue={row.name} maxLength={200} data-testid="plan-report-rename-input"
+          onChange={(e) => { next = e.target.value; }} />
+      ),
+      okText: "保存", cancelText: "取消",
+      okButtonProps: { "data-testid": "plan-report-rename-ok" } as never,
+      onOk: async () => {
+        const name = next.trim();
+        if (!name) {
+          message.error("报告名不能为空");
+          return Promise.reject(new Error("empty"));
+        }
+        try {
+          await planApi.renameReport(row.id, { project_id: projectId, name });
+          message.success("报告已改名");
+          void loadReports();
+        } catch {
+          return Promise.reject(new Error("rename failed"));
+        }
+      },
+    });
+  }
+
+  function removeReport(row: PlanReportListRow): void {
+    Modal.confirm({
+      centered: true,
+      title: `删除报告「${row.name}」？`,
+      content: "报告与其全部明细会一起物理删除（后端同事务级联，只删这一份）。不可恢复。",
+      okText: "删除", cancelText: "取消",
+      okButtonProps: { danger: true, "data-testid": "plan-report-delete-ok" } as never,
+      onOk: async () => {
+        try {
+          await planApi.deleteReport(row.id, { project_id: projectId });
+          message.success("报告已删除");
+          void loadReports();
+        } catch {
+          return Promise.reject(new Error("delete failed"));
+        }
+      },
+    });
+  }
+
+  const linkColumns: ColumnsType<PlanLinkRow> = [
     { title: "对象", key: "subject",
       render: (_: unknown, r) => (
         <Space size={4} data-testid={"plan-link-row-" + r.id}>
           <Tag style={{ marginInlineEnd: 0 }}
-            color={SUBJECT_TYPES[r.subject_type]?.color ?? "default"}>
-            {SUBJECT_TYPES[r.subject_type]?.label ?? r.subject_type}
+            color={PLAN_SUBJECT_TYPES[r.subject_type]?.color ?? "default"}>
+            {PLAN_SUBJECT_TYPES[r.subject_type]?.label ?? r.subject_type}
           </Tag>
           <Typography.Text className="tp-text-sm">{r.subject_name}</Typography.Text>
         </Space>
@@ -527,8 +941,47 @@ function Detail() {
     { title: "对象 id", dataIndex: "subject_id", key: "subject_id", width: 120,
       render: (v: string) => (
         <Typography.Text type="secondary" className="tp-mono tp-text-xs" title={v}>{shortId(v)}</Typography.Text>) },
+    { title: "执行人", key: "executor", width: 170,
+      render: (_: unknown, r: PlanLinkRow) => {
+        const uid = r.executor_id ?? null;
+        const label = uid
+          ? <span data-testid={"plan-link-executor-" + r.id}>{executorName(uid)}</span>
+          : <Typography.Text type="secondary" className="tp-text-sm"
+              data-testid={"plan-link-executor-" + r.id}>未指派</Typography.Text>;
+        // 没有 link:update 就不摆一个点不动的下拉（只读角色看名字即可）。
+        if (!canLinkUpdate) return label;
+        return (
+          <Select size="small" allowClear data-testid={"plan-link-executor-edit-" + r.id}
+            style={{ width: 150 }} value={uid ?? undefined} placeholder="未指派"
+            disabled={busyLinkId === r.id} options={memberOptions}
+            onChange={(v: string | undefined) => void saveLinkExecutor(r, v)} />
+        );
+      } },
+    // D206 排序把手：只在 canSortLinks（本页覆盖全部关联）时出现——后端要求全覆盖。
+    { title: "顺序", key: "sort", width: 96,
+      render: (_: unknown, r: PlanLinkRow) => {
+        if (!canSortLinks) return null;
+        const idx = links.findIndex((l) => l.id === r.id);
+        const busy = busyLinkId === r.id;
+        return (
+          <Space size={2}>
+            <Tooltip title={idx <= 0 ? "已在最前" : "上移一格"}>
+              <Button size="small" type="text" icon={<ArrowUpOutlined />}
+                data-testid={"plan-link-up-" + r.id} disabled={busy || idx <= 0}
+                onClick={() => void moveLink(r, -1)} />
+            </Tooltip>
+            <Tooltip title={idx >= links.length - 1 ? "已在最后" : "下移一格"}>
+              <Button size="small" type="text" icon={<ArrowDownOutlined />}
+                data-testid={"plan-link-down-" + r.id} disabled={busy || idx >= links.length - 1}
+                onClick={() => void moveLink(r, 1)} />
+            </Tooltip>
+          </Space>
+        );
+      } },
     { title: "执行结论", key: "result", width: 150,
-      render: (_: unknown, r) => <LinkResultCell st={statusMap.get(r.id)} rowId={r.id} /> },
+      render: (_: unknown, r) => r.subject_type === "functional_case"
+        ? <FuncResultCell row={funcMap.get(r.id)} linkId={r.id} />
+        : <LinkResultCell st={statusMap.get(r.id)} rowId={r.id} /> },
     { title: "环境", key: "env", width: 240,
       render: (_: unknown, r) => {
         const label = r.env_id
@@ -559,11 +1012,25 @@ function Detail() {
         <Typography.Text className="tp-text-sm" data-testid="plan-link-created">
           {fmtTime(v) ?? "—"}
         </Typography.Text>) },
-    { title: "操作", key: "ops", width: 88,
-      render: (_: unknown, row: PlanLinkOut) => canLinkDelete ? (
-        <Button size="small" danger data-testid={"plan-link-remove-" + row.id}
-          disabled={busyLinkId === row.id} onClick={() => removeLink(row)}>摘除</Button>
-      ) : null },
+    { title: "操作", key: "ops", width: 240,
+      render: (_: unknown, row: PlanLinkRow) => (
+        <Space size={6}>
+          {/* 功能用例的人工执行入口：权限位 + 归档终态双门（归档后后端 409，不摆假把手）。 */}
+          {row.subject_type === "functional_case" && canFuncExec && !plan?.archived && (
+            <Button size="small" data-testid={"plan-func-exec-" + row.id}
+              onClick={() => setExecTarget(row)}>记录结论</Button>
+          )}
+          {/* D218：历史入口不看归档/写权限——结论改判后的旧账是事实，只读成员也该看得见 */}
+          {row.subject_type === "functional_case" && (
+            <Button size="small" data-testid={"plan-func-history-" + row.id}
+              onClick={() => setHistTarget(row)}>历史</Button>
+          )}
+          {canLinkDelete && (
+            <Button size="small" danger data-testid={"plan-link-remove-" + row.id}
+              disabled={busyLinkId === row.id} onClick={() => removeLink(row)}>摘除</Button>
+          )}
+        </Space>
+      ) },
   ];
 
   const reportColumns: ColumnsType<PlanReportListRow> = [
@@ -592,6 +1059,48 @@ function Detail() {
       render: (_: unknown, r) => (
         <Typography.Text className="tp-text-sm">{r.passed + " / " + r.failed}</Typography.Text>) },
     { title: "生成时间", dataIndex: "created_at", key: "created_at", width: 150,
+      render: (v: string | null) => (
+        <Typography.Text className="tp-text-sm">{fmtTime(v) ?? "—"}</Typography.Text>) },
+  ];
+  // D210：操作列只在有 update/delete 其一时出现（两个都缺 = 整列不渲染，不摆空白列）。
+  if (canReportUpdate || canReportDelete) {
+    reportColumns.push({
+      title: "操作", key: "ops", width: 140,
+      render: (_: unknown, r: PlanReportListRow) => (
+        <Space size={4}>
+          {canReportUpdate && (
+            <Button size="small" data-testid={"plan-report-rename-" + r.id}
+              onClick={() => renameReport(r)}>重命名</Button>
+          )}
+          {canReportDelete && (
+            <Button size="small" danger data-testid={"plan-report-remove-" + r.id}
+              onClick={() => removeReport(r)}>删除</Button>
+          )}
+        </Space>
+      ),
+    });
+  }
+
+  const bugColumns: ColumnsType<PlanBugRow> = [
+    { title: "ID", dataIndex: "num", key: "num", width: 90,
+      render: (v: number) => <Typography.Text className="tp-text-sm">{v}</Typography.Text> },
+    { title: "标题", dataIndex: "title", key: "title",
+      render: (v: string, r) => (
+        <a data-testid={"plan-bug-row-" + r.id} onClick={() => nav("/defects/" + r.id)}>{v}</a>
+      ) },
+    { title: "状态", key: "status", width: 100,
+      render: (_: unknown, r) => {
+        const m = defectStatusMeta(r.status);
+        return <Tag color={m.color} data-testid={"plan-bug-status-" + r.id}>{m.label}</Tag>;
+      } },
+    { title: "优先级", dataIndex: "priority", key: "priority", width: 80 },
+    { title: "处理人", key: "handle", width: 120,
+      render: (_: unknown, r) => (
+        <Typography.Text className="tp-text-sm">
+          {r.handle_user_name ?? (r.handle_user_id ? shortId(r.handle_user_id) : "—")}
+        </Typography.Text>
+      ) },
+    { title: "更新时间", dataIndex: "updated_at", key: "updated_at", width: 150,
       render: (v: string | null) => (
         <Typography.Text className="tp-text-sm">{fmtTime(v) ?? "—"}</Typography.Text>) },
   ];
@@ -641,12 +1150,33 @@ function Detail() {
       <Space style={{ width: "100%", justifyContent: "space-between" }} wrap>
         <Button data-testid="plan-detail-back" onClick={() => nav("/plans")}>返回计划列表</Button>
         <Space>
+          {/* D231：关注（写位 :update；缺位不渲染）。星标由 followed 现查结果驱动，
+              计数是详情端点现查的 follower_count——读者没有写位也能看到「N 人关注」。 */}
+          {canUpdate && (
+            <Button loading={followBusy} data-testid="plan-detail-follow"
+              data-followed={String(!!plan.followed)}
+              icon={<StarOutlined fill={plan.followed ? "currentColor" : "none"}
+                style={{ color: plan.followed ? tpv.func.warning : undefined }} />}
+              onClick={() => void toggleFollow()}>
+              {plan.followed ? "已关注" : "关注"}
+            </Button>
+          )}
+          <Typography.Text className="tp-text-sm" type="secondary"
+            data-testid="plan-detail-follower-count">
+            {plan.follower_count ?? 0} 人关注
+          </Typography.Text>
           <Button icon={<ReloadOutlined />} data-testid="plan-detail-reload"
             onClick={() => {
               void loadPlan(); void loadStatus();
-              if (canLinkRead) void loadLinks();
+              if (canLinkRead) { void loadLinks(); void loadBugs(); }
               if (canReportRead) void loadReports();
             }}>刷新</Button>
+          {/* D225：执行钮只对未归档计划渲染（后端对归档 409；摆一个点了必失败的钮是假门），
+              且权限位是独立的 :execute 不是 :update。 */}
+          {canExecute && !plan.archived && (
+            <Button type="primary" loading={execBusy} data-testid="plan-detail-execute"
+              onClick={() => void executePlan()}>执行计划</Button>
+          )}
           {/* 归档钮只对未归档计划渲染（终态无反归档——摆了把手就是引人点必失败的假门），
               且权限位是 :manage 不是 :update。 */}
           {canManage && !plan.archived && (
@@ -723,16 +1253,30 @@ function Detail() {
       {/* ── 关联用例 ── */}
       {canLinkRead ? (
         <Card size="small" title="关联用例" data-testid="plan-detail-links"
-          extra={canLinkCreate && (
-            <Button type="primary" size="small" icon={<PlusOutlined />}
-              data-testid="plan-link-create" onClick={() => setPickerOpen(true)}>加关联</Button>
-          )}>
+          extra={
+            <Space size={8}>
+              {/* D206：勾选了才出现批量把手（不摆一个永远无效的按钮）。 */}
+              {canLinkDelete && picked.length > 0 && (
+                <Button danger size="small" data-testid="plan-link-batch-remove"
+                  onClick={removePicked}>批量摘除（{picked.length}）</Button>
+              )}
+              {canLinkCreate && (
+                <Button type="primary" size="small" icon={<PlusOutlined />}
+                  data-testid="plan-link-create" onClick={() => setPickerOpen(true)}>加关联</Button>
+              )}
+            </Space>
+          }>
           {linksError && (
             <Alert type="error" showIcon style={{ marginBottom: 8 }} data-testid="plan-detail-links-error"
               message="关联列表加载失败" description={<EchoBlock text={linksError} />} />
           )}
-          <Table<PlanLinkOut> size="small" rowKey="id" dataSource={links} columns={linkColumns}
+          <Table<PlanLinkRow> size="small" rowKey="id" dataSource={links} columns={linkColumns}
             pagination={false}
+            rowSelection={canLinkDelete ? {
+              selectedRowKeys: picked,
+              onChange: (keys) => setPicked(keys.map(String)),
+              getCheckboxProps: (r: PlanLinkRow) => ({ disabled: busyLinkId === r.id }),
+            } : undefined}
             locale={{ emptyText: linksError
               ? "没取到关联——原因见上方错误条，点右上角「刷新」重试"
               : canLinkCreate ? "还没有关联，点右上角「加关联」" : "还没有关联（你没有 testplan:link:create 权限）" }} />
@@ -741,9 +1285,12 @@ function Detail() {
             <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
                 「执行结论」按 link_id join 实时状态——join 不上画「—」（跨页时是常态，不是没跑过）；
                 「执行中」来自 executing 布尔，不混进结论词表。
+                「执行人」是指派（executor_id），不是真实执行人（后者见功能结论/报告）；
+                排序要求整页装下全部关联，跨页时这一列不出把手。
             </Typography.Text>
             <ListPager current={linkCurrent} pageSize={linkPageSize} total={linkTotal}
-              onPage={setLinkCurrent} onPageSize={setLinkPageSize} />
+              onPage={(p) => { setPicked([]); setLinkCurrent(p); }}
+              onPageSize={(n) => { setPicked([]); setLinkPageSize(n); }} />
           </div>
         </Card>
       ) : (
@@ -751,6 +1298,28 @@ function Detail() {
           message="当前项目没有 testplan:link:read 权限"
           description="关联用例清单需要读权限，缺位时这一节整块不演空表。" />
       )}
+
+      {/* ── 计划缺陷（D207：计划内用例关联的缺陷，只读聚合） ── */}
+      {canLinkRead ? (
+        <Card size="small" title="计划缺陷" data-testid="plan-detail-bugs">
+          {bugsError && (
+            <Alert type="error" showIcon style={{ marginBottom: 8 }} data-testid="plan-detail-bugs-error"
+              message="缺陷清单加载失败" description={<EchoBlock text={bugsError} />} />
+          )}
+          <Table<PlanBugRow> size="small" rowKey="id" dataSource={bugs} columns={bugColumns}
+            pagination={false}
+            locale={{ emptyText: bugsError
+              ? "没取到缺陷——原因见上方错误条，点右上角「刷新」重试"
+              : "这个计划还没有关联缺陷（计划内用例在缺陷详情里关联缺陷后，这里会出现）" }} />
+          <div className="tp-cardfoot">
+            <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
+                清单按缺陷去重：一条缺陷被计划内多条用例指向也只出一道；只读投影，回收站里的缺陷不出现。
+            </Typography.Text>
+            <ListPager current={bugCurrent} pageSize={bugPageSize} total={bugTotal}
+              onPage={setBugCurrent} onPageSize={setBugPageSize} />
+          </div>
+        </Card>
+      ) : null}
 
       {/* ── 计划报告 ── */}
       {canReportRead ? (
@@ -786,6 +1355,36 @@ function Detail() {
           description="计划报告清单需要读权限，缺位时这一节整块不演空表。" />
       )}
 
+      {/* D225 执行回执：一条一行，成功与跳过同表（跳过带人话原因）。「投递 ≠ 跑完」
+          写在弹层正文里，免得有人等这里出通过率。 */}
+      <Modal open={execResult !== null} title="执行计划回执" width={720} centered
+        data-testid="plan-execute-modal"
+        onCancel={() => setExecResult(null)}
+        footer={<Button data-testid="plan-execute-close"
+          onClick={() => setExecResult(null)}>知道了</Button>}>
+        {execResult && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Alert
+              type={execResult.skipped ? "warning" : "success"} showIcon
+              message={`已投递 ${execResult.submitted} 条`
+                + (execResult.skipped ? `，${execResult.skipped} 条未投递` : "")}
+              description="投递不等于跑完：执行结果去报告中心/任务中心看；未投递的每一条在下面都写了原因。" />
+            <Table<PlanExecuteResult["items"][number]> size="small" rowKey="link_id"
+              dataSource={execResult.items} pagination={false}
+              locale={{ emptyText: "计划里还没有关联用例" }}
+              columns={[
+                { title: "对象", dataIndex: "subject_name" },
+                { title: "类型", dataIndex: "subject_type",
+                  render: (t: string) => PLAN_SUBJECT_TYPES[t]?.label ?? t },
+                { title: "结果", key: "result",
+                  render: (_: unknown, r) => (r.run_id
+                    ? <Tag color="blue">已投递</Tag>
+                    : <Typography.Text type="secondary">{r.reason ?? "未投递"}</Typography.Text>) },
+              ]} />
+          </div>
+        )}
+      </Modal>
+
       <LinkPickerModal open={pickerOpen} planId={plan.id} projectId={projectId} perms={perms}
         canEnvRead={canEnvRead} envs={envs} envsError={envsError}
         onClose={() => setPickerOpen(false)}
@@ -794,6 +1393,18 @@ function Detail() {
           void loadLinks();
           void loadStatus(); // 新增一条关联 = 分母变了，状态卡跟着重取
         }} />
+
+      <FuncExecModal open={execTarget !== null} row={execTarget} planId={plan.id}
+        projectId={projectId} onClose={() => setExecTarget(null)}
+        onDone={() => {
+          setExecTarget(null);
+          // 结论变了：精确结论（本表）与两率（状态卡）一起重取，两个数字同源不同出口。
+          void loadFunctional();
+          void loadStatus();
+        }} />
+
+      <FunctionalHistoryDrawer target={histTarget} planId={plan.id} projectId={projectId}
+        executorName={executorName} onClose={() => setHistTarget(null)} />
     </div>
   );
 }

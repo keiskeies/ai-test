@@ -8,8 +8,8 @@
 //    成功 toast「密码已修改」；弹窗关闭。
 // ⑤ 403 bad_credentials → 中文「旧密码不正确」，原始 code 不许出现在页面上，弹窗保持打开可重试。
 // ⑥ 其它错误（500）→ 后端中文 message 原样上屏，不许静默。
-// ⑦ 仍未开放的模块（mcp/skills 零路由零后端代码）的 Tooltip 说「未开放（计划X期）」，
-//    不许说「X期开放」——后者把排期断言成已交付，违 shell.tsx 的诚实原则。
+// ⑦ 二期模块入口（mcp/skills）已全部交付：不再有「未开放」哨兵；入口必须可点并落到
+//    各自的设置子路由（/settings/mcp、/settings/skills），钉在下面「二期模块入口已翻真」。
 //    D183 步 6a：plans 已翻成真页面（/plans），它不再属于这条；新形状（入口与断言同批翻，
 //    口径同 nav.spec.mjs 的 wb-pilot-generate 先例）钉在下面的「nav-plans 已翻成正常入口」。
 // ⑧ 项目切换器的空下拉分两条来路：取失败说「没取到」，真 0 个项目才留 antd 缺省句。
@@ -199,31 +199,27 @@ describe("ChangePasswordModal 校验与提交", () => {
   });
 });
 
-describe("未开放模块的诚实标注", () => {
-  it("MCP/Skills 两个 disabled 入口的 Tooltip 说「未开放（计划X期）」——零路由零后端代码的模块不许写「X期开放」断言已交付", async () => {
+describe("二期模块入口已翻真", () => {
+  it("nav-mcp / nav-skills 都不是灰条，点了分别落到 /settings/mcp 与 /settings/skills", async () => {
     global.fetch = vi.fn(async () => res(200, { items: [] })) as unknown as typeof fetch;
-    renderShell();
-    // Tooltip 挂在 testid span 的内层 span 上（shell.tsx:175），事件只到得着监听器的节点；
-    // hover 手法同 EnvPanel.test.tsx:286-294（mouseOver+mouseEnter 两件，mouseLeave 不发 ⇒ 浮层留在 DOM）
-    // ProLayout 的 defaultOpenAll 在挂载后才落 openKeys（一轮 effect），首个 tick 菜单项
-    // 可能还没进 DOM——用 findBy 等到它出现，不赌同步渲染（真浏览器无此问题）。
-    for (const id of ["nav-mcp", "nav-skills"]) {
-      const node = (await screen.findByTestId(id)).querySelector("span")!;
-      fireEvent.mouseOver(node);
-      fireEvent.mouseEnter(node);
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route path="/" element={<Shell />}>
+            <Route path="settings/mcp" element={<div data-testid="mcp-route-probe">/settings/mcp</div>} />
+            <Route path="settings/skills" element={<div data-testid="skills-route-probe">/settings/skills</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    // D265/D266：两个入口都已交付（MCP 管理 + Skills 管理都在系统设置里），
+    // 继续钉 disabled/「未开放」就是把已交付说成没交付；入口与断言同批翻。
+    for (const [nav, probe] of [["nav-mcp", "mcp-route-probe"], ["nav-skills", "skills-route-probe"]] as const) {
+      const node = await screen.findByTestId(nav, {}, { timeout: 2000 });
+      expect(node.closest("li")!.className).not.toContain("ant-menu-item-disabled");
+      fireEvent.click(node);
+      expect(await screen.findByTestId(probe, {}, { timeout: 2000 })).not.toBeNull();
     }
-    const visibleTips = () => Array.from(
-      document.querySelectorAll(".ant-tooltip:not(.ant-tooltip-hidden) .ant-tooltip-inner"),
-    ).map((n) => n.textContent).join("|");
-    await waitFor(() => {
-      expect(visibleTips()).toContain("未开放（计划二期）");
-    }, { timeout: 4000 });
-    // 「X期开放」把排期说成已交付状态；「未开放（计划X期）」不含这两个子串
-    expect(visibleTips()).not.toContain("二期开放");
-    // D183 步 6a：plans 已是真页面——「三期」这个批次文案随 note 一起退场。
-    // 反向钉：翻过去的入口不许留着旧 Tooltip 冒充未交付（下面「nav-plans 已翻成正常入口」
-    // 钉正向形状，这条钉反向缺席；两条都靠 renderShell 的真实菜单，不是空扫出来的绿）。
-    expect(visibleTips()).not.toContain("未开放（计划三期）");
   });
 });
 
@@ -247,7 +243,7 @@ describe("D183 步 6a nav-plans 已翻成正常入口", () => {
     fireEvent.mouseOver(node);
     fireEvent.mouseEnter(node);
     // 等一帧 hover 触发窗口（Tooltip mouseEnterDelay 0.1s），再量「一个浮层都不许有」；
-    // 同文件上一用例刚证明过 hover 未开放项能让浮层出现，选择器不是哑的。
+    // 二期入口全翻真后，这个断言是「没留旧 note」的唯一保险（选择器仍是真的）。
     await new Promise((r) => setTimeout(r, 350));
     const tips = Array.from(
       document.querySelectorAll(".ant-tooltip:not(.ant-tooltip-hidden) .ant-tooltip-inner"),

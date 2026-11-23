@@ -285,7 +285,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
                       onClick={() => pick(f)}
                       style={{
                         display: "flex", gap: 8, alignItems: "center", padding: "6px 16px", cursor: "pointer",
-                        background: idx === active ? "#EAF6F1" : undefined,
+                        background: idx === active ? tpv.bg.selected : undefined,
                       }}>
                       <Typography.Text className="tp-text-md" style={{ flex: 1, minWidth: 0 }}
                         ellipsis={{ tooltip: f.item.name }}>{f.item.name}</Typography.Text>

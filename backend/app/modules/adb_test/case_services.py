@@ -27,12 +27,36 @@ from app.modules.adb_test import schemas
 from app.modules.adb_test.commands import validate_steps
 from app.modules.adb_test.models import STATUS_RECYCLED, AdbCase
 from app.modules.adb_test.module_services import _adb_module
+from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.visibility import assert_row_visible, visible_clause
 
 # 契约 1：adb_test 不 import iam → 人名解析走表名 join（audit/services._APP_USER 同形状）。
 # §11.4.18 回收站的「删除人」列要的是人名：updated_by 是 user id，把 id 直接渲染成删除人
 # 等于把 UUID 当人名，界面就不诚实了；查不到人留 None，前端画「—」。
 _APP_USER = table("app_user", column("id"), column("name"))
+
+# D217：ADB 用例列表的可筛面（D47-a 三件套铺到 ADB 页）。只收 adb_case 表上的业务列；
+# `recycled` 是视图轴（与 status 的原值一起由顶层开关决定，进条件组会自相矛盾），
+# `module_id`/`unfiled_only` 是模块树轴（页面由左侧树驱动，条件组里再来一份就是两把尺子）。
+ADB_CASE_LIST_FILTER = ListViewFilter(
+    view_type="adb_case",
+    label="ADB 用例",
+    fields={
+        "name": FieldDecl(AdbCase.name, "text", "名称", nullable=False),
+        "priority": FieldDecl(AdbCase.priority, "enum", "优先级", nullable=False),
+        "enabled": FieldDecl(AdbCase.enabled, "bool", "启用", nullable=False),
+        "default_device": FieldDecl(AdbCase.default_device, "text", "默认设备"),
+        "owner_id": FieldDecl(AdbCase.owner_id, "id", "负责人"),
+        "project_public": FieldDecl(AdbCase.project_public, "bool", "项目内公开", nullable=False),
+        "step_count": FieldDecl(AdbCase.step_count, "number", "步骤数", nullable=False),
+        "last_run_at": FieldDecl(AdbCase.last_run_at, "time", "最近执行时间"),
+        "last_run_status": FieldDecl(AdbCase.last_run_status, "enum", "最近执行结果"),
+        "updated_by": FieldDecl(AdbCase.updated_by, "id", "更新人"),
+        "created_at": FieldDecl(AdbCase.created_at, "time", "创建时间", nullable=False),
+        "updated_at": FieldDecl(AdbCase.updated_at, "time", "更新时间", nullable=False),
+    },
+)
+register(ADB_CASE_LIST_FILTER)
 
 
 async def _user_names(db, user_ids: set[str]) -> dict[str, str]:
@@ -117,7 +141,10 @@ async def adb_case_list(payload: schemas.AdbCaseListIn, ctx) -> ServiceResult:
     assert ctx.db is not None
     stmt = select(AdbCase).where(AdbCase.project_id == payload.project_id,
                                  visible_clause(AdbCase, ctx),
-                                 AdbCase.status == (STATUS_RECYCLED if payload.recycled else "normal"))
+                                 AdbCase.status == (STATUS_RECYCLED if payload.recycled else "normal"),
+                                 # D217：高级搜索条件与项目/可见性/回收站轴并行 AND；
+                                 # OR 组自带括号，不会把可见性谓词吃进 OR 里。
+                                 ADB_CASE_LIST_FILTER.parse(payload.filter))
     if payload.unfiled_only:
         stmt = stmt.where(AdbCase.module_id.is_(None))
     elif payload.module_id:

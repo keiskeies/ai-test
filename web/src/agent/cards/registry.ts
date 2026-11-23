@@ -12,6 +12,13 @@ export interface CardContext {
   onUserMessage: (text: string) => void;
   /** 运行中（status==="运行中"）：按钮 disabled + 「等本轮结束」，不排队不吞点击。 */
   busy: boolean;
+  /** D264 候选方案落库：宿主注入（页面负责权限判定与 API 调用）。
+   *  缺省 = 没接落库或不具备 scenario:create → 卡片不画保存钮（不造假门）。 */
+  onSaveScenarioPlan?: (name: string, graph: unknown) => Promise<{ id: string; name: string }>;
+  /** D264：候选方案所属项目（写进预览页的 sessionStorage 信封）。
+   *  预览页是新标签页、读不到 bench 的本地选择，必须随 payload 带过去；
+   *  缺省 = 宿主不知道该属于哪个项目 → 预览页不画保存钮（宁缺不写错项目）。 */
+  projectId?: string;
 }
 
 const registry = new Map<string, CardRenderer>();

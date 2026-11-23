@@ -4,7 +4,8 @@
 - cron 是自由字符串进、422 出——形状校验（先数段数、再 crontab()）住在 service
   （`_check_cron`，2026-11-16 实测的形状修正：4 段被 celery 静默补位、6 段抛 TypeError，
   两头都不许进库）；schema 层不重复解析，防止两处校验漂移。
-- subject_type 一期只放 scenario（D30）：白名单在 service 把守（显式拒绝不静默改值）。
+- subject_type 白名单是 scenario / plan / plan_report（D30 只放 scenario；D226 增计划
+  定时执行；D229 增定时计划报告 = 报告订阅）：白名单在 service 把守（显式拒绝不静默改值）。
 - next_5 预览读**未落库**的草稿 cron（抽屉里预览发生在保存前），base 可选：
   缺省=当前时刻；传 ISO 串供测试钉确定性。
 """
@@ -27,6 +28,9 @@ class TaskCreateIn(BaseModel):
 class TaskListIn(BaseModel):
     project_id: str
     enabled: int | None = Field(default=None, ge=0, le=1)  # 过滤：1 只看启用 / 0 只看停用
+    # D240：高级搜索条件组（JSON 串，形状见 shared/filters.py）。与 enabled 快捷筛选并行 AND；
+    # 条件在分页之前生效（翻页接着筛出来的集合走），不是页内过滤。
+    filter: str | None = None
     cursor: str | None = None
     # current（D47-b）：页码分页入口，MS 页脚的 {current, pageSize, total} 口径。
     # None = 键集/游标路径；与 cursor 互斥，两者同时到场在 handler 里 400（判据同 report_list）。

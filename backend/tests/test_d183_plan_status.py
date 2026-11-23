@@ -487,8 +487,9 @@ async def test_status_reads_write_nothing(client, session, conn, make_user) -> N
         return {c["name"] for c in inspect(sync_conn).get_columns("plan_record")}
 
     cols = await conn.run_sync(_cols)
-    assert cols == {"id", "project_id", "name", "description", "archived", "created_by",
-                    "updated_by", "created_at", "updated_at"}, \
+    # module_id（D211）是模块归属列，不是展示态；除它之外仍只有 archived 一个持久状态。
+    assert cols == {"id", "project_id", "name", "description", "archived", "module_id",
+                    "created_by", "updated_by", "created_at", "updated_at"}, \
         "plan_record 长列了——展示态不许有持久列：" + str(sorted(cols))
 
     files = sorted(_MODULE_DIR.glob("*.py"))

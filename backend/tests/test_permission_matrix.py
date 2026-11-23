@@ -13,11 +13,11 @@ reportDetail、datasets、uiElements、uiCaseDetail（后四页为 DoD 第 3 条
 本段曾长期写「6 页」而 1E 起 schedules/notifyChannels 两页早已各自带门控用例——**和下面
 ROWS 行数一样会漂**，改 UI 面时记得同步这里。
 
-矩阵形状：62 行（实测 `len(ROWS)`，主要接口，覆盖 iam/project、env、api_test 定义+用例、
-scenario（含 run_rerun_step 单步重跑与 D164 的 run_cancel 三域行）、schedule、ui_test、adb_test、执行/报告、工作台、search（含 D47-a 的 filter_meta 与 saved_view 四件）、testplan（D183 步 1 计划本体六行：list/create/get/update/archive/delete；步 2 关联四行：link list/create/update/delete；步 3 实时状态一行：status；步 4 报告四行：report list/create/get/delete；步 5 明细分页一行：report item list）、audit、model_cfg（含 D39 用量统计）、
+矩阵形状：74 行（实测 `len(ROWS)`，主要接口，覆盖 iam/project、env、api_test 定义+用例、
+scenario（含 run_rerun_step 单步重跑与 D164 的 run_cancel 三域行）、schedule、ui_test、adb_test、执行/报告、工作台、search（含 D47-a 的 filter_meta 与 saved_view 四件）、testplan（D183 步 1 计划本体六行：list/create/get/update/archive/delete；步 2 关联四行：link list/create/update/delete；步 3 实时状态一行：status；D225 执行计划一行：execute；步 4 报告四行：report list/create/get/delete；步 5 明细分页一行：report item list）、audit、model_cfg（含 D39 用量统计）、
 notify、用户批量导入）× 4 列
-（READONLY / MEMBER / PROJECT_ADMIN / SYSTEM_ADMIN）= 248 格。
-计数口径按 `--collect-only` 实测定（251 例 = 62×4 + 3 条非矩阵钉。此处曾长期手写 29 行/116 格
+（READONLY / MEMBER / PROJECT_ADMIN / SYSTEM_ADMIN）= 296 格。
+计数口径按 `--collect-only` 实测定（299 例 = 74×4 + 3 条非矩阵钉。此处曾长期手写 29 行/116 格
 而实测 ROWS 早已是 32——**docstring 漂了 3 行没人发现**，因为 parametrize 用 `len(ROWS)` 生成、
 永远跟着代码走。所以别手写这个数：加行后跑 `pytest tests/test_permission_matrix.py --collect-only`
 再改本段。
@@ -96,8 +96,9 @@ PLATFORM_PATTERNS: dict[str, list[str]] = {
 # ROWS（notify_list / schedule_task_list / schedule_task_create）——留在此集合是如实登记
 # 已认族，不是在途豁免；删掉任何一项都会让前缀覆盖测试红。
 KNOWN_PREFIX_FAMILIES = {
-    "adb", "agent", "api", "auth", "env", "iam", "model", "notify", "project",
-    "scenario", "schedule", "search", "system", "ui", "workbench", "testplan",
+    "adb", "agent", "api", "auth", "defect", "env", "file", "functional", "iam", "integration",
+    "mcp", "mock", "model", "notify", "plugin", "project", "resource", "review", "share", "skill",
+    "task", "scenario", "schedule", "search", "system", "ui", "workbench", "testplan",
 }
 
 # KNOWN_HOLES：按权限表应当拒绝、实测却放行的格（真实越权）。
@@ -182,6 +183,11 @@ def _ids(ctx: dict[str, Any], role: str) -> dict[str, str]:
         # D183 步 4：报告段的靶子（get/delete 两行按 {report} 定位；list/create 挂在
         # {plan} 路径下）。每角色一份自己的报告（在自己计划上生成）。
         "report": res["report"],
+        # D211：模块段 update/delete 两行的靶子（每角色一个自己的模块，见 _build_ctx）
+        "module": res["module"],
+        # D225：plan_execute 行的靶子 = 每角色一条**空计划**（零关联）。执行空计划
+        # 不派发任何 run（submitted=0），矩阵格不会把执行引擎拖进来；放行格要的是 2xx。
+        "empty_plan": res["empty_plan"],
         "victim": ctx["victims"].get(role, ctx["victims"]["spare"]),
     }
 
@@ -346,8 +352,17 @@ def _rows() -> list[dict[str, Any]]:
         {"id": "plan_create", "svc": "plan_create", "desc": "建计划（testplan:plan:create；名随行带 role 防四角色撞名）",
          "request": _mk("POST", "/api/v1/plans",
                         body={"project_id": "{project}", "name": "矩阵计划-{role}"})},
+        {"id": "plan_copy", "svc": "plan_copy", "desc": "复制计划（testplan:plan:create；默认名随机后缀防撞名）",
+         "request": _mk("POST", "/api/v1/plans/{plan}/copy", body=dict(_P))},
         {"id": "plan_get", "svc": "plan_get", "desc": "计划详情（testplan:plan:read）",
          "request": _mk("GET", "/api/v1/plans/{plan}", params=dict(_P))},
+        # —— D231 计划关注（写副作用走 testplan:plan:update，不借 read；READONLY 403）——
+        {"id": "plan_follow", "svc": "plan_follow",
+         "desc": "关注计划（testplan:plan:update；幂等，重复关注仍 200）",
+         "request": _mk("POST", "/api/v1/plans/{plan}/follow", body=dict(_P))},
+        {"id": "plan_unfollow", "svc": "plan_unfollow",
+         "desc": "取消关注计划（testplan:plan:update；幂等，未关注也 200）",
+         "request": _mk("POST", "/api/v1/plans/{plan}/unfollow", body=dict(_P))},
         {"id": "plan_update", "svc": "plan_update", "desc": "改计划名（testplan:plan:update）",
          "request": _mk("PATCH", "/api/v1/plans/{plan}",
                         body={"project_id": "{project}", "name": "矩阵计划改-{role}"})},
@@ -355,10 +370,35 @@ def _rows() -> list[dict[str, Any]]:
          "request": _mk("POST", "/api/v1/plans/{plan}/archive", body=dict(_P))},
         {"id": "plan_delete", "svc": "plan_delete", "desc": "删计划（testplan:plan:delete；MEMBER 的 -*:delete 在此生效）",
          "request": _mk("DELETE", "/api/v1/plans/{plan}", body=dict(_P))},
+        {"id": "plan_batch_delete", "svc": "plan_batch_delete", "desc": "批量删计划（testplan:plan:delete；与单删同一位，MEMBER 的 -*:delete 在此生效）",
+         "request": _mk("POST", "/api/v1/plans/batch-delete",
+                        body={"project_id": "{project}", "plan_ids": ["{plan}"]})},
+        # —— D211 计划模块树（复用 testplan:plan:* 位，不新造权限；四行各一格）——
+        # {module} 是该角色自己的模块（_build_ctx 每角色建一个）。delete 行放最后：
+        # 它腾空的是自己的靶子，后面的行不再引用它。
+        {"id": "plan_module_tree", "svc": "plan_module_tree", "desc": "计划模块树（testplan:plan:read）",
+         "request": _mk("GET", "/api/v1/plan-modules/tree", params=dict(_P))},
+        {"id": "plan_module_create", "svc": "plan_module_create",
+         "desc": "建计划模块（testplan:plan:create；名随行带 role 防四角色撞名）",
+         "request": _mk("POST", "/api/v1/plan-modules",
+                        body={"project_id": "{project}", "name": "矩阵新模块-{role}"})},
+        {"id": "plan_module_update", "svc": "plan_module_update",
+         "desc": "改计划模块（testplan:plan:update）",
+         "request": _mk("PATCH", "/api/v1/plan-modules/{module}",
+                        body={"project_id": "{project}", "name": "矩阵模块改-{role}"})},
+        {"id": "plan_module_delete", "svc": "plan_module_delete",
+         "desc": "删计划模块（testplan:plan:delete；MEMBER 的 -*:delete 在此生效）",
+         "request": _mk("POST", "/api/v1/plan-modules/{module}/delete", body=dict(_P))},
         # —— D183 步 3 §五：实时状态现算（复用 testplan:plan:read，不新造位；单行钉通过形状，
         # 位名守护在 test_d183_plan_status 的 gates 用例——第六十轮 §二口径）——
         {"id": "plan_status", "svc": "plan_status", "desc": "计划实时状态现算（testplan:plan:read；只读零落库）",
          "request": _mk("GET", "/api/v1/plans/{plan}/status", params=dict(_P))},
+        # —— D225：执行计划（testplan:plan:execute，新位；**空计划**当靶 → submitted=0，
+        # 不把执行引擎拖进矩阵）——位名守护在 test_d225_plan_execute 的权限用例。
+        {"id": "plan_execute", "svc": "plan_execute",
+         "desc": "执行计划（testplan:plan:execute；空计划零派发，只钉权限门形状）",
+         "request": _mk("POST", "/api/v1/plans/{empty_plan}/execute",
+                        body={"project_id": "{project}", "plan_id": "{empty_plan}"})},
         # —— D183 步 2 §五：计划关联（testplan:link:* 前缀；四端点各一行）——
         # {link} 是该角色自己计划上挂自己场景的关联行（_build_ctx 每角色建一条）——
         # 与 plan/saved_view 段同一纪律：拒绝格必须让权限门自己开口，不许借归属缺失混 404。
@@ -399,6 +439,10 @@ def _rows() -> list[dict[str, Any]]:
         {"id": "plan_report_delete", "svc": "plan_report_delete",
          "desc": "删报告（testplan:report:delete；MEMBER 的 -*:delete 在此生效，物理删+明细级联）",
          "request": _mk("DELETE", "/api/v1/plan-reports/{report}", body=dict(_P))},
+        {"id": "plan_report_rename", "svc": "plan_report_rename",
+         "desc": "报告改名（testplan:report:update；只写 name 一列，内容快照不动；MEMBER 放行）",
+         "request": _mk("PATCH", "/api/v1/plan-reports/{report}",
+                        body={"project_id": "{project}", "name": "矩阵报告改名-{role}"})},
         # —— 平台级（system / model / notify；auth 自助类无矩阵意义）——
         {"id": "audit_list", "svc": "audit_list", "desc": "审计查询（D23：仅系统管理员，带 project_id 也拒）",
          "request": _mk("GET", "/api/v1/audit", params=dict(_P))},
@@ -422,6 +466,28 @@ def _rows() -> list[dict[str, Any]]:
          "platform": True, "request": _mk("GET", "/api/v1/model-usage")},
         {"id": "notify_list", "svc": "notify_channel_list", "desc": "通知渠道列表（平台级；已进表，见 KNOWN_PREFIX_FAMILIES 注释）",
          "platform": True, "request": _mk("GET", "/api/v1/notify-channels")},
+        # —— D265/D266 的 mcp / skill 平台治理位（此前只落在模块测试里，前缀覆盖逮到）——
+        {"id": "mcp_server_list", "svc": "mcp_server_list",
+         "desc": "MCP 服务登记列表（mcp:server:read；平台级，非管理员只有 auth:*）",
+         "platform": True, "request": _mk("GET", "/api/v1/mcp-servers")},
+        {"id": "skill_list", "svc": "skill_list",
+         "desc": "Skills 列表（skill:manage；平台级目录，读取也需治理位）",
+         "platform": True, "request": _mk("GET", "/api/v1/skills")},
+        # —— D203 平台运维：三块登记面各取列表行（读位），外加平台级 system_info ——
+        # 新建行不进来：四角色同项目创建会同名撞 uq，矩阵行的 body 无法按角色取名；
+        # 写位的 403 由 tests/test_d203_platform_ops.py 直接钉。
+        {"id": "integration_list", "svc": "integration_list",
+         "desc": "服务集成列表（D203；项目级 integration:integration:read）",
+         "request": _mk("GET", "/api/v1/service-integrations", params=_P)},
+        {"id": "resource_pool_list", "svc": "resource_pool_list",
+         "desc": "资源池列表（D203；项目级 resource:pool:read）",
+         "request": _mk("GET", "/api/v1/resource-pools", params=_P)},
+        {"id": "plugin_list", "svc": "plugin_list",
+         "desc": "插件登记列表（D203；项目级 plugin:plugin:read）",
+         "request": _mk("GET", "/api/v1/plugins", params=_P)},
+        {"id": "system_info", "svc": "system_info",
+         "desc": "系统版本（D203；平台级 system:info:read）",
+         "platform": True, "request": _mk("GET", "/api/v1/system/info")},
     ]
 
 
@@ -485,6 +551,15 @@ async def _build_ctx(client, make_user, session) -> dict[str, Any]:
         pl = await client.post("/api/v1/plans",
                                json={"project_id": pid, "name": f"mx-plan-{role}"}, headers=h)
         assert pl.status_code in (200, 201), pl.text
+        # D225：每角色再一条**空计划**，只给 plan_execute 行当靶（零关联 → 不派发 run）。
+        ep = await client.post("/api/v1/plans",
+                               json={"project_id": pid, "name": f"mx-plan-empty-{role}"}, headers=h)
+        assert ep.status_code in (200, 201), ep.text
+        # D211：每角色一个自己的计划模块，供模块段 update/delete 两行当靶（{module}）。
+        # tree/create 两行不带 id；update 行改名、delete 行腾空后删（都只在自己那份上）。
+        mod = await client.post("/api/v1/plan-modules",
+                                json={"project_id": pid, "name": f"mx-module-{role}"}, headers=h)
+        assert mod.status_code in (200, 201), mod.text
         # D183 步 2：每角色第二个环境 + 第二个场景 + 计划里一条真关联，供 link 四行当靶。
         # 第二个环境给 link_update（换成「角色自己的 env」才是权限门形状——第一环境已被
         # 挂链时抄成 link 的 env，换成同一个值改不动任何东西）；第二个场景给 link_create
@@ -507,8 +582,10 @@ async def _build_ctx(client, make_user, session) -> dict[str, Any]:
         ctx["res"][role] = {"env": env.json()["id"], "definition": d.json()["id"],
                             "scenario": s.json()["id"], "scenario_version": s.json()["version"],
                             "view": v.json()["id"], "plan": pl.json()["id"],
+                            "empty_plan": ep.json()["id"],
                             "env2": env2.json()["id"], "scenario2": s2.json()["id"],
                             "link": lk.json()["id"], "report": rep.json()["id"],
+                            "module": mod.json()["id"],
                             # 可重建的单步重跑源（run_rerun_step 行的靶，见行注释）
                             "rerun_src": await _mk_rerun_src(
                                 session, project_id=pid, scenario_id=s.json()["id"], role=role),

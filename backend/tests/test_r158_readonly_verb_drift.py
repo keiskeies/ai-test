@@ -41,8 +41,9 @@ def _backend_write_tails() -> set[str]:
     specs = [t for t in REGISTRY.all() if getattr(t.handler, "__module__", "").startswith("app.")]
     write_perms = {t.perm for t in specs if t.effect != "read"}
     personal = {p for p in write_perms if _PERSONAL.match(p)}
-    assert personal <= {"auth:password:self"}, (
-        "`:self` 个人账户豁免面长出了新成员 " + str(sorted(personal - {"auth:password:self"}))
+    assert personal <= {"auth:password:self", "auth:self"}, (
+        "`:self` 个人账户豁免面长出了新成员 "
+        + str(sorted(personal - {"auth:password:self", "auth:self"}))
         + "——确认它真的与项目角色无关，再来扩 _PERSONAL")
     return {p.split(":")[-1] for p in write_perms if not _PERSONAL.match(p)}
 

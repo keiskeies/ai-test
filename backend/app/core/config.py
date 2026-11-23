@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     model_seed_name: str = "fundgpt-coder-next"
     model_seed_api_key: str = ""
     artifacts_dir: str = "backend/data/artifacts"
+    # D195 文件库/附件：本地磁盘根（内容寻址；换 S3 时只换 storage 实现）
+    files_dir: str = "backend/data/files"
     # §8.8 的 64KB 线：单条 detail 超阈值的大字段外置为制品文件，DB 只存 ref+head
     artifact_max_bytes: int = 65536
     agent_max_tool_calls: int = 25

@@ -10,6 +10,7 @@ import {
 import { DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined, ReloadOutlined, UndoOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
+import ShareButton from "../ui/ShareButton";
 import { ApiErr, get, patch, post } from "../api/client";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
@@ -121,6 +122,8 @@ function ApiWorkbench() {
   const canCreate = can(perms, "api:def:create");
   const canUpdate = can(perms, "api:def:update");
   const canDelete = can(perms, "api:def:delete");
+  // D202：接口文档公开分享（写副作用，缺位不渲染）。
+  const canShare = can(perms, "share:link:create");
   const canDebug = can(perms, "api:debug:run");
 
   const [defs, setDefs] = useState<ApiDef[]>([]);
@@ -424,6 +427,72 @@ function ApiWorkbench() {
     }
   }
 
+  // D251：批量回收。全有或全无的判据在后端，前端只把 409 的 blocked 清单翻译成人话，
+  // 不给「批量 force」——强删必须逐个过一段确认（后端同样没有这个参数）。
+  const [batchRemoving, setBatchRemoving] = useState(false);
+  async function doBatchRemove(): Promise<void> {
+    setBatchRemoving(true);
+    try {
+      await post("/api-definitions/batch-delete",
+        { project_id: pid, definition_ids: selected });
+      message.success("已放入回收站（" + selected.length + " 个接口）");
+      setSelected([]);
+      await load();
+    } catch (e) {
+      const blk = (e instanceof ApiErr
+        ? (e.details as { blocked?: { name: string; count: number }[]; reason?: string } | null)
+        : null)?.blocked;
+      if (blk && blk.length > 0) {
+        Modal.error({
+          centered: true,
+          title: "整批未删除：有接口被场景引用",
+          content: (
+            <div>
+              <p>{blk.map((b) => b.name + "（" + b.count + " 个场景）").join("、")}</p>
+              <p>整批一行未动。请先在场景里解除引用；确认要连带断掉场景步骤时，请逐个回收。</p>
+            </div>
+          ),
+        });
+      }
+      // 其余错误 client 已 toast
+    } finally { setBatchRemoving(false); }
+  }
+  function batchRemove() {
+    Modal.confirm({
+      centered: true,
+      title: "将选中的 " + selected.length + " 个接口放入回收站？",
+      content: "全有或全无：只要有一个接口被未回收场景引用，整批都不会删。"
+        + "用例不删，restore 后原样回来。",
+      okText: "放入回收站",
+      okButtonProps: { danger: true },
+      onOk: doBatchRemove,
+    });
+  }
+
+  // D252：批量恢复。与批量回收同一个「全有或全无」判据，只是方向相反。
+  const [batchRestoring, setBatchRestoring] = useState(false);
+  async function doBatchRestore(): Promise<void> {
+    setBatchRestoring(true);
+    try {
+      await post("/api-definitions/batch-restore",
+        { project_id: pid, definition_ids: selected });
+      message.success("已恢复（" + selected.length + " 个接口）");
+      setSelected([]);
+      await load();
+    } catch { /* client 已 toast；弹窗关闭，选择保留让用户改名单 */ }
+    finally { setBatchRestoring(false); }
+  }
+  function batchRestore() {
+    Modal.confirm({
+      centered: true,
+      title: "恢复选中的 " + selected.length + " 个接口？",
+      content: "全有或全无：只要有一个不在回收站，整批都不会恢复。"
+        + "恢复后有请求内容的回到「已完成」，没请求内容的回到「草稿」。",
+      okText: "恢复",
+      onOk: doBatchRestore,
+    });
+  }
+
   function removeDef(d: ApiDef) {
     Modal.confirm({
       centered: true,
@@ -574,12 +643,25 @@ function ApiWorkbench() {
           </>)}
         />
         {/* 批量条（1E T5 补完）：选中才出现，[导出选中] 把 ids 原样带进 /api-export；
-            全量导出走顶栏独立按钮，两者不共用一个按钮位，杜绝「以为选了其实全量」。 */}
+            全量导出走顶栏独立按钮，两者不共用一个按钮位，杜绝「以为选了其实全量」。
+            D252：回收站里同一条子变成 [批量恢复]——彻底删除仍要求逐字确认名称，不做批量。 */}
         {canRead && !inRecycled && selected.length > 0 && (
           <Space style={{ marginBottom: 12 }} data-testid="api-batch-bar">
             <Typography.Text>已选 {selected.length} 项</Typography.Text>
             <Button size="small" type="primary" ghost icon={<ExportOutlined />} data-testid="api-export-selected"
               loading={exporting} onClick={() => void exportDefs(selected)}>导出选中</Button>
+            {canDelete && (
+              <Button size="small" danger icon={<DeleteOutlined />} data-testid="api-batch-delete"
+                loading={batchRemoving} onClick={batchRemove}>批量回收</Button>
+            )}
+            <Button size="small" data-testid="api-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+          </Space>
+        )}
+        {canUpdate && inRecycled && selected.length > 0 && (
+          <Space style={{ marginBottom: 12 }} data-testid="api-batch-bar">
+            <Typography.Text>已选 {selected.length} 项</Typography.Text>
+            <Button size="small" type="primary" icon={<ReloadOutlined />} data-testid="api-batch-restore"
+              loading={batchRestoring} onClick={batchRestore}>批量恢复</Button>
             <Button size="small" data-testid="api-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
           </Space>
         )}
@@ -595,7 +677,7 @@ function ApiWorkbench() {
           // 列设置在工具条（allColumns/columnPref 三个 props），不走 ProTable 的
           // options.setting：那会让 ProTable 在卡片顶边多造一条只放一个齿轮的空工具栏。
           options={false}
-          rowSelection={canRead && !inRecycled ? {
+          rowSelection={(!inRecycled && canRead) || (inRecycled && canUpdate) ? {
             selectedRowKeys: selected,
             onChange: (keys) => setSelected(keys.map(String)),
             preserveSelectedRowKeys: false,
@@ -811,6 +893,10 @@ function ApiWorkbench() {
             {canUpdate && (
               <Button type="primary" ghost data-testid="detail-edit" icon={<EditOutlined />}
                 onClick={() => openEditor(detail)}>编辑</Button>
+            )}
+            {canShare && detail && (
+              <ShareButton projectId={pid} targetType="api_doc" targetId={detail.id}
+                title={detail.name} />
             )}
             {canDelete && !inRecycled && (
               <Button danger data-testid="detail-delete" icon={<DeleteOutlined />}

@@ -6,7 +6,7 @@
 // ③ 回收站视图：恢复/彻底删除按权限出现，purge 必须逐字输名才放行；
 // ④ 拉取失败出 Alert（「加载失败」），不画「还没有用例」的空态骗人。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 // antd 的响应式观察器要用 matchMedia，jsdom 没有（每个测试文件自己补）
@@ -35,6 +35,22 @@ function adbCase(over: Partial<AdbCaseOut> = {}): AdbCaseOut {
 const PROJECT = { id: "p1", name: "履约", description: null, status: "normal",
   my_role: "PROJECT_ADMIN", my_perms: ["*"] };
 
+// D217：ADB 页工具栏要的 /filter-meta（形状与后端 filter_registry 一致）。
+// supported_view_types 必须含 adb_case，否则工具栏按「本页不支持」画——那会把
+// 「桩没 mock 到」演成「功能不存在」。
+const ADB_META = {
+  view_type: "adb_case",
+  fields: [
+    { field: "name", label: "名称", kind: "text",
+      ops: ["CONTAINS", "EMPTY", "EQUALS", "NOT_CONTAINS", "NOT_EQUALS", "NOT_EMPTY"] },
+    { field: "priority", label: "优先级", kind: "enum",
+      ops: ["EMPTY", "EQUALS", "IN", "NOT_EQUALS", "NOT_EMPTY"] },
+  ],
+  supported_view_types: ["adb_case"],
+  view_label: "ADB 用例",
+  operators: [], labels: {}, kinds: {}, unavailable: {},
+};
+
 // D47-b 步5a：记录本轮桩见过的所有列表 GET URL——D127 绊线「挂载稳定后恰好一条请求」
 // 与「点一次页码恰好一条」都数它（runs.test.tsx 同款）。
 let listUrls: string[] = [];
@@ -56,6 +72,8 @@ function mockBackend(pages: { normal: AdbCaseOut[]; recycled: AdbCaseOut[]; tota
   listUrls = [];
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    if (url.includes("/filter-meta")) return deepResp(ADB_META);
+    if (url.includes("/saved-views")) return deepResp([]);
     if (url.includes("/projects/") && url.includes("/members")) {
       return deepResp({ items: [{ user_id: "u9", account: "lisi", name: "李四" }], next_cursor: null });
     }
@@ -220,6 +238,42 @@ describe("ADB 用例列表", () => {
     expect(document.body.textContent).toContain("心跳离线不剔除它");
     expect(document.body.textContent).not.toContain("空闲设备");
   });
+
+  it("D217 空条件不拼 filter；应用「名称包含 登录」后下一次列表请求带条件 JSON", async () => {
+    mockBackend({ normal: [adbCase()], recycled: [] });
+    render(<MemoryRouter><AdbCasesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByTestId("adb-case-row-name")).toHaveLength(1));
+    expect(qsOf(listUrls[0]).has("filter")).toBe(false); // 空条件整个参数不上线（不是 filter=）
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "登录" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listUrls.length).toBe(2));
+    // 字段名来自后端 meta 的第一项（name），前端不自列字段
+    expect(JSON.parse(qsOf(listUrls[1]).get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "登录" }],
+    });
+  });
+
+  it("D217 列设置勾掉「默认设备」只藏那一列（其余表头原样）", async () => {
+    localStorage.clear();
+    mockBackend({ normal: [adbCase()], recycled: [] });
+    render(<MemoryRouter><AdbCasesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByTestId("adb-case-row-name")).toHaveLength(1));
+    const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("默认设备");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "优先级", "默认设备", "启用", "最近结果", "负责人", "更新时间"]);
+    fireEvent.click(boxes[labels.indexOf("默认设备")]);
+    await waitFor(() => expect(thead()).not.toContain("默认设备"));
+    expect(thead()).toContain("启用");
+  });
 });
 
 // 第八道差集第二十三轮（adbCases.tsx 脚注）：旧世界 Page 没有 total、单页 size=200，
@@ -235,6 +289,8 @@ describe("页码分页 ListPager（D47-b 步5a）：共 N 只认服务端 total�
     listUrls = [];
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/filter-meta")) return deepResp(ADB_META);
+      if (url.includes("/saved-views")) return deepResp([]);
       if (url.includes("/members")) return deepResp({ items: [], next_cursor: null });
       if (b.fail) return deepResp({ code: "db_error", message: "库挂了", details: null }, 500);
       listUrls.push(url);
@@ -361,6 +417,8 @@ describe("D180 回收站模板跟数据：点击与取数之间不给活行套�
     let gets = 0;
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/filter-meta")) return deepResp(ADB_META);
+      if (url.includes("/saved-views")) return deepResp([]);
       if (url.includes("/members")) {
         return deepResp({ items: [{ user_id: "u9", account: "lisi", name: "李四" }], next_cursor: null });
       }

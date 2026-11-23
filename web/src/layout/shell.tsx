@@ -13,7 +13,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ProLayout } from "@ant-design/pro-components";
 import { Dropdown, Input, Select, Space, Tooltip, Typography } from "antd";
 import {
-  AndroidOutlined, ApiOutlined, BellOutlined, ClockCircleOutlined, CodeOutlined,
+  AndroidOutlined, ApiOutlined, BellOutlined, BugOutlined, ClockCircleOutlined, CodeOutlined,
   DatabaseOutlined, DesktopOutlined, ExperimentOutlined, FileTextOutlined,
   HddOutlined, LayersOutlined, MoonOutlined, NodeIndexOutlined,
   OrderedListOutlined, PanelLeftCloseOutlined, PanelLeftOpenOutlined,
@@ -56,6 +56,7 @@ const MENU: Group[] = [
       { key: "api", label: "接口管理", testid: "nav-api", to: "/api", icon: <CodeOutlined /> },
       { key: "scene", label: "场景编排", testid: "nav-scene", to: "/scene", icon: <NodeIndexOutlined /> },
       { key: "datasets", label: "数据集", testid: "nav-datasets", to: "/datasets", icon: <DatabaseOutlined /> },
+      { key: "mock", label: "API Mock", testid: "nav-mock", to: "/mock", icon: <ApiOutlined /> },
     ],
   },
   {
@@ -77,10 +78,22 @@ const MENU: Group[] = [
     ],
   },
   {
+    // D191：补 MS 的「测试跟踪」一级；D193 功能用例本体已落地（评审仍在后续批次）。
+    key: "g-tracking",
+    label: "测试跟踪",
+    icon: <BugOutlined />,
+    children: [
+      { key: "cases", label: "功能用例", testid: "nav-cases", to: "/functional/cases", icon: <OrderedListOutlined /> },
+      { key: "defects", label: "缺陷管理", testid: "nav-defects", to: "/defects", icon: <BugOutlined /> },
+      { key: "reviews", label: "用例评审", testid: "nav-reviews", to: "/reviews", icon: <ProfileOutlined /> },
+    ],
+  },
+  {
     key: "g-task",
     label: "任务中心",
     icon: <ProfileOutlined />,
     children: [
+      { key: "task-center", label: "任务中心", testid: "nav-task-center", to: "/task-center", icon: <ClockCircleOutlined /> },
       { key: "runs", label: "运行记录", testid: "nav-runs", to: "/runs", icon: <ClockCircleOutlined /> },
       { key: "plans", label: "测试计划", testid: "nav-plans", to: "/plans", icon: <TableOutlined /> },
       { key: "reports", label: "报告中心", testid: "nav-reports", to: "/reports", icon: <FileTextOutlined /> },
@@ -93,8 +106,12 @@ const MENU: Group[] = [
     icon: <SettingOutlined />,
     children: [
       { key: "settings", label: "项目与成员", testid: "nav-settings", to: "/settings", icon: <UsergroupOutlined /> },
-      { key: "mcp", label: "MCP 服务", testid: "nav-mcp", note: "未开放（计划二期）", icon: <ToolOutlined /> },
-      { key: "skills", label: "Skills", testid: "nav-skills", note: "未开放（计划二期）", icon: <SparklesOutlined /> },
+      // D270：组织是平台级分组层，不依赖当前项目——独立成页，组织管理员（非系统管理员）
+      // 也有入口；此前只挂在设置页的系统管理员 Tab 下，组织管理员界面是死路。
+      { key: "orgs", label: "组织", testid: "nav-orgs", to: "/orgs", icon: <TeamOutlined /> },
+      { key: "files", label: "文件管理", testid: "nav-files", to: "/files", icon: <FileTextOutlined /> },
+      { key: "mcp", label: "MCP 服务", testid: "nav-mcp", to: "/settings/mcp", icon: <ToolOutlined /> },
+      { key: "skills", label: "Skills", testid: "nav-skills", to: "/settings/skills", icon: <SparklesOutlined /> },
       { key: "notify", label: "通知渠道", testid: "nav-notify", to: "/notify/channels", icon: <BellOutlined /> },
     ],
   },
@@ -108,7 +125,8 @@ const PATH_TO_KEY: Record<string, string> = Object.fromEntries(
 // 详情页按前缀回落到所属列表项（否则侧栏在详情页上「什么都不选中」）。
 const PREFIX_TO_KEY: Array<[string, string]> = [
   ["/scene/", "scene"], ["/reports/", "reports"], ["/plans/", "plans"], ["/plan-reports/", "plans"],
-  ["/ui/cases/", "ui-cases"], ["/adb/cases/", "adb-cases"],
+  ["/ui/cases/", "ui-cases"], ["/adb/cases/", "adb-cases"], ["/defects/", "defects"],
+  ["/functional/cases/", "cases"], ["/reviews/", "reviews"],
 ];
 function currentKey(pathname: string): string {
   const exact = PATH_TO_KEY[pathname];
@@ -231,6 +249,8 @@ export default function Shell() {
       menu={{
         items: [
           { key: "who", label: (user?.name ?? "") + "（" + (user?.account ?? "") + "）", disabled: true },
+          // D198：个人中心（资料/偏好/API Key），门禁 = 已登录。
+          ...(user ? [{ key: "me", label: <span data-testid="menu-me">个人中心</span> }] : []),
           // D105 自助改密：门禁 = 已登录（后端判平台级基础位，按项目 perms 门禁会造新假门）。
           ...(user ? [{ key: "password", label: <span data-testid="menu-change-password">修改密码</span> }] : []),
           { key: "logout", label: <span data-testid="logout">退出登录</span> },
@@ -238,6 +258,7 @@ export default function Shell() {
         onClick: ({ key }) => {
           if (key === "logout") logout();
           if (key === "password") setPwdOpen(true);
+          if (key === "me") nav("/me");
         },
       }}
     >

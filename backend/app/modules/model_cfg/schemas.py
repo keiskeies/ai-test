@@ -66,6 +66,9 @@ class CfgOut(BaseModel):
 
 class CfgListIn(BaseModel):
     model_type: Literal["CHAT", "EMBEDDING"] | None = None
+    # D260：模型池的关键字搜索。与场景/接口列表同口径：两端空白不进入匹配，
+    # 只打「名字 / 模型标识 / 网关地址」三列（用户认模型的就是这三样）。
+    keyword: str | None = None
     cursor: str | None = None
     size: int = Field(default=50, ge=1, le=200)
 

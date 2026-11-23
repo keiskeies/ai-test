@@ -94,6 +94,18 @@ function installFetch(): void {
       if (!q.get("current") || q.get("current") === "1") return resp(cfg.first ?? PAGE1);
       return resp(cfg.more ?? cfg.first ?? PAGE1);
     }
+    if (url.includes("/filter-meta")) {
+      // D215：工具栏要的元数据。不给的话 useFilterMeta 会画「筛选配置未取到」，
+      // 整页仍是能跑的，但那把「本测试没 mock」演成「功能故障」——把故障演成常态。
+      return resp({
+        view_type: "report",
+        fields: [{ field: "subject_name", label: "对象名称", kind: "text",
+          ops: ["CONTAINS", "EMPTY", "EQUALS", "NOT_CONTAINS", "NOT_EQUALS", "NOT_EMPTY"] }],
+        supported_view_types: ["report"], view_label: "报告中心",
+        operators: [], labels: {}, kinds: {}, unavailable: {},
+      });
+    }
+    if (url.includes("/saved-views")) return resp([]);
     if (url.includes("/scenarios?")) return resp(plain([{ id: "s1", name: "履约场景A" }]));
     if (url.includes("/envs?")) {
       return resp(plain([

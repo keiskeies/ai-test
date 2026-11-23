@@ -46,12 +46,33 @@ function mockBackend() {
       ({ ok: true, status: 200, json: async () => json }) as unknown as Response;
     const page = (items: unknown[]) => ({ items, next_cursor: null });
     if (url.includes("/reports?")) return resp(page(ROWS));
+    if (url.includes("/filter-meta")) return resp(REPORT_META);
+    if (url.includes("/saved-views")) return resp([]);
     if (url.includes("/scenarios?")) return resp(page([{ id: "s1", name: "履约场景A" }]));
     if (url.includes("/envs?")) return resp(page([{ id: "e1", name: "测试环境" }]));
     if (url.includes("/members")) return resp(page([{ user_id: "u1", name: "张三", account: "a" }]));
     throw new Error("未 mock 的请求: GET " + url);
   }) as unknown as typeof fetch;
 }
+
+// D215：报告页工具栏要的 /filter-meta 形状（只留本页断言用到的字段；形状与
+// backend filter_registry.ListViewFilter.meta() 一致，supported_view_types 必须含 report，
+// 否则工具栏按「本页不支持」画——那会把「没 mock 到」演成「功能不存在」）。
+const REPORT_META = {
+  view_type: "report",
+  fields: [
+    { field: "subject_name", label: "对象名称", kind: "text",
+      ops: ["CONTAINS", "EMPTY", "EQUALS", "IN", "NOT_CONTAINS", "NOT_EQUALS", "NOT_IN", "NOT_EMPTY"] },
+    { field: "status", label: "执行结果", kind: "enum",
+      ops: ["EMPTY", "EQUALS", "IN", "NOT_EQUALS", "NOT_EMPTY", "NOT_IN"] },
+  ],
+  supported_view_types: ["report"],
+  view_label: "报告中心",
+  operators: [],
+  labels: {},
+  kinds: {},
+  unavailable: {},
+};
 
 beforeEach(() => {
   cleanup();
@@ -258,5 +279,68 @@ describe("结果列词表外 status（R112：不回落友好标签）", () => {
     expect(weirdBadge.textContent).not.toContain("通过"); // 绝不回落成认识的话
     // 正对照：同屏词表内行照常画友好标签——不是整列退化成了原文
     expect(within(rows[1]).getByTestId("report-status").textContent).toBe("通过");
+  });
+});
+
+// ── D215：报告列表高级搜索 / 列设置（D47-a 三件套铺到报告页）─────────────────────
+describe("D215 报告列表高级搜索 / 列设置", () => {
+  const urls: string[] = [];
+  function mockD215(): void {
+    urls.length = 0;
+    const resp = (json: unknown) =>
+      ({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(json)) }) as unknown as Response;
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/filter-meta")) return resp(REPORT_META);
+      if (url.includes("/saved-views")) return resp([]);
+      if (url.includes("/scenarios?")) return resp({ items: [], next_cursor: null });
+      if (url.includes("/envs?")) return resp({ items: [], next_cursor: null });
+      if (url.includes("/members")) return resp({ items: [], next_cursor: null });
+      if (/\/reports\?/.test(url)) {
+        urls.push(url);
+        return resp({ items: [row("r1", "manual")], next_cursor: null, total: 1 });
+      }
+      throw new Error("未 mock 的请求: GET " + url);
+    }) as unknown as typeof fetch;
+  }
+  const sentFilter = (url: string) => {
+    const raw = new URL(url, "http://x").searchParams.get("filter");
+    return raw === null ? null : JSON.parse(raw);
+  };
+
+  it("空条件不拼 filter；应用「对象名称包含 履约」后下一次 /reports 带条件 JSON", async () => {
+    mockD215();
+    render(<MemoryRouter><ReportsPage /></MemoryRouter>);
+    await waitFor(() => expect(urls.length).toBe(1));
+    expect(sentFilter(urls[0])).toBeNull(); // 空条件整个参数不上线（不是 filter=）
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "履约" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(urls.length).toBe(2));
+    // 字段名来自后端 meta 的第一项（subject_name），前端不自列字段
+    expect(sentFilter(urls[1])).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "subject_name", operator: "CONTAINS", value: "履约" }],
+    });
+  });
+
+  it("列设置勾掉「环境」只藏那一列（其余表头原样）", async () => {
+    localStorage.clear();
+    mockD215();
+    render(<MemoryRouter><ReportsPage /></MemoryRouter>);
+    await waitFor(() => expect(urls.length).toBe(1));
+    const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("环境");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["对象", "触发", "结果", "通过率", "步骤", "耗时", "环境", "执行人", "开始时间"]);
+    fireEvent.click(boxes[labels.indexOf("环境")]);
+    await waitFor(() => expect(thead()).not.toContain("环境"));
+    expect(thead()).toContain("通过率");
   });
 });

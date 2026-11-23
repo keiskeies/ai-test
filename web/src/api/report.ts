@@ -88,7 +88,11 @@ export interface ReportStepDetail {
   detail: Record<string, unknown> | null;
 }
 
-export type ReportListFilter = Pick<ReportListQuery, "project_id"> & Partial<Omit<ReportListQuery, "project_id">>;
+// D215：filter（高级搜索条件组 JSON 串）后端已加进 ReportListIn，而 schema.d.ts 要等
+// gen:api 重画（会自起后端抢 8321，与 D47-b 同笔账）。照 scene.ts 的手写镜像约定在派生
+// 类型上显式补键，字段名与后端 `ReportListIn.filter` 逐字一致，下次 gen 合流不漂移。
+export type ReportListFilter = Pick<ReportListQuery, "project_id"> & Partial<Omit<ReportListQuery, "project_id">>
+  & { filter?: string };
 
 export const reportApi = {
   /** 报告列表：默认不含 trigger=debug（Review Focus 11：报告是结论，调试看运行记录页）。 */

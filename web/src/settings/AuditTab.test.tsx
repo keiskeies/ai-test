@@ -2,7 +2,7 @@
 // 以及 AuditTab 的 [diff] 钮只在带 before/after 的行上可点、区间控件把
 // ts_from/ts_to（纯日期，Shanghai 日历日归界在后端）带进请求。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import AuditTab from "./AuditTab";
 import AuditDiffModal, { diffRows, hasComparison } from "./AuditDiffModal";
 import type { AuditRow } from "../api/api";
@@ -31,6 +31,25 @@ const PLAIN_ROW: AuditRow = {
   entry: "schedule", action: "env_create", target: "p1", ok: true, diff: { produced: [] },
 };
 
+// D246：工具栏的元数据（/filter-meta）。照后端 AUDIT_LIST_FILTER 的真实形状给：
+// 有 audit、字段集是表格里那六列——工具栏据此才画得出可用的「高级搜索」。
+const FILTER_META = {
+  operators: ["CONTAINS", "EQUALS"],
+  labels: { CONTAINS: "包含", EQUALS: "等于" },
+  kinds: { text: ["CONTAINS", "EQUALS"] },
+  unavailable: {},
+  supported_view_types: ["audit"],
+  view_label: "审计日志",
+  fields: [
+    { field: "ts", label: "时间", kind: "time", ops: ["EQUALS", "BETWEEN"] },
+    { field: "user_name", label: "操作人", kind: "text", ops: ["CONTAINS", "EQUALS"] },
+    { field: "entry", label: "入口", kind: "enum", ops: ["EQUALS", "IN"] },
+    { field: "action", label: "动作", kind: "text", ops: ["CONTAINS", "EQUALS"] },
+    { field: "target", label: "目标", kind: "text", ops: ["CONTAINS", "EMPTY"] },
+    { field: "ok", label: "结果", kind: "bool", ops: ["EQUALS", "NOT_EQUALS"] },
+  ],
+};
+
 function mockAudit() {
   const calls: string[] = [];
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -41,12 +60,18 @@ function mockAudit() {
       return { ok: true, status: 200, json: async () => ({
         items: [{ id: "u9", account: "alice", name: "Alice", is_member: true }], next_cursor: null }) };
     }
+    if (url.includes("/filter-meta?")) {
+      return { ok: true, status: 200, json: async () => FILTER_META };
+    }
+    if (url.includes("/saved-views?")) {
+      return { ok: true, status: 200, json: async () => [] };
+    }
     return { ok: true, status: 200, json: async () => ({ items: [DIFF_ROW, PLAIN_ROW], next_cursor: null }) };
   }) as unknown as typeof fetch;
   return calls;
 }
 
-beforeEach(() => cleanup());
+beforeEach(() => { cleanup(); localStorage.clear(); });
 
 /** /audit 按状态码失败；操作人下拉那条口恒 200（筛选项是可选件，不该把整页变成报错）。
  *  reject=true 时 fetch 直接 reject —— 后端没起/断网是传输层失败，抛的不是 ApiErr。 */
@@ -55,6 +80,14 @@ function mockAuditFail(auditStatus: number, opts: { reject?: boolean } = {}) {
     const url = String(input);
     if (url.includes("/project-member-candidates")) {
       return { ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) };
+    }
+    // 工具栏的元数据照常给：这一组用例钉的是「列表取数失败」怎么说话，
+    // 不能顺手把工具栏也打成故障态（那是另一件事）。
+    if (url.includes("/filter-meta?")) {
+      return { ok: true, status: 200, json: async () => FILTER_META };
+    }
+    if (url.includes("/saved-views?")) {
+      return { ok: true, status: 200, json: async () => [] };
     }
     if (opts.reject) throw new TypeError("Failed to fetch");
     return { ok: false, status: auditStatus, json: async () => ({
@@ -69,6 +102,12 @@ function mockAuditEmpty() {
     const url = String(input);
     if (url.includes("/project-member-candidates")) {
       return { ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) };
+    }
+    if (url.includes("/filter-meta?")) {
+      return { ok: true, status: 200, json: async () => FILTER_META };
+    }
+    if (url.includes("/saved-views?")) {
+      return { ok: true, status: 200, json: async () => [] };
     }
     return { ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) };
   }) as unknown as typeof fetch;
@@ -134,7 +173,7 @@ describe("AuditDiffModal（双栏并排 + 差异键高亮）", () => {
 describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => {
   it("带 before/after 的行 [diff] 可点开模态；没有对照物的行钮置灰", async () => {
     mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-diff")).toHaveLength(2));
     const [withDiff, without] = screen.getAllByTestId("audit-diff");
     expect((without as HTMLButtonElement).disabled).toBe(true);
@@ -145,9 +184,10 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
 
   it("选日期区间 → 请求带 YYYY-MM-DD 的 ts_from/ts_to；入口选项含「定时」", async () => {
     const calls = mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(calls.length).toBeGreaterThan(0));
-    expect(calls[0]).toContain("/audit?");
+    // 工具栏也往 calls 记账（/filter-meta、/saved-views），首条列表请求要按端点族找
+    expect(calls.find((u) => u.includes("/audit?"))).toContain("/audit?");
     // 入口筛选词表含 schedule→定时（§11.4.27 筛选条「全部|Web|Pilot|定时」的定时位）
     // audit-entry 是逐行画的 Tag（AuditTab.tsx:85）：上面那条 waitFor 只等到请求发出，
     // 慢后端下行还在回包路上，getAll 会抓到空数组。门要钉在行上（同隔壁 [diff] 用例等
@@ -162,7 +202,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
 
   it("「动作」框回车 → 立刻重查且请求带 action=：这条钉的是 useEffect 依赖里必须有 action", async () => {
     const calls = mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     // 只数 /audit 请求：操作人下拉的数据源是另一条口，别把它算成「多查了一次」
     await waitFor(() => expect(calls.filter((u) => u.includes("/audit?"))).toHaveLength(1));
     const box = screen.getByTestId("audit-filter-action");
@@ -175,7 +215,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
 
   it("「动作」框是真受控 + 点 × 连已生效筛选一起清：清空后重查不再带 action（D128）", async () => {
     const calls = mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     const audits = () => calls.filter((u) => u.includes("/audit?"));
     await waitFor(() => expect(audits()).toHaveLength(1));
 
@@ -203,7 +243,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
 
   it("操作人筛选：数据源来自项目内用户查找；选中后请求带 user_id=，清空后不再带（§11.5.1）", async () => {
     const calls = mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     // 首屏：审计列表 + 操作人下拉数据源各发一次
     await waitFor(() => expect(calls.some((u) => u.includes("/audit?"))).toBe(true));
     await waitFor(() => expect(calls.some((u) => u.includes("/project-member-candidates?"))).toBe(true));
@@ -260,7 +300,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
         hasCursor ? { items: rowsB, next_cursor: null } : { items: rowsA, next_cursor: "c1" }) };
     }) as unknown as typeof fetch;
 
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-row")).toHaveLength(2));
     // 「加载更多」只在响应带 next_cursor 时存在（cursor && 分支）
     const more = await screen.findByTestId("audit-more");
@@ -304,7 +344,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
         filtered ? { items: rowsB, next_cursor: null } : { items: rowsA, next_cursor: null }) };
     }) as unknown as typeof fetch;
 
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-row")).toHaveLength(2));
     expect(document.querySelector('[data-audit-id="pa-1"]')).not.toBeNull();
 
@@ -331,7 +371,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
     // mockAudit 恒返 next_cursor:null —— 与上一测的 c1 相反方向，两个 fixture 一起
     // 才把 cursor && 分支钉住：删分支 → 这里多出一个钮；反成 !cursor → 首屏就出现钮、点它翻车。
     mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-row")).toHaveLength(2));
     expect(screen.queryByTestId("audit-more")).toBeNull();
   });
@@ -340,7 +380,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
     // mock 只影响请求，不进断言；本测钉的是 audit-filters 这层容器的**包含关系**与词表，
     // 把 <Space> 拆掉/摘 testid 即红。
     mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     const filters = screen.getByTestId("audit-filters");
     for (const id of ["audit-filter-range", "audit-filter-user", "audit-filter-entry",
       "audit-filter-ok", "audit-filter-action"]) {
@@ -361,7 +401,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
 
   it("[细节] 卡体 = 被点那一行的 diff JSON；[收起] 关整张卡", async () => {
     mockAudit();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-row")).toHaveLength(2));
     // 未开卡：body/close/card 都不在 DOM（openRow && 分支）
     expect(screen.queryByTestId("audit-detail-body")).toBeNull();
@@ -388,7 +428,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
 
   it("卡体永远跟着最后一次 [细节] 的行走，收起后换行再开即换内容", async () => {
     mockAudit();
-    const { unmount } = render(<AuditTab projectId="p1" />);
+    const { unmount } = render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-row")).toHaveLength(2));
     fireEvent.click(screen.getAllByTestId("audit-detail")[0]);
     const body = await screen.findByTestId("audit-detail-body");
@@ -406,7 +446,7 @@ describe("AuditTab 接线（[diff] 钮 + 时间区间 + 定时入口）", () => 
     unmount();
 
     // 同一次 mount 里点第一行 → 第二行（不收起直接换）：卡体必须跟着换
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await waitFor(() => expect(screen.getAllByTestId("audit-row")).toHaveLength(2));
     fireEvent.click(screen.getAllByTestId("audit-detail")[0]);
     await screen.findByTestId("audit-detail-body");
@@ -422,7 +462,7 @@ describe("审计空态与报错分句的诚实性（文案不许比代码多说�
     // 旧文案的谎：fetch 失败也渲染「这段时间没有写操作被记录」——「没取到」≠「查到了 0 条」。
     // 正向断言 + not.toContain 双向钉：只查新句的话，两句同时渲染的变异体照样绿。
     mockAuditFail(500);
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findByText("审计日志没取到");
     expect(bodyText()).toContain(NOT_FETCHED);
     expect(bodyText()).not.toContain("这段时间没有写操作被记录");
@@ -430,7 +470,7 @@ describe("审计空态与报错分句的诚实性（文案不许比代码多说�
 
   it("真取到 0 条且无筛选 → 设计说明句仍在（正向对照：不是把无条件句换了个词）", async () => {
     mockAuditEmpty();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findByText(CENSUS);
     expect(bodyText()).not.toContain(NOT_FETCHED);
     expect(bodyText()).not.toContain(NO_MATCH);
@@ -438,7 +478,7 @@ describe("审计空态与报错分句的诚实性（文案不许比代码多说�
 
   it("带筛选取到 0 条 → 只说「当前筛选条件下没有匹配的记录」，全局普查句收回", async () => {
     mockAuditEmpty();
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     // 首屏无筛选：普查句是对的，必须在
     await screen.findByText(CENSUS);
     await pickEntryHttp();
@@ -449,7 +489,7 @@ describe("审计空态与报错分句的诚实性（文案不许比代码多说�
 
   it("403 → 权限/重新登录句，且不许出现网络句（错误类要说对）", async () => {
     mockAuditFail(403);
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findByText("审计日志没取到");
     expect(bodyText()).toContain(PERMISSION);
     expect(bodyText()).not.toContain("可能是网络不通");
@@ -457,7 +497,7 @@ describe("审计空态与报错分句的诚实性（文案不许比代码多说�
 
   it("500 → 网络句，且不许出现「重新登录」（本 Tab 挂载前读权限已核过，重登是死路）", async () => {
     mockAuditFail(500);
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findByText("审计日志没取到");
     expect(bodyText()).toContain(NETWORK);
     expect(bodyText()).not.toContain("重新登录");
@@ -465,7 +505,7 @@ describe("审计空态与报错分句的诚实性（文案不许比代码多说�
 
   it("传输层失败（fetch reject，抛的不是 ApiErr）→ 按网络句处理，不喊权限", async () => {
     mockAuditFail(0, { reject: true });
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findByText("审计日志没取到");
     expect(bodyText()).toContain(NETWORK);
     expect(bodyText()).not.toContain("重新登录");
@@ -522,7 +562,7 @@ describe("操作人下拉：名单没取到不许说成「没有匹配的用户�
 
   it("候选口 500 → 弹层说「没取到」并明写不是没人，且整页不许因此变成报错", async () => {
     mockOps("fail500");
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findAllByTestId("audit-action");
     expect(bodyText()).not.toContain("审计日志没取到");
     const dd = await opsDropdownText();
@@ -532,7 +572,7 @@ describe("操作人下拉：名单没取到不许说成「没有匹配的用户�
 
   it("候选口 403 → 说项目级没权限，不许喊「重新输入可重试」（重输拿不到本来就没有的权限）", async () => {
     mockOps("fail403");
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findAllByTestId("audit-action");
     const dd = await opsDropdownText();
     expect(dd).toContain(OPS_DENIED);
@@ -543,7 +583,7 @@ describe("操作人下拉：名单没取到不许说成「没有匹配的用户�
   // 正对照：真查到 0 条才配说「没有匹配的用户」。缺它时「一律说没取到」也全绿，等于没测。
   it("正对照：候选口 200 且 items 为空 → 仍说「没有匹配的用户」，不许蹭「没取到」", async () => {
     mockOps("ok_empty");
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findAllByTestId("audit-action");
     const dd = await opsDropdownText();
     expect(dd).toContain(OPS_EMPTY);
@@ -553,7 +593,7 @@ describe("操作人下拉：名单没取到不许说成「没有匹配的用户�
 
   it("失败后重新输入即恢复：旗标不许粘滞（否则一次抖动把下拉永久判死）", async () => {
     mockOps("fail_then_ok");
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findAllByTestId("audit-action");
     expect(await opsDropdownText()).toContain(OPS_FAIL);
     typeOps("ali");
@@ -565,7 +605,7 @@ describe("操作人下拉：名单没取到不许说成「没有匹配的用户�
   // 粘滞旗标没处显形。这条让「第二次查询真的查到 0 条」，notFoundContent 才重新上场说话。
   it("失败后重新输入且真查到 0 条 → 说「没有匹配的用户」，不许被上一次失败粘住", async () => {
     mockOps("fail_then_empty");
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     await screen.findAllByTestId("audit-action");
     expect(await opsDropdownText()).toContain(OPS_FAIL);
     typeOps("zzz");
@@ -575,10 +615,63 @@ describe("操作人下拉：名单没取到不许说成「没有匹配的用户�
 
   it("请求在途时展开 → 说「搜索中…」，不许先替这次查询下结论", async () => {
     mockOps("never");
-    render(<AuditTab projectId="p1" />);
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
     const dd = await opsDropdownText();
     expect(dd).toContain("搜索中…");
     expect(dd).not.toContain(OPS_EMPTY);
     expect(dd).not.toContain(OPS_FAIL);
+  });
+
+  // —— D246：三件套接进审计页 --------------------------------------------------------
+  it("选中已存视图 → 条件作为 filter 参数重查（与五条快捷轴并行，不互相覆盖）", async () => {
+    const calls: string[] = [];
+    const view = {
+      id: "v1", project_id: "p1", view_type: "audit", name: "只看 env 动作",
+      conditions: { search_mode: "AND", conditions: [
+        { field: "action", operator: "CONTAINS", value: "env" }] },
+      pos: 0, updated_at: "2026-11-23T00:00:00+00:00",
+    };
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/project-member-candidates")) {
+        return { ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) };
+      }
+      if (url.includes("/filter-meta?")) {
+        return { ok: true, status: 200, json: async () => FILTER_META };
+      }
+      if (url.includes("/saved-views?")) {
+        return { ok: true, status: 200, json: async () => [view] };
+      }
+      return { ok: true, status: 200, json: async () => ({ items: [DIFF_ROW, PLAIN_ROW], next_cursor: null }) };
+    }) as unknown as typeof fetch;
+
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
+    await waitFor(() => expect(calls.some((u) => u.includes("/audit?"))).toBe(true));
+
+    const sel = screen.getByTestId("lt-view");
+    fireEvent.mouseDown(sel.querySelector(".ant-select-selector")!);
+    fireEvent.click(await screen.findByText("只看 env 动作"));
+
+    await waitFor(() => {
+      const last = calls.filter((u) => u.includes("/audit?")).at(-1)!;
+      expect(last).toContain("filter=");
+      expect(decodeURIComponent(last)).toContain('"field":"action"');
+    });
+  });
+
+  it("列设置取消「动作」→ 该列头与单元格一起消失（key 与 cols 逐字对齐才藏得掉）", async () => {
+    mockAudit();
+    render(<AuditTab projectId="p1" canSaveView canDeleteView />);
+    await waitFor(() => expect(screen.getAllByTestId("audit-action")).toHaveLength(2));
+
+    fireEvent.click(screen.getByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const row = within(panel).getByText("动作").closest("label")!;
+    fireEvent.click(row);
+
+    await waitFor(() => expect(screen.queryAllByTestId("audit-action")).toHaveLength(0));
+    // 别的列不受牵连（收窄只作用于勾掉的那一列）
+    expect(screen.getAllByTestId("audit-entry").length).toBe(2);
   });
 });

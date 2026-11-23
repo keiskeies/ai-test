@@ -4,24 +4,38 @@
 // 计划里的「批量[删除]」随现实修正为不做，不做假按钮。
 // 契约（nav.spec 钉）：根节点 data-testid="page-reports" + PageHead 标题「报告中心」。
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Progress, Select, Space, Switch, Table, Tag, Tooltip, Typography } from "antd";
+import { Alert, Button, Progress, Select, Space, Switch, Tag, Tooltip, Typography } from "antd";
 import { ReloadOutlined } from "../ui/icons";
 import type { ColumnsType } from "antd/es/table";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
 import { useAuth } from "../auth/store";
+import { can, patternsForProject } from "../auth/perms";
 import { reportApi, type ReportRow } from "../api/report";
 import { sceneApi } from "../api/scene";
 import { get } from "../api/client";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 import { SELECTABLE_TRIGGERS, STATUSES, SUBJECT_TYPES, TRIGGERS, vocabMeta } from "../shared/runVocab";
 import { pctAttr, ratePctNum } from "../shared/passRate";
+import { tokensFor } from "../theme";
+import { useTheme } from "../ui/themeMode";
 import { useNavigate } from "react-router-dom";
 import type { EnvRow, Page } from "../api/api";
 
 /** 通过率环：null（分母≤0，全跳步/空集）画「-」，不画 0%——0% 是结论，「-」是没结论。 */
 export function PassRing({ rate, size = 34 }: { rate: number | null; size?: number }) {
+  // 色按 mode 现取。理由换了：实测（2026-11-22 headless）rc-progress 把 stroke 写进
+  // **inline style**（rc-progress/lib/Circle/util.js:29 getCircleStyle 返回 {stroke}），
+  // var() 在那条通路上是解析的——旧注释「Circle.js:69 是呈现属性、不认变量」经实测为假。
+  // 仍取具体值走的是统一约定：SVG 的 stroke **属性**通路不认变量（antd 在 trail 上
+  // attr 与 style 两路都写），与 echarts/monaco/xyflow 同一套按 mode 取色的写法。
+  const mode = useTheme((s) => s.mode);
+  const t = tokensFor(mode);
   if (rate == null) {
     return (
       <span data-testid="report-pass-rate" data-percent={pctAttr(rate)}
@@ -31,13 +45,13 @@ export function PassRing({ rate, size = 34 }: { rate: number | null; size?: numb
     );
   }
   const pct = ratePctNum(rate);
-  const color = pct >= 100 ? "#2BA47D" : pct >= 60 ? "#D48806" : "#D3564F";
+  const color = pct >= 100 ? t.func.success : pct >= 60 ? t.func.warning : t.func.error;
   return (
     // data 属性落在外层 span：antd Progress 不保证转发未知 prop，测试事实不能押在它身上。
     // 值走 pctAttr（和 reportDetail 概览卡外壳同一个函数）——两处若有两份算式，
     // 断言钉住一份就等于没钉（6b V1 变异实测），同源之后分歧在源码层不存在。
     <span data-testid="report-pass-rate" data-percent={pctAttr(rate)} style={{ display: "inline-flex" }}>
-      <Progress type="circle" size={size} percent={pct} strokeColor={color} trailColor="#EEF1F0"
+      <Progress type="circle" size={size} percent={pct} strokeColor={color} trailColor={t.split}
         format={() => <span style={{ fontSize: 10 }}>{pct}%</span>} />
     </span>
   );
@@ -48,6 +62,20 @@ function daysAgoIso(days: number): string {
   const d = new Date(Date.now() - days * 86400_000);
   return d.toISOString().replace("Z", "").replace(/:\d{2}\.\d{3}$/, "");
 }
+
+// D215：列设置面板要露的列（key 与下方 columns 的 key 逐字对上，对不上就是「面板能勾、
+// 表头不动」的假把手——reports.test.tsx 的列设置用例钉这一环）。
+const REPORT_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "对象" },
+  { key: "trigger", label: "触发" },
+  { key: "status", label: "结果" },
+  { key: "pass", label: "通过率" },
+  { key: "steps", label: "步骤" },
+  { key: "elapsed", label: "耗时" },
+  { key: "env", label: "环境" },
+  { key: "creator", label: "执行人" },
+  { key: "time", label: "开始时间" },
+];
 
 interface Filters {
   days: number; // 7 / 30 / 0=不限
@@ -62,8 +90,9 @@ interface Filters {
 }
 
 function ReportsWorkbench() {
-  const { project } = useAuth();
+  const { project, user } = useAuth();
   const pid = project!.id;
+  const perms = patternsForProject(project, user?.is_system_admin);
   const nav = useNavigate();
   const [items, setItems] = useState<ReportRow[]>([]);
   // D47-b：页码分页（current/size/total）替换「加载更多」游标追加。一页只许有一个
@@ -77,10 +106,15 @@ function ReportsWorkbench() {
   const [sceneOpts, setSceneOpts] = useState<Array<{ value: string; label: string }>>([]);
   const [members, setMembers] = useState<Array<{ user_id: string; name: string | null; account: string | null }>>([]);
   const [f, setF] = useState<Filters>({ days: 7, subject: "", includeDebug: false });
+  // D215：高级搜索条件（D47-a 三件套）+ 列偏好（列设置的落盘在 useColumnPrefs）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("report", REPORT_COL_CHOICES.map((c) => c.key));
   // 任一筛选变化必回第 1 页：停在第 7 页改筛选，落的是新条件下无关的切片甚至空页，
   // 和换档位是同一个 hazard（listPagination.tsx 注释③）。七个筛选只有 patch 这一个写入口，
   // 回页就钉在这唯一入口处，测试从第 3 页改筛选钉它。
   const patch = (p: Partial<Filters>): void => { setF((old) => ({ ...old, ...p })); setCurrent(1); };
+  // D215：高级搜索是第八类筛选，同样从唯一入口回第 1 页（不另开一条不回页的旁路）。
+  const patchAdv = (next: FilterDoc): void => { setAdvFilter(next); setCurrent(1); };
 
   useEffect(() => {
     get<Page<EnvRow>>("/envs?project_id=" + encodeURIComponent(pid) + "&size=200", { silent: true })
@@ -114,6 +148,8 @@ function ReportsWorkbench() {
       if (f.envId) q.env_id = f.envId;
       if (f.createdBy) q.created_by = f.createdBy;
       if (f.includeDebug) q.include_debug = true;
+      // D215：空条件不上线（与 keyword/since 同口径）；非空才拼 filter JSON 串。
+      if (!isFilterEmpty(advFilter)) q.filter = JSON.stringify(advFilter);
       const r = await reportApi.list(q as Parameters<typeof reportApi.list>[0]);
       setItems(r.items);
       // total 只从响应来，永不由 items.length 客户端现攒（页内行数不是总数）。
@@ -125,7 +161,7 @@ function ReportsWorkbench() {
       setItems([]);
       setTotal(null);
     } finally { setLoading(false); }
-  }, [pid, f, current, pageSize]);
+  }, [pid, f, advFilter, current, pageSize]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -137,41 +173,64 @@ function ReportsWorkbench() {
     () => members.map((m) => ({ value: m.user_id, label: m.name || m.account || m.user_id })),
     [members]);
 
-  const cols: ColumnsType<ReportRow> = [
-    { title: "对象", dataIndex: "subject_name", render: (v: string, r) => (
+  // D215：高级搜索的候选值——都来自页面已经拿得到的东西，不拉第二遍：
+  // enum 型（触发/结果/对象类型）直接复用本页筛选下拉的同一份前端词表；
+  // env_id / created_by 用已经在手的 /envs 与项目成员名单。status_code 等数值列没有
+  // 等价词表 → 不给候选，按原值精确匹配（面板底部已写明）。
+  const filterValueOptions = useMemo<Record<string, Option[]>>(() => ({
+    trigger: Object.entries(SELECTABLE_TRIGGERS).map(([k, v]) => ({ value: k, label: v.icon + " " + v.label })),
+    status: Object.entries(STATUSES).map(([k, v]) => ({ value: k, label: v.label })),
+    subject_type: Object.entries(SUBJECT_TYPES).map(([k, v]) => ({ value: k, label: v.label })),
+    env_id: envs.map((e) => ({ value: e.id, label: e.name })),
+    created_by: creatorOpts,
+  }), [envs, creatorOpts]);
+
+  const cols: ColumnsType<ReportRow> = applyColumnPrefs([
+    { title: "对象", dataIndex: "subject_name", key: "name", render: (v: string, r) => (
       // D141：ReportListItemOut.subject_name 是 str（report_services.py `class ReportListItemOut` = 52），
       // 旧兜底「…已删除」类型上进不来、语义也是假的，删。
       <a data-testid="reports-row-link" onClick={() => nav("/reports/" + r.id)}>
         {v}
       </a>) },
-    { title: "触发", dataIndex: "trigger", width: 96, render: (v: string) => {
+    { title: "触发", dataIndex: "trigger", key: "trigger", width: 96, render: (v: string) => {
         // 徽标查 TRIGGERS 全表：它报的是「这条 run 当时是怎么起来的」，库里既然存了
         // webhook 就得照实画出来（查 SELECTABLE_TRIGGERS 会把它降级成 "? webhook"，
         // 那是把已发生的事演成不认识——筛选才需要裁承诺面，见下面 :168 与 runVocab.ts）。
         const m = TRIGGERS[v] ?? { icon: "?", label: v, color: "default" as const };
         return <Tag data-testid="report-trigger" color={m.color}>{m.icon + " " + m.label}</Tag>;
       } },
-    { title: "结果", dataIndex: "status", width: 104, render: (v: string) => {
+    { title: "结果", dataIndex: "status", key: "status", width: 104, render: (v: string) => {
         const m = vocabMeta(STATUSES, v);
         return <Tag data-testid="report-status" color={m.color}>{m.label}</Tag>;
       } },
-    { title: "通过率", dataIndex: "pass_rate", width: 92, render: (v: number | null) => <PassRing rate={v} /> },
+    { title: "通过率", dataIndex: "pass_rate", key: "pass", width: 92, render: (v: number | null) => <PassRing rate={v} /> },
     { title: "步骤", key: "steps", width: 72, render: (_, r) => (
       // stats.total = 顶层步骤数（§11.4.15 的「步骤」列口径：看规模，不是叶子计数）
       <Typography.Text data-testid="report-steps" className="tp-mono">
         {typeof r.stats?.total === "number" ? r.stats.total : "—"}
       </Typography.Text>) },
-    { title: "耗时", dataIndex: "elapsed_ms", width: 92, render: (v: number | null) => (
+    { title: "耗时", dataIndex: "elapsed_ms", key: "elapsed", width: 92, render: (v: number | null) => (
       <Typography.Text className="tp-text-sm">{v == null ? "—" : v + " ms"}</Typography.Text>) },
-    { title: "环境", dataIndex: "env_name", width: 104, render: (v: string | null) => v ?? "—" },
-    { title: "执行人", dataIndex: "created_by_name", width: 104, render: (v: string | null) => v ?? "—" },
-    { title: "开始时间", dataIndex: "started_at", width: 168, render: (v: string | null) => (
+    { title: "环境", dataIndex: "env_name", key: "env", width: 104, render: (v: string | null) => v ?? "—" },
+    { title: "执行人", dataIndex: "created_by_name", key: "creator", width: 104, render: (v: string | null) => v ?? "—" },
+    { title: "开始时间", dataIndex: "started_at", key: "time", width: 168, render: (v: string | null) => (
       <Typography.Text className="tp-text-sm" data-testid="report-time">{fmtTime(v) ?? "—"}</Typography.Text>) },
-  ];
+  ], colPref);
 
   return (
     <div className="tp-fill tp-fill-body" data-testid="reports-body">
       <div style={{ flex: "0 0 auto" }}>
+      {/* D215：D47-a 三件套铺到报告页（视图保存 / 高级搜索 / 列设置）。下方七个快捷筛选
+          是既有入口（时间窗/场景/对象类型/触发/结果/环境/执行人），与高级搜索各打各的
+          参数、并存不互相替代——高级搜索是「任意组合」，快捷筛选是「常用一刀」。 */}
+      <ListToolbar
+        projectId={pid} viewType="report"
+        filter={advFilter} onFilterChange={patchAdv}
+        valueOptions={filterValueOptions}
+        allColumns={REPORT_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        canSaveView={can(perms, "search:view:create")}
+        canDeleteView={can(perms, "search:view:delete")}
+      />
       <Space style={{ marginBottom: 12 }} wrap data-testid="reports-filters">
         <Select data-testid="reports-filter-days" style={{ width: 128 }} value={f.days}
           onChange={(v) => patch({ days: v })}

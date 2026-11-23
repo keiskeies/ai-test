@@ -276,6 +276,64 @@ describe("调试 422 前置失败：面板 + 下一步，且不挂「让 Pilot �
   });
 });
 
+// ── D228：接口用例「运行」（独立执行，落 api_case run）──────────────────────────
+// 与「调试」共用后端执行链，但 trigger 记 manual；这里钉接线：POST 地址/入参、
+// 通过/未通过两句话术、成功后刷新列表、没有 api:case:run 时不摆按钮。
+function mockRun(passed: boolean) {
+  global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if ((init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/api-cases/c1/run")) {
+      return { ok: true, status: 200, json: async () => ({
+        run_id: "r1", ok: true, passed, status: 200,
+      }) } as unknown as Response;
+    }
+    return { ok: true, status: 200, json: async () => (url.includes("/api-cases?")
+      ? { items: [caseRow()], next_cursor: null }
+      : { items: [], next_cursor: null }) } as unknown as Response;
+  }) as unknown as typeof fetch;
+}
+
+function renderForRun(perms: string[], envId: string | null = "e1", onChanged?: () => void) {
+  render(
+    <ConfigProvider theme={{ token: { motion: false } }}>
+      <CaseList def={DEF} envId={envId} perms={perms} onChanged={onChanged} />
+    </ConfigProvider>,
+  );
+}
+
+describe("D228 用例运行：POST /api-cases/{id}/run 与结论话术", () => {
+  it("通过：入参带 project/case/env，回「执行通过」，并通知父级刷新", async () => {
+    const ok = vi.spyOn(message, "success");
+    const changed = vi.fn();
+    mockRun(true);
+    renderForRun(["*"], "e1", changed);
+    await screen.findByTestId("case-row");
+    fireEvent.click(await screen.findByTestId("case-run"));
+    await waitFor(() => expect(ok).toHaveBeenCalled());
+    expect(ok.mock.calls[0][0]).toContain("执行通过");
+    const body = JSON.parse(String((global.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .find((c) => String(c[0]).includes("/api-cases/c1/run"))?.[1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual({ project_id: "p1", case_id: "c1", env_id: "e1" });
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("未通过：不说「通过」，回「断言未通过」", async () => {
+    const warn = vi.spyOn(message, "warning");
+    mockRun(false);
+    renderForRun(["*"]);
+    fireEvent.click(await screen.findByTestId("case-run"));
+    await waitFor(() => expect(warn).toHaveBeenCalled());
+    expect(warn.mock.calls[0][0]).toContain("断言未通过");
+  });
+
+  it("没有 api:case:run 时不摆「运行」按钮（READONLY 的页面不画假门）", async () => {
+    mockRun(true);
+    renderForRun(["api:case:read", "api:debug:run"]);
+    await screen.findByTestId("case-row");
+    expect(screen.queryByTestId("case-run")).toBeNull();
+  });
+});
+
 // ── 第二十三轮：列表取失败不许摊成「还没有用例」 ──
 // 旧实现 `catch { setRows([]); }` + silent:true：GET 500/403 与「查到了 0 条」画同一张空态，
 // 后端炸了会被读成「这个接口的用例被删空了」。第 7 处同款（datasets/reports/runs/scenes/

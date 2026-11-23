@@ -5,7 +5,7 @@
 // created_at 出参后端已吐，列渲染走 shared/timefmt 的 UTC→展示时区口径。
 import { useCallback, useEffect, useState } from "react";
 import AdminTable from "../ui/AdminTable";
-import { Alert, Button, Form, Input, Modal, Popconfirm, Space, Switch, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Form, Input, Modal, Popconfirm, Space, Switch, Tag, Typography, message } from "antd";
 import { PlusOutlined, ReloadOutlined, UploadOutlined } from "../ui/icons";
 import type { ColumnsType } from "antd/es/table";
 import { get, patch, post } from "../api/client";
@@ -14,15 +14,38 @@ import { fmtTime } from "../shared/timefmt";
 import UserImportWizard from "./UserImportWizard";
 import { FilterBar, Toolbar } from "../ui/Toolbar";
 import StateView from "../ui/StateView";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import {
+  applyColumnPrefs, emptyFilter, isFilterEmpty,
+  type ColumnChoice, type FilterDoc,
+} from "../shared/listFilters";
 
 const PAGE = 50;
+
+// D244：列设置面板要露的列（key 与下方 cols 的 key 逐字一致；ops 是操作钮，不可隐藏）。
+const USER_COL_CHOICES: ColumnChoice[] = [
+  { key: "account", label: "账号" },
+  { key: "name", label: "姓名" },
+  { key: "email", label: "邮箱" },
+  { key: "created", label: "创建时间" },
+  { key: "admin", label: "类型" },
+  { key: "status", label: "状态" },
+];
+
+// 高级搜索候选：状态与类型直接用页面渲染词表（启用/停用、平台管理员/普通用户）。
+// 布尔列候选的 value 必须是真布尔（后端 kind=bool 只收 JSON true/false）。
+const USER_VALUE_OPTIONS: Record<string, Option[]> = {
+  status: [{ value: "active", label: "启用" }, { value: "disabled", label: "停用" }],
+  is_system_admin: [{ value: true, label: "平台管理员" }, { value: false, label: "普通用户" }],
+};
 
 // D171：UserOut 已带 created_at，但 api.ts 的 UserRow 与 schema.d.ts（生成物，D149）
 // 都还没跟上——本地扩展，不动生成物。
 type UserRowOut = UserRow & { created_at?: string | null };
 
-export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
-  canCreate: boolean; canUpdate: boolean; canDisable: boolean; selfId: string;
+export default function UsersTab({ projectId, canCreate, canUpdate, canDisable, selfId }: {
+  projectId: string; canCreate: boolean; canUpdate: boolean; canDisable: boolean; selfId: string;
 }) {
   const [items, setItems] = useState<UserRowOut[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -34,6 +57,9 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   const [pwForm] = Form.useForm();
+  // D244：高级搜索条件组 + 列设置偏好（视图按当前项目存；用户表本身是平台级）。
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("user", USER_COL_CHOICES.map((c) => c.key));
 
   const load = useCallback(async (reset: boolean): Promise<void> => {
     setLoading(true);
@@ -41,15 +67,21 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
     try {
       const next = reset ? null : cursor;
       const q = new URLSearchParams({ size: String(PAGE) });
+      // D244：空条件不拼参数（URL 里不出现骗人的 filter=），非空才交给后端编 WHERE。
+      if (!isFilterEmpty(advFilter)) q.set("filter", JSON.stringify(advFilter));
       if (next) q.set("cursor", next);
       const r = await get<Page<UserRowOut>>("/system/users?" + q.toString(), { silent: true });
       setItems((prev) => (next === null ? r.items : [...prev, ...r.items]));
       setCursor(r.next_cursor);
     } catch { setFailed(true); if (reset) { setItems([]); setCursor(null); } }
     finally { setLoading(false); }
-  }, [cursor]);
+  }, [cursor, advFilter]);
 
-  useEffect(() => { void load(true); }, []);
+  // D244：条件变化必须重查（reset 语义），否则面板里改了条件、表还是旧行。
+  // load 自己不进依赖——写 items/cursor 的是它，把 load 放进 effect 依赖就是无限回路
+  // （cursor 变 → load 换身份 → effect 重跑 → 再取一页）。同 AuditTab.tsx:66 的口径。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { void load(true); }, [advFilter]);
   const refresh = () => void load(true);
 
   async function create(): Promise<void> {
@@ -104,16 +136,18 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
     } catch { await load(true); }
   }
 
+  // D244：key 与 USER_COL_CHOICES 逐字一致——applyColumnPrefs 只按 key 过滤，
+  // 只写 dataIndex 的列永远藏不掉（列设置会变成「勾了没反应」的假开关）。
   const cols: ColumnsType<UserRowOut> = [
-    { title: "账号", dataIndex: "account", render: (v: string) => (
+    { title: "账号", key: "account", dataIndex: "account", render: (v: string) => (
       <Typography.Text data-testid="user-account">{v}</Typography.Text>) },
-    { title: "姓名", dataIndex: "name" },
-    { title: "邮箱", dataIndex: "email", render: (v: string | null) => v ?? "—" },
-    { title: "创建时间", dataIndex: "created_at", width: 150, render: (v: string | null | undefined) => (
+    { title: "姓名", key: "name", dataIndex: "name" },
+    { title: "邮箱", key: "email", dataIndex: "email", render: (v: string | null) => v ?? "—" },
+    { title: "创建时间", key: "created", dataIndex: "created_at", width: 150, render: (v: string | null | undefined) => (
       <span data-testid="user-created">{fmtTime(v) ?? "—"}</span>) },
-    { title: "类型", dataIndex: "is_system_admin", width: 110, render: (v: boolean) => (
+    { title: "类型", key: "admin", dataIndex: "is_system_admin", width: 110, render: (v: boolean) => (
       v ? <Tag color="gold" data-testid="user-admin">平台管理员</Tag> : <Tag>普通用户</Tag>) },
-    { title: "状态", dataIndex: "status", width: 88, render: (v: string) => (
+    { title: "状态", key: "status", dataIndex: "status", width: 88, render: (v: string) => (
       <Tag data-testid="user-status" color={v === "active" ? "green" : "red"}
         >{v === "active" ? "启用" : "停用"}</Tag>) },
     { title: "", key: "ops", width: 150, render: (_: unknown, r: UserRow) => (
@@ -146,6 +180,13 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
 
   return (
     <div data-testid="tab-users" className="tp-fill-tab">
+      {/* D244：高级搜索三件套。条件是 WHERE（后端 USER_LIST_FILTER），平台用户表本身
+          没有项目维度，视图按当前项目存。本 Tab 只对能读平台用户的角色渲染，
+          保存/删除视图按后端 search:view:* 权限位放行（系统管理员为 *）。 */}
+      <ListToolbar projectId={projectId} viewType="user"
+        filter={advFilter} onFilterChange={setAdvFilter}
+        allColumns={USER_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        valueOptions={USER_VALUE_OPTIONS} canSaveView canDeleteView />
       <FilterBar actions={(
         <Toolbar>
           <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>刷新</Button>
@@ -170,7 +211,8 @@ export default function UsersTab({ canCreate, canUpdate, canDisable, selfId }: {
       )}
       {/* 外壳只有 AdminTable 自己那一层 tp-tablecard（与 MembersTab/AuditTab 同口径，
           此前多包一层 tp-card 是双白卡双描边 + 4px 手抄 padding）。 */}
-      <AdminTable<UserRowOut> rowKey="id" loading={loading} columns={cols} dataSource={items}
+      <AdminTable<UserRowOut> rowKey="id" loading={loading}
+        columns={applyColumnPrefs(cols, colPref)} dataSource={items}
         locale={{ emptyText: failed
           // 第 9 处「取失败摊成空列表」（datasets/reports/runs/scenes/api/adbCases/CaseList…）：
           // catch 里 setItems([])，500 与「平台真没用户」在这一格长得一模一样。

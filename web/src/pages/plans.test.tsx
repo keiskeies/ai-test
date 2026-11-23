@@ -22,7 +22,7 @@
 // ⑬ 行名**是链接**（6b 落地 /plans/:id 路由后与名称列同批翻）：6a 当初钉「不可点」防的是
 //    catch-all 静默弹回工作台；路由真落地后这条钉「点了真去 /plans/p1」——两头不许只改一边。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 Object.defineProperty(window, "matchMedia", {
@@ -39,8 +39,10 @@ import { useAuth } from "../auth/store";
 import type { components } from "../api/schema";
 
 type PlanOut = components["schemas"]["PlanOut"];
+/** D231：列表行多一位 followed（后端 PlanListRowOut；现查 plan_follower，不存列表第二份）。 */
+type PlanRow = PlanOut & { followed?: boolean };
 
-function plan(id: string, over: Partial<PlanOut> = {}): PlanOut {
+function plan(id: string, over: Partial<PlanRow> = {}): PlanRow {
   return { id, project_id: "p1", name: "计划" + id, description: null, archived: false,
     created_by: null, updated_by: null, created_at: null, updated_at: null, ...over };
 }
@@ -69,9 +71,11 @@ interface BackendOpts {
   /** POST /plans 直接失败且 message=BACKEND_RAW。 */
   createFail?: boolean;
   /** 列表返回固定集合（空态两分支用）。 */
-  fixedItems?: PlanOut[];
+  fixedItems?: PlanRow[];
   /** fixedItems 响应里是否带 total 键。 */
   fixedTotal?: number | null;
+  /** D211：模块树响应（缺省 = 空树 + 未分组 0）。 */
+  tree?: unknown;
 }
 
 function mockBackend(over: BackendOpts = {}) {
@@ -119,6 +123,52 @@ function mockBackend(over: BackendOpts = {}) {
       const row = ROWS.find((r) => r.id === a[1]) ?? ROWS[0];
       return resp(200, { ...row, archived: true });
     }
+    // D231：关注/取关。回执两位都是后端现查结果；这里按路径前缀给确定值，
+    // 断的是前端「按当前 followed 选路」与「照抄回执」，不是守桩。
+    const f = url.match(/\/plans\/([^/?]+)\/(un)?follow$/);
+    if (f && method === "POST") return resp(200, { following: !f[2], follower_count: f[2] ? 2 : 3 });
+    // D208：复制。复制件名由后端生成（前端只回显），这里给固定串方便断「用了响应的名」。
+    const c = url.match(/\/plans\/([^/?]+)\/copy$/);
+    if (c && method === "POST") {
+      const row = ROWS.find((r) => r.id === c[1]) ?? ROWS[0];
+      return resp(201, { ...row, id: "p9", name: row.name + "_abcde_COPY", archived: false });
+    }
+    // D209：批量删。后端回 {ok:true}；断 body 时前端不许传「选中行的其他字段」。
+    if (url.endsWith("/plans/batch-delete") && method === "POST") {
+      return resp(200, { ok: true });
+    }
+    // D211：模块树（左树首载；缺省给空树）。CRUD 回固定形状，断点靠 calls 里的 body。
+    if (url.includes("/plan-modules/tree") && method === "GET") {
+      return resp(200, over.tree ?? { nodes: [], unassigned_count: 0 });
+    }
+    if (url.endsWith("/plan-modules") && method === "POST") {
+      return resp(201, { id: "m9", parent_id: null, name: (body as { name: string }).name,
+        sort: 0, plan_count: 0, children: [] });
+    }
+    const mu = url.match(/\/plan-modules\/([^/?]+)$/);
+    if (mu && method === "PATCH") {
+      return resp(200, { id: mu[1], parent_id: null, name: (body as { name: string }).name,
+        sort: 0, plan_count: 0, children: [] });
+    }
+    const md = url.match(/\/plan-modules\/([^/?]+)\/delete$/);
+    if (md && method === "POST") return resp(200, { ok: true });
+    // D212：高级搜索元数据 + 个人视图（工具条首载两请求）。
+    if (url.includes("/filter-meta") && method === "GET") {
+      return resp(200, {
+        view_type: "plan",
+        fields: [
+          { field: "name", label: "计划名称", kind: "text",
+            ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+          { field: "archived", label: "是否归档", kind: "bool", ops: ["EQUALS", "NOT_EQUALS"] },
+          { field: "module_id", label: "所属模块", kind: "id",
+            ops: ["IN", "NOT_IN", "EQUALS", "NOT_EQUALS", "EMPTY", "NOT_EMPTY"] },
+          { field: "created_at", label: "创建时间", kind: "time", ops: ["GT", "LT", "BETWEEN"] },
+        ],
+        supported_view_types: ["plan"],
+        unavailable: {},
+      });
+    }
+    if (url.includes("/saved-views") && method === "GET") return resp(200, []);
     throw new Error("未 mock 的请求: " + method + " " + url);
   }) as unknown as typeof fetch;
 }
@@ -202,6 +252,7 @@ describe("权限门", () => {
     expect(listReqs()).toHaveLength(1); // 回路在：load 依赖里塞回它写的 state → 这里红
     expect(screen.queryByTestId("plans-create")).toBeNull();
     expect(screen.queryByTestId("plans-edit-p1")).toBeNull();
+    expect(screen.queryByTestId("plans-copy-p1")).toBeNull(); // D208：复制与新建同门（:create）
     expect(screen.queryByTestId("plans-archive-p1")).toBeNull(); // :manage 缺位 → 不渲染（非禁用）
     expect(screen.queryByTestId("plans-remove-p1")).toBeNull();
     // 正对照：不是整块操作列没了——编辑钮的缺席和「操作列压根没渲染」得区分开：
@@ -215,12 +266,181 @@ describe("权限门", () => {
     await waitFor(() => expect(shownPlanRows()).toEqual(["p1", "p2"]));
     expect(screen.getByTestId("plans-create")).not.toBeNull();
     expect(screen.getByTestId("plans-edit-p1")).not.toBeNull();
+    expect(screen.getByTestId("plans-copy-p1")).not.toBeNull(); // D208
     expect(screen.getByTestId("plans-archive-p1")).not.toBeNull();
     expect(screen.getByTestId("plans-remove-p1")).not.toBeNull();
     // p2 已归档：归档钮不存在（后端对已归档再归档 409——点了必失败的把手就是假门）
     expect(screen.queryByTestId("plans-archive-p2")).toBeNull();
     // 但删除对已归档行照在（归档 ≠ 只读，后端 DELETE 不拦归档件）
     expect(screen.getByTestId("plans-remove-p2")).not.toBeNull();
+  });
+});
+
+describe("D208 复制计划", () => {
+  it("点击复制发 POST /plans/{id}/copy（body 只有 project_id）、回显后端生成的名并重取列表", async () => {
+    mockBackend();
+    await renderSettled();
+    fireEvent.click(screen.getByTestId("plans-copy-p1"));
+    await waitFor(() => expect(
+      calls.filter((c) => c.method === "POST" && c.url.includes("/plans/p1/copy"))).toHaveLength(1));
+    const req = calls.find((c) => c.method === "POST" && c.url.includes("/copy"))!;
+    // 只发 project_id：name 省略 = 后端生成 `<源名>_<5位>_COPY`（前端不自己拼名）
+    expect(req.body).toEqual({ project_id: "p1" });
+    // 复制后重新取列表（新计划可能不在当前页，前端不往 rows 里塞凭空位置）
+    await waitFor(() => expect(listReqs()).toHaveLength(2));
+  });
+
+  it("READONLY 已归档行也无复制钮——复制与新建同门（:create）", async () => {
+    useAuth.setState({ project: READONLY_PROJECT });
+    mockBackend();
+    await renderSettled();
+    expect(screen.queryByTestId("plans-copy-p1")).toBeNull();
+    expect(screen.queryByTestId("plans-copy-p2")).toBeNull();
+  });
+});
+
+describe("D209 批量删除计划", () => {
+  it("勾选行后出现批量删除钮；确认发 POST /plans/batch-delete（body 只带 project_id + plan_ids），成功后清勾选并重取列表", async () => {
+    mockBackend();
+    await renderSettled();
+    fireEvent.click(document.querySelector(".ant-table-thead input[type='checkbox']") as Element);
+    await waitFor(() => expect(screen.getByTestId("plans-batch-delete")).not.toBeNull());
+    expect(screen.getByTestId("plans-batch-delete").textContent).toContain("2");
+    fireEvent.click(screen.getByTestId("plans-batch-delete"));
+    fireEvent.click(await screen.findByTestId("plans-batch-delete-ok"));
+    await waitFor(() => expect(
+      calls.filter((c) => c.method === "POST" && c.url.endsWith("/plans/batch-delete"))).toHaveLength(1));
+    const req = calls.find((c) => c.method === "POST" && c.url.endsWith("/plans/batch-delete"))!;
+    // 只带 id 列表：行对象里的 name/archived 等不许混进请求（后端 schema 也会拒未知字段之外的噪音）
+    expect(req.body).toEqual({ project_id: "p1", plan_ids: ["p1", "p2"] });
+    // 本地不先删行：等后端成功后再取列表；且勾选集清空 → 批量钮消失
+    await waitFor(() => expect(listReqs()).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByTestId("plans-batch-delete")).toBeNull());
+  });
+
+  it("READONLY：没有勾选列、也没有批量删除钮（不摆用不了的把手）", async () => {
+    useAuth.setState({ project: READONLY_PROJECT });
+    mockBackend();
+    await renderSettled();
+    expect(document.querySelector(".ant-table-thead input[type='checkbox']")).toBeNull();
+    expect(screen.queryByTestId("plans-batch-delete")).toBeNull();
+  });
+});
+
+describe("D211 计划模块树", () => {
+  // 根 m1 计数 2（直属），子 m2 计数 1：父不并入子树，钉「直属」口径。
+  const TREE = { unassigned_count: 3, nodes: [{
+    id: "m1", parent_id: null, name: "回归", sort: 0, plan_count: 2,
+    children: [{ id: "m2", parent_id: "m1", name: "结算", sort: 0, plan_count: 1, children: [] }],
+  }] };
+
+  it("左树渲染模块名与直属计数；点模块发 module_id（整棵子树口径）、点未分组发 unassigned=true 且不带 module_id", async () => {
+    mockBackend({ tree: TREE });
+    await renderSettled();
+    expect(screen.getByTestId("plan-module-node-m1").textContent).toContain("回归");
+    expect(screen.getByTestId("plan-module-node-m1").textContent).toContain("2");
+    expect(screen.getByTestId("plan-module-unassigned").textContent).toContain("3");
+    // 未分组计数是树外入口的事，不混进模块节点（「未分组」不是模块）
+    expect(screen.getByTestId("plan-module-node-m1").textContent).not.toContain("未分组");
+
+    fireEvent.click(screen.getByTestId("plan-module-node-m1"));
+    await waitFor(() => expect(listReqs().at(-1)!.url).toContain("module_id=m1"));
+    expect(new URLSearchParams(listReqs().at(-1)!.url.split("?")[1]).get("current")).toBe("1");
+
+    fireEvent.click(screen.getByTestId("plan-module-unassigned"));
+    await waitFor(() => expect(listReqs().at(-1)!.url).toContain("unassigned=true"));
+    expect(listReqs().at(-1)!.url).not.toContain("module_id=");
+    // 回「全部计划」= 两个过滤键都不带
+    fireEvent.click(screen.getByTestId("plan-module-all"));
+    await waitFor(() => {
+      const q = new URLSearchParams(listReqs().at(-1)!.url.split("?")[1]);
+      expect(q.has("module_id")).toBe(false);
+      expect(q.has("unassigned")).toBe(false);
+    });
+  });
+
+  it("选中模块后新建计划：POST /plans body 带 module_id（默认未分组路径由既有用例逐字钉住不许多发键）", async () => {
+    mockBackend({ tree: TREE });
+    await renderSettled();
+    fireEvent.click(screen.getByTestId("plan-module-node-m1"));
+    await waitFor(() => expect(listReqs().at(-1)!.url).toContain("module_id=m1"));
+    fireEvent.click(screen.getByTestId("plans-create"));
+    await screen.findByTestId("plan-field-name");
+    fireEvent.change(screen.getByTestId("plan-field-name"), { target: { value: "模块内新计划" } });
+    fireEvent.click(screen.getByTestId("plan-save"));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/plans"))).toBe(true));
+    const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/plans"))!;
+    expect(c.body).toEqual({ project_id: "p1", name: "模块内新计划", description: "", module_id: "m1" });
+  });
+
+  it("新建模块：POST /plan-modules body 恰 {project_id,parent_id,name}，成功重取树；未选中模块时不摆改名/删除把手", async () => {
+    mockBackend({ tree: TREE });
+    await renderSettled();
+    expect(screen.queryByTestId("plan-module-rename")).toBeNull();
+    expect(screen.queryByTestId("plan-module-delete")).toBeNull();
+    fireEvent.click(screen.getByTestId("plan-module-new"));
+    const input = await screen.findByTestId("plan-module-name-input");
+    fireEvent.change(input, { target: { value: "新模块" } });
+    fireEvent.click(screen.getByTestId("plan-module-name-ok"));
+    await waitFor(() => expect(
+      calls.some((c) => c.method === "POST" && c.url.endsWith("/plan-modules"))).toBe(true));
+    const req = calls.find((c) => c.method === "POST" && c.url.endsWith("/plan-modules"))!;
+    expect(req.body).toEqual({ project_id: "p1", parent_id: null, name: "新模块" });
+    // 首载 1 次 + 写后 1 次
+    await waitFor(() => expect(
+      calls.filter((c) => c.url.includes("/plan-modules/tree")).length).toBe(2));
+  });
+
+  it("READONLY：树照读（计数可见），新建/改名/删除模块都不在 DOM", async () => {
+    useAuth.setState({ project: READONLY_PROJECT });
+    mockBackend({ tree: TREE });
+    await renderSettled();
+    expect(screen.getByTestId("plan-module-node-m1")).not.toBeNull();
+    expect(screen.queryByTestId("plan-module-new")).toBeNull();
+    fireEvent.click(screen.getByTestId("plan-module-node-m1"));
+    await waitFor(() => expect(listReqs().at(-1)!.url).toContain("module_id=m1"));
+    expect(screen.queryByTestId("plan-module-rename")).toBeNull();
+    expect(screen.queryByTestId("plan-module-delete")).toBeNull();
+  });
+});
+
+describe("D212 计划列表高级搜索 / 列设置", () => {
+  const sentFilter = (c: { url: string }) => {
+    const raw = new URL(c.url, "http://x").searchParams.get("filter");
+    return raw === null ? null : JSON.parse(raw);
+  };
+
+  it("空条件不拼 filter；应用「名称包含 结算」后下一次列表请求带条件 JSON", async () => {
+    mockBackend();
+    await renderSettled();
+    expect(sentFilter(listReqs()[0])).toBeNull();
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const row = await within(panel).findByTestId("lt-cond-row");
+    fireEvent.change(within(row).getByTestId("lt-val-text"), { target: { value: "结算" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listReqs()).toHaveLength(2));
+    expect(sentFilter(listReqs()[1])).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "name", operator: "CONTAINS", value: "结算" }],
+    });
+  });
+
+  it("列设置勾掉「描述」只藏那一列（其余表头原样）", async () => {
+    localStorage.clear();
+    mockBackend();
+    await renderSettled();
+    const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+    expect(thead()).toContain("描述");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["名称", "描述", "归档", "创建时间", "更新时间"]);
+    fireEvent.click(boxes[labels.indexOf("描述")]);
+    await waitFor(() => expect(thead()).not.toContain("描述"));
+    expect(thead()).toContain("归档");
   });
 });
 
@@ -471,5 +691,57 @@ describe("失败与空态（空态文案不许指向不在 DOM 的按钮）", ()
     renderPage();
     await waitFor(() => expect(screen.getByText(/还没有计划，点右上角新建/)).not.toBeNull());
     expect(screen.getByTestId("plans-create")).not.toBeNull();
+  });
+});
+
+describe("D231 计划关注（视图轴 + 星标）", () => {
+  it("① 星标吃列表行的 followed；点星按当前态选 follow/unfollow，回执只改这一行", async () => {
+    mockBackend({
+      fixedItems: [
+        plan("p1", { name: "甲计划", followed: true }),
+        plan("p2", { name: "乙计划", followed: false }),
+      ],
+      fixedTotal: 2,
+    });
+    await renderSettled();
+    expect(screen.getByTestId("plans-follow-p1").getAttribute("data-followed")).toBe("true");
+    expect(screen.getByTestId("plans-follow-p2").getAttribute("data-followed")).toBe("false");
+
+    fireEvent.click(screen.getByTestId("plans-follow-p2"));
+    await waitFor(() => expect(calls.some(
+      (c) => c.url === "/api/v1/plans/p2/follow" && c.method === "POST")).toBe(true));
+    expect(calls.find((c) => c.url === "/api/v1/plans/p2/follow")!.body)
+      .toEqual({ project_id: "p1" });
+    // 回执 following=true → 只改 p2；p1 的星标不受影响（不是整表重取/整表重算）。
+    await waitFor(() => expect(screen.getByTestId("plans-follow-p2")
+      .getAttribute("data-followed")).toBe("true"));
+    expect(screen.getByTestId("plans-follow-p1").getAttribute("data-followed")).toBe("true");
+
+    fireEvent.click(screen.getByTestId("plans-follow-p1"));
+    await waitFor(() => expect(screen.getByTestId("plans-follow-p1")
+      .getAttribute("data-followed")).toBe("false"));
+    expect(calls.some((c) => c.url === "/api/v1/plans/p1/unfollow" && c.method === "POST")).toBe(true);
+  });
+
+  it("② 「我关注的」是后端筛：带 followed_by_me=true 且回第 1 页；关掉后不再带这个键", async () => {
+    mockBackend();
+    await renderSettled();
+    expect(listReqs().some((c) => c.url.includes("followed_by_me"))).toBe(false);
+
+    fireEvent.click(screen.getByTestId("plans-followed-only"));
+    await waitFor(() => expect(listReqs().some(
+      (c) => c.url.includes("followed_by_me=true"))).toBe(true));
+    expect(listReqs().at(-1)!.url).toContain("current=1");
+
+    fireEvent.click(screen.getByTestId("plans-followed-only"));
+    await waitFor(() => expect(listReqs().at(-1)!.url).not.toContain("followed_by_me"));
+  });
+
+  it("③ READONLY：星标不渲染（关注是写位 :update），筛选开关是读行为照常在场", async () => {
+    useAuth.setState({ project: READONLY_PROJECT });
+    mockBackend({ fixedItems: [plan("p1", { followed: true })], fixedTotal: 1 });
+    await renderSettled();
+    expect(screen.queryByTestId("plans-follow-p1")).toBeNull();
+    expect(screen.getByTestId("plans-followed-only")).not.toBeNull();
   });
 });

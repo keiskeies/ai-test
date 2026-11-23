@@ -1,5 +1,6 @@
 // Pilot 试验台（§11.3/§11.4.30 简化版）：项目→会话→消息→SSE 事件流；模式/思考/模型选择器；发送/中断。
-// 产品决策（R23）：会话在首次发送时惰性创建（放弃草稿不留垃圾会话）；S0 无页面审批（二期），审批卡提示可中断。
+// 产品决策（R23）：会话在首次发送时惰性创建（放弃草稿不留垃圾会话）；D263 起 ASK 的写工具
+// 在审批卡上直接回传（批准本次/本会话/拒绝），中断仍是另一条随时可走的出口。
 // D55 判据3：刷新不再失忆——sessionId 落 localStorage（按项目键），挂载时 GET /agent/sessions/{id}/messages
 // 回放历史喂进同一条 applyEvent，再挂直播流续传。
 import { useEffect, useRef, useState } from "react";
@@ -17,6 +18,7 @@ import type { EffectMap } from "../agent/EventCard";
 import { foldPlanListCards } from "../agent/cards/fold"; // 计划列表「原地更新」合流（§11.4.33）
 import { foldToolCalls } from "../agent/turns"; // 一次工具的两条信封合成一行 chip
 import { producedRefs, producedHref, producedLabel, turnStats } from "../agent/sidepanel";
+import { savePlanAsScenario } from "../shared/planSave";
 import { fmtTime } from "../shared/timefmt";
 import { tp, tpv } from "../theme";
 import { FilterBar } from "../ui/Toolbar";
@@ -48,24 +50,22 @@ export default function Bench() {
   const [models, setModels] = useState<ModelOut[]>([]);
   const [modelsFailed, setModelsFailed] = useState(false);
   const [modelId, setModelId] = useState<string | null>(null);
-  // 默认只读 PLAN（蓝图 §13：写/破坏性工具+审批门属二期，一期 1F 就是 PLAN 只读预览；
-  // ASK 挂起后无审批出口、FULL 无门直跑写工具——一期唯一全通的档是 PLAN）。三档都可手选。
+  // 默认只读 PLAN：D263 起 ASK 已有页面审批出口，但「只读预览」仍是更安全的默认档；
+  // FULL 仍按 agent:full:use 隐藏。三档都可手选。
   const [mode, setMode] = useState<Mode>("PLAN");
   const [thinking, setThinking] = useState<Think>("medium");
   const [armed, setArmed] = useState(false); // 已「开始会话」（会话本体惰性到首条消息）
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("未开始");
+  // D263：审批回传在途（防连点）。决策事件一到，卡片自己会翻成「已处理」。
+  const [approving, setApproving] = useState(false);
   // D55 判据3：历史回放中标记。它锁发送（历史没喂完就发送 = 消息插进半截时间线），
   // 但它【不是】「运行中」：回放没在跑任何 run，中断钮（running 门）不认它。
   const [replaying, setReplaying] = useState(false);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [effects, setEffects] = useState<EffectMap>({});
   const [draft, setDraft] = useState("");
-  // 输入容器的聚焦态：边框换主色 + 3px 光晕（§11.6.2 聚焦环口径）。
-  // 用 state 而不是 :focus-within 伪类：光晕要同时落在「容器」上，而容器不是被聚焦的那个节点，
-  // 纯 CSS 只能靠 :focus-within 且没法同时改 borderColor 与光晕透明度两处（也没有变量承接）。
-  const [composerFocus, setComposerFocus] = useState(false);
   const streamRef = useRef<SseHandle | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   // D179 世代号：SSE 落定屏上状态与「重新开始」都不是发送方自己做的跃迁，在途的 send/sendText
@@ -97,6 +97,8 @@ export default function Bench() {
         setModelsFailed(!(e instanceof ApiErr && e.status === 403));
       });
     return () => streamRef.current?.close();
+    // 挂载一次性取数（项目/模型）：authProject 变化不该重新武装页面，也不该重置会话。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // D84 诚实切片：「问 Pilot」入口 nav("/bench", { state: { pilotDraft } }) 只预填输入框，
@@ -175,7 +177,7 @@ export default function Bench() {
   function applyEvent(ev: AgentEvent) {
     if (ev.type === "RUN_END") {
       // 终态事件携带最终状态（全集见 backend/app/modules/agent/models.py:43）：
-      // WAIT_APPROVAL = 挂起（S0 无页面审批，可中断）；ERROR = run 抛异常
+      // WAIT_APPROVAL = 挂起（D263 可在审批卡回传，也可中断）；ERROR = run 抛异常
       // （tasks.py:81/:92）——崩掉的 run 不许洗回绿色「空闲」，如实上屏「出错」；
       // DONE（runner.py:53）/ CANCELLED（routes.py:131 中断后回到可操作态）及
       // 未知值 → 空闲。三个终态都清 runId：run 已终态，没东西可中断。
@@ -194,7 +196,14 @@ export default function Bench() {
       }
       return;
     }
-    if (ev.type === "APPROVAL_REQ") { stGen.current += 1; setStatus("等待审批"); }
+    if (ev.type === "APPROVAL_REQ") {
+      stGen.current += 1;
+      setStatus("等待审批");
+      // D263：刷新/重连后只有事件回放能重建「这是哪一轮」，run_id 随审批卡落库。
+      // 没有它，未决审批卡的按钮只能恒灰——「重开会话依旧可操作」就是空话。
+      const rid = String((ev.payload as { run_id?: string }).run_id ?? "");
+      if (rid) setRunId(rid);
+    }
     setEvents((old) => (old.some((e) => e.seq === ev.seq) ? old : [...old, ev]));
   }
 
@@ -301,9 +310,20 @@ export default function Bench() {
     }
   }
 
+  // 当前项目的生效权限：项目列表回包自带 my_perms，authProject 只作未加载完的兜底
+  // （权限是项目作用域的，拿另一个项目的位给这个项目放行就是假门）。
+  const activeProject = projects.find((p) => p.id === projectId) ?? authProject;
+  // D264：候选方案落库 = POST /scenarios，位是 scenario:create。缺位不注入实现 →
+  // 卡片不画保存钮（写钮缺位，不画假门）；预览页也靠 entry 里的 projectId 自行判定。
+  const canCreateScenario = can(patternsForProject(activeProject, authUser?.is_system_admin), "scenario:create");
+
   const cardCtx: CardContext = {
     onUserMessage: (t) => void sendText("[卡片操作] " + t),
     busy,
+    projectId: projectId ?? undefined,
+    onSaveScenarioPlan: canCreateScenario && projectId
+      ? (name, graph) => savePlanAsScenario(projectId, name, graph)
+      : undefined,
   };
 
   async function interrupt() {
@@ -315,16 +335,40 @@ export default function Bench() {
     }
   }
 
+  /** D263：审批回传 → 后端落决策并异步续推；本函数只负责发请求与在途态。
+   *  先切「运行中」是为了让输入区与审批钮同时上锁：决策一落，后端已把 run 拉回 RUNNING。 */
+  async function decideApproval(toolCallId: string, decision: "once" | "session" | "deny") {
+    if (!runId || !toolCallId || approving) return;
+    const prev = status;
+    setApproving(true);
+    setStatus("运行中");
+    try {
+      await post("/agent/runs/" + runId + "/approval", { tool_call_id: toolCallId, decision });
+    } catch {
+      // 409 already_decided / run_not_waiting 等：回到原状态，让卡片自己按事件流翻面
+      setStatus(prev);
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  // 回放里的决策：同一 tool_call_id 的 APPROVAL_DECISION 一旦出现，卡片就不再可点。
+  const approvalDecisions = new Map<string, string>();
+  for (const e of events) {
+    if (e.type !== "APPROVAL_DECISION") continue;
+    const a = e.payload as { tool_call_id?: string; decision?: string };
+    if (a.tool_call_id && a.decision) approvalDecisions.set(a.tool_call_id, a.decision);
+  }
+
   const canModelSelect = models.length > 0;
   // 右栏两个读数都从事件流当场数出来（sidepanel.ts 纯函数），页面上不存在第二个计数器。
   const stat = turnStats(events);
   const produced = producedRefs(events);
   // D102：FULL == 写能力（唯一不拦的档），按 agent:full:use 出选项。判定按**当前选中项目**
-  // 的位（项目列表回包自带 my_perms），authProject 只作未加载完的兜底——权限是项目作用域的，
+  // 的位（activeProject 见上），authProject 只作未加载完的兜底——权限是项目作用域的，
   // 拿另一个项目的位给这个项目放行就是假门。选择器选项不是写入口，「隐藏不是禁用」的
   // 口径不强制——这里取隐藏：没勾上的人不该看见一个按了必 403 的档位（后端建会话同位 403 兜底）。
   // 初值 PLAN（R44 翻案）天然安全：隐藏 FULL 后无位用户到不了 FULL 的两条路（默认档/手选）。
-  const activeProject = projects.find((p) => p.id === projectId) ?? authProject;
   const canFull = can(patternsForProject(activeProject, authUser?.is_system_admin), "agent:full:use");
   const modeOptions = [
     { value: "PLAN", label: "只读（PLAN）" },
@@ -385,9 +429,17 @@ export default function Bench() {
               )}
               {/* 两层合流都在渲染侧，applyEvent 不被动过：
                   计划列表卡只留最新一份（§11.4.33），一次工具的两条信封只画一行 chip。 */}
-              {foldToolCalls(foldPlanListCards(events)).map(({ ev, result }) => (
-                <EventCard key={ev.seq} ev={ev} result={result} effects={effects} cardCtx={cardCtx} />
-              ))}
+              {foldToolCalls(foldPlanListCards(events)).map(({ ev, result }) => {
+                // 审批卡按 tool_call_id 对回决策：已决 → 只读徽标；未决 → 三档按钮。
+                const tcId = ev.type === "APPROVAL_REQ"
+                  ? String((ev.payload as { tool_call_id?: string }).tool_call_id ?? "") : "";
+                return (
+                  <EventCard key={ev.seq} ev={ev} result={result} effects={effects} cardCtx={cardCtx}
+                    approvalDecision={tcId ? approvalDecisions.get(tcId) ?? null : undefined}
+                    approvalBusy={approving}
+                    onApproval={tcId && runId && !replaying ? decideApproval : undefined} />
+                );
+              })}
             </div>
 
             {/* 汇总 pill（改版）：参考图上是「3 个文件已修改 +2 -6」，本后端不产 diff 统计，

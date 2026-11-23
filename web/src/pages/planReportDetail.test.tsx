@@ -100,7 +100,16 @@ interface Opts {
   weirdResult?: boolean;
   /** 空报告：全零计数 + 两率 0.0 + 空 items（③b 腿，后端口径空报告是 0% 不是 100%）。 */
   emptyReport?: boolean;
+  /** D230：导出端点状态码覆盖（失败腿）。 */
+  exportStatus?: number;
 }
+
+/** D230 导出载体 fixture：内容独特到不可能被前端现拼（透传不等于字面相等即红）。 */
+const EXPORT_HTML = "<!DOCTYPE html><html><body><h1>计划报告 · 结算回归 报告</h1>"
+  + "<div>后端渲染的快照明细</div></body></html>";
+const EXPORT_FILENAME = "结算回归 报告-2026-11-20.html";
+/** 最近一次 createObjectURL 收到的 Blob（jsdom 没有真实下载，落地动作只能押在这里）。 */
+let lastBlob: Blob | null = null;
 
 function mockBackend(over: Opts = {}) {
   calls.length = 0;
@@ -128,6 +137,14 @@ function mockBackend(over: Opts = {}) {
       return resp(200, over.itemsNoTotal
         ? { items, next_cursor: null }
         : { items, next_cursor: null, total: ITEMS_TOTAL });
+    }
+    if (url.startsWith("/api/v1/plan-reports/r1/export") && method === "GET") {
+      if (over.exportStatus) {
+        return resp(over.exportStatus, { code: "export_failed",
+          message: "导出失败：storage 不可写", details: {} });
+      }
+      return resp(200, { filename: EXPORT_FILENAME, media_type: "text/html; charset=utf-8",
+        content: EXPORT_HTML, item_count: ITEMS_TOTAL });
     }
     if (url.startsWith("/api/v1/plan-reports/r1") && method === "DELETE") {
       return resp(200, { ok: true });
@@ -159,6 +176,12 @@ afterEach(cleanup);
 beforeEach(() => {
   cleanup();
   localStorage.clear();
+  lastBlob = null;
+  // jsdom 不实现 createObjectURL：下载落地只能在这里押（revoke 同步清掉无副作用）。
+  Object.defineProperty(URL, "createObjectURL", {
+    writable: true, value: (b: Blob) => { lastBlob = b; return "blob:d230"; },
+  });
+  Object.defineProperty(URL, "revokeObjectURL", { writable: true, value: () => {} });
   useAuth.setState({
     user: { id: "u1", account: "a", name: "张三", email: null, is_system_admin: false, status: "active" },
     project: PROJECT, ready: true,
@@ -454,5 +477,37 @@ describe("导航与页面契约（⑭⑮）", () => {
     renderPage();
     await waitFor(() => expect(screen.getByTestId("page-plan-report-detail")).not.toBeNull());
     expect(document.querySelector(".tp-page-title")?.textContent).toBe("计划报告详情");
+  });
+});
+
+// D230 导出：页面只做落地——请求形状（project_id 在场）、内容逐字透传（不在前端拼/补数）、
+// 文件名用后端给的（不自己命名）、明细条数照后端原话。
+describe("导出报告（D230 ⑧）", () => {
+  it("⑧ 点导出：GET export 端点 + Blob 内容逐字等于后端 content + 成功话术带后端文件名与条数", async () => {
+    mockBackend();
+    await renderSettled();
+    expect(lastBlob).toBeNull(); // 正对照：没点之前不许有落地动作
+
+    fireEvent.click(screen.getByTestId("plan-report-detail-export"));
+
+    await waitFor(() => expect(gets("/plan-reports/r1/export")).toHaveLength(1));
+    const call = gets("/plan-reports/r1/export")[0];
+    expect(call.url).toContain("project_id=p1");
+    await waitFor(() => expect(lastBlob).not.toBeNull());
+    // 逐字透传：前端拼一个空壳或改一个字节，size 就对不上
+    expect(lastBlob!.type).toBe("text/html; charset=utf-8");
+    expect(lastBlob!.size).toBe(new Blob([EXPORT_HTML]).size);
+    await waitFor(() => expect(document.body.textContent)
+      .toContain("已导出 " + ITEMS_TOTAL + " 条明细（" + EXPORT_FILENAME + "）"));
+  });
+
+  it("⑧ 导出失败：不落地文件（没有假下载），错误走 client 原话", async () => {
+    mockBackend({ exportStatus: 500 });
+    await renderSettled();
+    fireEvent.click(screen.getByTestId("plan-report-detail-export"));
+    await waitFor(() => expect(gets("/plan-reports/r1/export")).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(lastBlob).toBeNull();
+    expect(document.body.textContent).toContain("导出失败：storage 不可写");
   });
 });

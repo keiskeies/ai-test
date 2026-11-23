@@ -54,13 +54,51 @@ type PlanReportCreateBody = components["schemas"]["plan_report_create_body"];
 type PlanReportDeleteBody = components["schemas"]["plan_report_delete_body"];
 type PlanReportOut = components["schemas"]["PlanReportOut"];
 type PlanReportItemOut = components["schemas"]["PlanReportItemOut"];
+/** D230 导出载体（content = 自包含 HTML 文本；由前端 downloadBlob 落地为文件）。 */
+type PlanReportExport = { filename: string; media_type: string; content: string; item_count: number };
 type PlanStatusOut = components["schemas"]["PlanStatusOut"];
 type PlanOut = components["schemas"]["PlanOut"];
 type PlanCreateIn = components["schemas"]["PlanCreateIn"];
+/** D211：新建计划可带 module_id（生成物本刀没有这一键，手写交集补齐，字段与后端
+ *  schemas.PlanCreateIn 一致；省略/null = 未分组）。 */
+export type PlanCreateBody = PlanCreateIn & { module_id?: string | null };
 type PlanUpdateBody = components["schemas"]["plan_update_body"];
 type PlanArchiveBody = components["schemas"]["plan_archive_body"];
+// D208：复制入参**手写**——gen:api 本刀禁跑（会自起后端抢业主 :8321 的服务），生成物里
+// 还没有 plan_copy_body；字段与后端 schemas.PlanCopyIn 逐字一致（project_id 必填，
+// name 可选 = 不给自己生成 `<源名>_<5位>_COPY`）。
+export type PlanCopyBody = { project_id: string; name?: string };
+
+/** D225：执行计划的逐条结果。run_id 与 reason 二选一：
+ *  投出去 → run_id；没投出去 → reason（人话，直接上屏，不翻译）。 */
+export type PlanExecuteItem = {
+  link_id: string;
+  subject_type: string;
+  subject_id: string;
+  subject_name: string;
+  run_id?: string | null;
+  reason?: string | null;
+};
+export type PlanExecuteResult = {
+  plan_id: string;
+  submitted: number;
+  skipped: number;
+  items: PlanExecuteItem[];
+};
+export type PlanExecuteBody = { project_id: string; plan_id: string };
+/** D209：批量删计划（MS `/delete/batch`）。全有或全无：任一 id 不在本项目 → 404 整批不动。 */
+export type PlanBatchDeleteBody = { project_id: string; plan_ids: string[] };
 type PlanDeleteBody = components["schemas"]["plan_delete_body"];
 type OkOut = components["schemas"]["OkOut"];
+
+// ── D231：计划关注人 ─────────────────────────────────────────────────────────
+// gen:api 禁跑（会自起后端抢业主 :8321 的服务），生成物里还没有 D231 的三个模型；
+// 手写交集与后端 schemas.PlanListRowOut / PlanDetailOut / PlanFollowOut 逐字段一致。
+// 列表行只带 followed（不带总数：列表不做每页 GROUP BY，总数只在详情回答）；
+// 关注态是**现查**plan_follower 的结果，不存前端第二份真相。
+export type PlanRow = PlanOut & { followed?: boolean };
+export type PlanDetail = PlanOut & { followed?: boolean; follower_count?: number };
+export type PlanFollowOut = { following: boolean; follower_count: number };
 
 // 列表 query 直接引生成物 operations：后端 PlanListIn 改字段名，这里编译期就断。
 type PlanListQuery = operations["get_plan_list_api_v1_plans_get"]["parameters"]["query"];
@@ -76,6 +114,106 @@ type PlanReportListQuery =
 type PlanReportItemListQuery =
   operations["get_plan_report_item_list_api_v1_plan_reports__report_id__items_get"]["parameters"]["query"];
 
+// ── D204：计划内功能用例（人工执行） ────────────────────────────────────────
+// 这次的返回标注是 `-> ServiceResult`（分页 Page）与 `-> OkOut`（写），与列表族同病：
+// 200 外壳不进 schema，行类型手写镜像后端 schemas.PlanFunctionalCaseOut（逐字段一致）。
+// 词表 `none + 四值` 与后端 models.PLAN_FUNCTIONAL_RESULTS 对齐；前端不多造值。
+export type PlanFunctionalResult = "pass" | "fail" | "blocked" | "skip";
+export type PlanFunctionalCaseRow = {
+  link_id: string;
+  case_id: string;
+  num: number;
+  name: string;
+  priority: string;
+  module_id?: string | null;
+  result: "none" | PlanFunctionalResult;
+  comment?: string | null;
+  executed: boolean;
+  executed_by?: string | null;
+  executed_at?: string | null;
+};
+export type PlanFunctionalListQuery = {
+  project_id: string;
+  current: number;
+  size: number;
+  keyword?: string;
+  module_id?: string;
+  /** none = 尚未给结论；不传 = 不筛 */
+  result?: "none" | PlanFunctionalResult;
+};
+export type PlanFunctionalExecuteBody = {
+  project_id: string;
+  link_ids: string[];
+  result: PlanFunctionalResult;
+  comment?: string;
+};
+
+// ── D207：计划缺陷清单（只读聚合） ─────────────────────────────────────────
+// 行类型镜像后端 schemas.PlanBugOut（逐字段一致）；数据是缺陷本体的实时投影，
+// 不存快照，前端也不缓存成第二份真相。
+export type PlanBugRow = {
+  id: string;
+  num: number;
+  title: string;
+  status: string;
+  priority: string;
+  handle_user_id?: string | null;
+  handle_user_name?: string | null;
+  tags: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+export type PlanBugListQuery = {
+  project_id: string;
+  current: number;
+  size: number;
+  status?: string;
+  priority?: string;
+  keyword?: string;
+};
+
+// ── D211：计划模块树 ───────────────────────────────────────────────────────
+// gen:api 禁跑（会自起后端抢业主 :8321 的服务），模块一族全部手写镜像后端：
+// 类型与 schemas.PlanModuleNode/PlanModuleTreeOut 逐字段一致；4 个端点的返回里
+// tree 标了 PlanModuleTreeOut（会进生成物，但本刀生成物没有），其余 CRUD 同理。
+// 计数含归档计划（archive 不改 module_id）；树里没有「未分组」这个假节点。
+export type PlanModuleNode = {
+  id: string;
+  parent_id?: string | null;
+  name: string;
+  sort: number;
+  /** 本模块**直属**计划数（子模块的计划不并进来） */
+  plan_count: number;
+  children: PlanModuleNode[];
+};
+export type PlanModuleTree = { nodes: PlanModuleNode[]; unassigned_count: number };
+export type PlanModuleCreateBody = {
+  project_id: string;
+  parent_id?: string | null;
+  name: string;
+  sort?: number;
+};
+/** parent_set = true 才认 parent_id（含 null = 移到根层）；与后端 PlanModuleUpdateIn 同款哨兵。 */
+export type PlanModuleUpdateBody = {
+  project_id: string;
+  name?: string;
+  parent_set?: boolean;
+  parent_id?: string | null;
+  sort?: number;
+};
+
+/** 列表 query 的模块扩展（后端 PlanListIn 本刀新增两键，生成物还没跟上，手写交集补齐）。 */
+export type PlanListQueryWithModule = PlanListQuery & {
+  /** 该模块**及整棵子树**内的计划 */
+  module_id?: string;
+  /** 只看未分组计划；与 module_id 同传后端 422 */
+  unassigned?: boolean;
+  /** D212：高级搜索条件（JSON 串，后端 PlanListIn.filter）。空条件不传。 */
+  filter?: string;
+  /** D231：只看我关注的计划（视图轴，与模块/未分组/条件组并行 AND）。 */
+  followed_by_me?: boolean;
+};
+
 /** 关联改环境入参。**手写判别式，刻意偏离生成物一处**（生成物在说谎的地方）：
  *  ① plan_link_update_body 把 clear_env 标成必填——后端默认是 false（schemas.py:147
  *     `clear_env: bool = False`，生成物 @default false 注释在场），省略与 false 同义
@@ -90,6 +228,24 @@ export type PlanLinkUpdateBody = { project_id: string } & (
   | { env_id?: never; clear_env?: never }
 );
 
+// ── D206：执行人指派 / 拖拽排序 / 批量摘除 ──────────────────────────────────
+// PlanLinkOut 在生成物里没有这两列（后端这次加了，但 gen:api 禁跑）：**手写交集补齐**，
+// 字段与后端 schemas.PlanLinkOut（schemas.py）逐字一致；`executor_id=null` 是「未指派」，
+// `sort_order=0` 是「从未排过」（列表退化回 id 升序）。
+export type PlanLinkRow = PlanLinkOut & {
+  executor_id?: string | null;
+  sort_order?: number;
+};
+export type PlanLinkAssignBody = {
+  project_id: string;
+  link_ids: string[];
+  /** null = 取消指派；省略与 null 同义（后端默认 None），这里显式写 null 让语义可见。 */
+  executor_id?: string | null;
+};
+export type PlanLinkSortBody = { project_id: string; link_ids: string[] };
+export type PlanLinkBatchDeleteBody = { project_id: string; link_ids: string[] };
+type PlanLinkWriteOut = { updated: number };
+
 const enc = encodeURIComponent;
 
 function qs(o: Record<string, unknown>): string {
@@ -100,18 +256,64 @@ function qs(o: Record<string, unknown>): string {
   return q.toString();
 }
 
+export type PlanFunctionalHistoryRow = {
+  id: string;
+  seq: number;
+  result: string;
+  comment: string | null;
+  executed_by: string | null;
+  created_at: string | null;
+};
+
+export type PlanFunctionalHistoryQuery = {
+  project_id: string;
+  current: number;
+  size: number;
+};
+
 export const planApi = {
   /** 计划列表（页码制：current+size，后端 paginate_page 钳 size 1..200，本端点没有 cursor
    *  这一说——响应里 next_cursor 恒 null）。响应外壳手写 Page<PlanOut>：plan_list 返回
    *  core Page(items, next_cursor=None, total=…)，带 total。
    *  注意：PlanOut 没有展示态字段（库里没那列，_plan_display 现算只从 status 出口给），
    *  列表页不许逐行拉 /status（N+1 请求 + 给列表编一个它没给过的数）。 */
-  list: (q: PlanListQuery) =>
-    get<Page<PlanOut>>("/plans?" + qs(q), { silent: true }),
+  list: (q: PlanListQueryWithModule) =>
+    get<Page<PlanRow>>("/plans?" + qs(q), { silent: true }),
 
-  /** 计划详情（6b 详情页消费；跨项目与不存在同码同文案，前端不分句）。 */
+  // ── D211：计划模块树（左树 + 按模块过滤 + 模块 CRUD） ─────────────────────
+
+  /** 模块树（perm testplan:plan:read）。树里只有模块，「未分组」由 unassigned_count 单列，
+   *  前端渲染成树外的一条入口——不把一类「没有模块的计划」伪装成一个模块节点。 */
+  moduleTree: (projectId: string) =>
+    get<PlanModuleTree>("/plan-modules/tree?project_id=" + enc(projectId), { silent: true }),
+
+  /** 新建模块（perm testplan:plan:create；同父重名 409，父模块须在本项目）。 */
+  createModule: (body: PlanModuleCreateBody) =>
+    post<PlanModuleNode>("/plan-modules", body),
+
+  /** 改名/移动/排序（perm testplan:plan:update；成环 422 cycle、同父重名 409）。 */
+  updateModule: (moduleId: string, body: PlanModuleUpdateBody) =>
+    patch<PlanModuleNode>("/plan-modules/" + enc(moduleId), body),
+
+  /** 删模块（perm testplan:plan:delete，destructive）。有子模块或计划 → 409 module_not_empty，
+   *  **不递归删计划**（与 MS 相反，见后端 models.PlanModule docstring）。 */
+  deleteModule: (moduleId: string, body: { project_id: string }) =>
+    post<OkOut>("/plan-modules/" + enc(moduleId) + "/delete", body),
+
+  /** 计划详情（6b 详情页消费；跨项目与不存在同码同文案，前端不分句）。
+   *  D231：多两问 followed / follower_count——两条都是 `_plan` 之后现查 plan_follower
+   *  （不存计划表冗余列）；写路径（create/update/archive/copy）不回答这两问。 */
   get: (projectId: string, planId: string) =>
-    get<PlanOut>("/plans/" + enc(planId) + "?project_id=" + enc(projectId)),
+    get<PlanDetail>("/plans/" + enc(planId) + "?project_id=" + enc(projectId)),
+
+  /** D231：关注计划（perm testplan:plan:update——写副作用走写位，不借 read）。
+   *  幂等：重复关注 following 仍 true；回执 follower_count 是操作后现查的行数。 */
+  follow: (planId: string, body: { project_id: string }) =>
+    post<PlanFollowOut>("/plans/" + enc(planId) + "/follow", body),
+
+  /** D231：取消关注（幂等：未关注也回 following=false，不报错）。 */
+  unfollow: (planId: string, body: { project_id: string }) =>
+    post<PlanFollowOut>("/plans/" + enc(planId) + "/unfollow", body),
 
   /** 计划实时状态（现算：status 四态 + 两个率 + 逐关联结论；率口径 pass=passed÷total、
    *  execute=executed÷total，空计划 0.0 不是 1.0——后端 _rates 是唯一算式）。 */
@@ -119,7 +321,7 @@ export const planApi = {
     get<PlanStatusOut>("/plans/" + enc(planId) + "/status?project_id=" + enc(projectId)),
 
   /** 新建计划（同项目重名 409——重名检查连回收站式墓碑都算，后端 _name_dup）。 */
-  create: (body: PlanCreateIn) => post<PlanOut>("/plans", body),
+  create: (body: PlanCreateBody) => post<PlanOut>("/plans", body),
 
   /** 改名/描述（PATCH 语义：不传=不改。**改不了归档**——archived 是后端显式声明的拒收
    *  哨兵位，传了值 422 说清去哪，传 null=没打算改。归档只有 archive()）。 */
@@ -131,10 +333,28 @@ export const planApi = {
   archive: (planId: string, body: PlanArchiveBody) =>
     post<PlanOut>("/plans/" + enc(planId) + "/archive", body),
 
+  /** D225：执行计划（perm testplan:plan:execute）。对计划内全部可运行关联对象
+   *  （场景/UI 用例/ADB 用例）各投一次 worker；逐条回报 run_id 或跳过原因。
+   *  **不返回整体成功/失败**：投出去几条、几条没投出去（及原因）都在 items 里——
+   *  「部分成功」是常态（架构上的 503、权限缺位、对象在回收站都可能只挂一条）。 */
+  execute: (planId: string, body: PlanExecuteBody) =>
+    post<PlanExecuteResult>("/plans/" + enc(planId) + "/execute", body),
+
   /** 删除（DELETE 带 JSON body：后端入参模型统一从 body 读 project_id，client.del 同款；
    *  级联删关联与报告是后端一条事务，前端不预告细节）。 */
   remove: (planId: string, body: PlanDeleteBody) =>
     del<OkOut>("/plans/" + enc(planId), body),
+
+  /** D208：复制计划（perm testplan:plan:create，与新建同一位；MS 的 copy 用 create/copy 二选一）。
+   *  复制头 + 全部用例关联；**执行结论与已生成报告不复制**（复制件是全新一轮，未归档）。
+   *  name 省略 = 后端生成 `<源名>_<5位>_COPY`；同项目重名 409（含显式给名的那条路）。 */
+  copy: (planId: string, body: PlanCopyBody) =>
+    post<PlanOut>("/plans/" + enc(planId) + "/copy", body),
+
+  /** D209：批量删除（POST /plans/batch-delete，与单删同一位 testplan:plan:delete）。
+   *  全有或全无：任一 id 不在本项目 → 404，一行都不删；级联与单删同一条事务。 */
+  batchDelete: (body: PlanBatchDeleteBody) =>
+    post<OkOut>("/plans/batch-delete", body),
 
   // ── 关联（case-links）家族：6b 详情页消费 ────────────────────────────────
 
@@ -145,7 +365,7 @@ export const planApi = {
    *  按 link_id == PlanLinkOut.id join，见 services.py:605-606；join 不上的行渲染「—」，
    *  不许现算一个结论填上去）。 */
   listLinks: (planId: string, q: PlanLinkListQuery) =>
-    get<Page<PlanLinkOut>>("/plans/" + enc(planId) + "/case-links?" + qs(q), { silent: true }),
+    get<Page<PlanLinkRow>>("/plans/" + enc(planId) + "/case-links?" + qs(q), { silent: true }),
 
   /** 挂关联（409 已在此计划 / 404 subject 不存在·跨项目·回收站——原话直出，不翻译）。
    *  env_id 省略 = 后端抄 subject 自己的 env（抄不到留空 = 执行时沿用 subject 默认口径），
@@ -161,6 +381,51 @@ export const planApi = {
   /** 摘除关联（DELETE 带 JSON body {project_id}；只删关联行，用例本体无损）。 */
   deleteLink: (planId: string, linkId: string, body: PlanLinkDeleteBody) =>
     del<OkOut>("/plans/" + enc(planId) + "/case-links/" + enc(linkId), body),
+
+  // ── D206：批量指派执行人 / 排序 / 批量摘除 ────────────────────────────────
+
+  /** 批量指派执行人（perm testplan:link:update）。执行人必须是本项目成员（422
+   *  invalid_executor）；任一 link 不在本计划 → 404 整批不动。 */
+  assignLinks: (planId: string, body: PlanLinkAssignBody) =>
+    post<PlanLinkWriteOut>("/plans/" + enc(planId) + "/case-links/assign", body),
+
+  /** 拖拽排序（perm 同上）。link_ids **必须覆盖计划内全部关联**（422 incomplete_sort），
+   *  先后即新顺序；页面因此只在「本页装得下全部关联」时摆上下移把手。 */
+  sortLinks: (planId: string, body: PlanLinkSortBody) =>
+    post<PlanLinkWriteOut>("/plans/" + enc(planId) + "/case-links/sort", body),
+
+  /** 批量摘除（perm testplan:link:delete，destructive）：删关联行 + 该行人工结论/流水，
+   *  用例本体不动；全有或全无。 */
+  batchDeleteLinks: (planId: string, body: PlanLinkBatchDeleteBody) =>
+    post<PlanLinkWriteOut>("/plans/" + enc(planId) + "/case-links/batch-delete", body),
+
+  // ── D204：计划内功能用例（人工执行结论） ─────────────────────────────────
+
+  /** 计划内功能用例分页（结论来源是 plan_functional_exec，不是 run_record）。
+   *  perm testplan:link:read；与关联列表不同，这一族带**精确 result**（none/pass/fail/
+   *  blocked/skip），列表页据此画原值 Tag——plan status 只有 passed/failed 两轴，
+   *  拿 status 画结论会把「阻塞」显示成「未通过」。 */
+  listFunctional: (planId: string, q: PlanFunctionalListQuery) =>
+    get<Page<PlanFunctionalCaseRow>>("/plans/" + enc(planId) + "/functional-cases?" + qs(q),
+      { silent: true }),
+
+  /** 写人工结论（批量 link_ids；覆盖当前结论 + 追加一条 history）。
+   *  perm testplan:functional:execute；归档计划 409；跨计划 link 整批 404。 */
+  executeFunctional: (planId: string, body: PlanFunctionalExecuteBody) =>
+    post<OkOut>("/plans/" + enc(planId) + "/functional-cases/execute", body),
+
+  /** D218：结论变更历史（append-only 流水，seq 倒序，页码分页）。
+   *  perm testplan:link:read；行类型是**长期手写镜像**（端点返回标注是 ServiceResult，
+   *  `PlanFunctionalHistoryOut` 不进 OpenAPI），字段与后端 schemas.py:355 逐字一致。 */
+  functionalHistory: (planId: string, linkId: string, q: PlanFunctionalHistoryQuery) =>
+    get<Page<PlanFunctionalHistoryRow>>(
+      "/plans/" + enc(planId) + "/functional-cases/" + enc(linkId) + "/history?" + qs(q),
+      { silent: true }),
+
+  /** D207：计划缺陷清单（计划内用例关联的缺陷，按缺陷去重；只读）。
+   *  perm testplan:link:read；回收站里的缺陷不出现（读的是「这个计划暴露了哪些缺陷」）。 */
+  listBugs: (planId: string, q: PlanBugListQuery) =>
+    get<Page<PlanBugRow>>("/plans/" + enc(planId) + "/bugs?" + qs(q), { silent: true }),
 
   // ── 报告家族（列表 + 生成）：6b 详情页消费；报告详情一族归 6c ─────────────
 
@@ -196,4 +461,18 @@ export const planApi = {
    *  级联细节前端不预告，见 planApi.remove 同一口径。perm testplan:report:delete。 */
   deleteReport: (reportId: string, body: PlanReportDeleteBody) =>
     del<OkOut>("/plan-reports/" + enc(reportId), body),
+
+  /** D210：报告改名（PATCH /plan-reports/{id}，perm testplan:report:update）。
+   *  后端只写 name 一列——内容快照（status/计数/明细）仍是生成时刻的定格；前端改完只重取列表，
+   *  不重新生成报告。响应是列表行形状（PlanReportListRowOut），不是详情（没有 items）。 */
+  renameReport: (reportId: string, body: { project_id: string; name: string }) =>
+    patch<PlanReportListRow>("/plan-reports/" + enc(reportId), body),
+
+  /** D230：导出报告（GET /plan-reports/{id}/export，perm testplan:report:read）。
+   *  载体是 JSON 文本（content = 自包含 HTML），**不是** Blob 响应：本仓端点全在
+   *  @service 注册表里，raw 路由会漏权限/审计/OpenAPI 同一张网；前端 `downloadBlob`
+   *  把 content 落地为 .html（defect_export 的 CSV 载体同款先例）。
+   *  内容是生成报告时的快照明细，item_count = 实际导出的明细行数（≠ 计划当前关联数）。 */
+  exportReport: (reportId: string, projectId: string) =>
+    get<PlanReportExport>("/plan-reports/" + enc(reportId) + "/export?project_id=" + enc(projectId)),
 };

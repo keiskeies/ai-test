@@ -265,6 +265,150 @@ describe("接口列表行勾选导出（1E T5 补完）", () => {
   });
 });
 
+// ── D251：批量回收（MS `/delete/batch` 等价面）────────────────────────────────
+// 钉两件事：① 勾中的 ids 原样进请求体，成功后清选择+重拉；② 409 blocked 要给名字，
+// 且整批不动、选择不丢——用户得能照着名单去解引用，而不是重新勾一遍。
+describe("接口定义批量回收（D251）", () => {
+  function mockBatchBackend(rows: ApiDef[], batch: { status: number; body: unknown }) {
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.includes("/api-definitions/batch-delete")) {
+        return { ok: batch.status < 400, status: batch.status,
+          json: async () => batch.body } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => (url.includes("/api-definitions")
+        ? { items: rows, next_cursor: null }
+        : { items: [], next_cursor: null, tree: [], recycled: [], scopes: {} }) } as unknown as Response;
+    }) as unknown as typeof fetch;
+  }
+  function rowBoxes(): HTMLElement[] {
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+  }
+  function batchBodies(): Record<string, unknown>[] {
+    return (global.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => String(c[0]).includes("/api-definitions/batch-delete"))
+      .map((c) => JSON.parse(String(c[1]?.body)) as Record<string, unknown>);
+  }
+  function listGets(): string[] {
+    return (global.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0])).filter((u) => u.includes("/api-definitions?"));
+  }
+
+  it("勾 2 行 → 确认 → POST batch-delete 恰好带这 2 个 id；成功后清选择并重拉", async () => {
+    mockBatchBackend([def({ id: "d1" }), def({ id: "d2", name: "创建订单" }),
+      def({ id: "d3", name: "取消订单" })], { status: 200, body: { ok: true } });
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    expect((await screen.findAllByTestId("api-row")).length).toBe(3);
+    fireEvent.click(rowBoxes()[0]);
+    fireEvent.click(rowBoxes()[1]);
+    fireEvent.click(await screen.findByTestId("api-batch-delete"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "放入回收站" }));
+    await waitFor(() => expect(batchBodies().length).toBe(1));
+    expect(batchBodies()[0].project_id).toBe("p1");
+    expect([...(batchBodies()[0].definition_ids as string[])].sort()).toEqual(["d1", "d2"]);
+    // 成功后：批量条消失（选择清空）且列表重拉
+    await waitFor(() => expect(screen.queryByTestId("api-batch-bar")).toBeNull());
+    await waitFor(() => expect(listGets().length).toBeGreaterThan(1));
+  });
+
+  it("被场景引用 409 → 弹窗点名接口与场景数，整批不动、选择保留", async () => {
+    mockBatchBackend([def({ id: "d1" }), def({ id: "d2", name: "创建订单" })], {
+      status: 409,
+      body: {
+        code: "referenced_by_scenario",
+        message: "有 1 个接口的用例被未回收场景引用：「查询订单」；整批一行未动。",
+        details: { blocked: [{ definition_id: "d1", name: "查询订单", count: 2, scenarios: [] }] },
+      },
+    });
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    expect((await screen.findAllByTestId("api-row")).length).toBe(2);
+    fireEvent.click(rowBoxes()[0]);
+    fireEvent.click(rowBoxes()[1]);
+    fireEvent.click(await screen.findByTestId("api-batch-delete"));
+    fireEvent.click(await screen.findByRole("button", { name: "放入回收站" }));
+
+    await waitFor(() => expect(document.body.textContent)
+      .toContain("整批未删除：有接口被场景引用"));
+    expect(document.body.textContent).toContain("查询订单（2 个场景）");
+    // 整批不动：选择没被清掉，列表也没重拉
+    expect(screen.getByTestId("api-batch-bar").textContent).toContain("已选 2 项");
+    expect(listGets().length).toBe(1);
+  });
+});
+
+// ── D252：回收站批量恢复（与 D251 对称）────────────────────────────────────────
+// 钉：① 回收站视图也能勾行，确认后 POST batch-restore 带 ids；② 404（有行不在回收站）
+//     时整批不动、选择保留——用户得能照着错误改名单。
+describe("回收站批量恢复（D252）", () => {
+  const TRASH = [def({ id: "t1", name: "删掉的甲" }), def({ id: "t2", name: "删掉的乙" })];
+
+  function mockTrashBackend(batch: { status: number; body: unknown }) {
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.includes("/api-definitions/batch-restore")) {
+        return { ok: batch.status < 400, status: batch.status,
+          json: async () => batch.body } as unknown as Response;
+      }
+      if (url.includes("/api-definitions?")) {
+        const recycled = url.includes("recycled=true");
+        return { ok: true, status: 200, json: async () => ({
+          items: recycled ? TRASH : [], next_cursor: null }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({
+        items: [], next_cursor: null, tree: [], recycled: [] }) } as unknown as Response;
+    }) as unknown as typeof fetch;
+  }
+  function trashBoxes(): HTMLElement[] {
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+  }
+  function restoreBodies(): Record<string, unknown>[] {
+    return (global.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => String(c[0]).includes("/api-definitions/batch-restore"))
+      .map((c) => JSON.parse(String(c[1]?.body)) as Record<string, unknown>);
+  }
+
+  it("回收站勾 2 行 → 恢复 → body 带这 2 个 id，成功后清选择并重拉", async () => {
+    mockTrashBackend({ status: 200, body: { ok: true } });
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("module-recycled-toggle"));
+    expect((await screen.findAllByTestId("api-row")).length).toBe(2);
+    fireEvent.click(trashBoxes()[0]);
+    fireEvent.click(trashBoxes()[1]);
+    fireEvent.click(await screen.findByTestId("api-batch-restore"));
+
+    const dlg = await screen.findByRole("dialog");
+    fireEvent.click(within(dlg).getByRole("button", { name: /恢\s*复/ }));
+    await waitFor(() => expect(restoreBodies().length).toBe(1));
+    expect(restoreBodies()[0].project_id).toBe("p1");
+    expect([...(restoreBodies()[0].definition_ids as string[])].sort()).toEqual(["t1", "t2"]);
+    await waitFor(() => expect(screen.queryByTestId("api-batch-bar")).toBeNull());
+    await waitFor(() => expect((global.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0])).filter((u) => u.includes("recycled=true")).length)
+      .toBeGreaterThan(1));
+  });
+
+  it("404（有行不在回收站）→ 整批不动、选择保留", async () => {
+    mockTrashBackend({ status: 404, body: {
+      code: "not_found", message: "有接口不存在或不在回收站",
+      details: { definition_ids: ["t2"] } } });
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("module-recycled-toggle"));
+    expect((await screen.findAllByTestId("api-row")).length).toBe(2);
+    fireEvent.click(trashBoxes()[0]);
+    fireEvent.click(trashBoxes()[1]);
+    fireEvent.click(await screen.findByTestId("api-batch-restore"));
+    const dlg = await screen.findByRole("dialog");
+    fireEvent.click(within(dlg).getByRole("button", { name: /恢\s*复/ }));
+
+    await waitFor(() => expect(restoreBodies().length).toBe(1));
+    // 选择保留：还能照着错误改名单重试
+    expect(screen.getByTestId("api-batch-bar").textContent).toContain("已选 2 项");
+  });
+});
+
 // ── 一期 DoD 判据第 3 条「UI 面」（1E T9 补账）：本页 × 4 角色的按钮门控 ──────────
 // 期望值一律从 perms.ts ROLE_PATTERNS 的字面量推导（不是「页面藏了就断言藏」的同义反复）：
 //   PROJECT_ADMIN ["*","-system:*"]            → api:def:{create,read,delete} 全有

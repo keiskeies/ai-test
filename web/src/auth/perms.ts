@@ -54,7 +54,11 @@ export function patternsForProject(
 // `system:user:disable`）。`auth:password:self` 故意不在词表里：改自己密码与项目角色无关，
 // 算进去等于把横幅废掉。已知宽判：`api:def:create` 同挂在只读服务上（api_import_preview），
 // 持它的自定义角色会被判「可写」而少一条横幅——少一句提示不撒谎，把只读说成可写才是。
-const WRITE_TAIL = /:(create|update|delete|run|debug|manage|write|disable)$/;
+// D191：`comment` 是缺陷域新增的写动词（defect:defect:comment，effect=write）。
+// 不进来就会把只挂评论位的自定义角色判成「只读」——后端 test_r158 的跨语言漂移钉会先红。
+// D196：`stop` 是任务中心的写动词（task:center:stop）。
+// D204：`execute` 是计划内功能用例的人工结论写动词（testplan:functional:execute）。
+const WRITE_TAIL = /:(create|update|delete|run|debug|manage|write|disable|comment|stop|execute)$/;
 
 /**
  * 「本项目无任何可写入口」（§11.5.1 只读横幅的唯一信号，不参与任何门禁）。

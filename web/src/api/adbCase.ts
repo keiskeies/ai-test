@@ -128,6 +128,8 @@ export interface AdbCaseListInput {
    *  （schema.d.ts 尚未重画：gen:api 会自起后端抢 8321，生成物重画是收尾单独一次，
    *  那一刀把整份 OpenAPI 的漂移一起看过）。 */
   current?: number;
+  /** D217：高级搜索条件组（JSON 串），与 module/unfiled/recycled 并行 AND。 */
+  filter?: string;
 }
 
 export const adbCaseApi = {

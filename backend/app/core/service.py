@@ -190,6 +190,45 @@ async def run_finalized(db, *, run_id, project_id, trigger, ok, summary) -> None
             "run 终态钩子异常（已吞，不影响 run 落库）：run=%s project=%s", run_id, project_id)
 
 
+# —— 报告通知钩子（D229）：形状与 run 终态钩子完全同款（core 不认识 notify） ——
+_report_notify_hook = None
+
+
+def set_report_notify_hook(fn) -> None:
+    """报告通知钩子注入（D229；组装层 main.create_app 接 notify.hooks.on_report_notified）。
+
+    挂载点唯一：schedule.service._fire_report 在**报告行已生成（commit）之后**调它——
+    先有报告、再谈通知；通知炸了也不许把已经成立的报告说成没生成（次序即前提，同
+    set_run_finalized_hook 的注释）。
+    """
+    global _report_notify_hook
+    _report_notify_hook = fn
+
+
+async def notify_report(db, *, project_id: str, report: dict, channel_ids: list[str]) -> list[dict]:
+    """把一份报告摘要发往给定渠道；**钩子异常一律吞掉**（通知是旁路），返回 [] 表示没发成。
+
+    返回值是逐渠道回执 [{channel_id, name?, ok, error?}]：schedule 的 last_run 要把
+    「发给了谁、谁失败」如实落到回执里——这正是 run 终态钩子**没有**返回值的差别（那边
+    回执由 notify 自己写进 last_send/last_run）。吞异常后返回 [] 是**第三种形状**：
+    绑了渠道却一条回执都没有 = 钩子自身炸了；调用方（`_fire_report`）据此写
+    「通知发送异常」而不是冒充「未绑定通知渠道」。
+    """
+    if _report_notify_hook is None:
+        return []
+    try:
+        out = await _report_notify_hook(db, project_id=project_id, report=report,
+                                        channel_ids=channel_ids)
+        return list(out or [])
+    except Exception:  # noqa: BLE001  旁路兜底：吞一切，重抛会让定时 fire 记红账
+        import logging
+
+        logging.getLogger("testpilot").exception(
+            "报告通知钩子异常（已吞，报告已生成）：project=%s report=%s", project_id,
+            report.get("id"))
+        return []
+
+
 async def resolve_project_perms(db: AsyncSession, user_id: str, is_admin: bool, project_id: str) -> set[str] | None:
     if _perms_resolver is None:  # pragma: no cover
         raise RuntimeError("perms resolver 未注入")
@@ -264,6 +303,17 @@ async def ensure_project_access(ctx: ServiceCtx, project_id: str) -> None:
     if perms is None:
         raise ApiError("forbidden", "无此项目权限", 403)
     ctx.perms = perms
+
+
+def trigger_from_entry(entry: str) -> str:
+    """run_record.trigger 的事实口径：入口是什么就写什么（scenario_run 裁定⑥的推广）。
+
+    取值词表见 execution/models.py:25：debug/manual/schedule/agent/webhook。
+    **schedule 是第三种真实入口**：计划定时执行（schedule.fire → plan_execute →
+    各域 *_run）重建的 ctx entry="schedule"，若继续按「非 agent 即 manual」落值，
+    定时跑出来的用例会在运行记录里显示成「手动」——把一件真实发生过的事记错。
+    """
+    return entry if entry in ("agent", "schedule") else "manual"
 
 
 def build_router(*, get_db_dep, get_user_dep, user_model) -> APIRouter:

@@ -13,7 +13,8 @@ import { childrenOf, isValidKey, walk } from "./graphOps";
 import { autoLayout, NODE_H, NODE_W } from "./layout";
 import { BLOCKED_1B, CONTAINER_KINDS, kindMeta, labelOf, type StepNode } from "./stepTypes";
 import { mergeIssues, selectDirty, useSceneStore } from "./store";
-import { tpv } from "../theme";
+import { tokensFor, tpv } from "../theme";
+import { useTheme } from "../ui/themeMode";
 
 export const DND_NODE = "application/x-tp-node";
 export const DND_KIND = "application/x-tp-kind";
@@ -105,8 +106,8 @@ function NodeInner(props: NodeProps) {
       <div style={{ padding: "8px 12px", minWidth: 0, flex: 1 }}>
         <div className="tp-text-sm" style={{ color: "var(--tp-text-2)", display: "flex", gap: 6, alignItems: "center" }}>
           <span>{meta.label}</span>
-          {n.disable && <span className="tp-text-xs" data-testid="node-disabled-tag" style={{ background: "#F2F3F4", color: "#8B8E94", borderRadius: 4, padding: "0 4px" }}>已禁用</span>}
-          {blocked && <span className="tp-text-xs" style={{ color: "#D48806" }}>保存会被拒（{BLOCKED_1B[n.kind]} 开放）</span>}
+          {n.disable && <span className="tp-text-xs" data-testid="node-disabled-tag" style={{ background: tpv.tag.default.bg, color: tpv.tag.default.fg, borderRadius: 4, padding: "0 4px" }}>已禁用</span>}
+          {blocked && <span className="tp-text-xs" style={{ color: tpv.func.warning }}>保存会被拒（{BLOCKED_1B[n.kind]} 开放）</span>}
 </div>
         <div className="tp-text-md" style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {n.name || n.key}
@@ -203,6 +204,9 @@ export default function Canvas() {
   const setMulti = useSceneStore((s) => s.setMulti);
   const dirty = useSceneStore(selectDirty);
   const readOnly = useSceneStore((s) => s.readOnly);
+  // 小地图/连线/圆点走 @xyflow 的 CSS 变量（它的 style.css 只读 --xy-* 一族，不读主题），
+  // 在这里把 tp 的值喂进去；深色下库自带的 #fff 面板与浅灰节点在深画布上刺眼。
+  const mode = useTheme((s) => s.mode);
   // zustand v5：选择器必须返回稳定引用，否则 useSyncExternalStore 判定快照不稳定 →
   // 无限重渲（React #185）。issue 合并放 useMemo，不在选择器里现算。
   const serverIssues = useSceneStore((s) => s.serverIssues);
@@ -241,6 +245,14 @@ export default function Canvas() {
       id: n.key,
       type: "step",
       position: layout[n.key] ?? { x: 0, y: 0 },
+      // 尺寸必须自己声明：我们是受控 nodes + onNodesChange 空实现（结构改动只走树），
+      // xyflow 测完尺寸只会把 dimensions change 交给我们（@xyflow/system:1916 →
+      // react:3560），我们不落盘 → userNode 永远没有 measured。
+      // 后果实测过：MiniMap 的 nodeHasDimensions（system:756）为假 → 小地图一个节点都不画
+      // （修前 6 节点画布上 mmNodes=0，修后 6 个）。
+      // 节点是定死的 NODE_W×NODE_H（NodeInner 的 style 同源），写出来与屏幕一致。
+      width: NODE_W,
+      height: NODE_H,
       selected: n.key === selectedKey,
       draggable: false, // 位置由布局说了算；HTML5 拖拽（移动节点）走 NodeInner
       hidden: !!parent && collapsed.includes(parent),
@@ -258,15 +270,22 @@ export default function Canvas() {
   }, [nodes, layout, collapsed, selectedKey, badKeys, caseName, onMenu, readOnly]);
 
   const rfEdges: Edge[] = useMemo(() => {
+    // 箭头必须拿具体色，不能给 var：@xyflow/system 的 getMarkerId（system/index.js:1519）
+    // 把 marker 对象拼成**元素 id**（…&color=#5A646C&…），边再用 marker-end="url('#id')" 引它——
+    // 那条通路上颜色是名字的一部分，不是可解析的绘制值（实测：var() 只会拼出一个含括号的怪 id）。
+    // 线身 style.stroke 走 inline style，var() 其实解析（实测 computed 正常），但线身与箭头
+    // 必须同一个色，所以两处一起按 mode 取具体值。浅色 text[4] 就是此前手抄的 #B4BBC2——
+    // 浅色一像素不变，深色换成深底读得出的灰。
+    const edgeColor = tokensFor(mode).text[4];
     const pairs = visiblePairs(nodes, collapsed);
     return pairs
       .filter(([, p]) => !!p)
       .map(([n, p]) => ({
         id: p + "->" + n.key, source: p as string, target: n.key,
-        markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: "#B4BBC2" },
-        style: { stroke: "#B4BBC2" },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: edgeColor },
+        style: { stroke: edgeColor },
       }));
-  }, [nodes, collapsed]);
+  }, [nodes, collapsed, mode]);
 
   const menuItems = useMemo(() => {
     if (!menu) return [];
@@ -320,7 +339,11 @@ export default function Canvas() {
         onDragOver={(e) => { e.preventDefault(); }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--tp-border)" />
+        {/* 小地图三个色不写就吃 @xyflow 的浅色默认（面板 #fff、节点 #e2e2e2、面纱 rgba(240,240,240,.6)），
+            它不跟主题：深色画布右下角会挂一块 18.5:1 的白板。这三个 props 落进 --xy-minimap-*-props
+            与节点 rect 的 style.fill，是 CSS 侧解析的，所以这里用 var 形式（会随主题切）。 */}
         <MiniMap pannable zoomable style={{ width: 180, height: 120 }}
+          bgColor={tpv.bg.container} maskColor={tpv.mask} nodeColor={tpv.text[4]}
           onNodeClick={(_, n) => select(n.id)} />
       </ReactFlow>
       {dirty && (

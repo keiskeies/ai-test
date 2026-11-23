@@ -21,8 +21,18 @@ async def get_current_user(
 ) -> User:
     if creds is None or not creds.credentials:
         raise ApiError("unauthorized", "未认证", 401)
+    token = creds.credentials
+    # D198：自助 API Key（tp_ 前缀）与 JWT 同一 Bearer 头；明文只存哈希。
+    if token.startswith("tp_"):
+        from app.modules.iam.personal_services import resolve_api_key
+
+        user = await resolve_api_key(db, token)
+        if user is None:
+            raise ApiError("unauthorized", "API Key 无效、已吊销或已过期", 401)
+        request.state.user_id = user.id
+        return user
     try:
-        user_id = decode_access_token(creds.credentials)
+        user_id = decode_access_token(token)
     except ApiError:
         raise
     except Exception:

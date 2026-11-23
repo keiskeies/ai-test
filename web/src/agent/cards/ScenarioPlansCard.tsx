@@ -1,9 +1,11 @@
 // 候选场景卡（§11.4.30 / §9.7 :600-601 草图形状）：每卡 名称/覆盖意图/步骤预览/风险点
-// + [画布预览][选择]。**[保存] 不出现为可点按钮**——§13 纪律 1：能点但后端不认的按钮是假门，
-// 只在选择钮旁留一句 secondary 文案「保存（二期开放）」（§4 :206 / §13 :1604 口径）。
+// + [画布预览][选择][保存为场景]。D264 起保存接真：宿主通过 ctx.onSaveScenarioPlan
+// 注入落库实现（cards/ 不直连 API）；没接宿主 / 没 scenario:create 时保存钮不渲染，
+// 没带 graph 时 disabled + 人话 Tooltip——写钮要么真能写，要么不出现。
 // T4：[画布预览] 接真——payload 自包含，graph 合法即写 sessionStorage 后开新 Tab 跳
 // /scene-preview（同 Tab 跳会丢 bench 会话现场）；没带 graph 的方案保持 disabled + 人话 Tooltip。
 import { Button, Card, Space, Tooltip, Typography, message } from "antd";
+import SavePlanAction from "../../shared/SavePlanAction";
 import type { CardContext } from "./registry";
 import type { ScenarioPlansPayload } from "./types";
 import { previewPageUrl, previewStorageKey, previewableGraph } from "./previewLink";
@@ -15,10 +17,12 @@ function previewRunToken(): string {
   return "t" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
 }
 
-function openPreview(planName: string, graph: unknown, index: number): void {
+function openPreview(planName: string, graph: unknown, index: number, projectId?: string): void {
   const key = previewStorageKey(previewRunToken(), index);
   try {
-    sessionStorage.setItem(key, JSON.stringify({ plan_name: planName, graph }));
+    sessionStorage.setItem(key, JSON.stringify({
+      plan_name: planName, graph, ...(projectId ? { project_id: projectId } : {}),
+    }));
   } catch {
     // 隐私模式/配额满：说清楚为什么打不开，不演「已打开」
     message.warning("浏览器会话存储不可用，无法打开画布预览（可能被隐私模式拦截）");
@@ -75,7 +79,7 @@ export default function ScenarioPlansCard({ payload, ctx }: { payload: ScenarioP
                     size="small"
                     data-testid="plan-preview"
                     disabled={!canPreview}
-                    onClick={() => openPreview(name, plan.graph, i)}
+                    onClick={() => openPreview(name, plan.graph, i, ctx.projectId)}
                   >
                     画布预览
                   </Button>
@@ -90,7 +94,11 @@ export default function ScenarioPlansCard({ payload, ctx }: { payload: ScenarioP
               >
                 选择
               </Button>
-              <Typography.Text className="tp-text-sm" type="secondary">保存（二期开放）</Typography.Text>
+              <SavePlanAction planName={name} disabledReason={canPreview
+                ? null : "这个方案没带场景图（graph），不能落库"}
+                onSave={ctx.onSaveScenarioPlan
+                  ? (finalName) => ctx.onSaveScenarioPlan!(finalName, plan.graph)
+                  : undefined} />
             </Space>
             {ctx.busy && (
               <Typography.Text className="tp-text-sm" type="secondary" data-testid="card-busy-note" style={{ display: "block", marginTop: 6 }}>

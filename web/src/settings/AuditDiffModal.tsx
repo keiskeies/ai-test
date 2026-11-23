@@ -7,7 +7,7 @@
 // 嵌套对象不递归展开比较——键级不同已足够定位「改了哪」，值级高亮留给细节卡的全量 JSON。
 import { Modal, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { tp } from "../theme";
+import { tpv } from "../theme";
 
 export interface DiffRow {
   key: string;
@@ -53,10 +53,10 @@ export default function AuditDiffModal({ diff, action, onClose }: {
     { title: "键", dataIndex: "key", width: 130, render: (v: string) => (
       <Typography.Text className="tp-mono" data-testid="audit-diff-key">{v}</Typography.Text>) },
     { title: "before", dataIndex: "before", render: (v: string, r: DiffRow) => (
-      <div data-testid={"audit-diff-before-" + r.key} style={r.changed ? { background: tp.tag.red.bg } : undefined}
+      <div data-testid={"audit-diff-before-" + r.key} style={r.changed ? { background: tpv.tag.red.bg } : undefined}
         >{cell(v)}</div>) },
     { title: "after", dataIndex: "after", render: (v: string, r: DiffRow) => (
-      <div data-testid={"audit-diff-after-" + r.key} style={r.changed ? { background: tp.tag.green.bg } : undefined}
+      <div data-testid={"audit-diff-after-" + r.key} style={r.changed ? { background: tpv.tag.green.bg } : undefined}
         >{cell(v)}</div>) },
   ];
   return (

@@ -31,7 +31,7 @@
 // ⑫ 取失败不许摊成空态：表体 500 说「没取到」而不是「还没有成员」；弹窗候选查失败
 //    说「候选用户没取到」而不是「没有匹配的用户」（catch 里 setCands([]) 让两者同形）。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ConfigProvider, message } from "antd";
 import MembersTab from "./MembersTab";
 import type { CandidateRow, MemberRow, RoleRow } from "../api/api";
@@ -77,6 +77,19 @@ function res(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
 }
 
+// D245：高级搜索三件套的依赖。字段与后端 MEMBER_LIST_FILTER 同名同 kind。
+const FILTER_META = {
+  view_type: "member", view_label: "项目成员",
+  supported_view_types: ["member"],
+  fields: [
+    { field: "account", label: "账号", kind: "text",
+      ops: ["CONTAINS", "NOT_CONTAINS", "EQUALS", "NOT_EQUALS"] },
+    { field: "role_code", label: "角色", kind: "enum",
+      ops: ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN"] },
+  ],
+  unavailable: {},
+};
+
 interface Call { url: string; method: string; body?: string }
 type Resp = { status: number; body: unknown };
 
@@ -101,8 +114,11 @@ function mockBackend(members: MemberRow[], over: {
     const url = String(input);
     const method = (init?.method ?? "GET").toUpperCase();
     calls.push({ url, method, body: init?.body ? String(init.body) : undefined });
+    // D245：ListToolbar 挂载即拉元数据与个人视图（未 mock 会 throw，整页红成取数失败）
+    if (url.includes("/filter-meta?")) return res(200, FILTER_META);
+    if (url.includes("/saved-views?")) return res(200, []);
     // 前缀 /api/v1 来自 client.ts:77 的统一拼装
-    if (method === "GET" && url === "/api/v1/projects/p1/members") {
+    if (method === "GET" && url.startsWith("/api/v1/projects/p1/members")) {
       const r = take(over.membersResp, nMembers++, { status: 200, body: { items: members } });
       return res(r.status, r.body);
     }
@@ -138,11 +154,12 @@ const dels = (c: Call[]) => c.filter((x) => x.method === "DELETE" && x.url.start
 /** motion:false 同 UsersTab.test.tsx:86-93：rc-motion 的 leave 动画在 jsdom 里不完成，
  * destroyOnClose 的弹窗关掉后节点永远留在 DOM，「成功/失败后窗关不关」就断言不了。 */
 function renderTab(over: {
-  canManage?: boolean; selfId?: string; onChanged?: () => void;
+  canManage?: boolean; canSaveView?: boolean; selfId?: string; onChanged?: () => void;
 } = {}) {
   return render(
     <ConfigProvider theme={{ token: { motion: false } }}>
       <MembersTab projectId="p1" canManage={over.canManage ?? true}
+        canSaveView={over.canSaveView ?? true} canDeleteView={over.canSaveView ?? true}
         selfId={over.selfId ?? "u1"} onChanged={over.onChanged} />
     </ConfigProvider>,
   );
@@ -606,5 +623,51 @@ describe("⑬ 取失败不许摊成空态（表体 + 弹窗候选）", () => {
     openDropdown(screen.getByTestId("member-candidate"));
     expect(await screen.findByText("没有匹配的用户", {}, { timeout: 2000 })).not.toBeNull();
     expect(screen.queryByText(/候选用户没取到/)).toBeNull();
+  });
+});
+
+// ── D245：高级搜索 + 列设置（三件套铺到项目成员）────────────────────────────
+describe("D245 高级搜索 + 列设置（三件套铺到项目成员）", () => {
+  const listCalls = (calls: Call[]) => calls.filter((c) =>
+    c.method === "GET" && c.url.startsWith("/api/v1/projects/p1/members"));
+  const thead = () => document.querySelector(".ant-table-thead")?.textContent ?? "";
+
+  it("空条件不拼 filter；应用「账号包含 li」后重查且请求带条件 JSON", async () => {
+    // 变异靶：load 不接 advFilter（重查请求无 filter）· 空条件也拼 filter=
+    const calls = mockBackend([M_SELF, M_LI, M_ANON]);
+    renderTab();
+    await waitFor(() => expect(screen.getByText("lisi")).toBeTruthy());
+    expect(listCalls(calls)[0].url).toBe("/api/v1/projects/p1/members");
+    const before = listCalls(calls).length;
+    fireEvent.click(await screen.findByTestId("lt-search"));
+    const panel = await screen.findByTestId("lt-panel");
+    fireEvent.click(within(panel).getByTestId("lt-add-cond"));
+    const cond = await within(panel).findByTestId("lt-cond-row");
+    // 字段名来自后端 meta 的第一项（account），前端不自列字段
+    fireEvent.change(within(cond).getByTestId("lt-val-text"), { target: { value: "li" } });
+    fireEvent.click(within(panel).getByTestId("lt-apply"));
+    await waitFor(() => expect(listCalls(calls).length).toBe(before + 1));
+    const last = listCalls(calls)[listCalls(calls).length - 1];
+    const q = new URL(last.url, "http://t.test").searchParams;
+    expect(JSON.parse(q.get("filter")!)).toEqual({
+      search_mode: "AND",
+      conditions: [{ field: "account", operator: "CONTAINS", value: "li" }],
+    });
+  });
+
+  it("列设置勾掉「姓名」只藏那一列（其余表头原样）", async () => {
+    // 变异靶：columns 不包 applyColumnPrefs（勾了没反应）· key 与 CHOICES 漂移（藏错列）
+    mockBackend([M_SELF, M_LI, M_ANON]);
+    renderTab();
+    await waitFor(() => expect(screen.getByText("lisi")).toBeTruthy());
+    expect(thead()).toContain("姓名");
+    fireEvent.click(await screen.findByTestId("lt-cols"));
+    const panel = await screen.findByTestId("lt-col-panel");
+    const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
+    const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
+    expect(labels).toEqual(["账号", "姓名", "角色"]);
+    fireEvent.click(boxes[labels.indexOf("姓名")]);
+    await waitFor(() => expect(thead()).not.toContain("姓名"));
+    expect(thead()).toContain("角色");
   });
 });

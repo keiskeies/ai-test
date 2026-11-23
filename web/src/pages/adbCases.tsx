@@ -9,7 +9,7 @@
 //    回收站入口是它的历史欠账，这里不做「跟孪生一样缺」的辩护——有端点就诚实给入口。
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Empty, Input, Modal, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Empty, Input, Modal, Space, Tag, Typography, message } from "antd";
 import { PlusOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
@@ -20,6 +20,10 @@ import { adbCaseApi, type AdbCaseOut } from "../api/adbCase";
 import { ownerLabel, MEMBERS_FAILED, MEMBERS_LOADING, membersReady, type MemberLookup } from "../shared/ownerName";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
+import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
+import type { Option } from "../shared/listToolbar/ListToolbar";
+import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 import { STATUSES } from "../shared/runVocab";
 import type { Page } from "../api/api";
 
@@ -27,6 +31,18 @@ type Row = AdbCaseOut;
 type MemberRow = { user_id: string; account: string | null; name: string | null };
 
 const PRIO_COLOR: Record<string, string> = { P0: "red", P1: "volcano", P2: "blue", P3: "default" };
+
+// D217：列设置面板要露的列（key 与 columns 的 key 逐字一致）。回收站独有的
+// 「删除人/删除时间/操作」不进清单——它们跟着视图走，不跟着偏好走。
+const ADB_COL_CHOICES: ColumnChoice[] = [
+  { key: "name", label: "名称" },
+  { key: "prio", label: "优先级" },
+  { key: "dev", label: "默认设备" },
+  { key: "enabled", label: "启用" },
+  { key: "last", label: "最近结果" },
+  { key: "owner", label: "负责人" },
+  { key: "upd", label: "更新时间" },
+];
 
 // adb 运行的 error 全来自「没跑成」（debug_services.py _run_status:275-289 / _finish_error
 // :331-371，如「用例不可执行：默认设备…不在本项目可用设备里」），一条 adb 运行里没有
@@ -59,10 +75,15 @@ function CasesList() {
   const [current, setCurrent] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState<number | null>(null);
+  // D217：高级搜索条件 + 列偏好（列设置落盘键 adb_case，与 filter-meta 的 view_type 同源）
+  const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
+  const [colPref, setColPref] = useColumnPrefs("adb_case", ADB_COL_CHOICES.map((c) => c.key));
   // inRecycled 只有这一个写入口（runs.tsx 的 patch 同款）：三个 setState 各写各的时，
   // 漏接一个 setCurrent(1) 没人拦得住——停在第 3 页点回收站，落的是回收集里无关的切片
   // （listPagination.tsx 注释③ 的同一个 hazard）。
   const toggleRecycled = (): void => { setInRecycled((v) => !v); setCurrent(1); };
+  // D217：高级搜索是第二类筛选，与回收站开关同一条「改条件必回第 1 页」纪律
+  const patchAdv = (next: FilterDoc): void => { setAdvFilter(next); setCurrent(1); };
 
   // load 依赖 [pid, inRecycled, current, pageSize]，**绝不把 rows 放进去**：load 自己
   // setRows(新数组)——写者进自己的依赖就是「响应→新 rows→load 换身份→effect 重跑→再请求」
@@ -75,7 +96,9 @@ function CasesList() {
       // 请求永不带 cursor：current+cursor 同传后端直接 400，一页两把尺子正是被禁的那件事
       const r = await adbCaseApi.listCases({
         project_id: pid, size: pageSize, current,
-        ...(inRecycled ? { recycled: true } : {}) });
+        ...(inRecycled ? { recycled: true } : {}),
+        // D217：空条件不上线（不是 filter=），非空才拼条件组 JSON
+        ...(isFilterEmpty(advFilter) ? {} : { filter: JSON.stringify(advFilter) }) });
       // 页码模式是替换语义：第 3 页的行就只画第 3 页的，别页的行必须下桌。
       setRows(r.items);
       // total 只从响应来，永不由 rows.length 客户端现攒（页内行数不是总数）。
@@ -93,7 +116,7 @@ function CasesList() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "用例列表加载失败");
     } finally { setLoading(false); }
-  }, [pid, inRecycled, current, pageSize]);
+  }, [pid, inRecycled, current, pageSize, advFilter]);
   useEffect(() => { void load(); }, [load]);
   // 负责人列要名字不是 id：成员表拉一次。失败如实标 failed（ownerLabel 会说「名字未取到」），
   // 不静默把 uuid 当名字摊出去——同 uiCases.tsx 一起改的口径。
@@ -137,6 +160,15 @@ function CasesList() {
   const [purge, setPurge] = useState<Row | null>(null);
   const [purgeName, setPurgeName] = useState("");
   const [purging, setPurging] = useState(false);
+
+  // D217：高级搜索的候选值全部复用页面已在手的数据（成员表/优先级/执行结果词表），
+  // 不为一个下拉再拉第二遍；成员表没就绪时不给候选，用户仍可按原值精确筛。
+  const filterValueOptions: Record<string, Option[]> = {
+    priority: ["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v })),
+    last_run_status: Object.entries(STATUSES).map(([k, v]) => ({ value: k, label: v.label })),
+    owner_id: members.state === "ready"
+      ? Object.entries(members.names).map(([k, v]) => ({ value: k, label: v })) : [],
+  };
   async function submitPurge(): Promise<void> {
     if (!purge) return;
     setPurging(true);
@@ -152,6 +184,16 @@ function CasesList() {
   return (
     <div className="tp-fill tp-fill-body">
       <div style={{ flex: "0 0 auto" }}>
+      {/* D217：D47-a 三件套铺到 ADB 用例页。快捷入口（新建/回收站）留在下一行，
+          高级搜索管任意组合，两者并存不互相替代。 */}
+      <ListToolbar
+        projectId={pid} viewType="adb_case"
+        filter={advFilter} onFilterChange={patchAdv}
+        valueOptions={filterValueOptions}
+        allColumns={ADB_COL_CHOICES} columnPref={colPref} onColumnPrefChange={setColPref}
+        canSaveView={can(perms, "search:view:create")}
+        canDeleteView={can(perms, "search:view:delete")}
+      />
       <Space style={{ marginBottom: 12 }} wrap>
         {canCreate && !inRecycled && (
           <Button type="primary" icon={<PlusOutlined />} data-testid="adb-case-new"
@@ -181,18 +223,18 @@ function CasesList() {
               : canCreate ? "还没有 ADB 用例，点「新建用例」进步骤编辑器"
               : "还没有 ADB 用例（你没有新建权限）"} />
         ) }}
-        columns={[
-          { title: "名称", dataIndex: "name", render: (v: string, r) => (
+        columns={applyColumnPrefs([
+          { title: "名称", dataIndex: "name", key: "name", render: (v: string, r) => (
             <Typography.Link data-testid="adb-case-row-name" onClick={() => nav("/adb/cases/" + r.id)}>
               {v}
             </Typography.Link>) },
-          { title: "优先级", dataIndex: "priority", width: 80, render: (v: string) => (
+          { title: "优先级", dataIndex: "priority", key: "prio", width: 80, render: (v: string) => (
             <Tag color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
           { title: "默认设备", key: "dev", width: 160, render: (_, r) => (
             r.default_device
               ? <Typography.Text className="tp-text-sm" data-testid="adb-case-row-device">{r.default_device}</Typography.Text>
               : <Tag data-testid="adb-case-row-device" color="blue">任一空闲</Tag>) },
-          { title: "启用", dataIndex: "enabled", width: 70, render: (v: boolean) => (
+          { title: "启用", dataIndex: "enabled", key: "enabled", width: 70, render: (v: boolean) => (
             <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag>) },
           { title: "最近结果", key: "last", width: 110, render: (_, r) => {
             if (!r.last_run_status) return <Typography.Text type="secondary">未运行</Typography.Text>;
@@ -251,7 +293,7 @@ function CasesList() {
             : (canDelete ? [{ title: "操作", key: "ops", width: 90, render: (_: unknown, r: Row) => (
               <Button size="small" danger data-testid="adb-case-del"
                 onClick={() => removeOne(r)}>删除</Button>) }] : [])),
-        ]}
+        ], colPref)}
         cardFooter={(
           // 脚注与页码住进卡底（业主点名：卡有边有角，小字却散在卡外的页面底色上）。
           <div className="tp-cardfoot">

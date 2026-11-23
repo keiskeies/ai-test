@@ -19,9 +19,9 @@ export default function OpenPageCard({ payload, ctx }: { payload: OpenPagePayloa
   const navigate = useNavigate();
   const url = toPageUrl(String(payload.route ?? ""), payload.params);
   return (
-    <div data-testid="open-page-card" style={{ border: "1px solid #D6E4FF", borderRadius: 8, padding: "8px 12px", background: "#F7FAFF", display: "flex", alignItems: "center", gap: 8 }}>
+    <div data-testid="open-page-card" style={{ border: "1px solid var(--tp-tag-blue-bd)", borderRadius: 8, padding: "8px 12px", background: "var(--tp-tag-blue-bg)", display: "flex", alignItems: "center", gap: 8 }}>
       <Typography.Text className="tp-text-md">建议打开：</Typography.Text>
-      <Typography.Text className="tp-text-sm tp-mono" style={{ color: "#1677ff" }}>{url}</Typography.Text>
+      <Typography.Text className="tp-text-sm tp-mono" style={{ color: "var(--tp-tag-blue-fg)" }}>{url}</Typography.Text>
       <Space size={8}>
         <Button size="small" type="primary" data-testid="open-page-go" disabled={ctx.busy} onClick={() => navigate(url)}>
           前往

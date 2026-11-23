@@ -138,11 +138,38 @@ class ScenarioListIn(BaseModel):
     # 不顺手扩列（那是行为改变）。大小写不敏感来自 utf8mb4_0900_ai_ci（与浏览器
     # toLowerCase 同宽度）；% 与 _ 是字面量（转义复用 shared.filters._like）。全空白 = 没筛选。
     keyword: str | None = Field(default=None, description="名称关键字（大小写不敏感）；全空白=不过滤")
+    # filter（D214）：D47-a 高级搜索条件组（JSON 串，形状见 shared.filters）。
+    # 与 module_id/module_ids/keyword/recycled 并行 AND；字段白名单见 SCENARIO_LIST_FILTER。
+    filter: str | None = Field(default=None, description="高级搜索条件组（JSON）；白名单外字段 400")
 
 
 class ScenarioGetIn(BaseModel):
     project_id: str
     scenario_id: str
+
+
+# —— 变更历史（D262）——
+class ScenarioRevisionListIn(BaseModel):
+    project_id: str
+    scenario_id: str
+    cursor: str | None = None
+    size: int = Field(default=20, ge=1, le=200)
+
+
+class ScenarioRevisionOut(BaseModel):
+    """一行历史：version = 变更后的版本号；changed 是 [{field, before, after}] 摘要。
+
+    variables 的 before/after 只含 `keys`（键名），step_graph 只含 `step_count`——
+    响应里不会出现变量值或步骤配置原文（那些可能有 token/密码）。
+    """
+
+    id: str
+    scenario_id: str
+    version: int
+    actor_id: str | None = None
+    actor_name: str | None = None
+    changed: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str | None = None
 
 
 class ScenarioPurgeIn(BaseModel):
@@ -236,6 +263,76 @@ class ScenarioBatchMoveIn(BaseModel):
     project_id: str
     scenario_ids: list[str] = Field(min_length=1)
     module_id: str | None = None  # None = 移到根（未分类）
+
+
+class ScenarioBatchIn(BaseModel):
+    """D255：批量回收 / 批量恢复（全有或全无）。
+
+    与 D251/D252 的接口定义批量同口径：重复 id → 422；任一不存在或状态不对 → 404
+    且整批不动。场景列表页此前是「前端 for 循环逐条 delete」——3 条里第 2 条失败会
+    留下半批已删、半批还在，用户看到的错误与真实状态对不上。
+    """
+
+    project_id: str
+    scenario_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class ScenarioBatchPurgeIn(ScenarioBatchIn):
+    """D256：批量彻底删除。单条要逐字输场景名，批量降级为固定短语，但**服务端也验**——
+    客户端 disabled 只是提示，API 直调不应该绕过这道确认。
+    """
+
+    confirm_word: str
+
+
+class ScenarioBatchCopyIn(ScenarioBatchIn):
+    """D257：批量复制。`module_id` 为 None 时各副本跟随各自源场景的模块。
+
+    名称策略与单条 duplicate 不同：单条撞名是 409（用户自己起的名），批量里 N 个
+    「- 副本」撞名若也 409，等于一次复制 200 个里有一个重名就全批失败。这里自动加
+    数字后缀（「 - 副本 2」「 - 副本 3」…）保证每行都能落地，并在响应里回报最终名。
+
+    D261：`target_project_id` 给定时复制到**另一个项目**（None/相同 = 项目内复制，
+    旧语义不变）。跨项目时有两处必须按项目私有资产处理：
+    - `env_id` **不跟随**：环境是项目私有资产（D181 已禁止跨项目引用），跟随过去
+      会让副本一保存就违规；副本落 None，由目标项目的人重新绑定；
+    - `module_id` 缺省 = 目标项目的「未分类」，**不跟来源模块**（模块树也是项目私有，
+      同样的 id 在目标项目里不存在）。
+    """
+
+    module_id: str | None = None
+    target_project_id: str | None = None
+
+
+class ScenarioBatchCopyOut(BaseModel):
+    ok: bool = True
+    created: int
+    names: list[str] = Field(default_factory=list)
+
+
+class ScenarioBatchRunIn(ScenarioBatchIn):
+    """D258：批量执行。`env_id` 只做统一覆盖；缺省时每个场景各用自己保存的环境。"""
+
+    env_id: str | None = None
+
+
+class ScenarioBatchRunFailed(BaseModel):
+    scenario_id: str
+    code: str
+    message: str
+
+
+class ScenarioBatchRunOut(BaseModel):
+    """投递结果逐条可解释。
+
+    预检（存在性/状态/重复/环境可解析）是全有或全无的；但「投递」是逐条 commit 的
+    （enqueue 的设计不允许攒批），broker 在第 k 条时死掉的话前 k-1 条已经诞生。
+    所以回包必须同时给 `run_ids` 与 `failed`，前端不能拿勾选数冒充「已启动数」。
+    """
+
+    ok: bool = True
+    run_ids: list[str] = Field(default_factory=list)
+    failed: list[ScenarioBatchRunFailed] = Field(default_factory=list)
 
 
 ScenarioMoveTarget = Literal["duplicate", "batch_move"]
