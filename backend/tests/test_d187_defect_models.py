@@ -130,7 +130,7 @@ def test_model_columns_match_the_migration_source() -> None:
 
     D191 起 0028 用 `alter_column` + `add_column` 扩了 `defect`，所以列集必须把
     迁移链上所有对该表的增列一起算——只读 0027 会把 tags/delete_user/delete_time
-    误判成「模型有、迁移没有」。
+    误判成「模型有、迁移没有」。D280 的 source/severity 在 0054，同样并进来。
     """
     import pathlib
     import re
@@ -139,7 +139,8 @@ def test_model_columns_match_the_migration_source() -> None:
     src = (versions / "0027_defect.py").read_text(encoding="utf-8")
     src28 = (versions / "0028_defect_services.py").read_text(encoding="utf-8")
     src29 = (versions / "0029_project_meta.py").read_text(encoding="utf-8")
-    assert src and src28 and src29, "读不到 0027/0028/0029 迁移文件"
+    src54 = (versions / "0054_defect_source_severity.py").read_text(encoding="utf-8")
+    assert src and src28 and src29 and src54, "读不到 0027/0028/0029/0054 迁移文件"
 
     for table, model in (("defect", Defect), ("defect_case_link", DefectCaseLink)):
         # 抠 `op.create_table("table", ...)` 那一段里的 sa.Column("x"
@@ -151,6 +152,10 @@ def test_model_columns_match_the_migration_source() -> None:
             r'op\.add_column\(\s*"' + table + r'",\s*sa\.Column\(\s*"([a-z_]+)"', src28))
         in_migration |= set(re.findall(
             r'op\.add_column\(\s*"' + table + r'",\s*sa\.Column\(\s*"([a-z_]+)"', src29))
+        if table == "defect":
+            # D280：0054 只给 defect 加列
+            in_migration |= set(re.findall(
+                r'op\.add_column\(\s*"defect",\s*sa\.Column\(\s*"([a-z_]+)"', src54))
         in_model = {c.key for c in model.__table__.columns}
         assert in_model - in_migration == set(), f"{table}: 模型有、迁移没有 → insert 报 Unknown column：{sorted(in_model - in_migration)}"
         assert in_migration - in_model == set(), f"{table}: 迁移有、模型没有 → 模型读不到这一列：{sorted(in_migration - in_model)}"
@@ -195,9 +200,15 @@ async def test_migration_0027_is_on_the_head_of_the_chain() -> None:
     assert parents["0050"] == "0049"
     assert parents["0051"] == "0050"
     assert parents["0052"] == "0051"
+    assert parents["0053"] == "0052"
+    assert parents["0054"] == "0053"
+    assert parents["0055"] == "0054"
+    assert parents["0056"] == "0055"
+    assert parents["0059"] == "0058"
+    assert parents["0060"] == "0059"
     chain = set(parents.values()) - {None}
     heads = set(revs) - chain
-    assert heads == {"0052"}, f"链头应为唯一 0052，实际 {sorted(heads)}"
+    assert heads == {"0060"}, f"链头应为唯一 0060，实际 {sorted(heads)}"
 
 
 async def test_tables_actually_exist_in_the_migrated_db(conn) -> None:

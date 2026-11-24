@@ -5,7 +5,7 @@
 // 这是继承语义最容易被做错的地方。「恢复继承」走 request_unset 把键真删掉。
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Empty, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
-import { BugOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PlusOutlined, RestOutlined, UndoOutlined } from "../ui/icons";
+import { BugOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, RestOutlined, UndoOutlined } from "../ui/icons";
 import { ApiErr, get, patch, post } from "../api/client";
 import type { ApiDef, CaseRow, DatasetRow } from "./api";
 import type { Assertion } from "./req";
@@ -138,6 +138,9 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
   const [running, setRunning] = useState<string | null>(null);
   // 回收站视图（§11.4.5/§4.4）：用例能回收，就得看得见、回得来、也能彻底删掉
   const [inRecycled, setInRecycled] = useState(false);
+  // D273：批量选择（正常视图=批量回收，回收站视图=批量恢复）。换接口/换视图一律清空：
+  // 选中行在另一个视图里根本不可见，留着就是拿看不见的名单按下批量钮。
+  const [selected, setSelected] = useState<string[]>([]);
   const [purge, setPurge] = useState<CaseRow | null>(null);
   const [purgeName, setPurgeName] = useState("");
   const [purging, setPurging] = useState(false);
@@ -169,7 +172,9 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
 
   useEffect(() => { void load(); }, [def.id, def.version, inRecycled]);
   // 换个接口就退出回收站：停在上一个接口的墓碑堆里看新接口，只会让人以为它被删空了
-  useEffect(() => { setInRecycled(false); }, [def.id]);
+  useEffect(() => { setInRecycled(false); setSelected([]); }, [def.id]);
+  // D273：切视图清选择——批量钮只对当前视图的行有意义（回收站的名单不该带进正常视图）
+  useEffect(() => { setSelected([]); }, [inRecycled]);
   // 计数徽标只报正常视图：切进回收站不该让列表上的「N 条用例」变成墓碑数。
   // 取失败时报 null 而不是 0：Tab 上「用例(0)」是把「没查到」演成「查到了 0 条」，
   // api.tsx:706 收到 null 就只写「用例」，不带数字。
@@ -293,6 +298,68 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
     } catch { /* toast */ }
   }
 
+  // —— D273 批量回收/恢复（判据在后端：全有或全无；批量不提供 force）——
+  const [batchRemoving, setBatchRemoving] = useState(false);
+  async function doBatchRemove(): Promise<void> {
+    setBatchRemoving(true);
+    try {
+      await post("/api-cases/batch-delete", { project_id: def.project_id, case_ids: selected });
+      message.success("已放入回收站（" + selected.length + " 条用例）");
+      setSelected([]);
+      await load(); onChanged?.();
+    } catch (e) {
+      // 与单删的 409 不同，批量的 details 是 blocked 清单（每条各带引用数）：
+      // 翻译成弹窗点名，不吞进 toast（api.tsx 的 D251 批量条同口径）。
+      const blk = (e instanceof ApiErr
+        ? (e.details as { blocked?: { name: string; count: number }[]; reason?: string } | null)
+        : null)?.blocked;
+      if (blk && blk.length > 0) {
+        Modal.error({
+          centered: true,
+          title: "整批未回收：有用例被场景引用",
+          content: (
+            <div>
+              <p>{blk.map((b) => b.name + "（" + b.count + " 个场景）").join("、")}</p>
+              <p>整批一行未动。请先在场景里解除引用；确认要连带断掉场景步骤时，请逐个回收。</p>
+            </div>
+          ),
+        });
+      }
+      // 其余错误 client 已 toast
+    } finally { setBatchRemoving(false); }
+  }
+  function batchRemove(): void {
+    Modal.confirm({
+      centered: true,
+      title: "把选中的 " + selected.length + " 条用例放入回收站？",
+      content: "全有或全无：只要有一条被未回收场景引用，整批都不会删。",
+      okText: "放入回收站",
+      okButtonProps: { danger: true },
+      onOk: doBatchRemove,
+    });
+  }
+
+  const [batchRestoring, setBatchRestoring] = useState(false);
+  async function doBatchRestore(): Promise<void> {
+    setBatchRestoring(true);
+    try {
+      await post("/api-cases/batch-restore", { project_id: def.project_id, case_ids: selected });
+      message.success("已恢复（" + selected.length + " 条用例）");
+      setSelected([]);
+      await load(); onChanged?.();
+    } catch { /* client 已 toast；选择保留让用户改名单 */ }
+    finally { setBatchRestoring(false); }
+  }
+  function batchRestore(): void {
+    Modal.confirm({
+      centered: true,
+      title: "恢复选中的 " + selected.length + " 条用例？",
+      content: "全有或全无：只要有一条不在回收站，或绑定的数据集已被删除，整批都不会恢复。",
+      okText: "恢复",
+      onOk: doBatchRestore,
+    });
+  }
+
   async function submitPurge(): Promise<void> {
     if (!purge) return;
     setPurging(true);
@@ -381,7 +448,30 @@ export default function CaseList({ def, envId, perms, onChanged, onCount }: {
           description={denied ? "你已不是本项目成员或没有读取这个接口用例的权限，刷新不会改变结论"
             : "可能是网络不通或后端没起，恢复后重新进入本接口即可"} />
       )}
+      {/* D273 批量条（api.tsx 的 D251/D252 同口径）：选中才出现；
+          正常视图 [批量回收]，回收站 [批量恢复]——彻底删除仍要求逐字确认名称，不做批量。 */}
+      {canDelete && !inRecycled && selected.length > 0 && (
+        <Space style={{ marginBottom: 8 }} data-testid="case-batch-bar">
+          <Typography.Text>已选 {selected.length} 项</Typography.Text>
+          <Button size="small" danger icon={<DeleteOutlined />} data-testid="case-batch-delete"
+            loading={batchRemoving} onClick={batchRemove}>批量回收</Button>
+          <Button size="small" data-testid="case-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+        </Space>
+      )}
+      {canUpdate && inRecycled && selected.length > 0 && (
+        <Space style={{ marginBottom: 8 }} data-testid="case-batch-bar">
+          <Typography.Text>已选 {selected.length} 项</Typography.Text>
+          <Button size="small" type="primary" icon={<ReloadOutlined />} data-testid="case-batch-restore"
+            loading={batchRestoring} onClick={batchRestore}>批量恢复</Button>
+          <Button size="small" data-testid="case-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+        </Space>
+      )}
       <Table size="small" rowKey="id" loading={loading} dataSource={rows}
+        rowSelection={(!inRecycled && canDelete) || (inRecycled && canUpdate) ? {
+          selectedRowKeys: selected,
+          onChange: (keys) => setSelected(keys.map(String)),
+          preserveSelectedRowKeys: false,
+        } : undefined}
         locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={failed
             ? (inRecycled ? "回收站没取到，以上方的加载失败提示为准" : "用例没取到，以上方的加载失败提示为准")

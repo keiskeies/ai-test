@@ -1,5 +1,10 @@
 // §7.1 请求对象的前端镜像 + 断言常量（与后端 schemas.py 逐字段对齐）。
-export type Pair = [string, string];
+// 历史数据/导入/环境变量是两元 ["名","值"]；接口参数可带第三、四位
+// ["名","值","1|0","描述"]（D288），执行层只读前两位。
+export type Pair = [string, string, string?, string?];
+
+/** 键值表的编辑行：把可选的两元/四元统一摊成四个字段。 */
+export interface PairRow { k: string; v: string; required: boolean; description: string }
 
 export interface ReqBody { type: "none" | "json" | "text" | "form"; content?: string | null }
 
@@ -57,12 +62,24 @@ export const ASSERT_TYPES: { value: string; label: string }[] = [
   { value: "script", label: "脚本断言" },
 ];
 
-export function pairsToRows(pairs?: Pair[] | null): { k: string; v: string }[] {
-  return (pairs ?? []).map((p) => ({ k: p[0] ?? "", v: p[1] ?? "" }));
+export function pairsToRows(pairs?: Pair[] | null): PairRow[] {
+  return (pairs ?? []).map((p) => ({
+    k: p[0] ?? "", v: p[1] ?? "",
+    required: p[2] === "1", description: p[3] ?? "",
+  }));
 }
 
-export function rowsToPairs(rows: { k: string; v: string }[]): Pair[] {
-  return rows.filter((r) => r.k.trim() !== "").map((r) => [r.k, r.v]);
+/**
+ * withMeta=true 用于接口参数：只有真的填了「必填/描述」才升级成四元，
+ * 没填过的行仍写两元（旧数据、用例覆盖层、OpenAPI 导出的形状不变）。
+ */
+export function rowsToPairs(rows: PairRow[], withMeta = false): Pair[] {
+  return rows.filter((r) => r.k.trim() !== "").map((r) => {
+    if (withMeta && (r.required || r.description.trim() !== "")) {
+      return [r.k, r.v, r.required ? "1" : "0", r.description] as Pair;
+    }
+    return [r.k, r.v] as Pair;
+  });
 }
 
 export function cleanRequest(r: Partial<RequestObject>): RequestObject {
@@ -70,7 +87,7 @@ export function cleanRequest(r: Partial<RequestObject>): RequestObject {
   return {
     method: r.method ?? "GET",
     url: r.url ?? "",
-    params: rowsToPairs(pairsToRows(r.params)),
+    params: rowsToPairs(pairsToRows(r.params), true),
     headers: rowsToPairs(pairsToRows(r.headers)),
     auth: r.auth ?? { type: "none" },
     body: body.type === "none" ? { type: "none" } : { type: body.type, content: body.content ?? "" },

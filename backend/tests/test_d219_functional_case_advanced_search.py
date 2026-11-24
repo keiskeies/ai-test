@@ -60,6 +60,7 @@ async def test_filter_meta_registers_functional_case(client, make_user) -> None:
     fields = {f["field"] for f in body["fields"]}
     assert fields == {
         "num", "name", "description", "priority", "template_id",
+        "owner_id",
         "created_by", "updated_by", "created_at", "updated_at",
     }
     # 视图轴 / 模块树轴不是业务字段

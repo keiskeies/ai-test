@@ -59,10 +59,40 @@ type PlanReportExport = { filename: string; media_type: string; content: string;
 type PlanStatusOut = components["schemas"]["PlanStatusOut"];
 type PlanOut = components["schemas"]["PlanOut"];
 type PlanCreateIn = components["schemas"]["PlanCreateIn"];
+
+/** D279：计划头六个可写位（测试阶段/计划与实际起止/责任人）。
+ *  生成物本刀没有这些键（gen:api 禁跑，会自起后端抢 :8321 的业主 demo），手写交集，
+ *  字段与后端 schemas.PlanCreateIn / PlanUpdateIn / PlanOut 逐字一致。
+ *  日期一律 ISO 串；null = 未填（不是「今天」，也不画 0）。 */
+export type PlanScheduleFields = {
+  stage?: string | null;
+  planned_start?: string | null;
+  planned_end?: string | null;
+  actual_start?: string | null;
+  actual_end?: string | null;
+  owner_id?: string | null;
+};
+/** 更新路径的三态哨兵：带 `xxx_set: true` 才认 `xxx`（含 null = 清空）；
+ *  不带 = 不动。与后端 PlanUpdateIn 的 `*_set` 逐字一致。 */
+export type PlanScheduleSentinels = {
+  stage_set?: boolean;
+  planned_start_set?: boolean;
+  planned_end_set?: boolean;
+  actual_start_set?: boolean;
+  actual_end_set?: boolean;
+  owner_set?: boolean;
+};
+
+/** D285：标签（与后端 PlanRecord.tags 逗号串一一对应；出参为数组，空 = 无标签）。
+ *  生成物本刀没有这一键（gen:api 禁跑），手写交集补齐。 */
+export type PlanTagsField = { tags?: string[] };
+
 /** D211：新建计划可带 module_id（生成物本刀没有这一键，手写交集补齐，字段与后端
  *  schemas.PlanCreateIn 一致；省略/null = 未分组）。 */
-export type PlanCreateBody = PlanCreateIn & { module_id?: string | null };
-type PlanUpdateBody = components["schemas"]["plan_update_body"];
+export type PlanCreateBody = PlanCreateIn & PlanScheduleFields & PlanTagsField
+  & { module_id?: string | null };
+type PlanUpdateBody = components["schemas"]["plan_update_body"]
+  & PlanScheduleFields & PlanScheduleSentinels & PlanTagsField;
 type PlanArchiveBody = components["schemas"]["plan_archive_body"];
 // D208：复制入参**手写**——gen:api 本刀禁跑（会自起后端抢业主 :8321 的服务），生成物里
 // 还没有 plan_copy_body；字段与后端 schemas.PlanCopyIn 逐字一致（project_id 必填，
@@ -96,8 +126,39 @@ type OkOut = components["schemas"]["OkOut"];
 // 手写交集与后端 schemas.PlanListRowOut / PlanDetailOut / PlanFollowOut 逐字段一致。
 // 列表行只带 followed（不带总数：列表不做每页 GROUP BY，总数只在详情回答）；
 // 关注态是**现查**plan_follower 的结果，不存前端第二份真相。
-export type PlanRow = PlanOut & { followed?: boolean };
-export type PlanDetail = PlanOut & { followed?: boolean; follower_count?: number };
+export type PlanRow = PlanOut & PlanScheduleFields & PlanTagsField & {
+  /** D279：责任人姓名（后端一次批量解析；没有可解析的名字时缺省，前端画「—」） */
+  owner_name?: string | null;
+  followed?: boolean;
+};
+
+/** D275：列表页批量状态投影（后端 schemas.PlanStatusSummaryOut 手写镜像）。
+ *  与 /plans/{id}/status 同一套判据（_plan_display/_link_result/_rates），只是不带 links 明细。 */
+export type PlanStatusSummary = {
+  plan_id: string;
+  archived: boolean;
+  status: string;
+  total: number;
+  passed: number;
+  failed: number;
+  executed: number;
+  executing: number;
+  not_executed: number;
+  pass_rate: number;
+  execute_rate: number;
+  counts: {
+    functional_case: number;
+    api_case: number;
+    scenario: number;
+    ui_case: number;
+    adb_case: number;
+  };
+};
+export type PlanDetail = PlanOut & PlanScheduleFields & PlanTagsField & {
+  owner_name?: string | null;
+  followed?: boolean;
+  follower_count?: number;
+};
 export type PlanFollowOut = { following: boolean; follower_count: number };
 
 // 列表 query 直接引生成物 operations：后端 PlanListIn 改字段名，这里编译期就断。
@@ -212,6 +273,8 @@ export type PlanListQueryWithModule = PlanListQuery & {
   filter?: string;
   /** D231：只看我关注的计划（视图轴，与模块/未分组/条件组并行 AND）。 */
   followed_by_me?: boolean;
+  /** D285：标签精确筛选（后端 FIND_IN_SET；空/全空白 = 不过滤）。 */
+  tag?: string;
 };
 
 /** 关联改环境入参。**手写判别式，刻意偏离生成物一处**（生成物在说谎的地方）：
@@ -319,6 +382,12 @@ export const planApi = {
    *  execute=executed÷total，空计划 0.0 不是 1.0——后端 _rates 是唯一算式）。 */
   status: (projectId: string, planId: string) =>
     get<PlanStatusOut>("/plans/" + enc(planId) + "/status?project_id=" + enc(projectId)),
+
+  /** D275：列表页批量状态（当前页一次，替代逐行 N+1）。只回仍存在的计划——
+   *  取数间隙被删的行不在 items 里，前端画「—」而不是编 0。silent：页面自己有失败提示条。 */
+  statusBatch: (projectId: string, planIds: string[]) =>
+    post<{ items: PlanStatusSummary[]; total: number }>("/plan-status-batch",
+      { project_id: projectId, plan_ids: planIds }, { silent: true }),
 
   /** 新建计划（同项目重名 409——重名检查连回收站式墓碑都算，后端 _name_dup）。 */
   create: (body: PlanCreateBody) => post<PlanOut>("/plans", body),

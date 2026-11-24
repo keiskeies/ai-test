@@ -81,8 +81,8 @@ async def test_export_selected_fields_verbatim(client, make_user) -> None:
     assert e["validation"] == []
     # 跨域引用 = 原样 id 指针（kind/ref/step_key 点名，不做跨域解析）
     assert e["refs"] == [{"step_key": "login", "kind": "api_case", "ref": "case-login"}]
-    # 如实报：只读导出/不可回灌这件事写进 notes，不只写在文档串里
-    assert any("只读备份快照" in n and "不可回灌" in n for n in out["notes"])
+    # 如实报：D274 起导出可回灌（导入生成新 id，不是恢复备份），这条口径写在 notes 里
+    assert any("本导出是场景快照" in n and "导入" in n and "id 会重新生成" in n for n in out["notes"])
     assert any("跨域引用" in n and "case-login" not in n and s["name"] in n for n in out["notes"])
 
 

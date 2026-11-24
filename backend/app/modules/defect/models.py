@@ -76,6 +76,10 @@ DEFECT_CASE_TYPES: tuple[str, ...] = (
 # 在这里另立第四种词表才是真错。
 PRIORITIES: tuple[str, ...] = ("P0", "P1", "P2", "P3")
 
+# D280：严重程度四值（critical/major/minor/trivial = 致命/严重/一般/提示）。
+# 存码、展示中文由前端词表负责；空 = 未评估（不拿「一般」冒充已评估）。
+DEFECT_SEVERITIES: tuple[str, ...] = ("critical", "major", "minor", "trivial")
+
 
 class Defect(ProjectScopedMixin, TimestampMixin, Base):
     """缺陷本体 `defect`。逐列口径（判据 1 的正面清单：每列点名写入方与读取方 + 它的步号）。
@@ -88,6 +92,8 @@ class Defect(ProjectScopedMixin, TimestampMixin, Base):
     - `handle_users`（复数，MS 那列写两次全仓无一处读，取证 §G 第 1 条）：死列，判据 1 直接毙。
       要「处理人」就只有一个 —— 下面的 `handle_user_id`。
     - `platform` / `platform_bug_id`：不做第三方同步就没人写（§一）。
+      D280 补的 `source`/`severity` 不进这条：它们在缺陷表单里有写入口、列表有读方，
+      与「等第三方同步才会有人写」的 platform 不是一类。
     - `version`（乐观锁）：与 ApiCase/UiCase/Scenario 同口径不做（R104）。
     - `title` 上**没有唯一键**：见下面的 `title` 列。
 
@@ -142,6 +148,14 @@ class Defect(ProjectScopedMixin, TimestampMixin, Base):
         String(24), nullable=False, default=DEFECT_START_STATUS, index=True
     )
     priority: Mapped[str] = mapped_column(String(4), nullable=False, default="P2")
+    # D280：缺陷来源（对齐 MS 列表的「缺陷来源」列）。MS 侧是项目可配字典，本仓没有
+    # 字典表；收自由文本比凭空造一份词表诚实（空 = 未填）。写入方 = create/update，
+    # 读方 = 列表/详情/高级搜索。
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # D280：严重程度（DEFECT_SEVERITIES 四值，空 = 未评估）。与 priority 是两个轴：
+    # priority 回答「先修谁」，severity 回答「坏得多重」，MS 两列并存。
+    # 不设默认值：把未评估的缺陷默认标成「一般」= 伪造一次评估结论。
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # 处理人（单数）。**可空**：MS 缺 handleUser 直接抛错（取证 §B 末），那是替业主定的政策；
     # 「新建时还没决定谁来处理」是真实状态，收空比伪造一个「默认指派创建人」诚实。
     # 写入方 = 步 2 的 create/update；读取方 = 列表与详情的「处理人」列。

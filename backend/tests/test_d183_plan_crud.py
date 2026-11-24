@@ -1,9 +1,10 @@
 """D183 步 1 判据刀：plan_record 本体 CRUD（计划 §六 应用到步 1）。
 
 钉的契约（一条判断一条用例，命名即判据）：
-1. **表形状 = 迁移形状**：列集恰好十列（D211 加入 module_id），没有 owner_id/project_public/软删列/状态枚举列
-   （§六 1「没有任何一列是有 schema 没写入方」的反面清单）；project_id 有索引、
-   项目内重名有唯一约束。走真 information_schema（模型声明了不等于库里有）。
+1. **表形状 = 迁移形状**：列集恰好十七列（D211 加入 module_id、D279 加入 stage/计划与实际起止/
+   owner_id、D285 加入 tags），没有 project_public/软删列/状态枚举列（§六 1「没有任何一列是有 schema 没写入方」的
+   反面清单）；project_id 有索引、项目内重名有唯一约束。走真 information_schema
+   （模型声明了不等于库里有）。
 2. **CRUD 往返 + 每列有写入方**：created_by/updated_by 由两个不同的人分别写出来并被读出
    （§六 1 的正面清单）；DELETE 物理删（raw SQL 数行）；步 2 起删除**级联删关联行**
    （test_delete_cascades_case_links 在本刀视角钉最小集成，完整判据在 test_d183_plan_links.py）。
@@ -87,17 +88,19 @@ async def _seed(session, pid: str, *, row_id: str, name: str, archived: bool = F
 # ══════════ 1. 表形状（迁移真跑出来的形状 + 反面清单） ══════════
 
 async def test_plan_record_shape_is_exactly_the_migration(conn) -> None:
-    """列集恰好十列（D211 的 module_id 在内）；索引/唯一键在场；三族「MS 式死列」都**不许**在。
+    """列集恰好十七列（D211 的 module_id、D279 的六列、D285 的 tags 在内）；索引/唯一键在场；
+    两族「MS 式死列」都**不许**在。
 
     反面清单逐族点名（都对应计划里骂过的形状）：
-    - owner_id/project_public：没有表单能把计划置成行级私有，列永远只有 true 一个值；
-      而且它们一旦出现，`shared/visibility` 就从「不该接」变成「看着能接」——列不许加，
-      助手不接线（另一半钉在用例 7 的源码扫描）。0018 的静默失效教训（schedule/models:10-13）。
+    - project_public：没有表单能把计划置成行级私有，列永远只有 true 一个值；
+      而且它一旦出现，`shared/visibility` 就从「不该接」变成「看着能接」——列不许加，
+      助手不接线（另一半钉在用例 9 的源码扫描）。0018 的静默失效教训（schedule/models:10-13）。
+      D279 的 owner_id 是**责任人展示位**，不参与可见性（用例 9 继续钉「不接 visibility」）。
     - deleted_at/软删列：删除是物理删（§四 末段）。
     - status/state/phase：状态只有 archived 一个持久值（§二 1），其余现算（步 3）。
 
-    D211 的 module_id **有写方也有读方**：plan_create/plan_update 写，_out/列表过滤/模块树读；
-    它不像上面三族那样是「挂名不写」的死列，所以进列集。
+    D211 的 module_id 与 D279 的六列、D285 的 tags **有写方也有读方**：plan_create/plan_update 写，
+    _out/列表过滤/详情读；它们不像上面两族那样是「挂名不写」的死列，所以进列集。
     """
     from sqlalchemy import inspect
 
@@ -114,14 +117,17 @@ async def test_plan_record_shape_is_exactly_the_migration(conn) -> None:
     got = await conn.run_sync(_read)
     assert "plan_record" in got["tables"], "迁移没建表（alembic 没跑到 0024）"
     assert set(got["cols"]) == {"id", "project_id", "name", "description", "archived",
-                                "module_id", "created_by", "updated_by", "created_at",
+                                "module_id", "stage", "planned_start", "planned_end",
+                                "actual_start", "actual_end", "owner_id", "tags",
+                                "created_by", "updated_by", "created_at",
                                 "updated_at"}, \
         "列集变了 = 有人加了没写方/没读方的列（§六 1）：" + str(sorted(got["cols"]))
-    assert not ({"owner_id", "project_public"} & set(got["cols"])), "可见性两列被「顺手补上」了"
+    assert "project_public" not in got["cols"], "可见性列被「顺手补上」了"
     assert not ({"deleted_at", "deleted", "recycled_at"} & set(got["cols"])), "物理删不许有软删列"
     assert not ({"status", "state", "phase"} & set(got["cols"])), "状态枚举列 = 说谎的列（§二 1）"
     assert "ix_plan_record_project_id" in got["idx"], "所有查询都按 project_id 走，缺索引就是全表扫"
     assert "ix_plan_record_module_id" in got["idx"], "模块过滤按 module_id 走，缺索引就是全表扫"
+    assert "ix_plan_record_owner_id" in got["idx"], "按责任人筛走 owner_id，缺索引就是全表扫"
     assert ("uq_plan_record_project_name", ("name", "project_id")) in got["uq"]
     assert got["cols"]["archived"]["nullable"] is False
     assert got["cols"]["module_id"]["nullable"] is True
@@ -537,18 +543,21 @@ async def test_plan_name_unique_per_project(client, session, make_user) -> None:
 # ══════════ 9. 行级可见性永不接线（静态） ══════════
 
 def test_row_level_visibility_is_never_wired_in() -> None:
-    """testplan 包的任何 import 不许指向 app.shared.visibility；模型不许长出那两列。
+    """testplan 包的任何 import 不许指向 app.shared.visibility；模型不许长出 project_public。
 
     为什么正向用例（test_same_project_members_all_see_shared_plans）不够：
-    assert_row_visible 读 `getattr(row, "project_public", True)`——喂给它一张没这两列的
+    assert_row_visible 读 `getattr(row, "project_public", True)`——喂给它一张没这列的
     表，**每行都公开、且不报错**（0018 静默失效；schedule/models.py:10-13 的注释就是为它
     写的）。行为不变的东西行为测试照不出，只能静态钉。visible_clause 更直接：
     它按属性建谓词，接上线当天列表就 AttributeError——但「没接线」这件事本身要有人钉，
     不然哪天「顺手统一一下」的人两边都看不见红。DDL 侧另一半在
-    test_plan_record_shape_is_exactly_the_migration（列集恰好十列）。
+    test_plan_record_shape_is_exactly_the_migration（project_public 不在列集）。
+
+    D279 之后 owner_id 是**允许存在**的责任人列，所以这里只拦 project_public；
+    「owner_id 不参与可见性」由 import 扫描守（services 仍只按 project_id 过滤）。
     """
-    assert not hasattr(PlanRecord, "project_public") and not hasattr(PlanRecord, "owner_id"), \
-        "模型长出可见性两列 = 把「不该接的助手」变成「看着能接」，先摘列再谈"
+    assert not hasattr(PlanRecord, "project_public"), \
+        "模型长出 project_public = 把「不该接的助手」变成「看着能接」，先摘列再谈"
     files = sorted(_MODULE_DIR.glob("*.py"))
     assert files, "扫描目录错了：" + str(_MODULE_DIR)
     for f in files:

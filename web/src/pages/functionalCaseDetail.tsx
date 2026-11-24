@@ -43,6 +43,8 @@ function Detail({ id }: { id: string }) {
   const [priority, setPriority] = useState("P2");
   const [description, setDescription] = useState("");
   const [moduleId, setModuleId] = useState<string | null>(null);
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  const [tags, setTags] = useState<string[]>([]);
   const [custom, setCustom] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
@@ -67,6 +69,8 @@ function Detail({ id }: { id: string }) {
       setPriority(c.priority);
       setDescription(c.description ?? "");
       setModuleId(c.module_id);
+      setOwnerId(c.owner_id);
+      setTags(c.tags ?? []);
       setCustom(c.custom_fields ?? {});
       const d = await projectMetaApi.template(pid, c.template_id).catch(() => null);
       setTpl(d);
@@ -84,6 +88,8 @@ function Detail({ id }: { id: string }) {
     try {
       const out = await functionalApi.updateCase(row.id, {
         project_id: pid, name: name.trim(), priority, description, description_set: true,
+        owner_id: ownerId, owner_set: true,
+        tags,
         module_id: moduleId, module_set: true,
         ...(tpl ? { custom_fields: custom } : {}),
       });
@@ -160,6 +166,21 @@ function Detail({ id }: { id: string }) {
             <Select style={{ width: 220 }} allowClear value={moduleId ?? undefined}
               disabled={!canUpdate} placeholder="未分类"
               onChange={(v) => setModuleId(v ?? null)} options={flattenModules(tree)} />
+          </div>
+          <div>
+            <Typography.Text strong>责任人</Typography.Text>
+            <Select data-testid="fc-detail-owner" style={{ width: 180 }} allowClear
+              value={ownerId ?? undefined} disabled={!canUpdate} placeholder="未指派"
+              onChange={(v) => setOwnerId(v ?? null)}
+              options={members.map((m) => ({
+                value: m.user_id, label: m.name ?? m.account ?? m.user_id,
+              }))} />
+          </div>
+          <div>
+            <Typography.Text strong>标签</Typography.Text>
+            <Select mode="tags" data-testid="fc-detail-tags" style={{ width: 220 }}
+              value={tags} disabled={!canUpdate} placeholder="回车或逗号分隔"
+              tokenSeparators={[",", "，"]} onChange={(v: string[]) => setTags(v)} />
           </div>
         </Space>
         <div style={{ marginTop: 12 }}>

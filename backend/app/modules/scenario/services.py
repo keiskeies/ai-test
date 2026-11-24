@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import column, delete, select, table
+from sqlalchemy import column, delete, func, select, table
 
 from app.core.errors import ApiError, Page, paginate, paginate_desc, paginate_page
 from app.core.permissions import match_perm
@@ -29,6 +29,7 @@ from app.modules.scenario.module_services import _mod
 from app.shared.assertions import prune_rows
 from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.filters import _like
+from app.shared.tags import join_tags, split_tags
 from app.shared.visibility import assert_row_visible, visible_clause
 
 # 回收站「删除人」列的人名来源（§11.4.18）：表名反射而非 import iam.models——领域模块之间
@@ -89,6 +90,8 @@ def _revision_digest(s: Scenario) -> dict[str, Any]:
     return {
         "name": s.name,
         "priority": s.priority,
+        # D284：标签进历史摘要（标签本身不是敏感值，按数组记录）
+        "tags": split_tags(s.tags),
         "module_id": s.module_id,
         "fail_fast": bool(s.fail_fast),
         "max_runtime_ms": s.max_runtime_ms,
@@ -106,6 +109,7 @@ def _out(s: Scenario, *, issues: list[dict] | None = None, produced: bool = Fals
         priority=s.priority, step_graph=s.step_graph, variables=dict(s.variables or {}),
         fail_fast=bool(s.fail_fast), max_runtime_ms=s.max_runtime_ms, env_id=s.env_id,
         common_assertions=list(s.common_assertions or []),
+        tags=split_tags(s.tags),
         owner_id=s.owner_id, project_public=s.project_public, version=s.version,
         step_count=s.step_count, last_run_at=_iso(s.last_run_at),
         last_run_status=s.last_run_status, updated_by=s.updated_by,
@@ -222,6 +226,10 @@ async def scenario_list(payload: schemas.ScenarioListIn, ctx) -> ServiceResult:
     if payload.keyword and payload.keyword.strip():
         kw = payload.keyword.strip()  # 两端空白不进入匹配（用户看不见也删不掉的空格）
         stmt = stmt.where(Scenario.name.like(f"%{_like(kw)}%", escape="\\"))
+    # D284：标签精确筛选走 FIND_IN_SET（逗号串上的 LIKE 会把 bug1 命中 bug10）；
+    # 全空白 = 不过滤（与 keyword 同尺）。
+    if payload.tag and payload.tag.strip():
+        stmt = stmt.where(func.find_in_set(payload.tag.strip(), Scenario.tags) > 0)
     stmt = stmt.order_by(Scenario.id)
     # D47-b 步 5b：cursor 与 current 二选一（同 /api-definitions 步 4b）。
     # 「我在哪」的两套真相一起到场是调用方的 bug，静默择一会把错位藏进翻页里，所以大声 400。
@@ -269,6 +277,7 @@ async def scenario_create(payload: schemas.ScenarioCreateIn, ctx) -> schemas.Sce
                  variables=dict(payload.variables or {}), fail_fast=payload.fail_fast,
                  max_runtime_ms=payload.max_runtime_ms, env_id=payload.env_id,
                  common_assertions=prune_rows(payload.common_assertions),
+                 tags=join_tags(payload.tags),
                  owner_id=ctx.user_id, project_public=payload.project_public,
                  version=1, step_count=count, updated_by=ctx.user_id)
     ctx.db.add(s)
@@ -320,6 +329,9 @@ async def scenario_update(payload: schemas.ScenarioUpdateIn, ctx) -> schemas.Sce
         s.name = payload.name
     if payload.priority is not None:
         s.priority = payload.priority
+    # D284：标签三态（None = 不改、[] = 清空）
+    if payload.tags is not None:
+        s.tags = join_tags(payload.tags)
     if payload.module_set:
         if payload.module_id is not None:
             await _mod(ctx.db, payload.project_id, payload.module_id)
@@ -493,6 +505,7 @@ async def scenario_duplicate(payload: schemas.ScenarioDuplicateIn, ctx) -> schem
                  variables=dict(src.variables or {}), fail_fast=bool(src.fail_fast),
                  max_runtime_ms=src.max_runtime_ms, env_id=src.env_id,
                  common_assertions=list(src.common_assertions or []),
+                 tags=src.tags,
                  owner_id=ctx.user_id, project_public=src.project_public, version=1,
                  step_count=src.step_count, updated_by=ctx.user_id)
     ctx.db.add(s)
@@ -559,6 +572,7 @@ async def scenario_batch_copy(payload: schemas.ScenarioBatchCopyIn, ctx) -> Base
                        variables=dict(src.variables or {}), fail_fast=bool(src.fail_fast),
                        max_runtime_ms=src.max_runtime_ms, env_id=env_id,
                        common_assertions=list(src.common_assertions or []),
+                       tags=src.tags,
                        owner_id=ctx.user_id, project_public=src.project_public, version=1,
                        step_count=src.step_count, updated_by=ctx.user_id)
         ctx.db.add(dup)

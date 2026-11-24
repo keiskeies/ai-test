@@ -18,6 +18,9 @@ export type DefectRow = {
   description: string | null;
   status: string;
   priority: string;
+  // D280：缺陷来源（自由文本）与严重程度（critical/major/minor/trivial，null = 未评估）
+  source: string | null;
+  severity: string | null;
   handle_user_id: string | null;
   handle_user_name: string | null;
   tags: string[];
@@ -98,6 +101,23 @@ export function statusMeta(v: string): DefectStatusMeta {
 export function allowedStatuses(current: string): string[] {
   return [current, ...(DEFECT_TRANSITIONS[current] ?? [])];
 }
+
+/** D280：严重程度四值（与后端 models.DEFECT_SEVERITIES 逐字一致）。
+ *  null/缺省 = 未评估——不画默认等级，也不把未评估算成「一般」。 */
+export const DEFECT_SEVERITIES = ["critical", "major", "minor", "trivial"] as const;
+export type DefectSeverityMeta = { label: string; color: string };
+const SEVERITY_META: Record<string, DefectSeverityMeta> = {
+  critical: { label: "致命", color: "red" },
+  major: { label: "严重", color: "volcano" },
+  minor: { label: "一般", color: "blue" },
+  trivial: { label: "提示", color: "default" },
+};
+/** 词表外的值渲染原文（R112 口径）。 */
+export function severityMeta(v: string): DefectSeverityMeta {
+  return SEVERITY_META[v] ?? { label: v, color: "default" };
+}
+/** 表单/筛选下拉的候选（中文标签）。 */
+export const SEVERITY_OPTIONS = DEFECT_SEVERITIES.map((v) => ({ value: v, label: severityMeta(v).label }));
 
 // ══════════ 状态流转配置（D267，后端 /defect-statuses）══════════
 // 每个项目可整份覆盖默认图；后端空表 = 默认图，所以这里拿到的一定是生效图。
@@ -184,7 +204,12 @@ export type DefectCreateBody = {
   project_id: string;
   title: string;
   description?: string | null;
+  /** D289：MS v2 新建表单的状态下拉；不传 = 状态图起始态 */
+  status?: string;
   priority?: string;
+  /** D280：来源自由文本；严重程度四值（不填 = 未评估） */
+  source?: string | null;
+  severity?: string | null;
   handle_user_id?: string | null;
   tags?: string[];
   template_id?: string | null;
@@ -199,6 +224,11 @@ export type DefectUpdateBody = {
   description?: string | null;
   description_set?: boolean;
   priority?: string;
+  /** D280：`*_set` 三态——不带 = 不改，带 null = 清空（后端 plan/defect 同款哨兵） */
+  source?: string | null;
+  source_set?: boolean;
+  severity?: string | null;
+  severity_set?: boolean;
   handle_user_id?: string | null;
   handle_user_set?: boolean;
   status?: string;

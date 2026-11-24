@@ -32,7 +32,7 @@ function def(over: Partial<ApiDef> = {}): ApiDef {
   return {
     id: "d1", project_id: "p1", module_id: null, name: "查询订单", method: "GET",
     path: "/order/{id}", request: null, status: "complete", version: 1,
-    owner_id: null, project_public: true, ...over,
+    owner_id: null, project_public: true, description: null, tags: [], ...over,
   };
 }
 
@@ -524,6 +524,61 @@ describe("详情抽屉 [编辑] 的写权限门（§11.5.1）", () => {
     fireEvent.click(await screen.findByTestId("api-new"));
     const save = await screen.findByTestId("api-save");
     expect(save.getAttribute("disabled")).toBeNull();
+  });
+});
+
+// ── D287：新建接口页版式（左档案 / 右请求工作区 / 调试结果）──
+// 2026-11-24 截图点名的问题：内容只堆在顶部、下半屏整块死白、字段标签与输入框同色。
+// 版式契约钉在 DOM 上：两栏骨架、左栏标题与必填标记、右栏请求定义、参数空态可照做、
+// 「断言提示归属断言页签」（旧版把这句话塞在左栏最底下）。
+describe("新建接口页版式（D287）", () => {
+  function mockEmpty() {
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ items: [], next_cursor: null, tree: [], recycled: [], scopes: {} }),
+    }) as unknown as Response) as unknown as typeof fetch;
+  }
+
+  it("两栏骨架 + 必填标记 + 断言提示落在断言页签", async () => {
+    useAuth.setState({
+      project: { id: "p1", name: "履约", description: null, status: "normal",
+        my_role: "READONLY", my_perms: ["api:def:create"] },
+    });
+    mockEmpty();
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("api-new"));
+    const side = await screen.findByTestId("api-editor-side");
+    expect(within(side).getByText("基本信息")).not.toBeNull();
+    expect(within(side).getByText("接口名")).not.toBeNull();
+    // 必填标记只落在接口名/路径上（路径是展示字段但保存必填，标记与 save() 的校验同源）
+    expect(side.querySelectorAll(".tp-field-req")).toHaveLength(2);
+    // 断言说明不再挂在左栏最底下
+    expect(within(side).queryByText(/断言为空时/)).toBeNull();
+
+    const req = await screen.findByTestId("api-editor-req");
+    expect(screen.getByText("请求定义")).not.toBeNull();
+    // 参数页签空态：说清这张表是什么、下一步点哪里（旧版只有「暂无」）
+    expect(within(req).getByText("还没有参数")).not.toBeNull();
+    // 切到断言页签 → 同一句说明在这里出现
+    fireEvent.click(within(req).getByRole("tab", { name: /^断言/ }));
+    expect(await within(req).findByText(/断言为空时/)).not.toBeNull();
+  });
+
+  it("调试结果空态收成一行（不再是居中大空板），Body=none 给可照做的空态", async () => {
+    useAuth.setState({
+      project: { id: "p1", name: "履约", description: null, status: "normal",
+        my_role: "READONLY", my_perms: ["api:def:create"] },
+    });
+    mockEmpty();
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("api-new"));
+    const panel = await screen.findByTestId("debug-panel");
+    expect(within(panel).getByText("调试结果")).not.toBeNull();
+    expect(panel.querySelector(".ant-empty")).toBeNull();
+    // Body 页签 type=none：给一块「当前不发送请求体」的空态，不是纯白
+    fireEvent.click(await screen.findByRole("tab", { name: "Body" }));
+    expect(await screen.findByTestId("req-body-empty")).not.toBeNull();
+    expect(screen.getByText("当前不发送请求体")).not.toBeNull();
   });
 });
 
@@ -2152,12 +2207,13 @@ describe("D47-a api 页接线：条件真打进请求，列设置真改表头", 
     fireEvent.click(await screen.findByTestId("lt-cols"));
     const panel = await screen.findByTestId("lt-col-panel");
     const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
-    // 面板列的是 API_COL_CHOICES 那七个可藏列；操作列不进来——它带着恢复/彻底删除的
+    // 面板列的是 API_COL_CHOICES 那十三个可藏列；操作列不进来——它带着恢复/彻底删除的
     // 入口，被勾掉等于把回收站的出口藏起来。
-    expect(boxes).toHaveLength(7);
+    expect(boxes).toHaveLength(13);
     expect(within(panel).queryByText("操作")).toBeNull();
     const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
-    expect(labels).toEqual(["接口", "方法", "模块", "状态", "负责人", "更新时间", "最近结果"]);
+    expect(labels).toEqual(["接口", "方法", "模块", "状态", "负责人", "标签", "描述", "用例数", "用例结果",
+      "用例通过率", "创建时间", "更新时间", "最近结果"]);
     const byLabel = (t: string) => boxes[labels.indexOf(t)];
     fireEvent.click(byLabel("方法"));
     await waitFor(() => expect(thead()).not.toContain("方法"));
@@ -2165,6 +2221,44 @@ describe("D47-a api 页接线：条件真打进请求，列设置真改表头", 
     expect(thead()).toContain("状态");                  // 只藏点名的那一列
     // 偏好落工具条这一套的键（useColumnPrefs 写盘）；键在即「设置被记住」接上了
     expect(localStorage.getItem("tp.listCols.api")).toContain("method");
+  });
+
+  it("D276 用例规模批量：一次请求带回三列；失败画「—」不画 0", async () => {
+    mockPage([def()]);
+    const base = global.fetch;
+    const bodies: unknown[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("api-def-case-summary-batch")) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return { ok: true, status: 200, json: async () => ({
+          items: [{ definition_id: "d1", case_count: 3, executed: 2, passed: 2, failed: 0,
+            running: 0, case_pass_rate: 2 / 3, result: "partial" }], total: 1 }) } as unknown as Response;
+      }
+      return base(input, init);
+    }) as unknown as typeof fetch;
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    await screen.findAllByTestId("api-row");
+    expect((await screen.findByTestId("api-cases-d1")).textContent).toContain("3");
+    expect(screen.getByTestId("api-result-d1").textContent).toContain("部分执行");
+    expect(screen.getByTestId("api-passrate-d1").textContent).toContain("67%");
+    // 当前页一次批量，不是逐行 N+1
+    expect(bodies).toEqual([{ project_id: PROJECT.id, definition_ids: ["d1"] }]);
+  });
+
+  it("D276 用例摘要失败：三列画「—」，绝不画成 0/未执行", async () => {
+    mockPage([def()]);
+    const base = global.fetch;
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("api-def-case-summary-batch")) {
+        return { ok: false, status: 503, json: async () => ({ code: "unavailable", message: "挂了" }) } as unknown as Response;
+      }
+      return base(input, init);
+    }) as unknown as typeof fetch;
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    await screen.findAllByTestId("api-row");
+    expect(screen.getByTestId("api-cases-d1").textContent).toBe("—");
+    expect(screen.getByTestId("api-result-d1").textContent).toBe("—");
+    expect(screen.getByTestId("api-passrate-d1").textContent).toBe("—");
   });
 
   it("高级搜索筛空 → 空态怪高级搜索；再输关键词也不抢走这句（归因链它在前）", async () => {
@@ -2181,6 +2275,69 @@ describe("D47-a api 页接线：条件真打进请求，列设置真改表头", 
     fireEvent.click(screen.getByTestId("lt-search"));
     fireEvent.click(await clearBtn());
     await waitFor(() => expect(sentFilter()).toBeNull());
+  });
+
+  // D282：接口描述/标签——列表两列、新建/编辑写入、详情展示。
+  it("D282 列表画标签与描述（空画「—」）", async () => {
+    mockPage([def({ description: "查询订单详情", tags: ["回归", "核心"] }),
+      def({ id: "d2", name: "无标签接口" })]);
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    await screen.findByTestId("api-tags-d1");
+    expect(screen.getByTestId("api-tags-d1").textContent).toContain("回归");
+    expect(screen.getByTestId("api-desc-d1").textContent).toBe("查询订单详情");
+    expect(screen.getByTestId("api-tags-d2").textContent).toBe("—");
+    expect(screen.getByTestId("api-desc-d2").textContent).toBe("—");
+  });
+
+  it("D282 新建填描述与标签 → POST body 带 description/tags", async () => {
+    mockPage([]);
+    const inner = global.fetch as ReturnType<typeof vi.fn>;
+    const bodies: Record<string, unknown>[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body && String(init.method).toUpperCase() === "POST") {
+        bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
+      return inner(input, init);
+    }) as unknown as typeof fetch;
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("api-new"));
+    fireEvent.change(await screen.findByTestId("def-name"), { target: { value: "带标签接口" } });
+    fireEvent.change(screen.getByTestId("def-path"), { target: { value: "/tagged" } });
+    fireEvent.change(screen.getByTestId("def-description"), { target: { value: "下单主链路" } });
+    const tagInput = within(screen.getByTestId("def-tags")).getByRole("combobox");
+    fireEvent.change(tagInput, { target: { value: "回归" } });
+    fireEvent.keyDown(tagInput, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    await waitFor(() => expect(screen.getByTestId("def-tags").textContent).toContain("回归"));
+    fireEvent.click(screen.getByTestId("api-save"));
+    await waitFor(() => expect(bodies.length).toBe(1));
+    expect(bodies[0]).toMatchObject({
+      project_id: "p1", name: "带标签接口", description: "下单主链路", tags: ["回归"],
+    });
+  });
+
+  it("D282 编辑预填两列，保存 PATCH 带 description_set 与 tags", async () => {
+    mockPage([def({ description: "旧说明", tags: ["旧标签"] })]);
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("api-row"));
+    await screen.findByTestId("detail-description");
+    expect(screen.getByTestId("detail-description").textContent).toBe("旧说明");
+    expect(screen.getByTestId("detail-tags").textContent).toContain("旧标签");
+    fireEvent.click(await screen.findByTestId("detail-edit"));
+    const desc = await screen.findByTestId("def-description");
+    expect((desc as HTMLTextAreaElement).value).toBe("旧说明");
+    expect(screen.getByTestId("def-tags").textContent).toContain("旧标签");
+    fireEvent.change(desc, { target: { value: "新说明" } });
+    const inner = global.fetch as ReturnType<typeof vi.fn>;
+    const patches: Record<string, unknown>[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body && String(init.method).toUpperCase() === "PATCH") {
+        patches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
+      return inner(input, init);
+    }) as unknown as typeof fetch;
+    fireEvent.click(screen.getByTestId("api-save"));
+    await waitFor(() => expect(patches.length).toBe(1));
+    expect(patches[0]).toMatchObject({ description: "新说明", description_set: true, tags: ["旧标签"] });
   });
 
 });
@@ -2354,5 +2511,24 @@ describe("D47-b 步4b 页码模式：module_ids 子树 / 页码漏斗 / 深链�
     await new Promise((r) => setTimeout(r, 200)); // 让 effect 有机会跑第二遍
     expect(screen.queryByTestId("api-detail-drawer")).toBeNull();
     expect(h.detailUrls).toHaveLength(0); // 也不该改而去敲按 id 的那条
+  });
+});
+
+// ── D286 顶层标签精确筛选：与 keyword 是两个口，各打各的参数 ────────────────────
+describe("D286 标签精确筛选", () => {
+  it("api-tags-filter 回车 → 列表请求带 tag（trim 后上线），打字零请求", async () => {
+    const h = serverMock([def({ tags: ["回归"] })]);
+    render(<MemoryRouter><ApiPage /></MemoryRouter>);
+    await screen.findByTestId("api-row");
+    const input = screen.getByTestId("api-tags-filter");
+    expect(input.tagName).toBe("INPUT");
+    const base = h.listUrls.length;
+    fireEvent.change(input, { target: { value: "  回归  " } });
+    await new Promise((r) => setTimeout(r, 120));
+    expect(h.listUrls.length).toBe(base); // 打字不请求（筛在服务端）
+    pressEnter(input);
+    await waitFor(() => expect(h.listUrls.length).toBe(base + 1));
+    expect(lastListQ(h).get("tag")).toBe("回归");
+    expect(lastListQ(h).has("keyword")).toBe(false); // 两个口互不冒充
   });
 });

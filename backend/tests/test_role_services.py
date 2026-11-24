@@ -335,8 +335,14 @@ async def test_migration_0022_and_table_exists(conn) -> None:
     assert parents["0050"] == "0049"
     assert parents["0051"] == "0050"
     assert parents["0052"] == "0051"
+    assert parents["0053"] == "0052"
+    assert parents["0054"] == "0053"
+    assert parents["0055"] == "0054"
+    assert parents["0056"] == "0055"
+    assert parents["0059"] == "0058"
+    assert parents["0060"] == "0059"
     heads = set(revs) - (set(parents.values()) - {None})
-    assert heads == {"0052"}, f"链头应唯一 0052：{sorted(heads)}"
+    assert heads == {"0060"}, f"链头应唯一 0060：{sorted(heads)}"
 
     def _read(sync_conn) -> dict:
         from sqlalchemy import inspect

@@ -3301,3 +3301,482 @@ DB 相关测试必须单路跑；`permission_matrix` 全量约 17 分钟，`-k` 
   全量前端 **134 files / 2150 passed**（59.9s）。
 - **文档**：README 批次表加 D272；审计 `workbench.tsx` 行改为「卡片可自定义由 D272 交付」，
   并把 `datasets.tsx` 行从「差距未裁」裁定为「独立管理面已交付，场景级多 CSV 属数据模型差异」。
+
+---
+
+## 90. 第 83 刀交付：MeterSphere 差距批次（D274–D278，2026-11-24）
+
+- **来源**：`docs/2026-11-24-metersphere-parity-gap.md` 的 P0/P1 清单；用户当前 goal
+  「全部优化，页面排版也好好设计」。MS 基准仍是 `http://192.168.1.5:18000` 实机。
+- **口径**：状态/规模类列一律**批量端点 + 与详情页同源判据**；取不到画「—」+ 提示条，
+  不画 0；不新增没有写入口的死字段（字段不存在就如实列进「未做」，不拿相近字段冒充）。
+
+### D274 场景导入（P0-1）
+
+- 后端 `app/modules/scenario/import_services.py`：`POST /scenario-import`，perm
+  `scenario:create`，201；逐条用保存期同一套 `graph.validate` 现算，任一条不合格整批 422
+  （`details.items` 前 50 条）；模块/环境只保留目标项目真实存在者，否则清空并在
+  `cleared_modules/cleared_envs` 点名；撞名自动 ` (导入)`；新 id、`owner_id=ctx.user_id`、
+  `version=1`、`step_count=sum(iter_nodes)`。
+- 导出侧文案从「只读不可回灌」改为「快照可用导入回灌」（`export_services.py`）；
+  `ScenarioImportEntry` 只声明可写子集，文件里的 `scenario_id/validation/refs` 不接收。
+- 前端 `web/src/pages/scenes.tsx`：工具栏「导入」+ 隐藏 file input；成功后重拉列表；
+  422 明细展开上屏。`sceneApi.import` 手写镜像（`web/src/api/scene.ts`）。
+- 测试：`backend/tests/test_d274_scenario_import.py` 4 例（往返保图/变量/策略/超时但 id 新、
+  文件 validation 不可信、整批 422 不写、跨项目模块环境清空 + 注册表 perm）；
+  `scenes.test.tsx` 新增 2 例（载荷逐字、缺 scenarios 不调接口）；
+  `test_scenario_export.py` 与 `e2e/closeout.spec.mjs` 的文案同步。
+
+### D275 测试计划批量摘要（P0-2）
+
+- 后端 `POST /plan-status-batch`（perm `testplan:plan:read`）：一次取关联行、`_link_results`、
+  `_functional_exec_map`，逐计划复用 `_plan_display/_link_result/_rates`；不返回 links 明细；
+  只回仍存在的计划。`_link_results` 的 OR 对按 300 分块（SQLite 999 参数上限）。
+- 前端 `web/src/pages/plans.tsx`：列设置新增状态/进度/通过率/用例数四列；一次批量请求，
+  **不逐行拉 `/status`**；失败清空摘要并亮 `plans-summary-error`，四列画「—」而非 0。
+- 测试：`test_d275_plan_status_batch.py` 4 例（与单计划 `/status` 逐字段同值、counts 分格、
+  缺行跳过、跨项目 scope + 非成员 403）；`plans.test.tsx` 改为「一次批量 + 不逐行」并加
+  失败画「—」用例（35 passed）。
+
+### D276 接口用例规模四列（P1-5）
+
+- 后端 `POST /api-def-case-summary-batch`（perm `api:def:read`）：只回存在且
+  `visible_clause` 可见的接口；非回收用例计数；run 状态 distinct 折叠；聚合口径
+  failed > running > passed（全过）> partial > none；`case_count==0` → `result=none`。
+  `ApiDefOut` 补 `created_at`。
+- 前端 `web/src/pages/api.tsx`：用例数/用例结果/用例通过率/创建时间四列；`scroll.x`
+  998→1394（列宽算式同步到契约测试）。
+- 测试：`test_d276_api_def_case_summary.py` 5 例（created_at 出参、历史失败不被后一次通过
+  抹掉、回收用例不计、partial/running、跨项目 scope）；`api.test.tsx` 2 例（批量载荷与三列
+  渲染、失败画「—」）；`api.columns.contract.test.ts` 的分母从 8 列改为 12 列。
+
+### D277 功能用例评审/执行/描述（P1-6）
+
+- 后端 `POST /functional-case-summary-batch`（perm `functional:case:read`）：最近一次评审
+  结论（`case_review_case` 按 updated_at）与最近一次计划人工执行（`plan_functional_exec`
+  按 executed_at）；null = 从未发生；只回仍存在的用例。
+- 前端 `web/src/pages/functionalCases.tsx`：评审结果/用例描述/执行结果三列；null 画
+  「未评审/未执行」。
+- 测试：`test_d277_functional_case_summary.py` 2 例；`functionalCases.test.tsx` 新增 1 例，
+  列设置期望 10 项（26 passed）。
+
+### D278 列表页排版修复（用户「页面排版也好好设计」）
+
+真机截图（Chromium 1440×900、dpr=1、8 页）暴露三处**真缺陷**，不是审美偏好：
+
+1. **计划页列向错位**：根节点 `className="tp-fill tp-fill-body"` + inline `display:flex`，
+   但 `.tp-fill` 自带 `flex-direction:column`，左树整块压在工具栏上方、右栏折到下一行。
+   修：显式 `flexDirection:"row"`；功能用例左树补 `Card + .tp-fill-side`，与接口/场景同构。
+2. **名称/标题列被压成 0**：`table-layout:fixed`（ellipsis 触发）+ 固定宽合计超过视口，
+   唯一无宽的「名称/标题」列被压成 0——计划页表头只剩「描述」，缺陷页「标题」竖排单字。
+   修：给名称 220/功能用例 240/缺陷标题 260 显式宽；表在卡内横向滚动。
+3. **表格把卡片撑出视口**：flex 子项 `min-width:auto` = 表格 min-content（1670），整条
+   `.ant-table-wrapper → .ant-table-container` 链被撑宽，卡片右边跑出 1440 视口。
+   修：`styles.css` 给这条链与 `.ant-table-content/.ant-table-body` 补 `min-width:0`，
+   横滚落在 `.ant-table-content` 内部。
+- 未采用 `scroll.x + fixed` 的原因：rc-table 会插入隐藏 `measure-row`，把 tbody 的勾选框
+  从 2 个变成 3 个（`functionalCases.test.tsx` 的 rowBoxes 当场红）——列宽问题用显式宽解决，
+  不引入只存在于 DOM 的假行。
+- 门禁：`tsc --noEmit` 0；`ruff` 改动文件 0；后端本轮 22 passed；前端全量
+  **134 files / 2156 passed**（68.0s）；截图复验计划/功能用例/缺陷/接口四页。
+
+### 本轮明确未做（写进 gap 文档 §6，不画假入口）
+
+- 计划「测试阶段/计划起止/实际起止/责任人」：模型无字段，需迁移 + 写入口。
+- 接口「描述/标签/版本/ID」：无字段；`version` 是乐观锁，不是发布版本。
+- 功能用例「责任人/用例状态/看板视图」：无责任人字段；`status` 只有 normal/recycled。
+- 缺陷「来源/严重程度/平台」：无字段；平台按缺陷模块裁定不做第三方同步。
+- 标签体系、场景多标签页、版本、性能测试、报告场景/用例分栏、公共用例库：整块能力。
+- 文档：`docs/2026-11-24-metersphere-parity-gap.md` 增 §6 状态表；
+  README 批次段落补 D274–D278。
+
+### D279 计划补测试阶段/计划与实际起止/责任人（P0-2 收尾）
+
+- 迁移 `0053_plan_schedule_owner.py`：`plan_record` 加 `stage` / `planned_start` /
+  `planned_end` / `actual_start` / `actual_end` / `owner_id`（+ owner 索引）。
+- 后端 `testplan`：
+  - `PlanCreateIn` 六列可写；`PlanUpdateIn` 五个可清空位用 `*_set` 哨兵
+    （review.ReviewUpdateIn.start_at_set 同款：不带 = 不动、带 null = 清空、带值 = 改）。
+  - 先后校验在**合并后的现值**上做（只改一端也要和另一端比）；结束早于开始 →
+    422 `invalid_time_range`。
+  - 责任人必须本项目成员（422 `invalid_owner`，`_check_member` 与执行人指派同源）；
+    `_out` 带 `owner_name`，列表一次 IN 批量解析，不画裸 UUID、不 N+1。
+  - 写入统一落 naive UTC（入参 `+08:00` 与库里读回的 UTC 同一口径，回执不再
+    「保存后时刻变了个写法」）。复制计划随源抄六列，归档位仍不抄。
+  - 高级搜索白名单补 `stage`/`owner_id`/四个时刻（`FieldDecl` time/id/text）。
+- 前端 `plans.tsx`：新建/编辑弹窗补阶段、责任人（`/projects/{id}/members` 候选）、
+  四个时刻（原生 `datetime-local`——本仓没有 dayjs 直接依赖，与 ListToolbar 同裁定）；
+  列表补六列并在列设置里可勾。`planDetail.tsx` 的静态描述区补阶段/责任人/四时刻。
+- 测试：`test_d279_plan_schedule_owner.py` 5 例（创建回读 + owner_name、三态清空、
+  越界责任人、创建时倒挂、复制随抄）；`test_d183_plan_crud.py` 的列集从 10 列改为 16 列，
+  并把「owner_id 不许存在」修正为「project_public 不许存在、owner_id 不接可见性」；
+  `plans.test.tsx` 新增 1 例（列表显示、预填、清空发 null + 六枚哨兵），
+  既有三处 body 断言补六列。
+- 门禁：后端 `pytest` 18 passed（D279 5 + D183 13）；前端 plans/planDetail 80 passed；
+  `tsc --noEmit` 0；`ruff` / `eslint` 0。
+
+### D280 缺陷补「缺陷来源 / 严重程度」（P1-7 收尾）
+
+- 迁移 `0054_defect_source_severity.py`：`defect` 加 `source String(64)` /
+  `severity String(16)`，downgrade 对称；两列都**可空、无默认值**。
+- 口径（写进 `defect/models.py` docstring）：
+  - `source` = 缺陷来源，MS 侧是项目可配字典；本仓没有字典表，收**自由文本**比凭空
+    造一份词表诚实，空 = 未填。写入方 = create/update，读方 = 列表/详情/高级搜索。
+  - `severity` = 严重程度，四值 `critical/major/minor/trivial`（致命/严重/一般/提示，
+    存码、中文在前端词表）。与 `priority` 是**两个轴**：priority 回答「先修谁」，
+    severity 回答「坏得多重」，MS 两列并存，不合并。空 = 未评估——不拿「一般」
+    冒充一次评估结论，所以不设默认值。
+  - `platform` / `platform_bug_id` 仍不做：那两列只有等第三方同步才有人写，是死列。
+- 后端 `defect`：`DefectCreateIn` 两列可写；`DefectUpdateIn` 用
+  `source_set` / `severity_set` 哨兵做三态（不带 = 不改、带 null = 清空、带值 = 改，
+  与 `handle_user_set` 同款）；`DefectOut` 出两列；`DEFECT_LIST_FILTER` 补
+  `source`（text，包含匹配）+ `severity`（enum）。
+- 前端：`api/defect.ts` 加 `DEFECT_SEVERITIES` / `severityMeta` / `SEVERITY_OPTIONS`
+  （词表外原样显示，R112）；`defects.tsx` 列设置多「严重程度 / 缺陷来源」两项，
+  列表严重程度画中文 Tag、来源画原文，空都画「—」；新建/编辑弹窗加严重程度下拉 +
+  来源输入（来源走 `Input`，没有字典就不假装是下拉）；高级搜索候选值补 severity。
+  `defectDetail.tsx` 头部补严重程度 Tag，编辑表单同上，保存时带两枚 `*_set` 并回填。
+- 测试：`test_d280_defect_source_severity.py` 3 例（创建→列表→详情→高级搜索全链路、
+  `*_set` 三态清空、词表外 422）；`test_d187_defect_models.py` 把 0054 的 add_column
+  并入模型↔迁移列比对，链头断言改 0054；`defects.test.tsx` 列标签期望改 14 项、
+  创建 body 断言补 `source/severity = null`，新增 1 例列表渲染。
+- 门禁：后端 `pytest` 56 passed（D280 3 + D187/D191/ADB/UI/定时/角色 53）；
+  `ruff` 0；前端 `tsc --noEmit` 0、`defects.test.tsx` 12 passed、`eslint` 0；
+  `scripts/check_migration_down.py 0054` 真跑 up→down→up（临时库，demo 库未动）。
+
+### D281 功能用例补「责任人」（P1-6 收尾之一）
+
+- 迁移 `0055_functional_case_owner.py`：`functional_case` 加 `owner_id String(36)`
+  + `ix_functional_case_owner_id`，downgrade 对称；可空、无默认值。
+- 口径（写进 `functional/models.py` docstring）：
+  - 空 = 还没定人，**不默认指派给创建人**（拿创建人冒充责任人就是说谎）。
+  - 指派对象必须是本项目成员：项目外的用户 422 `invalid_owner`（与计划域
+    `_check_owner` 同码），创建与更新两条路都拦。
+  - **「用例状态」不建列**：MS v3 的 `functional_case` 没有业务状态列，它是模板
+    自定义字段（D192 起本仓已具备，见 D267 台账勘误）。再造一个「未开始/进行中/
+    已完成」枚举，等于发明 MS 没有的语义，还会与本表的 `status`（normal/recycled）
+    撞名。
+- 后端 `functional`：`CaseCreateIn.owner_id`；`CaseUpdateIn` 用 `owner_set` 哨兵做
+  三态（不带 = 不改、带 null = 清空、带值 = 改）；`CaseOut` 出 `owner_id/owner_name`
+  （列表一次批量解析姓名）；`FUNCTIONAL_CASE_LIST_FILTER` 补 `owner_id`（id 等值）；
+  批量复制**随抄责任人**（复制 = 新建，内容全抄；评论/前后置关系仍不抄）；
+  `CaseStatsIn.group_by` 补 `owner`（MS maintainer 轴，未指派归「—」）。
+- 前端：`api/functional.ts` 补两列与 `owner` 轴；`functionalCases.tsx` 列设置多
+  「责任人」列（画姓名、空画「—」），新建/编辑弹窗加责任人下拉（成员列表，可清空），
+  提交时 create 带 `owner_id`、update 带 `owner_set`；高级搜索候选值补 owner_id；
+  统计下拉多「责任人」；复制说明同步。`functionalCaseDetail.tsx` 编辑表单同样可改
+  责任人并带 `owner_set`。
+- 测试：`test_d281_functional_case_owner.py` 4 例（创建→列表→详情→高级搜索全链路、
+  非成员 422（创建+更新）、`owner_set` 三态与复制随抄、统计 owner 轴未指派归「—」）；
+  五个迁移链断言文件把链头改 0055；`functionalCases.test.tsx` 新增 3 例
+  （列表姓名/「—」、新建带 owner_id、统计 owner 轴），列标签期望补「责任人」。
+- 门禁：后端 `pytest` 12 passed（D281 4 + D236/D193 8）；`ruff` 0；
+  前端 `tsc --noEmit` 0、`functionalCases.test.tsx` 29 passed、`eslint` 0；
+  迁移链断言 43 passed；`scripts/migrate_dev.py` 把开发库升到 0055；
+  `scripts/check_migration_down.py 0055` 真跑 up→down→up（临时库，demo 库未动）。
+
+### D282 接口定义补「描述 / 标签」（P1-5 收尾之一）
+
+- 迁移 `0056_api_def_description_tags.py`：`api_definition` 加 `description Text` /
+  `tags String(1000)`，downgrade 对称；都可空。
+- 口径（写进 `api_test/models.py` docstring）：
+  - 标签采用与 `defect.tags` **同一存法**（逗号串、去重保序、空 = 无标签），不另建
+    标签关联表——跨域标签体系是 P1-4 的独立一刀，这一刀先把接口两列补到
+    「有写入口、有读方」。合计超过 1000 字符 422 `validation_failed`（不让 DB
+    截断/500 替用户兜底）。
+  - `version` 仍是乐观锁整数，**不冒充发布版本**；裸 UUID 列也不画（无可读性）；
+    这两项在 gap 文档写明理由。
+- 后端 `api_test`：`ApiDefCreateIn` 两列可写；`ApiDefUpdateIn` 用 `description_set`
+  哨兵 + `tags=None/[]` 区分「不改/清空」；`ApiDefOut` 出 description 与 tags 列表；
+  **关键字搜索扩到 name/path/tags 三路 OR**（此前 docstring 明说 tags 不支持，
+  D282 起是真列）；`API_LIST_FILTER` 补 `description`（text 包含）。标签**不进**
+  条件组：逗号串 LIKE 会复刻 D190 明令避免的「bug1 命中 bug10」，精确标签筛选留给
+  标签体系。
+- 前端：`api/api.ts` 补两列；`api.tsx` 列设置多「标签 / 描述」两列（标签最多画两枚
+  + Tooltip 全量，空画「—」；描述 ellipsis + tooltip），新建/编辑抽屉加描述
+  TextArea 与标签 `Select mode="tags"`（逗号/回车分隔），详情抽屉用 Descriptions
+  展示两行；`scroll.x` 1394 → 1744 并同步注释。
+- 测试：`test_d282_api_def_description_tags.py` 3 例（创建→列表→详情→关键字→
+  描述筛选全链路、更新三态、标签超长 422）；`api.test.tsx` 新增 3 例（列表两列、
+  新建 POST 带 description/tags、编辑 PATCH 带 `description_set`），列设置期望
+  11 项 → 13 项；五个迁移链断言文件把链头改 0056。
+- 门禁：后端 `pytest` 24 passed（D282 3 + D47b/D193 21）；`ruff` 0；
+  前端 `tsc --noEmit` 0、`api.test.tsx` 93 passed、`eslint` 0；
+  迁移链断言 43 passed；`scripts/migrate_dev.py` 把开发库升到 0056；
+  `scripts/check_migration_down.py 0056` 真跑 up→down→up（临时库，demo 库未动）。
+
+### D283 功能用例补「标签」（P1-4 第一刀）
+
+- 迁移 `0057_functional_case_tags.py`：`functional_case` 加 `tags String(1000)`，
+  downgrade 对称；可空 = 无标签。
+- 标签口径第一次收到共享助手 `app/shared/tags.py`：`split_tags(raw)` 出数组、
+  `join_tags(tags, *, label, max_len=1000)` 去空白/去重保序、空 = None，
+  超长 422 `validation_failed`。D282 的 api_test 局部实现口径与之完全一致，
+  顺手切到共享助手（行为不变，D282 3 例回归通过）；defect/filelib 的历史口径
+  有差异（defect 不去空白、filelib 不卡长度），属行为变更，不并。
+- 后端 `functional`：
+  - `CaseListIn` 加顶层 `tag`（精确筛选轴，与关键字/优先级/视图并行 AND）；
+  - `CaseCreateIn.tags` 默认 `[]`；`CaseUpdateIn.tags: list[str] | None` 三态
+    （None = 不改、[] = 清空、带值 = 覆盖）；`CaseOut.tags` 出数组；
+  - list 用 `func.find_in_set(tag, FunctionalCase.tags) > 0`——**不用 LIKE**
+    （沿用 D190/D282 的「bug1 不命中 bug10」纪律）；标签不进高级搜索条件组；
+  - 批量复制随抄源用例 tags（副本与源同一语义，不默认清空）；
+  - 详情/列表都经 `_case_out` 出 tags，读路径无第二套形状。
+- 前端：
+  - `api/functional.ts` 补 `CaseRow.tags / CaseCreateBody.tags / CaseUpdateBody.tags /
+    CaseListQuery.tag`；
+  - `functionalCases.tsx` 列设置多「标签」（列 key 与 choices 逐字一致），列表最多
+    画两枚 + 「+N」Tooltip 全量，空画「—」；工具栏加「标签（精确）」搜索框，回车
+    下推顶层 `tag`；新建/编辑弹窗 `Select mode="tags"`（逗号/回车分隔），编辑整单
+    提交带 tags；
+  - `functionalCaseDetail.tsx` 详情编辑同样可改标签。
+- 测试：`test_d283_functional_case_tags.py` 3 例（创建→列表→详情全链路与去重、
+  「回归」精确筛选不命中「回归2」的 FIND_IN_SET 陷阱、更新三态 + 复制随抄、
+  超长 422）；`functionalCases.test.tsx` 新增 3 例（列渲染 +「—」、新建 POST 带
+  tags、标签筛选下推 tag 且 trim），列标签期望补「标签」（12 项）；五个迁移链断言
+  文件把链头改 0057。
+- 门禁：后端 `pytest` 11 passed（D283 3 + D281/D236 8）；`ruff` 0；
+  前端 `tsc --noEmit` 0、`functionalCases.test.tsx` 32 passed、`eslint` 0；
+  迁移链断言 43 passed；`scripts/migrate_dev.py` 把开发库升到 0057；
+  `scripts/check_migration_down.py 0057` 真跑 up→down→up（临时库，demo 库未动）。
+
+### D284 场景补「标签」（P1-4 第二刀）
+
+- 迁移 `0058_scenario_tags.py`：`scenario` 加 `tags String(1000)`，downgrade 对称。
+- 后端 `scenario`：
+  - `ScenarioCreateIn.tags` 默认 `[]`、`ScenarioUpdateIn.tags` 三态（None=不改、
+    [] = 清空、带值=覆盖）、`ScenarioOut.tags` 出数组、`ScenarioListIn.tag` 顶层
+    精确筛选（`FIND_IN_SET`，全空白=不过滤，与 keyword/模块/关注并行 AND）；
+  - 单条复制 / 批量复制随抄源 tags；变更历史摘要加 `tags`（改标签不再出现
+    changed=[] 的假「无变化」）；
+  - 导出快照带 `tags` 数组、导入回灌——场景导出文件可原样搬家且标签不丢。
+- 前端：
+  - `api/scene.ts` 补 `ScenarioExportEntry/ScenarioImportEntry.tags`、
+    `ScenarioListQuery.tag`；`schema.d.ts` 手写镜像补 create/out/update 的 tags，
+    并把 update 的四个 `*_set` 改回与后端一致的「有默认值 = 可选」（旧生成物
+    把它们标成必填，与本轮标签整单提交相冲突）；
+  - `scenes.tsx` 列设置加「标签」、列表最多两枚 + 「+N」Tooltip、空画「—」；
+    工具栏「标签（精确）」搜索框下推顶层 tag；空白/从用例生成两个创建弹窗都可
+    录入标签；行内新增「编辑标签」把手（带行 version 乐观锁，409 由 client 弹）；
+- 测试：`test_d284_scenario_tags.py` 3 例（创建/列表/详情/去重、FIND_IN_SET 精确
+  陷阱与空白不过滤、更新三态 + 复制随抄 + 历史摘要、导出/导入往返）；场景页新增
+  4 例（列渲染、筛选下推、新建带标签、行内编辑带 version），列标签期望补「标签」。
+- 门禁：后端 `pytest` 38 passed（D284 3 + 导入导出/用例 35）；`ruff` 0；
+  前端 `tsc` 0、`scenes.test.tsx` 84 passed（D284 4 例单跑通过）、`eslint` 0；
+  迁移链断言 43 passed；开发库升到 0058；`check_migration_down.py 0058` 通过。
+
+### D285 测试计划补「标签」（P1-4 第三刀，P1-4 收口）
+
+- 迁移 `0059_plan_tags.py`：`plan_record` 加 `tags String(1000)`，downgrade 对称。
+- 后端 `testplan`：
+  - `PlanCreateIn.tags`、`PlanUpdateIn.tags` 三态、`PlanOut.tags` 数组、
+    `PlanListIn.tag` 顶层精确筛选（`FIND_IN_SET`，与 module/unassigned/关注/条件组
+    并行 AND，**不是**互斥 elif 分支）；
+  - 复制计划随抄 tags；`test_d183_plan_crud` 的表形状断言从十六列升到十七列。
+- 前端：
+  - `api/plan.ts` 手写 `PlanTagsField` 并入 CreateBody/UpdateBody/PlanRow/PlanDetail，
+    列表查询补 `tag`；
+  - `plans.tsx` 列设置与列表加「标签」列（两枚 + 「+N」，空画「—」）、工具栏
+    「标签（精确）」下推 tag（提交即回第 1 页）、新建/编辑弹窗加标签
+    `Select mode="tags"` 且整单回传（编辑清空 = 发 `[]`）。
+- 测试：`test_d285_plan_tags.py` 2 例（创建/列表/详情/去重、精确陷阱 + 与未分组
+  并行 AND、更新三态、复制随抄）；计划页新增 4 例（列渲染、筛选下推并回第 1 页、
+  新建带标签、编辑预填与整单回传），既有 4 处 body 断言补 `tags`/列标签。
+- 门禁：后端 D285 + D183 全绿、领域回归 35 passed；`ruff` 0；
+  前端 `tsc` 0、`plans.test.tsx` 40 passed、`eslint` 0；
+  迁移链断言 43 passed；开发库升到 0059；`check_migration_down.py 0059` 通过
+  （0059 up→down→up，临时库已删）。
+
+### D286 接口定义补顶层「标签精确筛选」（P1-4 最后一格）
+
+- 背景：D282 给接口加了对 tags 的**关键字包含**搜索，但它回答的是「找得到」，不是
+  「就这一档」；功能用例/场景/计划三个列表都已有顶层 `tag` 精确筛选，接口是唯一缺口。
+- 后端：`ApiListIn.tag` + 列表 `FIND_IN_SET(tag, ApiDefinition.tags) > 0`（全空白 =
+  不过滤，与 keyword 并行 AND）；keyword 原语义不动（仍覆盖 name/path/tags 的包含）。
+- 前端：`api.tsx` 工具栏「标签（精确）」搜索框（`api-tags-filter`），回车下推 `tag`，
+  打字不发请求；与 `api-search` 各打各的参数，互不冒充。
+- 测试：`test_d286_api_tag_filter.py` 1 例（精确陷阱 bug1/bug、空白不过滤、
+  keyword+tag 交集）；接口页前端 1 例（打字零请求、回车带 tag、不带 keyword），
+  `api.test.tsx` 94 passed。
+- 门禁：后端 17 passed（D286 + D282 + D47-b）；`ruff` 0；前端 `tsc` 0、`eslint` 0。
+
+### P1-4 收口裁定
+
+标签体系按「各实体自带逗号串 + 顶层精确筛选 + 共享读写助手」落地，**不做中央
+标签字典**（跨域标签治理是另一件事：需要建表、授权、改名级联，且 MS 本身也是
+各模块各自标签）。四个实体（接口定义 D282+D286/功能用例 D283/场景 D284/计划
+D285）创建、编辑、列表、详情、筛选全链已通；缺陷 tags 此前已有。P1-8 多页签与
+P2-9~12 四项整块能力按差距文档 §6 写明的不做理由保持不做，不摆半套入口。
+
+
+### D287 新建/编辑接口页版式重做（业主截图投诉）
+
+- 背景：2026-11-24 业主上传新建接口页截图质问「就这鸡巴样」。实测问题：① 抽屉用
+  `Row/Col` 按内容高排，整页内容只占上半屏，下方约 280px 全空；② 右栏 1500 宽里
+  只有一张两列空表，参数/请求头表空态只有「暂无」；③ 左栏标签用 secondary、与输入框
+  同色，字段平铺无分组，断言提示被塞在左栏最底下；④ URL 行裸摆，Body=none 时页签
+  正文是一块白，调试结果用居中大 Empty 当占位。
+- 前端：
+  - `pages/api.tsx` 抽屉体改 `.tp-api-editor` 两栏满高：左 360px `基本信息` 面板
+    （`api-editor-side`，独立滚动，标签/必填/提示三层，可见性开关上移到身份字段后）；
+    右 `.tp-api-editor__main` 里 `请求定义` 面板吃满剩余高度，调试结果钉底；
+    Drawer `styles.body` 去 padding、禁外层滚动。
+  - `api/RequestEditor.tsx` 增 `fill` 开关（默认 false，弹窗/详情原样）：URL 行加
+    `.tp-req-line` 工具栏容器、fill 下 URL flex 基准 200 且不限宽；Tabs 用 middle；
+    参数/请求头空态改为「还没有… + 下一步」；添加行收进表脚；Body 页签改
+    `.tp-body-editor`，none 给虚线空态、json/text/form 的编辑器在 fill 下吃满页签高。
+  - `api/DebugPanel.tsx` 空态从居中大 Empty 收成一行「调试结果 + 点调试发送真实请求」。
+  - `styles.css` 新增 `.tp-api-editor*` / `.tp-field*` / `.tp-req-line` / `.tp-pair-empty`
+    / `.tp-body-editor*` / `.tp-debug-empty`，满高链复用 `.tp-fill-body`。
+- 测试：`api.test.tsx` 新增「新建接口页版式（D287）」2 例——两栏骨架、左栏两个必填标记、
+  断言提示只在断言页签、参数空态文案、调试空态无 `.ant-empty`、Body=none 空态。
+- 门禁：前端 `tsc` 0、`eslint` 0、`api.test.tsx` + `RequestEditor.test.tsx` 120 passed、
+  `EnvPanel.test.tsx` + `CaseList.test.tsx` 64 passed（PairTable 复用面）；
+  浏览器实测 1024 宽：GET/URL/10000ms 同排不换行、请求面板与页签正文吃满到调试结果、
+  Body 空态延伸到底、断言提示在断言页签顶部、项目内公开开关在首屏可见。无后端改动、无迁移。
+
+### D288 接口参数补「必填 / 描述」（四元键值对）
+
+- 背景：D287 之后参数表仍只有「参数名 / 参数值」两列，与 MS 的请求参数表差
+  必填与描述；直接加列会变成没有写入口的死字段，因此一并扩请求模型。
+- 契约：`Pair` 从两元扩为「两元或四元」——`["名","值"]` 或
+  `["名","值","1|0","描述"]`；四元只在填过必填/描述时写，旧数据、OpenAPI 导入、
+  环境变量、用例覆盖层仍是两元。执行层只读前两位；必填/描述是文档信息，不进查询串。
+- 后端：`api_test/schemas.py` 新增 `check_pairs`（长度 2/4、第三位 1/0、描述 ≤500），
+  `RequestObject` 与 `ApiRequestOverlay` 两处校验共用；`execution/core.py` 的
+  `_build_kwargs` 与 `api_test/services.py` 两处请求头合并改为按位取 `p[0]/p[1]`，
+  不再解包两元（四元会炸）。无迁移：参数存 JSON 列。
+- 前端：`api/req.ts` 的 `Pair` 加可选三/四位；`pairsToRows/rowsToPairs` 增加
+  `withMeta`（干净行仍写两元）；`RequestEditor` 参数表加「必填 / 描述」列
+  （`withMeta`），`toDraft` 保留四元，新增行写 `["","","0",""]`；左栏宽度改
+  `clamp(340px, 22vw, 400px)`。
+- 测试：后端 `tests/test_d288_api_param_meta.py` 3 例（四元往返、三/坏必填位/超长 422、
+  `_build_kwargs` 只取前两位）；前端 `RequestEditor.test.tsx` 新增 2 例（四元回显与
+  取消必填不丢描述、新增行写四元 + `cleanRequest` 两元/四元分形状）。
+- 门禁：后端 pytest `test_d288 + test_d282 + test_execution_core` 15 passed、ruff 0；
+  前端 tsc 0、`RequestEditor/api/EnvPanel/CaseList` 4 文件 186 passed。
+- 浏览器实测 1024 宽：参数表五列（参数名/参数值/必填/描述/删）可录入，必填勾选与描述
+  回显正常；左栏 clamp 后 340 宽，基本信息全字段不挤压。
+- 残余（如实记）：OpenAPI 导出/导入仍只带名/值，必填/描述不随导出文件走；
+  OpenAPI 的 parameter 有 required/description 落点，后续补双边映射与往返测试。
+
+### D289 功能用例 / 缺陷新建编辑页复刻 MS v2（两栏满高 + 表单字段补齐）
+
+- 背景：业主连续要求「新增编辑页复刻 MS v2」。2026-11-24 实机（192.168.1.5:18000）
+  对比结论：功能用例表单是「左内容（名称*/前置条件/步骤描述/备注/附件）+ 右属性
+  （所属模块*/责任人*/用例等级*/用例状态*/关联需求/标签）」；缺陷是右侧全高抽屉，
+  「标题*/严重程度*/处理人*/状态*/缺陷内容*（Markdown）+ 关联用例/附件/评论」。
+  本仓功能用例只有名称/模块/优先级/模板/责任人/标签/描述，缺前置条件、步骤、备注、
+  用例状态；缺陷新建页没有状态下拉，内容是纯文本且弹窗只占上半屏。
+- **口径撤销**：D267 曾裁定「用例状态是模板自定义字段，不建列」（依据 MS v3 源码）。
+  实机 v2 表单把它做成内置必填下拉，本批撤销该口径：`case_status` 建真列（迁移 0060），
+  与 `status`（normal/recycled 回收站视图位）分轴。词表存码
+  `prepare / underway / completed`，前端展示「准备中 / 进行中 / 已完成」，默认 prepare。
+- 后端（功能用例）：
+  - `FunctionalCase` 加 `precondition` / `steps`(JSON 文本) / `remark` / `case_status`
+    四列；`steps` 元素 `{"desc","expected"}`，两列全空的行不落库。
+  - `CaseCreateIn` 四项可写；`CaseUpdateIn` 用 `precondition_set` / `steps_set` /
+    `remark_set` 三态哨兵（不带=不改、带 null/[]=清空、带值=改），`case_status` 非空即改。
+    `CaseOut` 统一带回四项，列表/详情/回执同形。
+  - 前置条件/步骤/备注改动计入 `content_changed`（触发自动重评审）；用例状态是流程轴，
+    不计入内容。`CaseStatsIn` 的旧注释同步改为「已是真列但统计轴未开放」。
+- 后端（缺陷）：`DefectCreateIn` 加 `status`（未知 key → 422 `invalid_status`），
+  不传仍落状态图起始态；编辑本来就有 `status` 与流转校验，本次只是把写入口接到表单。
+- 前端：
+  - `.tp-api-editor*` 泛化为 `.tp-record-editor*`，新增 `--side-right`（内容左、属性右）
+    与 `__footer`；`ui/EditorField.tsx` 抽出三处编辑器共用的字段壳。
+  - 功能用例 `CaseFormModal` → `CaseFormDrawer`：全屏 Drawer 两栏满高，左栏名称*/
+    前置条件/步骤表（`fc-step-add`、行内两列、可删）/备注；右栏模块/责任人/用例等级*/
+    用例状态*/模板/标签/描述/自定义字段。提交带四项；编辑时带三个 `*_set`。
+  - 缺陷 `DefectFormModal` → `DefectFormDrawer`：全屏两栏，左栏标题*/缺陷内容
+    （Markdown 源码，等宽字体吃满剩余高度）；右栏模板/严重程度/处理人/状态*/优先级/
+    来源/标签/自定义字段。编辑时状态下拉只列「当前态 + 状态图允许的去向」，避免选完吃 409。
+- 测试：后端 `tests/test_d289_functional_case_content.py` 3 例（四项往返与空行丢弃、
+  三态更新与默认 prepare、词表外/超长步骤/超 200 行 422）；`test_d267_defect_flow.py`
+  加 1 例（新建可指定图中状态、默认起始态、未知 422）。前端 `functionalCases.test.tsx`
+  加 2 例（新建两栏与步骤提交、编辑回显与清空哨兵）、`defects.test.tsx` 加 2 例
+  （新建状态默认与 POST、编辑回显与 PATCH）。
+- 门禁：后端 pytest D289 3 passed、缺陷流 13 passed、迁移链 5 文件 43 passed、ruff 0；
+  前端 tsc 0、eslint 0、functionalCases 34 passed、defects 13 passed、api 页回归通过。
+  终检复跑（2026-11-24）：后端 D289 + d267 + d219 三文件合计 14 passed；前端
+  functionalCases / defects / api / RequestEditor 4 文件 170 tests 全 passed；
+  浏览器实机两页新建保存与列表刷新均 PASS。
+- 残余（如实记）：
+  - 「关联需求」不做：本仓没有需求实体，没有写入口就不摆死字段。
+  - 缺陷内容与处理人在 MS 是必填，本仓保持可选（存量缺陷可为空，不伪造）；差异保留。
+  - 关联用例/附件/评论仍在缺陷详情页，编辑抽屉只改本体，不复制第二套写入口。
+  - 功能用例列表还没画「用例状态」列，统计也没开 case_status 轴（本轮只做表单）。
+  - 步骤不进 OpenAPI/用例导入导出（功能用例导出/导入仍是名称/描述等既有字段）。
+
+### D290 场景编排「新建场景」点不开（弹层定位失效）
+
+- **现象**：点「新建场景」只看到垂直滚动条闪一下，菜单始终不出现（业主实机，DPR 1.25）。
+- **根因**：原入口是 antd Dropdown（`trigger=["click"]`），弹层由 `@rc-component/trigger`
+  的 useAlign 定位。打开首帧弹层还在预定位 `left: -1000vw; top: -1000vh`，同时 antd
+  slide 入场基础态把 `transform` 写成 `scale(0)`；useAlign 在这一帧量
+  `getBoundingClientRect` 得到 0 宽高，按 `scaleX === 0` 直接 return、不置 ready。
+  正常帧率下 ResizeObserver 会补一次对齐，所以本机 Playwright（DPR 1）复现不出；
+  DPR 1.25 的内置浏览器里实测弹层 inline `inset` 停在 `-9600px/-6320px`
+  （正好是视口宽高的 10 倍），`documentElement.scrollWidth` 被撑到 10188，
+  所以只看见滚动条闪动。补 `transform: scale(1)`、强制 `overlayStyle={{position:"fixed"}}`
+  都救不回来（ready 始终为 false，弹层不重排）。
+- **修复**：场景页新建入口改为自绘 fixed 菜单：
+  - `scenes.tsx`：去掉 Dropdown，按钮 `onClick` 用实时 `getBoundingClientRect()`
+    定位 `createPortal` 到 body 的 `.tp-new-menu`，菜单内容仍是原三项（antd Menu）；
+    点击遮罩/Esc/滚动/缩放即收起，按钮带 `aria-haspopup` / `aria-expanded`。
+  - `styles.css`：新增 `.tp-new-menu` / `.tp-new-menu-mask`（fixed，z-index 1049/1050）。
+- **验证**：
+  - 同环境（960x632、DPR 1.25）实测：菜单 rect `(254.8, 478.4) 135x112`，
+    三项都在视口内，`documentElement` 保持 `950x632`（不再有 6700px 假高度）。
+  - 前端 tsc 0、eslint 0、`scenes.test.tsx` 84 passed（菜单断言改锚
+    `.tp-new-menu .ant-menu-item`，选中即卸载）。
+- **同类风险（如实记）**：其他 7 处 antd Dropdown（项目切换、模块树行菜单、
+  脑图/画布右键、场景 ListMode、StepListEditor）仍是同一实现；本轮只修业主点名的
+  新建入口，若同环境再现再按同一手法替换。
+
+## 91. 第 84 刀交付：用例回收站批量入口（D273，2026-11-24）
+
+审计「功能家族一致性」发现的一处缺口：接口定义早有批量回收/恢复（D251/D252），
+功能用例也有批量，但**接口用例 / UI 用例 / ADB 用例只能逐条**。三族各补一对端点，
+把回收站批量入口补齐。按编号回溯登记（本刀在 D290 之后完成，逻辑上属 D251 同族）。
+
+### 后端
+
+- 三族各加 `POST /api-cases|ui-cases|adb-cases/batch-delete` 与 `/batch-restore`，
+  schemas 加 `CaseBatchDeleteIn` / `CaseBatchRestoreIn`（`project_id` + `case_ids`）。
+- 纪律逐字对齐单条 delete/restore 与 D251/D252：
+  - **全有或全无**：任一 id 不存在或状态不对 → 404 + `details.case_ids` 列出问题 id，
+    整批零写入；恢复侧不在回收站的也算不存在。
+  - **重复 id** → 422 `validation_failed`（拼错列表，不是「操作两次」）。
+  - **回收侧引用检查先全查完再写**：任一被未回收场景引用 → 409 `referenced_by_scenario`
+    + `details.blocked` 清单（名字 + 引用数），零写入；**批量不提供 force**——
+    强删意味着解绑场景步骤，必须逐个确认。
+  - **api_case 可达性跟定义走**：定义已回收的用例在批量里与不存在同码 404
+    （`assert_def_alive` 同口径）。
+  - **恢复侧特判**：api_case 绑的数据集已不存在 → 409 `dataset_missing` 整批不动
+    （R82 单条口径搬进批量）；ui/adb 回收期间名字被占 → 409 `conflict` 整批不动
+    （`uq_*_project_name` 覆盖所有状态行，这条分支是存量脏数据兜底，正常 API 造不出来）。
+
+### 前端
+
+- `web/src/api/CaseList.tsx` / `pages/uiCases.tsx` / `pages/adbCases.tsx` 各加勾选列与批量条：
+  - 正常视图「批量回收」，回收站「批量恢复」；选中才出现（隐藏不是禁用），按
+    delete/update 权限位显隐，成功清选择并重拉，切视图/换接口清选择。
+  - 批量 409 的 `blocked` 清单弹窗点名「谁被哪个场景引用」，不吞成 toast——
+    用户照着名单去解引用，不必凭猜测重试。
+
+### 测试与门禁
+
+- `backend/tests/test_d273_case_batch_recycle.py` **8 passed**：三族批量回收/恢复主链、
+  422 重复、404 全有或全无、409 blocked 清单零写入、api 定义已回收 404、
+  api 恢复数据集已删 409。
+- 前端 `CaseList.test.tsx` / `uiCases.test.tsx` / `adbCases.test.tsx` 合计 **79 passed**
+  （新增批量用例钉：勾 2 行 → POST body 带正确 `case_ids` → 成功清选择；
+  MEMBER 无删除位不渲染批量条；回收站切批量恢复）。
+- 门禁：后端 ruff 0；registry 17 + D110 哨兵 6 + D251 参考 + 三族用例回归 52 全 passed；
+  前端 tsc 0、eslint 0（仅 1 条 HEAD 既有的 useEffect 依赖 warning，非本刀引入）。
+- **顺带修**：D110「写形状 + `:read` 位」哨兵因工作区在途的 D274/D275/D276 三个批量投影端点
+  （`api_def_case_summary_batch` / `functional_case_summary_batch` / `plan_status_batch`）而红；
+  逐个核对函数体确为纯 `select` + 聚合、零 commit/flush/add/delete 后，连同可核对理由
+  登记进 `ADJUDICATED_READ_PERM_WRITES`（POST 只为一次装下一批 id）。
+- **仍未做（顺延）**：环境组 EXISTS 筛选、模型配置搜索；批量执行仍是 N 次 enqueue。

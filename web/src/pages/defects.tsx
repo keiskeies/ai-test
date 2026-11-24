@@ -11,18 +11,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Checkbox, Input, Modal, Select, Space, Tag, Tooltip, Typography, message,
+  Alert, Button, Checkbox, Drawer, Input, Modal, Select, Space, Tag, Tooltip, Typography, message,
 } from "antd";
 import { PlusOutlined, ReloadOutlined, StarOutlined } from "../ui/icons";
 import { tpv } from "../theme";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
+import EditorField from "../ui/EditorField";
 import StateView from "../ui/StateView";
 import { FilterBar } from "../ui/Toolbar";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
 import { ApiErr, get } from "../api/client";
-import { defectApi, defectFlowApi, flowLabel, isDefectFlow, statusMeta, DEFECT_STATUSES,
+import { defectApi, defectFlowApi, flowAllowed, flowLabel, isDefectFlow, severityMeta, statusMeta,
+  DEFECT_STATUSES, SEVERITY_OPTIONS,
   type DefectFlow, type DefectRow } from "../api/defect";
 import { projectMetaApi, type TemplateDetail, type TemplateField, type TemplateItem } from "../api/projectMeta";
 import CustomFieldForm from "../ui/CustomFields";
@@ -46,6 +48,8 @@ const DEFECT_COL_CHOICES: ColumnChoice[] = [
   { key: "title", label: "标题" },
   { key: "status", label: "状态" },
   { key: "priority", label: "优先级" },
+  { key: "severity", label: "严重程度" },
+  { key: "source", label: "缺陷来源" },
   { key: "tags", label: "标签" },
   { key: "custom", label: "自定义字段" },
   { key: "handle", label: "处理人" },
@@ -56,17 +60,24 @@ const DEFECT_COL_CHOICES: ColumnChoice[] = [
   { key: "updat", label: "更新时间" },
 ];
 
-function DefectFormModal({ open, editing, projectId, members, onClose, onSaved }: {
+function DefectFormDrawer({ open, editing, projectId, members, flow, statusOptions, onClose, onSaved }: {
   open: boolean;
   editing: DefectRow | null;
   projectId: string;
   members: MemberRow[];
+  flow: DefectFlow | null;
+  statusOptions: { value: string; label: string }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("P2");
+  // D280：来源（自由文本，空串 = 未填）与严重程度（null = 未评估）
+  const [source, setSource] = useState("");
+  const [severity, setSeverity] = useState<string | null>(null);
+  // D289：MS v2 新建表单就带状态下拉；编辑时只给状态图允许的去向（同态放行）。
+  const [status, setStatus] = useState("new");
   const [handle, setHandle] = useState<string | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [templates, setTemplates] = useState<TemplateItem[]>([]);
@@ -76,6 +87,8 @@ function DefectFormModal({ open, editing, projectId, members, onClose, onSaved }
   const [tplLoading, setTplLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const flowStart = flow?.start_key ?? "new";
 
   const loadTemplate = useCallback(async (id: string, base: Record<string, unknown>): Promise<void> => {
     if (!id) { setTpl(null); return; }
@@ -100,6 +113,9 @@ function DefectFormModal({ open, editing, projectId, members, onClose, onSaved }
     setTitle(editing?.title ?? "");
     setDescription(editing?.description ?? "");
     setPriority(editing?.priority ?? "P2");
+    setSource(editing?.source ?? "");
+    setSeverity(editing?.severity ?? null);
+    setStatus(editing?.status ?? flowStart);
     setHandle(editing?.handle_user_id ?? null);
     setTags(editing?.tags ?? []);
     setErr(null);
@@ -120,23 +136,35 @@ function DefectFormModal({ open, editing, projectId, members, onClose, onSaved }
         setErr(e instanceof ApiErr ? e.message : "模板加载失败");
       }
     })();
-  }, [open, editing, projectId, loadTemplate]);
+  }, [open, editing, projectId, loadTemplate, flowStart]);
+
+  // 编辑时只列「当前态 + 允许的去向」：状态图的非法边不给点，免得选完吃 409。
+  const allowedKeys = editing ? flowAllowed(flow, editing.status) : null;
+  const statusChoices = allowedKeys
+    ? statusOptions.filter((o) => allowedKeys.includes(o.value))
+    : statusOptions;
 
   async function submit(): Promise<void> {
     if (!title.trim()) { message.warning("缺陷标题必填"); return; }
     if (!templateId) { message.warning("还没有可用模板（刷新项目设置）"); return; }
+    if (!status) { message.warning("缺陷状态必填"); return; }
     setBusy(true);
     setErr(null);
     try {
       if (editing) {
         await defectApi.update(editing.id, {
           project_id: projectId, title: title.trim(), description,
-          description_set: true, priority, handle_user_id: handle, handle_user_set: true, tags,
+          description_set: true, priority, status,
+          handle_user_id: handle, handle_user_set: true, tags,
+          // D280：两个可清空位都带哨兵——清空来源/把严重程度退回未评估必须发得出去
+          source: source.trim() || null, source_set: true,
+          severity, severity_set: true,
           template_id: templateId, custom_fields: custom,
         });
       } else {
         await defectApi.create({
-          project_id: projectId, title: title.trim(), description, priority,
+          project_id: projectId, title: title.trim(), description, priority, status,
+          source: source.trim() || null, severity,
           handle_user_id: handle, tags, template_id: templateId, custom_fields: custom,
         });
       }
@@ -149,63 +177,101 @@ function DefectFormModal({ open, editing, projectId, members, onClose, onSaved }
   }
 
   return (
-    <Modal open={open} onCancel={onClose} centered width={680} destroyOnHidden
+    <Drawer open={open} onClose={onClose} width="100%" destroyOnHidden
+      className="tp-record-drawer"
       title={editing ? "编辑缺陷：" + editing.title : "新建缺陷"}
-      okText="保存" cancelText="取消" okButtonProps={{ loading: busy, "data-testid": "defect-save" }}
-      onOk={() => void submit()}>
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <div>
-          <Typography.Text strong>标题</Typography.Text>
-          <Input data-testid="defect-field-title" maxLength={255} value={title} autoFocus
-            placeholder="如「登录后偶发 500」" onChange={(e) => setTitle(e.target.value)} />
+      styles={{ body: { padding: 0, overflow: "hidden" } }}
+      footer={
+        <div className="tp-record-editor__footer">
+          <Button onClick={onClose}>取消</Button>
+          <Button type="primary" loading={busy} data-testid="defect-save" onClick={() => void submit()}>
+            保存
+          </Button>
         </div>
-        <div>
-          <Typography.Text strong>描述（纯文本）</Typography.Text>
-          <Input.TextArea data-testid="defect-field-description" rows={3} value={description}
-            placeholder="复现步骤、期望/实际结果" onChange={(e) => setDescription(e.target.value)} />
-        </div>
-        <Space size={16} wrap>
-          <div>
-            <Typography.Text strong>模板</Typography.Text>
-            <Select data-testid="defect-field-template" style={{ width: 220 }} value={templateId || undefined}
-              loading={tplLoading} disabled={Boolean(editing)}
-              placeholder="选择模板"
-              onChange={(v) => { setTemplateId(String(v)); void loadTemplate(String(v), {}); }}
-              options={templates.map((t) => ({ value: t.id, label: t.name + (t.is_default ? "（默认）" : "") }))} />
+      }>
+      <div className="tp-record-editor tp-record-editor--side-right">
+        <main className="tp-record-editor__main">
+          <section className="tp-record-editor__pane tp-record-editor__pane--fill">
+            <header className="tp-record-editor__pane-head">
+              <div className="tp-record-editor__pane-title">缺陷内容</div>
+              <span className="tp-record-editor__pane-sub">复现步骤、期望 / 实际结果</span>
+            </header>
+            <div className="tp-case-form">
+              <EditorField label="标题" required>
+                <Input data-testid="defect-field-title" maxLength={255} value={title} autoFocus
+                  placeholder="如「登录后偶发 500」" onChange={(e) => setTitle(e.target.value)} />
+              </EditorField>
+              <div className="tp-field tp-field--grow">
+                <div className="tp-field-label">
+                  <span>缺陷内容（Markdown）</span>
+                  <span className="tp-field-hint-inline">用空行分段；代码块用 ```</span>
+                </div>
+                <Input.TextArea className="tp-defect-content" data-testid="defect-field-description"
+                  value={description} placeholder={"## 复现步骤\n1. ...\n\n## 期望结果\n...\n\n## 实际结果\n..."}
+                  onChange={(e) => setDescription(e.target.value)} />
+              </div>
+              {err && <Alert type="error" showIcon data-testid="defect-save-error" message={err} />}
+            </div>
+          </section>
+        </main>
+        <aside className="tp-record-editor__side" data-testid="defect-form-side">
+          <div className="tp-record-editor__side-head">
+            <div className="tp-record-editor__pane-title">缺陷属性</div>
+            <div className="tp-record-editor__pane-sub">状态、严重程度与处理人</div>
           </div>
-          <div>
-            <Typography.Text strong>优先级</Typography.Text>
-            <Select data-testid="defect-field-priority" value={priority} style={{ width: 100 }}
-              onChange={setPriority}
-              options={["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v }))} />
+          <div className="tp-record-editor__side-body">
+            <EditorField label="模板" hint="编辑时不可换模板（字段定义会变）">
+              <Select data-testid="defect-field-template" style={{ width: "100%" }} value={templateId || undefined}
+                loading={tplLoading} disabled={Boolean(editing)}
+                placeholder="选择模板"
+                onChange={(v) => { setTemplateId(String(v)); void loadTemplate(String(v), {}); }}
+                options={templates.map((t) => ({ value: t.id, label: t.name + (t.is_default ? "（默认）" : "") }))} />
+            </EditorField>
+            <EditorField label="严重程度" hint="可留空 = 未评估（不伪造 P0）">
+              <Select data-testid="defect-field-severity" style={{ width: "100%" }} allowClear
+                value={severity ?? undefined} placeholder="未评估"
+                onChange={(v) => setSeverity(v ?? null)} options={SEVERITY_OPTIONS} />
+            </EditorField>
+            <EditorField label="处理人">
+              <Select data-testid="defect-field-handle" allowClear style={{ width: "100%" }}
+                value={handle ?? undefined} placeholder="未指派" onChange={(v) => setHandle(v ?? null)}
+                options={members.map((m) => ({ value: m.user_id, label: m.name ?? m.account ?? m.user_id }))} />
+            </EditorField>
+            <EditorField label="状态" required hint={editing ? "只列当前状态与状态图允许的去向" : "默认落项目状态图的起始态"}>
+              <Select data-testid="defect-field-status" style={{ width: "100%" }}
+                value={status || undefined} onChange={setStatus} options={statusChoices} />
+            </EditorField>
+            <EditorField label="优先级">
+              <Select data-testid="defect-field-priority" value={priority} style={{ width: "100%" }}
+                onChange={setPriority}
+                options={["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v }))} />
+            </EditorField>
+            <EditorField label="缺陷来源">
+              <Input data-testid="defect-field-source" maxLength={64}
+                value={source} placeholder="如「客户反馈」" onChange={(e) => setSource(e.target.value)} />
+            </EditorField>
+            <EditorField label="标签">
+              <Select data-testid="defect-field-tags" mode="tags" style={{ width: "100%" }}
+                value={tags} onChange={setTags} maxCount={20} tokenSeparators={[",", "，"]}
+                placeholder="回车创建标签，最多 20 个" />
+            </EditorField>
+            <EditorField label="自定义字段">
+              {tpl ? (
+                <CustomFieldForm fields={tpl.fields} values={custom} onChange={setCustom}
+                  members={members} disabled={tplLoading} />
+              ) : (
+                <Typography.Text type="secondary" className="tp-text-sm">
+                  {tplLoading ? "模板字段加载中…" : "请选择模板"}
+                </Typography.Text>
+              )}
+            </EditorField>
           </div>
-          <div>
-            <Typography.Text strong>处理人</Typography.Text>
-            <Select data-testid="defect-field-handle" allowClear style={{ width: 180 }}
-              value={handle ?? undefined} placeholder="未指派" onChange={(v) => setHandle(v ?? null)}
-              options={members.map((m) => ({ value: m.user_id, label: m.name ?? m.account ?? m.user_id }))} />
+          <div className="tp-record-editor__side-foot">
+            关联用例 / 附件 / 评论在缺陷详情页维护；这里只改缺陷本体。
           </div>
-        </Space>
-        <div>
-          <Typography.Text strong>标签</Typography.Text>
-          <Select data-testid="defect-field-tags" mode="tags" style={{ width: "100%" }}
-            value={tags} onChange={setTags} maxCount={20} tokenSeparators={[",", "，"]}
-            placeholder="回车创建标签，最多 20 个" />
-        </div>
-        <div>
-          <Typography.Text strong>自定义字段</Typography.Text>
-          {tpl ? (
-            <CustomFieldForm fields={tpl.fields} values={custom} onChange={setCustom}
-              members={members} disabled={tplLoading} />
-          ) : (
-            <Typography.Text type="secondary" className="tp-text-sm">
-              {tplLoading ? "模板字段加载中…" : "请选择模板"}
-            </Typography.Text>
-          )}
-        </div>
-        {err && <Alert type="error" showIcon data-testid="defect-save-error" message={err} />}
-      </Space>
-    </Modal>
+        </aside>
+      </div>
+    </Drawer>
   );
 }
 
@@ -350,6 +416,8 @@ function DefectsList() {
   const filterValueOptions: Record<string, Option[]> = {
     status: statusOptions,
     priority: ["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v })),
+    // D280：严重程度枚举（中文标签），来源是自由文本不需要候选
+    severity: SEVERITY_OPTIONS,
     handle_user_id: members.map((m) => ({ value: m.user_id, label: m.name ?? m.account ?? m.user_id })),
     template_id: templateOpts,
   };
@@ -523,7 +591,7 @@ function DefectsList() {
             <Typography.Text type="secondary" className="tp-text-sm" data-testid="defect-row-id">
               {r.num}
             </Typography.Text>) },
-          { title: "标题", dataIndex: "title", key: "title", render: (v: string, r) => (
+          { title: "标题", dataIndex: "title", key: "title", width: 260, render: (v: string, r) => (
             // 回收站行不是链接：defect_get 对已回收缺陷回 404（detail 只服务正常行）。
             // 按**行自己**的 recycled 判，而不是视图标记——在途/失败窗口里两者可能不同步。
             r.recycled
@@ -539,9 +607,18 @@ function DefectsList() {
           } },
           { title: "优先级", dataIndex: "priority", key: "priority", width: 80, render: (v: string) => (
             <Tag color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
-          { title: "标签", dataIndex: "tags", key: "tags", width: 180, render: (v: string[]) => (
+          // D280：严重程度（null = 未评估画「—」，不冒充「一般」）与缺陷来源
+          { title: "严重程度", dataIndex: "severity", key: "severity", width: 96,
+            render: (v: string | null) => (v
+              ? <Tag color={severityMeta(v).color}
+                  data-testid="defect-row-severity">{severityMeta(v).label}</Tag>
+              : <span data-testid="defect-row-severity">—</span>) },
+          { title: "缺陷来源", dataIndex: "source", key: "source", width: 130, ellipsis: true,
+            render: (v: string | null) => (
+              <span data-testid="defect-row-source">{v ?? "—"}</span>) },
+          { title: "标签", dataIndex: "tags", key: "tags", width: 160, render: (v: string[]) => (
             v.length ? v.map((t) => <Tag key={t}>{t}</Tag>) : <span>—</span>) },
-          { title: "自定义字段", key: "custom", width: 220, render: (_, r) => (
+          { title: "自定义字段", key: "custom", width: 200, render: (_, r) => (
             <Typography.Text className="tp-text-sm" data-testid="defect-row-custom">
               {customText(r)}
             </Typography.Text>) },
@@ -618,6 +695,8 @@ function DefectsList() {
             )
           ) },
         ], colPref)}
+        // 列宽合计 1672（回收站视图 1682）：显式宽让表在卡内横向滚动。
+        // 不给宽时 table-layout:fixed 会把「标题」压成一列竖排单字（2026-11-24 真机）。
         cardFooter={(
           <div className="tp-cardfoot">
             <Typography.Text type="secondary" className="tp-cardfoot-note tp-text-sm">
@@ -631,7 +710,8 @@ function DefectsList() {
         )}
       />
 
-      <DefectFormModal open={formOpen} editing={editing} projectId={pid} members={members}
+      <DefectFormDrawer open={formOpen} editing={editing} projectId={pid} members={members}
+        flow={flow} statusOptions={statusOptions}
         onClose={() => setFormOpen(false)} onSaved={() => void load()} />
 
       <Modal centered open={purge !== null} onCancel={() => { setPurge(null); setPurgeTitle(""); }}

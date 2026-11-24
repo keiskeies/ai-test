@@ -8,6 +8,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { Modal } from "antd";
 
 // antd 的响应式观察器要用 matchMedia，jsdom 没有（每个测试文件自己补）
 Object.defineProperty(window, "matchMedia", {
@@ -530,5 +531,81 @@ describe("D180 回收站模板跟数据：点击与取数之间不给活行套�
     ctl.release();
     // 正对照：真取回空回收站后同一句必须改口，否则这条腿只是「永远不说」
     await waitFor(() => expect(emptyDesc()).toContain("回收站是空的"));
+  });
+});
+
+// ── D273：ADB 用例批量回收/恢复（正常视图批量回收，回收站批量恢复）────────────
+// adbCases 现有 mockBackend 只给 GET（列表/filter-meta），批量要走 POST，这里自带一个
+// 覆盖 fetch 的小桩：POST /adb-cases/batch-* 记录 body；GET 列表按 recycled 切片。
+describe("adbCases 批量回收/恢复（D273）", () => {
+  let posts: { url: string; body: Record<string, unknown> }[] = [];
+
+  beforeEach(() => {
+    cleanup();
+    // Modal.confirm 静态弹窗挂 body 独立 root，cleanup 管不到——上一用例的确认框会串场
+    Modal.destroyAll();
+    document.querySelectorAll(".ant-modal-root").forEach((n) => n.remove());
+    useAuth.setState({
+      user: { id: "u1", account: "a", name: "张三", email: null, is_system_admin: false, status: "active" },
+      project: PROJECT, ready: true,
+    });
+  });
+
+  function mockBatch(normal: AdbCaseOut[], recycled: AdbCaseOut[]) {
+    posts = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.includes("/adb-cases/batch-")) {
+        posts.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+        return deepResp({ ok: true });
+      }
+      if (url.includes("/filter-meta")) return deepResp(ADB_META);
+      if (url.includes("/saved-views")) return deepResp([]);
+      if (url.includes("/adb-cases?")) {
+        const q = qsOf(url);
+        return deepResp({ items: q.get("recycled") === "true" ? recycled : normal, next_cursor: null });
+      }
+      return deepResp({ items: [] });
+    }) as unknown as typeof fetch;
+  }
+  function boxes(): HTMLElement[] {
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+  }
+
+  it("勾 2 行 → 批量回收：POST batch-delete 带 case_ids；成功后清选择", async () => {
+    mockBatch([adbCase({ id: "c1" }), adbCase({ id: "c2" }), adbCase({ id: "c3" })], []);
+    render(<MemoryRouter><AdbCasesPage /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByTestId("adb-case-row-name")).toHaveLength(3));
+    expect(screen.queryByTestId("adb-case-batch-bar")).toBeNull();
+    fireEvent.click(boxes()[0]);
+    fireEvent.click(boxes()[1]);
+    expect((await screen.findByTestId("adb-case-batch-bar")).textContent).toContain("已选 2 项");
+    fireEvent.click(screen.getByTestId("adb-case-batch-delete"));
+    fireEvent.click(await screen.findByRole("button", { name: "放入回收站" }));
+    await waitFor(() => expect(posts.some((p) => p.url.includes("batch-delete"))).toBe(true));
+    const call = posts.find((p) => p.url.includes("batch-delete"))!;
+    expect(call.body.project_id).toBe("p1");
+    expect([...(call.body.case_ids as string[])].sort()).toEqual(["c1", "c2"]);
+    await waitFor(() => expect(screen.queryByTestId("adb-case-batch-bar")).toBeNull());
+  });
+
+  it("回收站视图勾行 → 批量恢复：POST batch-restore 带 case_ids", async () => {
+    mockBatch([], [adbCase({ id: "c9", status: "recycled" }), adbCase({ id: "c8", status: "recycled" })]);
+    render(<MemoryRouter><AdbCasesPage /></MemoryRouter>);
+    await waitFor(() => expect(document.body.textContent).toContain("还没有 ADB 用例"));
+    fireEvent.click(screen.getByTestId("adb-case-recycled"));
+    await waitFor(() => expect(screen.getAllByTestId("adb-case-row-name")).toHaveLength(2));
+    fireEvent.click(boxes()[0]);
+    expect(await screen.findByTestId("adb-case-batch-restore")).not.toBeNull();
+    fireEvent.click(screen.getByTestId("adb-case-batch-restore"));
+    const m = await waitFor(() => {
+      const el = document.querySelector(".ant-modal-confirm") as HTMLElement | null;
+      if (!el) throw new Error("确认框未出现");
+      return el;
+    });
+    fireEvent.click(within(m).getByRole("button", { name: /^恢\s*复$/ }));
+    await waitFor(() => expect(posts.some((p) => p.url.includes("batch-restore"))).toBe(true));
+    expect((posts.find((p) => p.url.includes("batch-restore"))!.body.case_ids as string[]).length).toBeGreaterThan(0);
   });
 });

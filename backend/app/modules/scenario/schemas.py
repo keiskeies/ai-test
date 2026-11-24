@@ -71,6 +71,8 @@ class ScenarioCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     module_id: str | None = None
     priority: str = "P2"
+    # D284：标签（去空白/去重保序，空 = 无标签；存法见 shared/tags.py）
+    tags: list[str] = Field(default_factory=list)
     step_graph: dict = Field(default_factory=lambda: {"version": 1, "nodes": []})
     variables: dict[str, str] = {}
     fail_fast: bool = True
@@ -94,6 +96,8 @@ class ScenarioUpdateIn(BaseModel):
     version: int = Field(ge=1)  # 乐观锁：不匹配 → 409 conflict + current_version
     name: str | None = Field(default=None, min_length=1, max_length=200)
     priority: str | None = None
+    # D284：标签三态——None = 不改、[] = 清空、带值 = 覆盖（与 api/functional 同款）
+    tags: list[str] | None = None
     module_id: str | None = None
     module_set: bool = False  # 显式声明改绑/解绑模块（module_id 可为 null）
     step_graph: dict | None = None
@@ -138,6 +142,8 @@ class ScenarioListIn(BaseModel):
     # 不顺手扩列（那是行为改变）。大小写不敏感来自 utf8mb4_0900_ai_ci（与浏览器
     # toLowerCase 同宽度）；% 与 _ 是字面量（转义复用 shared.filters._like）。全空白 = 没筛选。
     keyword: str | None = Field(default=None, description="名称关键字（大小写不敏感）；全空白=不过滤")
+    # D284：标签精确筛选（FIND_IN_SET；全空白 = 不过滤）。与上面几路并行 AND。
+    tag: str | None = Field(default=None, max_length=200, description="标签精确筛选；全空白=不过滤")
     # filter（D214）：D47-a 高级搜索条件组（JSON 串，形状见 shared.filters）。
     # 与 module_id/module_ids/keyword/recycled 并行 AND；字段白名单见 SCENARIO_LIST_FILTER。
     filter: str | None = Field(default=None, description="高级搜索条件组（JSON）；白名单外字段 400")
@@ -187,6 +193,8 @@ class ScenarioOut(BaseModel):
     name: str
     status: str = "normal"
     priority: str = "P2"
+    # D284：标签数组（空数组 = 无标签，不画假 0/假值）
+    tags: list[str] = Field(default_factory=list)
     step_graph: dict = Field(default_factory=lambda: {"version": 1, "nodes": []})
     variables: dict[str, str] = {}
     fail_fast: bool = True
@@ -350,8 +358,8 @@ class ScenarioExportOut(BaseModel):
     """scenarios = 每条场景一份**只读备份快照**（step_graph 逐字 + 保存期同口径 validate 判定
     + 引用原样 ref）；notes = 未导出/限制的人话如实报。
 
-    **只读导出，不可回灌**（与接口域 api_export 的刻意分歧，见 export_services 模块 docstring）：
-    导入侧没有场景解析器，声称可回灌就是自证无门；validate 判定让导出内容至少能被判真假。
+    **D274 起可回灌**（import_services.scenario_import）：导入会生成新 id、重新校验、
+    模块/环境不存在则清空——是「复制成新场景」，不是恢复旧 id 的备份。
     """
 
     scenarios: list[dict[str, Any]] = []
@@ -411,3 +419,53 @@ class RerunStepOut(BaseModel):
     run_id: str
     status: str  # 同步等待的终态（run_single_step 本就 await 完成，裁定⑤）
     rerun_of: str
+
+
+# ══════════ D274：场景导入（回灌本平台导出的 JSON 快照） ══════════
+class ScenarioImportEntry(BaseModel):
+    """一条待导入场景。字段与 export_services._entry 的**可写子集**逐字对齐。
+
+    导出文件里的 `scenario_id` / `validation` / `refs` 是溯源与只读判定，本模型不声明
+    （pydantic 默认忽略未知键）：id 一律重新生成——跨项目/重复导入时沿用旧 id 会撞主键；
+    validation 一律**重新现算**，不信任文件里那份结论（文件可能是手改过的）。
+    """
+
+    name: str = Field(min_length=1, max_length=200)
+    priority: str = "P2"
+    # D284：标签随导出/导入往返（存法不变，仍是逗号串）
+    tags: list[str] = Field(default_factory=list)
+    module_id: str | None = None
+    step_graph: dict = Field(default_factory=lambda: {"version": 1, "nodes": []})
+    variables: dict[str, str] = {}
+    fail_fast: bool = True
+    max_runtime_ms: int | None = Field(default=None, ge=1000)
+    common_assertions: list[dict[str, Any]] = Field(default_factory=list)
+    env_id: str | None = None
+    project_public: bool = True
+
+    @field_validator("priority")
+    @classmethod
+    def _p(cls, v: str) -> str:
+        if v not in PRIORITIES:
+            raise ValueError("优先级必须是 P0-P3")
+        return v
+
+
+class ScenarioImportIn(BaseModel):
+    """一次导入整份文件。上限 200 与批量操作的既有上限同尺（ScenarioBatchIn）。"""
+
+    project_id: str
+    scenarios: list[ScenarioImportEntry] = Field(min_length=1, max_length=200)
+
+
+class ScenarioImportOut(BaseModel):
+    """导入结果逐项如实报：renamed / cleared_modules / cleared_envs 都是**被改写的输入**，
+    不是错误；notes 里再用人话点名跨域引用指针的口径。"""
+
+    ok: bool = True
+    imported: int = 0
+    names: list[str] = Field(default_factory=list)
+    renamed: list[dict[str, str]] = Field(default_factory=list)
+    cleared_modules: list[str] = Field(default_factory=list)
+    cleared_envs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)

@@ -25,7 +25,7 @@ from app.core.errors import ApiError, Page, paginate, paginate_page
 from app.core.service import ServiceResult, ensure_project_access, service
 from app.modules.adb_test import schemas
 from app.modules.adb_test.commands import validate_steps
-from app.modules.adb_test.models import STATUS_RECYCLED, AdbCase
+from app.modules.adb_test.models import STATUS_NORMAL, STATUS_RECYCLED, AdbCase
 from app.modules.adb_test.module_services import _adb_module
 from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.visibility import assert_row_visible, visible_clause
@@ -347,6 +347,122 @@ async def adb_case_purge(payload: schemas.AdbCasePurgeIn, ctx) -> BaseModel:
     if ref:
         raise _blocked(ref, action="彻底删除", case_id=c.id)
     await ctx.db.delete(c)
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="adb:case:delete", effect="destructive", name="adb_case_batch_delete",
+    description="批量把 ADB 用例放入回收站（全有或全无：任一不存在/已回收 → 404 整批不动；"
+                "任一被未回收场景引用 → 409 整批不动，不提供批量 force）",
+    http={"method": "POST", "path": "/adb-cases/batch-delete", "tags": ["adb"]},
+    tool=False,
+    resident=False,
+)
+async def adb_case_batch_delete(payload: schemas.AdbCaseBatchDeleteIn, ctx) -> BaseModel:
+    """D273：ADB 用例批量回收（纪律同 api_case_batch_delete / D251，与 UI 侧同形状）。
+
+    引用检查一次批量问完；任一被引用 → 409 + blocked 清单、零写入。
+    回收逐行落 updated_by（回收站「删除人」列），与单删同法。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("adb:case:delete")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.case_ids))
+    if len(uniq) != len(payload.case_ids):
+        raise ApiError("validation_failed", "case_ids 不能重复", 422,
+                       {"case_ids": payload.case_ids})
+    rows = (await ctx.db.execute(select(AdbCase).where(
+        AdbCase.project_id == payload.project_id,
+        AdbCase.id.in_(uniq),
+    ).order_by(AdbCase.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    missing = [i for i in uniq if i not in found or found[i].status != STATUS_NORMAL]
+    if missing:
+        raise ApiError("not_found", "用例不存在", 404, {"case_ids": missing})
+    for r in rows:
+        assert_row_visible(r, ctx, what="ADB 用例不存在")
+    refs = await _scenario_refs(ctx, payload.project_id, [r.id for r in rows])
+    blocked = [r for r in rows if (refs.get(r.id) or {}).get("count")]
+    if blocked:
+        details_list = []
+        hidden = False
+        for r in blocked:
+            ref = refs[r.id]
+            item: dict = {"case_id": r.id, "name": r.name,
+                          "count": ref["count"], "scenarios": ref["scenarios"]}
+            if ref["hidden"]:
+                item["hidden"] = True
+                hidden = True
+            details_list.append(item)
+        names = "、".join("「" + b["name"] + "」" for b in details_list[:5])
+        more = " 等 " + str(len(blocked)) + " 条用例" if len(blocked) > 5 else ""
+        details: dict = {"blocked": details_list}
+        if hidden:
+            details["reason"] = "missing_scenario_read"
+        raise ApiError(
+            "referenced_by_scenario",
+            "有 " + str(len(blocked)) + " 条用例被未回收场景引用：" + names + more
+            + "；整批一行未动。批量不提供 force——确认要连带断掉场景步骤请逐个回收",
+            409, details)
+    for r in rows:
+        r.status = STATUS_RECYCLED
+        r.updated_by = ctx.user_id
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="adb:case:update", effect="write", name="adb_case_batch_restore",
+    description="批量从回收站恢复 ADB 用例（全有或全无：任一不在回收站 → 404；"
+                "任一名被占用 → 409 整批不动，不静默改名）",
+    http={"method": "POST", "path": "/adb-cases/batch-restore", "tags": ["adb"]},
+    tool=False,
+    resident=False,
+)
+async def adb_case_batch_restore(payload: schemas.AdbCaseBatchRestoreIn, ctx) -> BaseModel:
+    """与批量回收对称的出口（D273，与 ui_case_batch_restore 同口径）。
+
+    uq_adb_case_project_name 让「回收期间名字被占」是真实风险：任一被占（含同批互撞）
+    → 409 点名，整批不落。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("adb:case:update")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.case_ids))
+    if len(uniq) != len(payload.case_ids):
+        raise ApiError("validation_failed", "case_ids 不能重复", 422,
+                       {"case_ids": payload.case_ids})
+    rows = (await ctx.db.execute(select(AdbCase).where(
+        AdbCase.project_id == payload.project_id,
+        AdbCase.id.in_(uniq),
+    ).order_by(AdbCase.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    bad = [i for i in uniq if i not in found or found[i].status != STATUS_RECYCLED]
+    if bad:
+        raise ApiError("not_found", "有用例不存在或不在回收站", 404, {"case_ids": bad})
+    for r in rows:
+        assert_row_visible(r, ctx, what="ADB 用例不存在")
+    names = [r.name for r in rows]
+    if len(set(names)) != len(names):
+        dup = sorted({n for n in names if names.count(n) > 1})
+        raise ApiError("conflict", "勾选的用例里有重名，恢复后会撞唯一约束："
+                       + "、".join("「" + n + "」" for n in dup)
+                       + "；整批未恢复", 409, {"names": dup})
+    taken = (await ctx.db.execute(select(AdbCase.name, AdbCase.id).where(
+        AdbCase.project_id == payload.project_id,
+        AdbCase.name.in_(names),
+        AdbCase.status == STATUS_NORMAL,
+        AdbCase.id.notin_(uniq),
+    ))).all()
+    if taken:
+        raise ApiError("conflict", "回收期间这些名字已被占用："
+                       + "、".join("「" + t[0] + "」" for t in taken)
+                       + "；先处理它们再恢复（整批未恢复）", 409,
+                       {"names": [t[0] for t in taken], "name_exists": True})
+    for r in rows:
+        r.status = STATUS_NORMAL
+        r.updated_by = ctx.user_id
     await ctx.db.commit()
     return schemas.OkOut(ok=True)
 

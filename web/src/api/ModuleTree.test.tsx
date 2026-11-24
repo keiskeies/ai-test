@@ -159,13 +159,10 @@ function rowByName(container: HTMLElement, name: string): HTMLElement {
   return title.closest(".ant-tree-treenode") as HTMLElement;
 }
 
-/** antd Dropdown trigger=["hover"]：React 的 onMouseEnter 由 mouseover 衍生
- *  （StepListEditor.test.tsx:214 三件套注释同款），且 mouseEnterDelay≈0.15s。 */
+/** 模块「更多」菜单是**点击**触发（trigger=["click"]），点一下才挂弹层。 */
 async function openNodeMenu(name: string): Promise<void> {
   const btn = screen.getByLabelText("模块菜单-" + name);
-  fireEvent.pointerOver(btn);
-  fireEvent.mouseOver(btn);
-  fireEvent.mouseEnter(btn);
+  fireEvent.click(btn);
   await waitFor(() => {
     expect(visibleMenuItems().length).toBeGreaterThan(0);
   }, { timeout: 4000 });

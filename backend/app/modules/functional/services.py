@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import column, func, select, table
@@ -16,6 +17,7 @@ from app.core.registry import REGISTRY
 from app.core.service import ServiceResult, ensure_project_access, service
 from app.modules.functional import schemas
 from app.modules.functional.models import (
+    CASE_STATUS_DEFAULT,
     PRIORITIES,
     STATUS_NORMAL,
     STATUS_RECYCLED,
@@ -34,8 +36,19 @@ from app.shared.custom_fields import (
     validate_custom_values,
 )
 from app.shared.filter_registry import FieldDecl, ListViewFilter, register
+from app.shared.tags import join_tags, split_tags
 
 APP_USER = table("app_user", column("id"), column("name"), column("account"))
+# D281：责任人必须是本项目成员（指派给项目外的人 = 一条永远没人认领的假指派）。
+PROJECT_MEMBER = table("project_member", column("id"), column("project_id"), column("user_id"))
+
+# D277：列表页的评审/执行结论批量投影。两域都用表名反射（不横向 import review/testplan
+# 的领域模型——跨域零横向 import 是既有纪律，testplan 的 _link_results 同款）。
+CASE_REVIEW_LINK = table("case_review_case", column("review_id"), column("case_id"),
+                         column("result"), column("updated_at"))
+CASE_REVIEW = table("case_review", column("id"), column("project_id"), column("name"))
+PLAN_FUNCTIONAL_EXEC = table("plan_functional_exec", column("project_id"),
+                             column("case_id"), column("result"), column("executed_at"))
 
 # D219：功能用例列表的可筛面（D47-a 三件套铺到功能用例页）。字段全是 functional_case
 # 上真实存在的列，白名单外 400 带本页清单。三个轴刻意不进条件组：
@@ -54,6 +67,7 @@ FUNCTIONAL_CASE_LIST_FILTER = ListViewFilter(
         "description": FieldDecl(FunctionalCase.description, "text", "描述"),
         "priority": FieldDecl(FunctionalCase.priority, "enum", "优先级", nullable=False),
         "template_id": FieldDecl(FunctionalCase.template_id, "id", "模板", nullable=False),
+        "owner_id": FieldDecl(FunctionalCase.owner_id, "id", "责任人"),
         "created_by": FieldDecl(FunctionalCase.created_by, "id", "创建人"),
         "updated_by": FieldDecl(FunctionalCase.updated_by, "id", "更新人"),
         "created_at": FieldDecl(FunctionalCase.created_at, "time", "创建时间", nullable=False),
@@ -69,6 +83,15 @@ async def _user_names(db, ids: set[str | None]) -> dict[str, str]:
         return {}
     rows = (await db.execute(select(APP_USER.c.id, APP_USER.c.name).where(APP_USER.c.id.in_(real)))).all()
     return {r.id: r.name for r in rows}
+
+
+async def _check_member(db, project_id: str, user_id: str) -> None:
+    """D281：责任人必须是本项目成员（422 `invalid_owner`，与计划域 `_check_owner` 同码）。"""
+    hit = (await db.execute(select(PROJECT_MEMBER.c.id).where(
+        PROJECT_MEMBER.c.project_id == project_id,
+        PROJECT_MEMBER.c.user_id == user_id).limit(1))).first()
+    if hit is None:
+        raise ApiError("invalid_owner", "责任人不是本项目成员", 422, {"owner_id": user_id})
 
 
 async def _resolve_template(ctx, project_id: str, template_id: str | None):
@@ -120,12 +143,34 @@ async def _replace_custom_values(db, case_id: str, project_id: str, values: dict
                                          project_id=project_id, value=dump_value(v)))
 
 
+def _dump_steps(steps: list[schemas.CaseStep]) -> str | None:
+    """D289：只存真填过的行（两列全空的行不落库，回显时也不画假空行）。"""
+    rows = [s.model_dump() for s in steps if s.desc.strip() or s.expected.strip()]
+    return json.dumps(rows, ensure_ascii=False) if rows else None
+
+
+def _load_steps(raw: str | None) -> list[dict]:
+    """读回步骤。列只由本服务写；老行是 NULL = 没有步骤，不猜内容。"""
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
 def _case_out(c: FunctionalCase, names: dict[str, str], custom: dict | None = None) -> schemas.CaseOut:
     return schemas.CaseOut(
         id=c.id, num=c.num, project_id=c.project_id, module_id=c.module_id,
         template_id=c.template_id, name=c.name, priority=c.priority,
-        description=c.description, recycled=c.status == STATUS_RECYCLED,
+        description=c.description,
+        precondition=c.precondition, steps=_load_steps(c.steps), remark=c.remark,
+        case_status=c.case_status or CASE_STATUS_DEFAULT,
+        recycled=c.status == STATUS_RECYCLED,
         custom_fields=custom or {},
+        owner_id=c.owner_id, owner_name=names.get(c.owner_id or ""),
+        tags=split_tags(c.tags),
         created_by=c.created_by, created_by_name=names.get(c.created_by or ""),
         updated_by=c.updated_by, updated_by_name=names.get(c.updated_by or ""),
         created_at=schemas.iso(c.created_at), updated_at=schemas.iso(c.updated_at),
@@ -391,6 +436,9 @@ async def functional_case_list(payload: schemas.CaseListIn, ctx) -> ServiceResul
     if payload.keyword:
         kw = "%" + payload.keyword.replace("%", "\\%").replace("_", "\\_") + "%"
         stmt = stmt.where(FunctionalCase.name.like(kw) | FunctionalCase.description.like(kw))
+    # D283：标签精确匹配（逗号串上 FIND_IN_SET > 0；LIKE 会把 bug1 命中 bug10）
+    if payload.tag and payload.tag.strip():
+        stmt = stmt.where(func.find_in_set(payload.tag.strip(), FunctionalCase.tags) > 0)
     if payload.followed_by_me:
         stmt = stmt.where(FunctionalCase.id.in_(select(FunctionalCaseFollower.case_id).where(
             FunctionalCaseFollower.user_id == ctx.user_id,
@@ -400,7 +448,8 @@ async def functional_case_list(payload: schemas.CaseListIn, ctx) -> ServiceResul
     page = await paginate_page(ctx.db, stmt, current=payload.current, size=payload.size)
     ids = [c.id for c in page.items]
     names = await _user_names(ctx.db, {c.created_by for c in page.items}
-                              | {c.updated_by for c in page.items})
+                              | {c.updated_by for c in page.items}
+                              | {c.owner_id for c in page.items})
     custom = await _load_custom_values(ctx.db, ids)
     followed = await _followed_ids(ctx.db, ids, ctx.user_id)
     return Page(items=[schemas.CaseListRowOut(
@@ -411,7 +460,7 @@ async def functional_case_list(payload: schemas.CaseListIn, ctx) -> ServiceResul
 
 @service(
     perm="functional:case:create", effect="write", name="functional_case_create",
-    description="新建功能用例（模板必填值校验；num 项目内唯一；模块可空）",
+    description="新建功能用例（模板必填值校验；num 项目内唯一；模块可空；责任人须为项目成员）",
     http={"method": "POST", "path": "/functional-cases", "tags": ["functional"], "status": 201},
 )
 async def functional_case_create(payload: schemas.CaseCreateIn, ctx) -> schemas.CaseOut:
@@ -420,18 +469,23 @@ async def functional_case_create(payload: schemas.CaseCreateIn, ctx) -> schemas.
     assert ctx.db is not None
     if payload.module_id:
         await _module(ctx.db, payload.project_id, payload.module_id)
+    if payload.owner_id:
+        await _check_member(ctx.db, payload.project_id, payload.owner_id)
     resolved = await _resolve_template(ctx, payload.project_id, payload.template_id)
     values = _validate_custom(resolved.fields, payload.custom_fields, require_all=True)
     num = await _next_num(ctx, payload.project_id)
     c = FunctionalCase(project_id=payload.project_id, num=num, module_id=payload.module_id,
                        template_id=resolved.template_id, name=payload.name,
                        priority=payload.priority, description=payload.description,
+                       precondition=payload.precondition, steps=_dump_steps(payload.steps),
+                       remark=payload.remark, case_status=payload.case_status,
+                       owner_id=payload.owner_id, tags=join_tags(payload.tags),
                        status=STATUS_NORMAL, created_by=ctx.user_id, updated_by=ctx.user_id)
     ctx.db.add(c)
     await ctx.db.flush()
     await _replace_custom_values(ctx.db, c.id, payload.project_id, values)
     await ctx.db.commit()
-    names = await _user_names(ctx.db, {ctx.user_id})
+    names = await _user_names(ctx.db, {ctx.user_id, payload.owner_id})
     return _case_out(c, names, values)
 
 
@@ -445,7 +499,7 @@ async def functional_case_get(payload: schemas.CaseGetIn, ctx) -> schemas.CaseDe
     ctx.require("functional:case:read")
     assert ctx.db is not None
     c = await _case(ctx.db, payload.project_id, payload.case_id)
-    names = await _user_names(ctx.db, {c.created_by, c.updated_by})
+    names = await _user_names(ctx.db, {c.created_by, c.updated_by, c.owner_id})
     custom = (await _load_custom_values(ctx.db, [c.id])).get(c.id, {})
     followed = await _followed_ids(ctx.db, [c.id], ctx.user_id)
     return schemas.CaseDetailOut(**_case_out(c, names, custom).model_dump(),
@@ -520,6 +574,31 @@ async def functional_case_update(payload: schemas.CaseUpdateIn, ctx) -> schemas.
         if (payload.description or "") != (c.description or ""):
             content_changed = True
         c.description = payload.description
+    # D289：前置条件/步骤/备注是「用例内容」，改动同样触发自动重评审。
+    if payload.precondition_set:
+        if (payload.precondition or "") != (c.precondition or ""):
+            content_changed = True
+        c.precondition = payload.precondition
+    if payload.steps_set:
+        dumped = _dump_steps(payload.steps or [])
+        if dumped != c.steps:
+            content_changed = True
+        c.steps = dumped
+    if payload.remark_set:
+        if (payload.remark or "") != (c.remark or ""):
+            content_changed = True
+        c.remark = payload.remark
+    # 用例状态是流程轴，不是内容：改了不该触发重评审。
+    if payload.case_status is not None:
+        c.case_status = payload.case_status
+    # D281：责任人三态——不带 = 不改、带 null = 清空、带值 = 改且必须是本项目成员。
+    if payload.owner_set:
+        if payload.owner_id is not None:
+            await _check_member(ctx.db, payload.project_id, payload.owner_id)
+        c.owner_id = payload.owner_id
+    # D283：标签 None = 不改、[] = 清空
+    if payload.tags is not None:
+        c.tags = join_tags(payload.tags)
     if payload.module_set:
         if payload.module_id is not None:
             await _module(ctx.db, payload.project_id, payload.module_id)
@@ -549,7 +628,7 @@ async def functional_case_update(payload: schemas.CaseUpdateIn, ctx) -> schemas.
                     }), ctx)
     c.updated_by = ctx.user_id
     await ctx.db.commit()
-    names = await _user_names(ctx.db, {c.created_by, c.updated_by})
+    names = await _user_names(ctx.db, {c.created_by, c.updated_by, c.owner_id})
     custom = (await _load_custom_values(ctx.db, [c.id])).get(c.id, {})
     return _case_out(c, names, custom)
 
@@ -585,7 +664,7 @@ async def functional_case_restore(payload: schemas.CaseGetIn, ctx) -> schemas.Ca
     c.status = STATUS_NORMAL
     c.updated_by = ctx.user_id
     await ctx.db.commit()
-    names = await _user_names(ctx.db, {c.created_by, c.updated_by})
+    names = await _user_names(ctx.db, {c.created_by, c.updated_by, c.owner_id})
     custom = (await _load_custom_values(ctx.db, [c.id])).get(c.id, {})
     return _case_out(c, names, custom)
 
@@ -751,7 +830,7 @@ async def functional_case_batch_copy(payload: schemas.CaseBatchCopyIn,
       全部落到 `module_id`（null = 未分类）。
     - **只复制正常态**：回收站/跨项目/不存在的 id 一律 404 且**整批不写**（不复制半批，
       也不泄露别项目用例的存在性）。
-    - **content 全抄、关系不抄**：模板、名称+后缀、优先级、描述、自定义值随行复制；
+    - **content 全抄、关系不抄**：模板、名称+后缀、优先级、描述、责任人、自定义值随行复制；
       评论与前后置关系说的是「源那一条」的事，不复制。
     - 重复 id 去重保序（复制两次同一条不是两个请求，去重后只产出一个副本）。
     """
@@ -781,7 +860,8 @@ async def functional_case_batch_copy(payload: schemas.CaseBatchCopyIn,
             project_id=payload.project_id, num=await _next_num(ctx, payload.project_id),
             module_id=payload.module_id if payload.module_set else src.module_id,
             template_id=src.template_id, name=name, priority=src.priority,
-            description=src.description, status=STATUS_NORMAL,
+            description=src.description, owner_id=src.owner_id, tags=src.tags,
+            status=STATUS_NORMAL,
             created_by=ctx.user_id, updated_by=ctx.user_id,
         )
         ctx.db.add(c)
@@ -795,7 +875,7 @@ async def functional_case_batch_copy(payload: schemas.CaseBatchCopyIn,
 # ══════════════════════════════ 统计 ══════════════════════════════
 @service(
     perm="functional:case:read", effect="read", name="functional_case_stats",
-    description="功能用例统计（按优先级/模块/创建人分组计数；含回收站总数）",
+    description="功能用例统计（按优先级/模块/创建人/责任人分组计数；含回收站总数）",
     http={"method": "POST", "path": "/functional-cases/stats", "tags": ["functional"]},
     tool=False,
 )
@@ -806,6 +886,7 @@ async def functional_case_stats(payload: schemas.CaseStatsIn, ctx) -> schemas.Ca
     是回收站的行数——两个数并排出现，用户才分得清「在用多少」与「删了多少」。
     `groups` 的计数之和必须等于 `total`：同一份 `where`（项目 + 视图状态）分两路
     取数（一次 count、一次 group by），两路复用同一个条件元组，不各写一遍。
+    D281 补 `owner` 轴（MS maintainer）：未指派归「—」，与创建人轴同口径。
     """
     await ensure_project_access(ctx, payload.project_id)
     ctx.require("functional:case:read")
@@ -844,10 +925,11 @@ async def functional_case_stats(payload: schemas.CaseStatsIn, ctx) -> schemas.Ca
             label = "未分类" if not mid else names.get(key, "未知模块")
             groups.append(schemas.CaseStatGroup(key=key, label=label, count=int(n)))
         groups.sort(key=lambda g: (-g.count, g.label))
-    else:  # creator
+    else:  # creator / owner（D281）——两轴口径一致：空值归「—」，名字批量解析
+        col = FunctionalCase.created_by if payload.group_by == "creator" else FunctionalCase.owner_id
         rows = (await ctx.db.execute(
-            select(FunctionalCase.created_by, func.count()).where(*scope)
-            .group_by(FunctionalCase.created_by))).all()
+            select(col, func.count()).where(*scope)
+            .group_by(col))).all()
         names = await _user_names(ctx.db, {str(uid) for uid, _ in rows if uid})
         for uid, n in rows:
             key = str(uid) if uid else ""
@@ -1326,3 +1408,67 @@ async def functional_minder_note_delete(payload: schemas.MinderNoteGetIn, ctx) -
         FunctionalMinderNote.id.in_(doomed)))
     await ctx.db.commit()
     return OkOut(ok=True)
+
+
+@service(
+    perm="functional:case:read",
+    effect="read",
+    name="functional_case_summary_batch",
+    description="功能用例列表的评审/执行结论批量投影（当前页一次：最近一次评审结论 + "
+    "最近一次计划内人工执行结论；没发生过就是 null，不画成未通过）",
+    http={"method": "POST", "path": "/functional-case-summary-batch",
+          "tags": ["functional"], "status": 200},
+)
+async def functional_case_summary_batch(
+    payload: schemas.CaseSummaryBatchIn, ctx,
+) -> schemas.CaseSummaryBatchOut:
+    """MS 列表的「评审结果 / 执行结果」两列。
+
+    - 评审结果 = 该用例所在**最近一次评审**里的当前结论（pending/pass/fail）；
+    - 执行结果 = 计划内人工执行的**最近一次**结论（pass/fail/blocked/skip，按 executed_at）；
+    - 两者都没发生过 → null。null 与 fail 是两句话，前端必须分开画。
+    只回仍存在的用例（页面取数间隙被删的行不回摘要）。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("functional:case:read")
+    assert ctx.db is not None
+    ids = list(dict.fromkeys(payload.case_ids))
+    alive = set((await ctx.db.execute(select(FunctionalCase.id).where(
+        FunctionalCase.project_id == payload.project_id,
+        FunctionalCase.id.in_(ids),
+    ))).scalars().all())
+    review_by: dict[str, tuple[str, str]] = {}
+    if alive:
+        rows = (await ctx.db.execute(
+            select(CASE_REVIEW_LINK.c.case_id, CASE_REVIEW_LINK.c.result,
+                   CASE_REVIEW.c.name, CASE_REVIEW_LINK.c.updated_at)
+            .select_from(CASE_REVIEW_LINK.join(
+                CASE_REVIEW, CASE_REVIEW.c.id == CASE_REVIEW_LINK.c.review_id))
+            .where(CASE_REVIEW.c.project_id == payload.project_id,
+                   CASE_REVIEW_LINK.c.case_id.in_(sorted(alive)))
+            .order_by(CASE_REVIEW_LINK.c.updated_at)
+        )).all()
+        for case_id, result, review_name, _upd in rows:
+            review_by[str(case_id)] = (str(result), str(review_name))  # 升序遍历，最后写入=最新
+    exec_by: dict[str, tuple[str, str]] = {}
+    if alive:
+        rows = (await ctx.db.execute(
+            select(PLAN_FUNCTIONAL_EXEC.c.case_id, PLAN_FUNCTIONAL_EXEC.c.result,
+                   PLAN_FUNCTIONAL_EXEC.c.executed_at)
+            .where(PLAN_FUNCTIONAL_EXEC.c.project_id == payload.project_id,
+                   PLAN_FUNCTIONAL_EXEC.c.case_id.in_(sorted(alive)))
+            .order_by(PLAN_FUNCTIONAL_EXEC.c.executed_at)
+        )).all()
+        for case_id, result, executed_at in rows:
+            exec_by[str(case_id)] = (str(result), schemas.iso(executed_at) or "")
+    items = [
+        schemas.CaseSummaryOut(
+            case_id=cid,
+            review_result=review_by.get(cid, (None, None))[0],
+            review_name=review_by.get(cid, (None, None))[1],
+            exec_result=exec_by.get(cid, (None, ""))[0],
+            exec_at=exec_by.get(cid, (None, ""))[1] or None,
+        )
+        for cid in ids if cid in alive
+    ]
+    return schemas.CaseSummaryBatchOut(items=items, total=len(items))

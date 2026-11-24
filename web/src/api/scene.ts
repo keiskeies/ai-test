@@ -47,6 +47,8 @@ export type ScenarioExportEntry = {
   scenario_id: string;
   name: string;
   priority: string;
+  /** D284：标签（导出快照带出，导入原样回灌） */
+  tags: string[];
   module_id: string | null;
   step_graph: Record<string, unknown>;
   variables: Record<string, string>;
@@ -61,6 +63,33 @@ export type ScenarioExportEntry = {
 export type ScenarioExportOut = {
   scenarios: ScenarioExportEntry[];
   exported: number;
+  notes: string[];
+};
+
+// D274 场景导入（手写镜像，字段名与后端 schemas.ScenarioImportIn/Out 逐字一致）。
+// 导入只吃本平台导出的 JSON 快照（export 的回灌对手方）；导出文件里的 scenario_id /
+// validation / refs 是溯源字段，后端不声明、一律忽略并重新生成 id / 现算校验。
+export type ScenarioImportEntry = {
+  name: string;
+  priority?: string;
+  /** D284：标签（可选，缺省 = 无标签） */
+  tags?: string[];
+  module_id?: string | null;
+  step_graph?: Record<string, unknown>;
+  variables?: Record<string, string>;
+  fail_fast?: boolean;
+  max_runtime_ms?: number | null;
+  common_assertions?: Record<string, unknown>[];
+  env_id?: string | null;
+  project_public?: boolean;
+};
+export type ScenarioImportOut = {
+  ok: boolean;
+  imported: number;
+  names: string[];
+  renamed: { from: string; to: string }[];
+  cleared_modules: string[];
+  cleared_envs: string[];
   notes: string[];
 };
 
@@ -94,7 +123,9 @@ function qs(o: Record<string, unknown>): string {
 // D214：filter（高级搜索条件组 JSON）与 current/keyword/module_ids 同一层，键名与后端
 // ScenarioListIn.filter 逐字一致。
 export type ScenarioListQuery = Pick<ListQuery, "project_id"> & Partial<Omit<ListQuery, "project_id">>
-  & { current?: number; keyword?: string; module_ids?: string[]; filter?: string };
+  & { current?: number; keyword?: string; module_ids?: string[]; filter?: string;
+      /** D284：标签精确筛选（后端 FIND_IN_SET；空/全空白 = 不过滤） */
+      tag?: string };
 
 export const sceneApi = {
   /** 场景列表（recycled=true 只看回收站；页码模式带 current+size，与 cursor 互斥）。
@@ -168,8 +199,13 @@ export const sceneApi = {
       "/scenario-batch-run", body),
 
   /** 导出备份（D74，§11.4.8 批量条）：ids 传了只导这几条；缺省 = 项目内全部非回收可见场景。
-   *  只读快照不可回灌（场景域无导入解析器，口径见后端 export_services 模块头）。 */
+   *  D274 起导出可回灌：用 import 把同一份 JSON 导成本项目的新场景（id 重新生成）。 */
   export: (body: ScenarioExportIn) => post<ScenarioExportOut>("/scenario-export", body),
+
+  /** D274：导入本平台导出的场景快照。逐条重新校验（有任何一条不合法整批 422、不写入）；
+   *  重名自动加「 (导入)」后缀，模块/环境在目标项目不存在时清空——回包逐项如实报。 */
+  import: (body: { project_id: string; scenarios: ScenarioImportEntry[] }) =>
+    post<ScenarioImportOut>("/scenario-import", body),
 
   /** 引用检测：某用例/接口定义被哪些未回收场景引用（含命中步骤 key）。 */
   references: (q: ReferencesQuery) =>

@@ -1236,6 +1236,19 @@ function Detail() {
         <Descriptions size="small" column={3} colon={false} style={{ marginTop: status ? 8 : 0 }}
           items={[
             { key: "desc", label: "描述", children: plan.description ?? "—" },
+            // D279：阶段/责任人/计划与实际起止（表单可写；没填画「—」，不编默认值）
+            { key: "stage", label: "测试阶段", children: (
+              <span data-testid="plan-detail-stage">{plan.stage ?? "—"}</span>) },
+            { key: "owner", label: "责任人", children: (
+              <span data-testid="plan-detail-owner">{plan.owner_name ?? "—"}</span>) },
+            { key: "ps", label: "计划开始", children: (
+              <span data-testid="plan-detail-planned-start">{fmtTime(plan.planned_start) ?? "—"}</span>) },
+            { key: "pe", label: "计划结束", children: (
+              <span data-testid="plan-detail-planned-end">{fmtTime(plan.planned_end) ?? "—"}</span>) },
+            { key: "as", label: "实际开始", children: (
+              <span data-testid="plan-detail-actual-start">{fmtTime(plan.actual_start) ?? "—"}</span>) },
+            { key: "ae", label: "实际结束", children: (
+              <span data-testid="plan-detail-actual-end">{fmtTime(plan.actual_end) ?? "—"}</span>) },
             { key: "ct", label: "创建时间", children: (
               <span data-testid="plan-detail-created">{fmtTime(plan.created_at) ?? "—"}</span>) },
             { key: "ut", label: "更新时间", children: (

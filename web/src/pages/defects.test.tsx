@@ -35,6 +35,7 @@ function row(id: string, over: Partial<DefectRow> = {}): DefectRow {
   return {
     id, num: id === "d1" ? 100001 : 100002, project_id: "p1", template_id: "tpl1",
     title: "缺陷" + id, description: null, status: "new", priority: "P2",
+    source: null, severity: null,
     handle_user_id: null, handle_user_name: null, tags: [], custom_fields: {}, recycled: false,
     created_by: "u1", created_by_name: "张三", updated_by: "u1", updated_by_name: "张三",
     created_at: "2026-11-22T10:30:00+08:00", updated_at: "2026-11-22T10:30:00+08:00",
@@ -244,7 +245,42 @@ describe("缺陷列表", () => {
     await waitFor(() => {
       const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/defects"));
       expect(c).toBeTruthy();
-      expect(c!.body).toMatchObject({ project_id: "p1", title: "新缺陷", priority: "P2", tags: [] });
+      expect(c!.body).toMatchObject({ project_id: "p1", title: "新缺陷", priority: "P2", tags: [],
+        // D280：来源/严重程度未填就是 null（未评估不冒充「一般」）
+        source: null, severity: null });
+    });
+  });
+
+  it("D289：新建页两栏满高，状态默认状态图起始态并随 POST 提交", async () => {
+    renderList();
+    await waitFor(() => expect(screen.getByText("登录失败")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("defect-new"));
+    await waitFor(() => expect(screen.getByTestId("defect-form-side")).toBeTruthy());
+    expect(document.querySelector(".tp-record-editor--side-right")).toBeTruthy();
+    expect(within(screen.getByTestId("defect-form-side")).getByText("新建")).toBeTruthy();
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/templates/tpl1"))).toBe(true));
+    fireEvent.change(screen.getByTestId("defect-field-title"), { target: { value: "带状态缺陷" } });
+    fireEvent.click(screen.getByTestId("defect-save"));
+    await waitFor(() => {
+      const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/defects"));
+      expect(c).toBeTruthy();
+      expect(c!.body).toMatchObject({ title: "带状态缺陷", status: "new" });
+    });
+  });
+
+  it("D289：编辑页回显当前状态，PATCH 带上 status", async () => {
+    renderList();
+    await waitFor(() => expect(screen.getByText("登录失败")).toBeTruthy());
+    fireEvent.click(screen.getAllByTestId("defect-edit")[0]);
+    await waitFor(() => expect(screen.getByTestId("defect-form-side")).toBeTruthy());
+    expect(within(screen.getByTestId("defect-form-side")).getByText("处理中")).toBeTruthy();
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/templates/tpl1"))).toBe(true));
+    fireEvent.change(screen.getByTestId("defect-field-title"), { target: { value: "改名缺陷" } });
+    fireEvent.click(screen.getByTestId("defect-save"));
+    await waitFor(() => {
+      const c = calls.find((x) => x.method === "PATCH" && /\/defects\/d1$/.test(x.url));
+      expect(c).toBeTruthy();
+      expect(c!.body).toMatchObject({ title: "改名缺陷", status: "in_process" });
     });
   });
 
@@ -280,6 +316,19 @@ describe("缺陷列表", () => {
     });
   });
 
+  it("D280 严重程度画中文标签、未评估画「—」；来源原样显示", async () => {
+    mockBackend([
+      row("d1", { title: "登录失败", severity: "critical", source: "客户反馈" }),
+      row("d2", { title: "支付超时" }),
+    ]);
+    renderList();
+    await waitFor(() => expect(screen.getByText("登录失败")).toBeTruthy());
+    expect(screen.getAllByTestId("defect-row-severity").map((n) => n.textContent))
+      .toEqual(["致命", "—"]);
+    expect(screen.getAllByTestId("defect-row-source").map((n) => n.textContent))
+      .toEqual(["客户反馈", "—"]);
+  });
+
   it("D216 列设置勾掉「标签」只藏那一列（其余表头原样）", async () => {
     renderList();
     await waitFor(() => expect(screen.getByText("登录失败")).toBeTruthy());
@@ -289,8 +338,8 @@ describe("缺陷列表", () => {
     const panel = await screen.findByTestId("lt-col-panel");
     const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
     const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
-    expect(labels).toEqual(["ID", "标题", "状态", "优先级", "标签", "自定义字段",
-      "处理人", "关联用例", "评论", "关注", "更新人", "更新时间"]);
+    expect(labels).toEqual(["ID", "标题", "状态", "优先级", "严重程度", "缺陷来源", "标签",
+      "自定义字段", "处理人", "关联用例", "评论", "关注", "更新人", "更新时间"]);
     fireEvent.click(boxes[labels.indexOf("标签")]);
     await waitFor(() => expect(thead()).not.toContain("标签"));
     expect(thead()).toContain("优先级");

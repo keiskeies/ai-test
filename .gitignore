@@ -37,6 +37,11 @@ id_ed25519
 # （.g2x 门禁快照、.mut-* 变异记录、.v*.json、.r*-*.txt 等）+ 三处 .tmp/ 草稿区。
 # 新临时文件请继续写进 backend/.tmp 或 web/.tmp——那里天然被盖住。
 **/.tmp/
+# 取证截图 / IDE 导入草稿 / WorkBuddy 本机数据：都是本机产物，不入库。
+# .workbuddy 存的是跨会话的项目记忆，换机器应重新积累，不是可共享的源码。
+.shots/
+.trae-import/
+.workbuddy/
 /.?*.json
 /.?*.txt
 /.?*.mjs

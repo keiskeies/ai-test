@@ -5,21 +5,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Drawer, Input, Modal, Progress, Select, Space, Tag, Typography, message,
+  Alert, Button, Card, Drawer, Input, Modal, Progress, Select, Space, Table, Tag, Tooltip, Typography, message,
 } from "antd";
 import { PlusOutlined, ReloadOutlined, StarOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
+import EditorField from "../ui/EditorField";
 import StateView from "../ui/StateView";
 import { FilterBar } from "../ui/Toolbar";
 import ModuleTree, { type ModNode } from "../api/ModuleTree";
 import CaseMindmap from "../api/CaseMindmap";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
-import { ApiErr, get } from "../api/client";
+import { ApiErr, get, post } from "../api/client";
 import {
-  functionalApi, type CaseBatchCopyBody, type CaseBatchUpdateBody, type CaseRow,
-  type CaseStats, type CaseStatsGroupBy, type FunctionalModuleNode,
+  CASE_STATUS_OPTIONS, functionalApi, type CaseBatchCopyBody, type CaseBatchUpdateBody, type CaseRow,
+  type CaseStats, type CaseStatsGroupBy, type CaseStep, type FunctionalModuleNode,
 } from "../api/functional";
 import { projectMetaApi, type TemplateDetail, type TemplateField, type TemplateItem } from "../api/projectMeta";
 import CustomFieldForm from "../ui/CustomFields";
@@ -39,12 +40,40 @@ type MemberRow = { user_id: string; account: string | null; name: string | null 
 const FUNCTIONAL_COL_CHOICES: ColumnChoice[] = [
   { key: "num", label: "编号" },
   { key: "name", label: "名称" },
+  { key: "review", label: "评审结果" },
+  { key: "tags", label: "标签" },
   { key: "prio", label: "优先级" },
   { key: "module", label: "模块" },
+  { key: "description", label: "用例描述" },
+  { key: "exec", label: "执行结果" },
+  { key: "owner", label: "责任人" },
   { key: "custom", label: "自定义字段" },
   { key: "updby", label: "更新人" },
   { key: "updat", label: "更新时间" },
 ];
+
+/** D277：评审/执行两列的词表。未发生（null）在渲染里单独画「未评审/未执行」，
+ *  不并进这两个表——「没发生过」与「结果是 pending/blocked」是两句话。 */
+const REVIEW_META: Record<string, { color: string; label: string }> = {
+  pending: { color: "default", label: "待评审" },
+  pass: { color: "success", label: "通过" },
+  fail: { color: "error", label: "未通过" },
+};
+const EXEC_META: Record<string, { color: string; label: string }> = {
+  pass: { color: "success", label: "通过" },
+  fail: { color: "error", label: "失败" },
+  blocked: { color: "warning", label: "阻塞" },
+  skip: { color: "default", label: "跳过" },
+};
+
+/** 一条用例的跨计划摘要（后端 functional-case-summary-batch 手写镜像）。 */
+type CaseSummary = {
+  case_id: string;
+  review_result: string | null;
+  review_name: string | null;
+  exec_result: string | null;
+  exec_at: string | null;
+};
 
 function toModNodes(nodes: FunctionalModuleNode[]): ModNode[] {
   return nodes.map((n) => ({
@@ -70,7 +99,12 @@ function moduleNameMap(nodes: FunctionalModuleNode[], acc: Record<string, string
   return acc;
 }
 
-function CaseFormModal({ open, editing, projectId, modules, members, onClose, onSaved }: {
+/** D289：步骤行的内部 key（用户删改行后仍稳定；不用数组下标当 React key）。 */
+type StepRow = CaseStep & { key: number };
+let stepKeySeq = 0;
+const nextStepKey = (): number => { stepKeySeq += 1; return stepKeySeq; };
+
+function CaseFormDrawer({ open, editing, projectId, modules, members, onClose, onSaved }: {
   open: boolean;
   editing: CaseRow | null;
   projectId: string;
@@ -82,7 +116,16 @@ function CaseFormModal({ open, editing, projectId, modules, members, onClose, on
   const [name, setName] = useState("");
   const [priority, setPriority] = useState("P2");
   const [description, setDescription] = useState("");
+  // D289：MS v2 用例表单的四项内容（步骤用行表格编辑）
+  const [precondition, setPrecondition] = useState("");
+  const [steps, setSteps] = useState<StepRow[]>([]);
+  const [remark, setRemark] = useState("");
+  const [caseStatus, setCaseStatus] = useState("prepare");
   const [moduleId, setModuleId] = useState<string | null>(null);
+  // D281：责任人（null = 还没定人，不默认指派）
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  // D283：标签
+  const [tags, setTags] = useState<string[]>([]);
   const [templates, setTemplates] = useState<TemplateItem[]>([]);
   const [templateId, setTemplateId] = useState("");
   const [tpl, setTpl] = useState<TemplateDetail | null>(null);
@@ -113,6 +156,12 @@ function CaseFormModal({ open, editing, projectId, modules, members, onClose, on
     setPriority(editing?.priority ?? "P2");
     setDescription(editing?.description ?? "");
     setModuleId(editing?.module_id ?? null);
+    setOwnerId(editing?.owner_id ?? null);
+    setTags(editing?.tags ?? []);
+    setPrecondition(editing?.precondition ?? "");
+    setSteps((editing?.steps ?? []).map((s) => ({ ...s, key: nextStepKey() })));
+    setRemark(editing?.remark ?? "");
+    setCaseStatus(editing?.case_status ?? "prepare");
     setErr(null);
     setTemplates([]);
     setTpl(null);
@@ -133,17 +182,34 @@ function CaseFormModal({ open, editing, projectId, modules, members, onClose, on
   async function submit(): Promise<void> {
     if (!name.trim()) { message.warning("用例名称必填"); return; }
     if (!templateId) { message.warning("还没有可用模板"); return; }
+    if (!caseStatus) { message.warning("用例状态必填"); return; }
+    // 两列全空的行不提交（后端也会丢，但请求体里就不该出现空行）
+    const cleanSteps: CaseStep[] = steps
+      .map(({ desc, expected }) => ({ desc: desc.trim(), expected: expected.trim() }))
+      .filter((s) => s.desc || s.expected);
+    const preconditionText = precondition.trim() || null;
+    const remarkText = remark.trim() || null;
     setBusy(true);
     setErr(null);
     try {
       if (editing) {
         await functionalApi.updateCase(editing.id, {
           project_id: projectId, name: name.trim(), priority, description, description_set: true,
+          precondition: preconditionText, precondition_set: true,
+          steps: cleanSteps, steps_set: true,
+          remark: remarkText, remark_set: true,
+          case_status: caseStatus,
+          owner_id: ownerId, owner_set: true,
+          tags,
           module_id: moduleId, module_set: true, template_id: templateId, custom_fields: custom,
         });
       } else {
         await functionalApi.createCase({
           project_id: projectId, name: name.trim(), priority, description,
+          precondition: preconditionText, steps: cleanSteps, remark: remarkText,
+          case_status: caseStatus,
+          owner_id: ownerId,
+          tags,
           module_id: moduleId, template_id: templateId, custom_fields: custom,
         });
       }
@@ -154,56 +220,151 @@ function CaseFormModal({ open, editing, projectId, modules, members, onClose, on
     } finally { setBusy(false); }
   }
 
+  function patchStep(key: number, patch: Partial<CaseStep>): void {
+    setSteps((xs) => xs.map((x) => (x.key === key ? { ...x, ...patch } : x)));
+  }
+
+  const stepColumns = [
+    {
+      title: "#", width: 44, align: "center" as const,
+      render: (_: unknown, __: StepRow, index: number) => index + 1,
+    },
+    {
+      title: "步骤描述",
+      render: (_: unknown, row: StepRow, index: number) => (
+        <Input.TextArea autoSize={{ minRows: 1, maxRows: 4 }} value={row.desc}
+          data-testid={`fc-step-desc-${index}`} placeholder="这一步做了什么"
+          onChange={(e) => patchStep(row.key, { desc: e.target.value })} />
+      ),
+    },
+    {
+      title: "预期结果",
+      render: (_: unknown, row: StepRow, index: number) => (
+        <Input.TextArea autoSize={{ minRows: 1, maxRows: 4 }} value={row.expected}
+          data-testid={`fc-step-expected-${index}`} placeholder="应该看到什么"
+          onChange={(e) => patchStep(row.key, { expected: e.target.value })} />
+      ),
+    },
+    {
+      title: "", width: 44,
+      render: (_: unknown, row: StepRow, index: number) => (
+        <Button type="text" danger size="small" data-testid={`fc-step-del-${index}`}
+          onClick={() => setSteps((xs) => xs.filter((x) => x.key !== row.key))}>删</Button>
+      ),
+    },
+  ];
+
   return (
-    <Modal open={open} onCancel={onClose} centered width={680} destroyOnHidden
+    <Drawer open={open} onClose={onClose} width="100%" destroyOnHidden
+      className="tp-record-drawer"
       title={editing ? "编辑用例：" + editing.name : "新建功能用例"}
-      okText="保存" cancelText="取消" okButtonProps={{ loading: busy, "data-testid": "fc-save" }}
-      onOk={() => void submit()}>
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <div>
-          <Typography.Text strong>名称</Typography.Text>
-          <Input data-testid="fc-field-name" maxLength={255} value={name} autoFocus
-            onChange={(e) => setName(e.target.value)} />
+      styles={{ body: { padding: 0, overflow: "hidden" } }}
+      footer={
+        <div className="tp-record-editor__footer">
+          <Button onClick={onClose}>取消</Button>
+          <Button type="primary" loading={busy} data-testid="fc-save" onClick={() => void submit()}>
+            保存
+          </Button>
         </div>
-        <Space size={16} wrap>
-          <div>
-            <Typography.Text strong>模块</Typography.Text>
-            <Select data-testid="fc-field-module" allowClear style={{ width: 220 }}
-              value={moduleId ?? undefined} placeholder="未分类"
-              onChange={(v) => setModuleId(v ?? null)}
-              options={flattenModules(modules)} />
+      }>
+      <div className="tp-record-editor tp-record-editor--side-right">
+        <main className="tp-record-editor__main">
+          <section className="tp-record-editor__pane tp-record-editor__pane--fill">
+            <header className="tp-record-editor__pane-head">
+              <div className="tp-record-editor__pane-title">用例内容</div>
+              <span className="tp-record-editor__pane-sub">前置条件、步骤与备注</span>
+            </header>
+            <div className="tp-case-form">
+              <EditorField label="用例名称" required>
+                <Input data-testid="fc-field-name" maxLength={255} value={name} autoFocus
+                  placeholder="一句话说清要验证什么"
+                  onChange={(e) => setName(e.target.value)} />
+              </EditorField>
+              <EditorField label="前置条件" hint="执行这条用例之前，环境 / 数据 / 账号需要处于什么状态">
+                <Input.TextArea data-testid="fc-field-precondition" rows={3} maxLength={20000}
+                  value={precondition} placeholder="例如：已登录管理员账号；项目内已有默认模板"
+                  onChange={(e) => setPrecondition(e.target.value)} />
+              </EditorField>
+              <EditorField label="步骤描述" hint="每行一步；两列都空的行不会保存">
+                <Table<StepRow> size="small" pagination={false} rowKey="key"
+                  className="tp-step-table" dataSource={steps} columns={stepColumns}
+                  locale={{ emptyText: "还没有步骤；点下方「添加步骤」逐行补" }} />
+                <Button type="dashed" block data-testid="fc-step-add" style={{ marginTop: 8 }}
+                  onClick={() => setSteps((xs) => [...xs, { key: nextStepKey(), desc: "", expected: "" }])}>
+                  添加步骤
+                </Button>
+              </EditorField>
+              <EditorField label="备注" hint="只给组内看，不影响执行判定">
+                <Input.TextArea data-testid="fc-field-remark" rows={3} maxLength={20000}
+                  value={remark} placeholder="可选：执行注意事项、数据来源等"
+                  onChange={(e) => setRemark(e.target.value)} />
+              </EditorField>
+              {err && <Alert type="error" showIcon data-testid="fc-save-error" message={err} />}
+            </div>
+          </section>
+        </main>
+        <aside className="tp-record-editor__side" data-testid="fc-form-side">
+          <div className="tp-record-editor__side-head">
+            <div className="tp-record-editor__pane-title">用例属性</div>
+            <div className="tp-record-editor__pane-sub">模块、责任人与状态</div>
           </div>
-          <div>
-            <Typography.Text strong>优先级</Typography.Text>
-            <Select value={priority} style={{ width: 100 }} onChange={setPriority}
-              options={["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v }))} />
+          <div className="tp-record-editor__side-body">
+            <EditorField label="所属模块">
+              <Select data-testid="fc-field-module" allowClear style={{ width: "100%" }}
+                value={moduleId ?? undefined} placeholder="未分类"
+                onChange={(v) => setModuleId(v ?? null)}
+                options={flattenModules(modules)} />
+            </EditorField>
+            <EditorField label="责任人" hint="可留空：还没定人时不伪造默认指派">
+              <Select data-testid="fc-field-owner" allowClear style={{ width: "100%" }}
+                value={ownerId ?? undefined} placeholder="未指派"
+                onChange={(v) => setOwnerId(v ?? null)}
+                options={members.map((m) => ({
+                  value: m.user_id, label: m.name ?? m.account ?? m.user_id,
+                }))} />
+            </EditorField>
+            <EditorField label="用例等级" required>
+              <Select data-testid="fc-field-priority" style={{ width: "100%" }} value={priority}
+                onChange={setPriority}
+                options={["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v }))} />
+            </EditorField>
+            <EditorField label="用例状态" required>
+              <Select data-testid="fc-field-status" style={{ width: "100%" }} value={caseStatus}
+                onChange={setCaseStatus} options={CASE_STATUS_OPTIONS} />
+            </EditorField>
+            <EditorField label="模板" hint="编辑时不可换模板（字段定义会变）">
+              <Select data-testid="fc-field-template" style={{ width: "100%" }} value={templateId || undefined}
+                loading={loading} disabled={Boolean(editing)}
+                onChange={(v) => { setTemplateId(String(v)); void loadTemplate(String(v), {}); }}
+                options={templates.map((t) => ({ value: t.id, label: t.name + (t.is_default ? "（默认）" : "") }))} />
+            </EditorField>
+            <EditorField label="标签">
+              <Select mode="tags" data-testid="fc-field-tags" style={{ width: "100%" }}
+                value={tags} placeholder="回车或逗号分隔"
+                tokenSeparators={[",", "，"]}
+                onChange={(v: string[]) => setTags(v)} />
+            </EditorField>
+            <EditorField label="描述">
+              <Input.TextArea rows={3} value={description}
+                onChange={(e) => setDescription(e.target.value)} />
+            </EditorField>
+            <EditorField label="自定义字段">
+              {tpl ? (
+                <CustomFieldForm fields={tpl.fields} values={custom} onChange={setCustom}
+                  members={members} disabled={loading} />
+              ) : (
+                <Typography.Text type="secondary" className="tp-text-sm">
+                  {loading ? "模板字段加载中…" : "请选择模板"}
+                </Typography.Text>
+              )}
+            </EditorField>
           </div>
-          <div>
-            <Typography.Text strong>模板</Typography.Text>
-            <Select data-testid="fc-field-template" style={{ width: 220 }} value={templateId || undefined}
-              loading={loading} disabled={Boolean(editing)}
-              onChange={(v) => { setTemplateId(String(v)); void loadTemplate(String(v), {}); }}
-              options={templates.map((t) => ({ value: t.id, label: t.name + (t.is_default ? "（默认）" : "") }))} />
+          <div className="tp-record-editor__side-foot">
+            前置条件 / 步骤 / 备注属于用例内容，改动会按项目开关触发自动重评审。
           </div>
-        </Space>
-        <div>
-          <Typography.Text strong>描述</Typography.Text>
-          <Input.TextArea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
-        </div>
-        <div>
-          <Typography.Text strong>自定义字段</Typography.Text>
-          {tpl ? (
-            <CustomFieldForm fields={tpl.fields} values={custom} onChange={setCustom}
-              members={members} disabled={loading} />
-          ) : (
-            <Typography.Text type="secondary" className="tp-text-sm">
-              {loading ? "模板字段加载中…" : "请选择模板"}
-            </Typography.Text>
-          )}
-        </div>
-        {err && <Alert type="error" showIcon data-testid="fc-save-error" message={err} />}
-      </Space>
-    </Modal>
+        </aside>
+      </div>
+    </Drawer>
   );
 }
 
@@ -226,6 +387,10 @@ function CasesList() {
   const [inRecycled, setInRecycled] = useState(false);
   const [shownRecycled, setShownRecycled] = useState(false);
   const [rows, setRows] = useState<CaseRow[]>([]);
+  // D277：当前页用例的评审/执行结论（一次批量）。null 值代表「从未发生」，摘要缺席
+  // （取数失败）才画「—」——两者不许混。
+  const [summaries, setSummaries] = useState<Record<string, CaseSummary>>({});
+  const [summaryError, setSummaryError] = useState(false);
   const [fieldMeta, setFieldMeta] = useState<Record<string, TemplateField>>({});
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -234,6 +399,8 @@ function CasesList() {
   const [total, setTotal] = useState<number | null>(null);
   const [kwDraft, setKwDraft] = useState("");
   const [keyword, setKeyword] = useState("");
+  // D283：标签精确筛选（与关键字/优先级并行）
+  const [tagFilter, setTagFilter] = useState("");
   const [priority, setPriority] = useState<string | undefined>();
   // D234：「我关注的」是后端视图轴（与模块/关键词/高级搜索并行 AND），不做本地过滤。
   const [followedOnly, setFollowedOnly] = useState(false);
@@ -301,7 +468,8 @@ function CasesList() {
     try {
       const r = await functionalApi.listCases({
         project_id: pid, module_id: selected ?? undefined, priority,
-        keyword: keyword || undefined, recycled: inRecycled, current, size: pageSize,
+        keyword: keyword || undefined, tag: tagFilter || undefined,
+        recycled: inRecycled, current, size: pageSize,
         ...(followedOnly ? { followed_by_me: true } : {}),
         ...(isFilterEmpty(advFilter) ? {} : { filter: JSON.stringify(advFilter) }),
       });
@@ -313,8 +481,31 @@ function CasesList() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "用例列表加载失败");
     } finally { setLoading(false); }
-  }, [pid, selected, priority, keyword, inRecycled, current, pageSize, advFilter, followedOnly]);
+  }, [pid, selected, priority, keyword, tagFilter, inRecycled, current, pageSize, advFilter, followedOnly]);
   useEffect(() => { void load(); }, [load]);
+
+  // D277：当前页评审/执行结论一次批量取（rows 身份变化 = 任何刷新/翻页/筛选）。
+  useEffect(() => {
+    if (rows.length === 0) { setSummaries({}); setSummaryError(false); return; }
+    let alive = true;
+    setSummaryError(false);
+    void (async () => {
+      try {
+        const out = await post<{ items: CaseSummary[]; total: number }>(
+          "/functional-case-summary-batch",
+          { project_id: pid, case_ids: rows.map((r) => r.id) },
+          { silent: true },
+        );
+        if (!alive) return;
+        setSummaries(Object.fromEntries(out.items.map((x) => [x.case_id, x])));
+      } catch {
+        if (!alive) return;
+        setSummaries({});
+        setSummaryError(true);
+      }
+    })();
+    return () => { alive = false; };
+  }, [pid, rows]);
 
   useEffect(() => {
     void (async () => {
@@ -576,7 +767,10 @@ function CasesList() {
 
   return (
     <div className="tp-fill tp-fill-body" style={{ flexDirection: "row", alignItems: "stretch" }}>
-      <div style={{ width: 240, flex: "0 0 240px", marginRight: 12, overflow: "auto" }}>
+      <div style={{ width: 240, flex: "0 0 240px", marginRight: 12 }} className="tp-fill-side">
+        {/* 与接口/场景两页同构：树住进吃满列高的白卡（此前裸 div + overflow:auto，
+            空树时左栏只剩 40px 高的一条，与右侧表格的底边完全对不上）。 */}
+        <Card size="small">
         <ModuleTree projectId={pid} tree={toModNodes(tree)} recycled={toModNodes(recycledModules)}
           inRecycled={inRecycled} onToggleRecycled={toggleRecycled}
           selected={selected} onSelect={(id) => { setSelected(id); setCurrent(1); }}
@@ -586,6 +780,7 @@ function CasesList() {
           loadError={treeError}
           countTip="徽标是该模块直属的用例数（不含子模块）"
           deleteHint="模块下还有子模块或用例时会被拒绝（409）；请先移走或回收它们。" />
+        </Card>
       </div>
       <div style={{ flex: 1, minWidth: 0 }} className="tp-fill tp-fill-body">
         <div style={{ flex: "0 0 auto" }}>
@@ -599,6 +794,8 @@ function CasesList() {
               created_by: members.map((m) => ({ value: m.user_id,
                 label: m.name ?? m.account ?? m.user_id })),
               updated_by: members.map((m) => ({ value: m.user_id,
+                label: m.name ?? m.account ?? m.user_id })),
+              owner_id: members.map((m) => ({ value: m.user_id,
                 label: m.name ?? m.account ?? m.user_id })),
             } satisfies Record<string, Option[]>}
             allColumns={FUNCTIONAL_COL_CHOICES} columnPref={colPref}
@@ -673,6 +870,9 @@ function CasesList() {
               <Select allowClear placeholder="优先级" style={{ width: 100 }} value={priority}
                 options={["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v }))}
                 onChange={(v) => { setPriority(v); setCurrent(1); }} />
+              <Input.Search data-testid="fc-filter-tag" allowClear placeholder="标签（精确）"
+                style={{ width: 150 }} defaultValue={tagFilter}
+                onSearch={(v) => { setTagFilter(v.trim()); setCurrent(1); }} />
             </Space>
           </FilterBar>
           {loadError && (
@@ -695,7 +895,8 @@ function CasesList() {
           columns={applyColumnPrefs([
             { title: "ID", key: "num", width: 90, render: (_, r) => (
               <Typography.Text type="secondary" className="tp-text-sm">{r.num}</Typography.Text>) },
-            { title: "名称", dataIndex: "name", key: "name", render: (v: string, r) => (
+            { title: "名称", dataIndex: "name", key: "name", width: 240,
+              render: (v: string, r) => (
               <Space size={4}>
                 {r.recycled ? <span>{v}</span> : (
                   <Typography.Link data-testid="fc-row-name" onClick={() => nav("/functional/cases/" + r.id)}>
@@ -712,10 +913,46 @@ function CasesList() {
                 )}
               </Space>
             ) },
+            // D277：评审结果/执行结果来自一次批量投影。四态分开画：
+            // 摘要缺席 →「—」+ 没取到；摘要在场但值为 null →「未评审/未执行」（真事实）。
+            { title: "评审结果", key: "review", width: 96, render: (_, r) => {
+                const s = summaries[r.id];
+                if (!s) return <Tooltip title={summaryError ? "评审摘要取数失败" : "评审摘要加载中"}>
+                  <Typography.Text type="secondary" data-testid={"fc-review-" + r.id}>—</Typography.Text></Tooltip>;
+                if (!s.review_result) return <Typography.Text type="secondary" data-testid={"fc-review-" + r.id}>未评审</Typography.Text>;
+                const m = REVIEW_META[s.review_result] ?? { color: "default", label: s.review_result };
+                return <Tooltip title={s.review_name ? "评审：" + s.review_name : undefined}>
+                  <Tag color={m.color} data-testid={"fc-review-" + r.id}>{m.label}</Tag></Tooltip>;
+              } },
+            // D283：标签（最多画两枚，其余进 Tooltip；空画「—」）
+            { title: "标签", key: "tags", width: 140, render: (_, r) => {
+                if (!r.tags.length) return <Typography.Text type="secondary"
+                  data-testid={"fc-tags-" + r.id}>—</Typography.Text>;
+                return <Tooltip title={r.tags.join("、")}>
+                  <Space size={4} data-testid={"fc-tags-" + r.id}>
+                    {r.tags.slice(0, 2).map((t) => <Tag key={t}>{t}</Tag>)}
+                    {r.tags.length > 2 ? <Tag>+{r.tags.length - 2}</Tag> : null}
+                  </Space>
+                </Tooltip>;
+              } },
             { title: "优先级", dataIndex: "priority", key: "prio", width: 80, render: (v: string) => (
               <Tag color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
             { title: "模块", key: "module", width: 130, render: (_, r) => (
               r.module_id ? (modNames[r.module_id] ?? "—") : "未分类") },
+            { title: "用例描述", dataIndex: "description", key: "description", width: 220,
+              ellipsis: true, render: (v: string | null) => v ?? "—" },
+            { title: "执行结果", key: "exec", width: 96, render: (_, r) => {
+                const s = summaries[r.id];
+                if (!s) return <Tooltip title={summaryError ? "执行摘要取数失败" : "执行摘要加载中"}>
+                  <Typography.Text type="secondary" data-testid={"fc-exec-" + r.id}>—</Typography.Text></Tooltip>;
+                if (!s.exec_result) return <Typography.Text type="secondary" data-testid={"fc-exec-" + r.id}>未执行</Typography.Text>;
+                const m = EXEC_META[s.exec_result] ?? { color: "default", label: s.exec_result };
+                return <Tooltip title={s.exec_at ? "执行于 " + fmtTime(s.exec_at) : undefined}>
+                  <Tag color={m.color} data-testid={"fc-exec-" + r.id}>{m.label}</Tag></Tooltip>;
+              } },
+            // D281：责任人（空 = 还没定人，画「—」；不拿创建人冒充）
+            { title: "责任人", key: "owner", width: 110, render: (_, r) => (
+              <span data-testid={"fc-owner-" + r.id}>{r.owner_name ?? "—"}</span>) },
             { title: "自定义字段", key: "custom", width: 220, render: (_, r) => (
               <Typography.Text className="tp-text-sm">{customText(r)}</Typography.Text>) },
             { title: "更新人", key: "updby", width: 100, render: (_, r) => r.updated_by_name ?? "—" },
@@ -755,6 +992,7 @@ function CasesList() {
               )
             ) },
           ], colPref)}
+          // 显式宽合计 1582 > 卡片可用宽：表在卡内横向滚动，无宽的名称列不会被压成 0。
           cardFooter={(
             <div className="tp-cardfoot">
               <Typography.Text type="secondary" className="tp-cardfoot-note tp-text-sm">
@@ -768,7 +1006,7 @@ function CasesList() {
           )}
         />
 
-        <CaseFormModal open={formOpen} editing={editing} projectId={pid} modules={tree}
+        <CaseFormDrawer open={formOpen} editing={editing} projectId={pid} modules={tree}
           members={members}
           onClose={() => setFormOpen(false)} onSaved={() => { void load(); void loadTree(); }} />
 
@@ -855,7 +1093,7 @@ function CasesList() {
                 onChange={(e) => setCopySuffix(e.target.value)} />
             </div>
             <Typography.Text type="secondary" className="tp-text-sm">
-              复制模板、名称、优先级、描述与自定义值；评论与前后置关系不复制。回收站里的用例不参与。
+              复制模板、名称、优先级、描述、责任人与自定义值；评论与前后置关系不复制。回收站里的用例不参与。
             </Typography.Text>
           </Space>
         </Modal>
@@ -872,6 +1110,7 @@ function CasesList() {
                   { value: "priority", label: "优先级" },
                   { value: "module", label: "模块" },
                   { value: "creator", label: "创建人" },
+                  { value: "owner", label: "责任人" },
                 ]}
                 onChange={(v) => void loadStats(v as CaseStatsGroupBy)} />
               <Typography.Text type="secondary" className="tp-text-sm">

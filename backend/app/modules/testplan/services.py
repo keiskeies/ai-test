@@ -3,8 +3,9 @@
 步 1 的四条判断，都各有一条测试钉着（tests/test_d183_plan_crud.py）：
 
 **1. 可见性 = 按 project_id 显式过滤，不喂 `shared/visibility`。** plan_record 没有
-owner_id/project_public 两列（理由逐字写在 models.py docstring：没有表单能把计划置为
-行级私有，visibility 助手对缺列的表会静默「每行都公开」——schedule_task 同款落法）。
+project_public 列（理由逐字写在 models.py docstring：没有表单能把计划置为行级私有，
+visibility 助手对缺列的表会静默「每行都公开」——schedule_task 同款落法）。D279 加的
+owner_id 只是责任人展示/筛选位，**不参与可见性**（不按 owner 收窄）。
 跨项目访问与不存在同码同文案（不泄露存在性，`_plan` 的 404 是唯一出口）。
 两面都有用例：跨项目 404 且与「不存在」逐字同文；同项目内成员**都能**看见彼此的
 共享计划——正向断言，守的是「我们没有行级私有」这个决定本身，将来有人给列表加
@@ -125,6 +126,7 @@ from app.modules.testplan.models import (
     PlanReportItem,
 )
 from app.shared.filter_registry import FieldDecl, ListViewFilter, register
+from app.shared.tags import join_tags, split_tags
 
 # 关联 subject 的归属校验用**表名反射**而非 import api_test/scenario/ui_test/adb_test——
 # 领域模块之间零横向 import 是 import-linter 契约 1 的红线，scenario/services.py 的
@@ -241,6 +243,13 @@ PLAN_LIST_FILTER = ListViewFilter(
         # archived 在库里 NOT NULL：FieldDecl 自动拿不到「为空/不为空」。
         "archived": FieldDecl(PlanRecord.archived, "bool", "是否归档", nullable=False),
         "module_id": FieldDecl(PlanRecord.module_id, "id", "所属模块"),
+        # D279：阶段/计划与实际起止/责任人（六列都是真实列，白名单外字段照旧 400）。
+        "stage": FieldDecl(PlanRecord.stage, "text", "测试阶段"),
+        "planned_start": FieldDecl(PlanRecord.planned_start, "time", "计划开始"),
+        "planned_end": FieldDecl(PlanRecord.planned_end, "time", "计划结束"),
+        "actual_start": FieldDecl(PlanRecord.actual_start, "time", "实际开始"),
+        "actual_end": FieldDecl(PlanRecord.actual_end, "time", "实际结束"),
+        "owner_id": FieldDecl(PlanRecord.owner_id, "id", "责任人"),
         "created_by": FieldDecl(PlanRecord.created_by, "id", "创建人"),
         "updated_by": FieldDecl(PlanRecord.updated_by, "id", "更新人"),
         "created_at": FieldDecl(PlanRecord.created_at, "time", "创建时间", nullable=False),
@@ -250,7 +259,9 @@ PLAN_LIST_FILTER = ListViewFilter(
 register(PLAN_LIST_FILTER)
 
 
-def _out(p: PlanRecord) -> schemas.PlanOut:
+def _out(p: PlanRecord, owner_name: str | None = None) -> schemas.PlanOut:
+    """行 → 出参。owner_name 由读路批量解析后传入（列表一次 IN 查询，避免 N+1）；
+    没有可解析的名字时如实给 None，前端画「—」，不画裸 UUID。"""
     return schemas.PlanOut(
         id=p.id,
         project_id=p.project_id,
@@ -258,11 +269,54 @@ def _out(p: PlanRecord) -> schemas.PlanOut:
         description=p.description,
         archived=p.archived,
         module_id=p.module_id,
+        stage=p.stage,
+        planned_start=schemas.iso(p.planned_start),
+        planned_end=schemas.iso(p.planned_end),
+        actual_start=schemas.iso(p.actual_start),
+        actual_end=schemas.iso(p.actual_end),
+        owner_id=p.owner_id,
+        owner_name=owner_name,
+        # D285：标签出数组（库里是逗号串；空 = 无标签）
+        tags=split_tags(p.tags),
         created_by=p.created_by,
         updated_by=p.updated_by,
         created_at=schemas.iso(p.created_at),
         updated_at=schemas.iso(p.updated_at),
     )
+
+
+async def _user_names(db, ids: set[str | None]) -> dict[str, str]:
+    """负责人姓名一次批量解析（APP_USER 反射，跨域零 import；defect.services 同款）。"""
+    real = {i for i in ids if i}
+    if not real:
+        return {}
+    rows = (
+        await db.execute(select(APP_USER.c.id, APP_USER.c.name).where(APP_USER.c.id.in_(real)))
+    ).all()
+    return {r.id: r.name for r in rows}
+
+
+async def _out_named(db, p: PlanRecord) -> schemas.PlanOut:
+    """写路径（create/update/archive/copy）的回执也要带 owner_name：前端用回执原地
+    替换行，缺名字会把「责任人」列洗成「—」。"""
+    names = await _user_names(db, {p.owner_id})
+    return _out(p, names.get(p.owner_id) if p.owner_id else None)
+
+
+def _as_naive_utc(dt: datetime | None) -> datetime | None:
+    if dt is None or dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).replace(tzinfo=None)
+
+
+def _check_span(start: datetime | None, end: datetime | None, label: str) -> None:
+    """结束早于开始 → 422。比较前统一成 naive UTC（带 Z 与不带 Z 的输入混比会 TypeError）。"""
+    s, e = _as_naive_utc(start), _as_naive_utc(end)
+    if s is not None and e is not None and e < s:
+        raise ApiError(
+            "invalid_time_range", label + "结束时间早于开始时间", 422,
+            {"start": schemas.iso(start), "end": schemas.iso(end)},
+        )
 
 
 # ── D231：关注（plan_follower）的两次现查 ──────────────────────────────────────
@@ -599,17 +653,32 @@ async def plan_create(payload: schemas.PlanCreateIn, ctx) -> schemas.PlanOut:
     await _name_dup(ctx.db, payload.project_id, payload.name)
     if payload.module_id is not None:
         await _module(ctx.db, payload.project_id, payload.module_id)
+    # D279：责任人必须是本项目成员；两对时间必须同向（结束不早于开始）。
+    if payload.owner_id is not None:
+        await _check_owner(ctx.db, payload.project_id, payload.owner_id)
+    _check_span(payload.planned_start, payload.planned_end, "计划")
+    _check_span(payload.actual_start, payload.actual_end, "实际")
     p = PlanRecord(
         project_id=payload.project_id,
         name=payload.name,
         description=payload.description,
         module_id=payload.module_id,
+        stage=payload.stage,
+        # 统一落 naive UTC：不落的话，create 回执是入参原偏移（+08:00），list/get 是库里
+        # 读回的 UTC——同一条记录两种写法，前端按同一格式解析会看到「保存后变了」。
+        planned_start=_as_naive_utc(payload.planned_start),
+        planned_end=_as_naive_utc(payload.planned_end),
+        actual_start=_as_naive_utc(payload.actual_start),
+        actual_end=_as_naive_utc(payload.actual_end),
+        owner_id=payload.owner_id,
+        # D285：标签（去空白/去重保序；空 = 无标签）
+        tags=join_tags(payload.tags),
         created_by=ctx.user_id,
         updated_by=ctx.user_id,
     )
     ctx.db.add(p)
     await ctx.db.commit()
-    return _out(p)
+    return await _out_named(ctx.db, p)
 
 
 @service(
@@ -651,6 +720,10 @@ async def plan_list(payload: schemas.PlanListIn, ctx) -> ServiceResult:
         stmt = stmt.where(
             PlanRecord.module_id.in_(_module_subtree_ids(list(rows), payload.module_id))
         )
+    # D285：标签精确筛选（FIND_IN_SET，不是 LIKE——「bug1」不被「bug」命中）；
+    # 全空白 = 不过滤。与模块/关注/条件组并行 AND（不是模块过滤的 elif 分支）。
+    if payload.tag and payload.tag.strip():
+        stmt = stmt.where(func.find_in_set(payload.tag.strip(), PlanRecord.tags) > 0)
     if payload.followed_by_me:
         # D231：视图轴与缺陷 followed_by_me 同尺——project_id 一并带上，跨项目的关注行
         # 不会把别的项目的计划勾出来（关注行本身也带 project_id，这里再钉一次同项目）。
@@ -664,9 +737,14 @@ async def plan_list(payload: schemas.PlanListIn, ctx) -> ServiceResult:
         )
     page = await paginate_page(ctx.db, stmt, current=payload.current, size=payload.size)
     followed = await _followed_ids(ctx.db, [p.id for p in page.items], ctx.user_id)
+    # D279：责任人姓名一次批量解析（本页 IN 查询，绝不逐行 join/查询）。
+    names = await _user_names(ctx.db, {p.owner_id for p in page.items})
     return Page(
         items=[
-            schemas.PlanListRowOut(**_out(p).model_dump(), followed=p.id in followed)
+            schemas.PlanListRowOut(
+                **_out(p, names.get(p.owner_id) if p.owner_id else None).model_dump(),
+                followed=p.id in followed,
+            )
             for p in page.items
         ],
         next_cursor=None,
@@ -690,7 +768,7 @@ async def plan_get(payload: schemas.PlanGetIn, ctx) -> schemas.PlanDetailOut:
     # 「N 人关注」不存冗余列，列表也没有给过这两个数（PlanListRowOut 只有 followed）。
     followed = p.id in await _followed_ids(ctx.db, [p.id], ctx.user_id)
     return schemas.PlanDetailOut(
-        **_out(p).model_dump(), followed=followed,
+        **(await _out_named(ctx.db, p)).model_dump(), followed=followed,
         follower_count=await _follower_count(ctx.db, p.id),
     )
 
@@ -776,10 +854,31 @@ async def plan_update(payload: schemas.PlanUpdateIn, ctx) -> schemas.PlanOut:
         if payload.module_id is not None:
             await _module(ctx.db, payload.project_id, payload.module_id)
         p.module_id = payload.module_id
+    # D279：五个可清空位同样用显式哨兵（带 null = 清空，不带 = 不动）。
+    if payload.stage_set:
+        p.stage = payload.stage
+    if payload.planned_start_set:
+        p.planned_start = _as_naive_utc(payload.planned_start)
+    if payload.planned_end_set:
+        p.planned_end = _as_naive_utc(payload.planned_end)
+    if payload.actual_start_set:
+        p.actual_start = _as_naive_utc(payload.actual_start)
+    if payload.actual_end_set:
+        p.actual_end = _as_naive_utc(payload.actual_end)
+    if payload.owner_set:
+        if payload.owner_id is not None:
+            await _check_owner(ctx.db, payload.project_id, payload.owner_id)
+        p.owner_id = payload.owner_id
+    # D285：标签三态（None = 不改、[] = 清空）
+    if payload.tags is not None:
+        p.tags = join_tags(payload.tags)
+    # 先后校验用**合并后的现值**：只改一端时也要和另一端比（改完才校验才不会漏）。
+    _check_span(p.planned_start, p.planned_end, "计划")
+    _check_span(p.actual_start, p.actual_end, "实际")
     # 每一次普通更新也落 updated_by：列语义是「最后谁动的」，归档那次同样动它（判断 2）。
     p.updated_by = ctx.user_id
     await ctx.db.commit()
-    return _out(p)
+    return await _out_named(ctx.db, p)
 
 
 async def _purge_plan(db, p: PlanRecord) -> None:
@@ -886,7 +985,7 @@ async def plan_archive(payload: schemas.PlanArchiveIn, ctx) -> schemas.PlanOut:
     p.archived = True
     p.updated_by = ctx.user_id
     await ctx.db.commit()
-    return _out(p)
+    return await _out_named(ctx.db, p)
 
 
 def _copy_name(source_name: str) -> str:
@@ -912,6 +1011,8 @@ async def plan_copy(payload: schemas.PlanCopyIn, ctx) -> schemas.PlanOut:
     抄什么（MS TestPlanService.copy 取证：copyPlanPrincipal + copyPlanCase）：
     - 计划头：description 抄；archived **不抄**（MS 把 status 复位 Prepare——复制件是
       可用的新计划）；module_id 随源抄（复制件留在源计划所在模块，不掉进未分组）；
+      D279 的 stage/计划与实际起止/责任人同样随源抄（复制的是「同一套计划安排」，
+      新计划就该继承同一责任人；执行结论才是不能抄的部分）；
       created_by/updated_by = 复制人。
     - 关联行：subject_type/subject_id/subject_name/env_id/executor_id/sort_order 逐列抄，
       created_by = 复制人（MS 的 createUser 同为当前用户）；新行 id、新 plan_id，
@@ -937,6 +1038,14 @@ async def plan_copy(payload: schemas.PlanCopyIn, ctx) -> schemas.PlanOut:
         archived=False,
         # 模块归属随源抄：复制件出现在源计划所在的模块里，而不是凭空掉进「未分组」。
         module_id=src.module_id,
+        stage=src.stage,
+        planned_start=src.planned_start,
+        planned_end=src.planned_end,
+        actual_start=src.actual_start,
+        actual_end=src.actual_end,
+        owner_id=src.owner_id,
+        # D285：标签随源抄（复制的是同一套计划安排）
+        tags=src.tags,
         created_by=ctx.user_id,
         updated_by=ctx.user_id,
     )
@@ -965,7 +1074,7 @@ async def plan_copy(payload: schemas.PlanCopyIn, ctx) -> schemas.PlanOut:
             )
         )
     await ctx.db.commit()
-    return _out(target)
+    return await _out_named(ctx.db, target)
 
 
 # ══════════════════ 步 2：plan_case_link 关联 CRUD ══════════════════
@@ -1232,19 +1341,28 @@ async def _links_in_plan(db, project_id: str, plan_id: str, link_ids: list[str])
     return [by_id[i] for i in uniq]
 
 
-async def _check_executor(db, project_id: str, executor_id: str) -> None:
-    """执行人必须是本项目成员：指派给项目外的人 = 一条永远没人认领的假指派。"""
+async def _check_member(db, project_id: str, user_id: str, *,
+                        code: str, label: str, field: str) -> None:
+    """用户必须是本项目成员：指派给项目外的人 = 一条永远没人认领的假指派。"""
     hit = (
         await db.execute(
             select(PROJECT_MEMBER.c.id).where(
-                PROJECT_MEMBER.c.project_id == project_id, PROJECT_MEMBER.c.user_id == executor_id
+                PROJECT_MEMBER.c.project_id == project_id, PROJECT_MEMBER.c.user_id == user_id
             ).limit(1)
         )
     ).first()
     if hit is None:
-        raise ApiError(
-            "invalid_executor", "执行人不是本项目成员", 422, {"executor_id": executor_id}
-        )
+        raise ApiError(code, label + "不是本项目成员", 422, {field: user_id})
+
+
+async def _check_executor(db, project_id: str, executor_id: str) -> None:
+    await _check_member(db, project_id, executor_id,
+                        code="invalid_executor", label="执行人", field="executor_id")
+
+
+async def _check_owner(db, project_id: str, owner_id: str) -> None:
+    await _check_member(db, project_id, owner_id,
+                        code="invalid_owner", label="责任人", field="owner_id")
 
 
 @service(
@@ -1660,25 +1778,30 @@ async def _link_results(
     if not links:
         return {}
     pairs = sorted({(lk.subject_type, lk.subject_id) for lk in links})
-    stmt = (
-        select(
-            RUN_RECORD.c.subject_type,
-            RUN_RECORD.c.subject_id,
-            func.count(case((RUN_RECORD.c.status.in_(TERMINAL_STATUSES), 1))),
-            func.count(case((RUN_RECORD.c.status.in_(FAILING_STATUSES), 1))),
-            func.count(case((RUN_RECORD.c.status.in_(INFLIGHT_STATUSES), 1))),
-        )
-        .where(
-            RUN_RECORD.c.project_id == project_id,
-            or_(
-                *[and_(RUN_RECORD.c.subject_type == st, RUN_RECORD.c.subject_id == sid) for st, sid in pairs]
-            ),
-        )
-        .group_by(RUN_RECORD.c.subject_type, RUN_RECORD.c.subject_id)
-    )
     out: dict[tuple[str, str], tuple[int, int, int]] = {}
-    for st, sid, t, f, g in (await db.execute(stmt)).all():
-        out[(str(st), str(sid))] = (int(t), int(f), int(g))
+    # D275：SQLite 的绑定参数上限是 999（一对占 2 个），一页 50 个计划×多关联很容易超过。
+    # 按 300 对分块，语义不变：pairs 已去重，块间无重键，按 key 合并即可。
+    for i in range(0, len(pairs), 300):
+        chunk = pairs[i:i + 300]
+        stmt = (
+            select(
+                RUN_RECORD.c.subject_type,
+                RUN_RECORD.c.subject_id,
+                func.count(case((RUN_RECORD.c.status.in_(TERMINAL_STATUSES), 1))),
+                func.count(case((RUN_RECORD.c.status.in_(FAILING_STATUSES), 1))),
+                func.count(case((RUN_RECORD.c.status.in_(INFLIGHT_STATUSES), 1))),
+            )
+            .where(
+                RUN_RECORD.c.project_id == project_id,
+                or_(
+                    *[and_(RUN_RECORD.c.subject_type == st, RUN_RECORD.c.subject_id == sid)
+                      for st, sid in chunk]
+                ),
+            )
+            .group_by(RUN_RECORD.c.subject_type, RUN_RECORD.c.subject_id)
+        )
+        for st, sid, t, f, g in (await db.execute(stmt)).all():
+            out[(str(st), str(sid))] = (int(t), int(f), int(g))
     return out
 
 
@@ -1836,6 +1959,85 @@ async def plan_status(payload: schemas.PlanStatusIn, ctx) -> schemas.PlanStatusO
         execute_rate=execute_rate,
         links=items,
     )
+
+
+@service(
+    perm="testplan:plan:read",
+    effect="read",
+    name="plan_status_batch",
+    description="计划列表的批量状态投影（当前页一次算完：状态/通过率/执行率/各类型用例数；"
+    "判据与 /plans/{plan_id}/status 共用 _plan_display/_link_result/_rates，不另立口径；"
+    "只回仍存在的计划，total 供调用方对账）",
+    http={"method": "POST", "path": "/plan-status-batch", "tags": ["testplan"], "status": 200},
+)
+async def plan_status_batch(payload: schemas.PlanStatusBatchIn, ctx) -> schemas.PlanStatusBatchOut:
+    """D275：列表页一次拿齐当前页的状态/规模，**不逐行打 /status**（50 行就是 50 份明细）。
+
+    与 plan_status 同源的三件套：同一份关联谓词、同一个 _link_result/_functional_result、
+    同一个 _rates/_plan_display。差别只有「批量取数 + 不返回 links 明细」。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("testplan:plan:read")
+    assert ctx.db is not None
+    ids = list(dict.fromkeys(payload.plan_ids))
+    plans = (
+        (await ctx.db.execute(select(PlanRecord).where(
+            PlanRecord.project_id == payload.project_id, PlanRecord.id.in_(ids))))
+        .scalars().all()
+    )
+    if not plans:
+        return schemas.PlanStatusBatchOut(items=[], total=0)
+    # 一次取齐这些计划的全部关联行（id 升序 = 计划详情页的绝对期望序，口径同 _plan_links）。
+    links = (
+        (await ctx.db.execute(select(PlanCaseLink).where(
+            PlanCaseLink.project_id == payload.project_id,
+            PlanCaseLink.plan_id.in_([p.id for p in plans]),
+        ).order_by(PlanCaseLink.id)))
+        .scalars().all()
+    )
+    by_plan: dict[str, list[PlanCaseLink]] = {}
+    for lk in links:
+        by_plan.setdefault(lk.plan_id, []).append(lk)
+    buckets = await _link_results(
+        ctx.db, [lk for lk in links if lk.subject_type != "functional_case"], payload.project_id)
+    execs = await _functional_exec_map(
+        ctx.db, [lk.id for lk in links if lk.subject_type == "functional_case"])
+    items: list[schemas.PlanStatusSummaryOut] = []
+    for p in plans:
+        passed = failed = executed = executing = 0
+        counts = {t: 0 for t in ("functional_case", "api_case", "scenario", "ui_case", "adb_case")}
+        rows = by_plan.get(p.id, [])
+        for lk in rows:
+            if lk.subject_type in counts:
+                counts[lk.subject_type] += 1
+            if lk.subject_type == "functional_case":
+                ex, ing, result = _functional_result(execs.get(lk.id))
+            else:
+                ex, ing, result = _link_result(
+                    *buckets.get((lk.subject_type, lk.subject_id), (0, 0, 0)))
+            if result == "passed":
+                passed += 1
+            elif result == "failed":
+                failed += 1
+            executed += int(ex)
+            executing += int(ing)
+        total = len(rows)
+        pass_rate, execute_rate = _rates(total, passed, executed)
+        items.append(schemas.PlanStatusSummaryOut(
+            plan_id=p.id,
+            archived=p.archived,
+            status=_plan_display(p.archived, total, executed, passed),
+            total=total,
+            passed=passed,
+            failed=failed,
+            executed=executed,
+            executing=executing,
+            not_executed=total - executed,
+            pass_rate=pass_rate,
+            execute_rate=execute_rate,
+            counts=schemas.PlanSubjectCountsOut(**counts),
+        ))
+    return schemas.PlanStatusBatchOut(items=items, total=len(items))
 
 
 # ══════════════════ 步 4：plan_report + plan_report_item（生成 = 一次性快照） ══════════════════

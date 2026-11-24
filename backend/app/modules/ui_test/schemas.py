@@ -294,6 +294,20 @@ class UiCasePurgeIn(BaseModel):
     confirm_name: str = Field(min_length=1, max_length=200)
 
 
+class UiCaseBatchDeleteIn(BaseModel):
+    """批量回收（D273，对齐 api_case_batch_delete）：全有或全无，不提供批量 force。"""
+
+    project_id: str
+    case_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class UiCaseBatchRestoreIn(BaseModel):
+    """批量恢复（D273）：全有或全无；任一名被占 → 409 整批不动（单条 restore 同口径）。"""
+
+    project_id: str
+    case_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class UiCaseOut(BaseModel):
     id: str
     project_id: str

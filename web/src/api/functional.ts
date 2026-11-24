@@ -14,6 +14,24 @@ export type FunctionalModuleNode = {
 
 export type ModuleTree = { tree: FunctionalModuleNode[]; recycled: FunctionalModuleNode[] };
 
+/** D289：MS v2 用例表单的一行步骤（两列都可空）。 */
+export type CaseStep = { desc: string; expected: string };
+
+/** D289：用例状态三态（与后端 models.CASE_STATUSES 逐字一致）。
+ *  存码、展示中文；词表外的值渲染原文（R112 口径）。 */
+export const CASE_STATUSES = ["prepare", "underway", "completed"] as const;
+export const CASE_STATUS_LABELS: Record<string, string> = {
+  prepare: "准备中",
+  underway: "进行中",
+  completed: "已完成",
+};
+export const CASE_STATUS_OPTIONS = CASE_STATUSES.map((v) => ({
+  value: v, label: CASE_STATUS_LABELS[v],
+}));
+export function caseStatusLabel(v: string): string {
+  return CASE_STATUS_LABELS[v] ?? v;
+}
+
 export type CaseRow = {
   id: string;
   num: number;
@@ -23,8 +41,18 @@ export type CaseRow = {
   name: string;
   priority: string;
   description: string | null;
+  /** D289：前置条件 / 步骤 / 备注 / 用例状态（表单四项） */
+  precondition: string | null;
+  steps: CaseStep[];
+  remark: string | null;
+  case_status: string;
   recycled: boolean;
   custom_fields: Record<string, unknown>;
+  /** D281：责任人（空 = 还没定人）；owner_name 由后端批量解析，不画裸 UUID。 */
+  owner_id: string | null;
+  owner_name: string | null;
+  /** D283：标签（后端把逗号串 split 成数组；空数组 = 无标签）。 */
+  tags: string[];
   created_by: string | null;
   created_by_name: string | null;
   updated_by: string | null;
@@ -48,6 +76,8 @@ export type CaseListQuery = {
   unfiled_only?: boolean;
   priority?: string;
   keyword?: string;
+  /** D283：标签精确筛选（FIND_IN_SET；空 = 不过滤） */
+  tag?: string;
   recycled?: boolean;
   /** D234：「我关注的」视图轴（后端与模块/未分组/关键词/高级搜索并行 AND）。 */
   followed_by_me?: boolean;
@@ -85,6 +115,15 @@ export type CaseCreateBody = {
   name: string;
   priority?: string;
   description?: string | null;
+  /** D289：前置条件 / 步骤 / 备注 / 用例状态 */
+  precondition?: string | null;
+  steps?: CaseStep[];
+  remark?: string | null;
+  case_status?: string;
+  /** D281：责任人（必须是本项目成员；不填 = 还没定人） */
+  owner_id?: string | null;
+  /** D283：标签 */
+  tags?: string[];
   template_id?: string | null;
   custom_fields?: Record<string, unknown>;
 };
@@ -95,6 +134,19 @@ export type CaseUpdateBody = {
   priority?: string;
   description?: string | null;
   description_set?: boolean;
+  /** D289：三态哨兵——不带 = 不改、带 null/[] = 清空、带值 = 改 */
+  precondition?: string | null;
+  precondition_set?: boolean;
+  steps?: CaseStep[];
+  steps_set?: boolean;
+  remark?: string | null;
+  remark_set?: boolean;
+  case_status?: string;
+  /** D281：`owner_set` 三态——不带 = 不改，带 null = 清空 */
+  owner_id?: string | null;
+  owner_set?: boolean;
+  /** D283：标签 None = 不改、[] = 清空 */
+  tags?: string[];
   module_id?: string | null;
   module_set?: boolean;
   template_id?: string | null;
@@ -126,8 +178,9 @@ export type CaseBatchCopyBody = {
 
 export type CaseBatchCopyOut = { ok: boolean; affected: number; case_ids: string[] };
 
-/** D236：统计分组轴（后端 Literal 三选一；MS 的 casetype 等本仓无等价列，不硬造）。 */
-export type CaseStatsGroupBy = "priority" | "module" | "creator";
+/** D236：统计分组轴（后端 Literal 四选一；MS 的 casetype 等本仓无等价列，不硬造）。
+ *  D281 补 owner（MS maintainer）：责任人列落地后统计轴才有真列可依。 */
+export type CaseStatsGroupBy = "priority" | "module" | "creator" | "owner";
 
 export type CaseStatGroup = { key: string; label: string; count: number };
 

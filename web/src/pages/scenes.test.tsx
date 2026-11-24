@@ -120,6 +120,15 @@ function clickPage(n: number): void {
   fireEvent.click(screen.getByTestId("list-pager")
     .querySelector(`.ant-pagination-item-${n} a`) as Element);
 }
+/** D284：rc-select 的 tags 输入——改搜索框现值后按 Enter 收成标签（keyDown+keyUp 一对，
+ *  keyCode/which 13 缺一不可，理由见 functionalCases.test.tsx 同款助手）。 */
+async function addTag(testid: string, value: string): Promise<void> {
+  const input = screen.getByTestId(testid).querySelector("input")!;
+  fireEvent.change(input, { target: { value } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+  fireEvent.keyUp(input, { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(screen.getByTestId(testid).textContent).toContain(value));
+}
 
 beforeEach(() => {
   cleanup();
@@ -352,7 +361,7 @@ describe("回收站两列（§11.4.18）", () => {
 describe("批量导出（D74）", () => {
   const EXPORT_OUT = {
     scenarios: [{
-      scenario_id: "s1", name: "履约回归", priority: "P2", module_id: null,
+      scenario_id: "s1", name: "履约回归", priority: "P2", tags: [], module_id: null,
       step_graph: { version: 1, nodes: [] }, variables: {}, fail_fast: true,
       max_runtime_ms: null, common_assertions: [], env_id: null, project_public: true,
       validation: [], refs: [],
@@ -555,10 +564,9 @@ describe("批量执行（D70 反向假门解禁）", () => {
 // ── 第十八轮 C：轴③ 零引用把手补测（scenes.tsx 的 9 个 data-testid）────────────
 // 手法照上：fetch 全 mock 到 client 层（list 走 silent → 失败不弹 toast，错误态只能查表体）、
 // useAuth.setState 注身份、vi.spyOn(sceneApi, *) 钉请求载荷本体。
-// 注：scene-new-menu（scenes.tsx:356）在 jsdom 里摸不到 —— antd 5.29 Dropdown 把未知 props
-// 转给 @rc-component/trigger 2.x，而 trigger 只从 restProps 里取事件回调、从不落 DOM
-// （实测 <Dropdown data-testid> 挂/开两态 document 里都查无此节点）。该把手的**行为**
-// 改走 trigger 钮 scene-new + 弹出菜单项文本钉死（下面 3 条），testid 本身是装饰性挂载。
+// 注：scene-new-menu 在 D290 前挂在 <Dropdown> 上，jsdom 里摸不到（antd 5.29 把未知
+// props 转给 @rc-component/trigger 2.x，trigger 不落 DOM）。D290 改成自绘 fixed 菜单后
+// 它是真实节点（下面 hoverOpen 的选择器就是锚它）；触发器仍是 scene-new 按钮。
 
 function rowsEl(): HTMLElement {
   const el = document.querySelector(".ant-table-tbody");
@@ -587,20 +595,16 @@ function checkAll(): void {
   fireEvent.click(box!);
 }
 
-/** antd Dropdown trigger=["hover"] + mouseEnterDelay≈0.15s：三件套（ModuleTree.test.tsx:159 同款）。 */
+/** 新建是**点击**触发：点一下按钮挂自绘菜单（D290 起不再用 antd Dropdown）。 */
 async function hoverOpen(el: Element): Promise<void> {
-  fireEvent.pointerOver(el);
-  fireEvent.mouseOver(el);
-  fireEvent.mouseEnter(el);
+  fireEvent.click(el);
   await waitFor(() => {
-    expect(document.querySelector(".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item"))
-      .not.toBeNull();
+    expect(document.querySelector(".tp-new-menu .ant-menu-item")).not.toBeNull();
   }, { timeout: 4000 });
 }
 
 function visibleMenuItems(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(
-    ".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item"));
+  return Array.from(document.querySelectorAll<HTMLElement>(".tp-new-menu .ant-menu-item"));
 }
 
 function menuItemByText(text: string): HTMLElement {
@@ -845,7 +849,7 @@ describe("空白场景弹窗（scene-blank-modal / scene-blank-prio）", () => {
     fireEvent.click(screen.getByTestId("scene-blank-ok"));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     expect(create.mock.calls[0][0]).toEqual({
-      project_id: "p1", name: "履约回归", priority: "P0", module_id: null,
+      project_id: "p1", name: "履约回归", priority: "P0", module_id: null, tags: [],
       step_graph: { version: 1, nodes: [] },
       variables: {}, fail_fast: true, project_public: true,
     });
@@ -1197,7 +1201,7 @@ describe("新建下拉的菜单集合与点击后果（scene-new-menu，newMenu 
     { label: "让 Pilot 生成", opens: null }, // pilot 不弹窗，跳 /bench（第三条单独钉）
   ];
 
-  it("scene-new-menu：未 hover 零菜单项；hover 后恰好三项、名称顺序与 newMenu 字面量一致；点「空白场景」弹新建窗；菜单收起后项从 DOM 消失", async () => {
+  it("scene-new-menu：未点开零菜单项；点开后恰好三项、名称顺序与 newMenuItems 字面量一致；点「空白场景」弹新建窗；选中后菜单从 DOM 消失", async () => {
     // motion:false（ModuleTree.test.tsx:128 同款）：jsdom 没有 transitionend，
     // 开着动效的 leave-motion 永远挂起、弹窗 DOM 停在 inMotion 摘不掉——「closed → absent」
     // 这条量不到。关掉动效后关闭即卸载，量的才是「销毁不是隐藏」这句话。
@@ -1210,14 +1214,11 @@ describe("新建下拉的菜单集合与点击后果（scene-new-menu，newMenu 
     // 开态：集合=条数+名称+顺序三重钉死（toEqual 有序数组，mutate「换序/改名/多一项」都红）
     expect(visibleMenuItems().map((n) => n.textContent?.trim()))
       .toEqual(MENU.map((m) => m.label));
-    // 点击后果落在 newMenu.onClick 的 key 路由上：blank → 弹 scene-blank-modal
+    // 点击后果落在 onNewMenuPick 的 key 路由上：blank → 弹 scene-blank-modal
     fireEvent.click(menuItemByText("空白场景"));
     await screen.findByTestId("scene-blank-modal");
-    // 收起：React 的 onMouseLeave 由原生 mouseout 衍生（fireEvent.mouseLeave 的
-    // 直发 mouseleave 到不了 EnterLeave 插件），leave → motion leave 后 trigger 卸弹窗。
-    // antd 的弹窗 root 不随 RTL cleanup 卸载，菜单 DOM 若只藏不删，这条会因残留项而红
-    // ——正是「closed → absent」的钉。
-    fireEvent.mouseOut(screen.getByTestId("scene-new"));
+    // 收起：选中即关（onNewMenuPick 先 setNewMenuOpen(false)）。自绘菜单没有
+    // leave-motion 残留问题，这里钉的是「关 = 从 DOM 卸载」，不是藏起来。
     await waitFor(() => expect(visibleMenuItems()).toHaveLength(0), { timeout: 4000 });
   });
 
@@ -1876,14 +1877,14 @@ describe("D180 切回收站：模板滞后于数据，不是滞后于点击", ()
 });
 
 // ── D133：导出成功的 toast 不许被固定快照说明染成 warning ────────────────────────
-// 后端只要导出过就固定追加「本导出是只读备份快照…」一条（scenario/export_services.py:123-126），
+// 后端只要导出过就固定追加「本导出是场景快照…」一条（scenario/export_services.py），
 // 旧前端拿 notes.length>0 当「有问题」的尺子 → 干净的成功永远出 warning。
 // 新口径：固定说明按内容开头排除，剩下的逐条问题 note（图校验/跨域引用）才配 warning。
 describe("D133 导出 toast：成功是 success，问题才 warning", () => {
-  const SNAPSHOT_NOTE = "本导出是只读备份快照：module_id/env_id 为平台内部 id，换项目/换平台后不自动成立；不可回灌（如实报）";
+  const SNAPSHOT_NOTE = "本导出是场景快照：可在场景列表用「导入」回灌成本项目的新场景（id 会重新生成，旧报告/计划关联不会指到新行；module_id/env_id 在目标项目不存在时清空；跨域引用保留 id 指针）";
   const OUT_WITH_NOTE = {
     scenarios: [{
-      scenario_id: "s1", name: "履约回归", priority: "P2", module_id: null,
+      scenario_id: "s1", name: "履约回归", priority: "P2", tags: [], module_id: null,
       step_graph: { version: 1, nodes: [] }, variables: {}, fail_fast: true,
       max_runtime_ms: null, common_assertions: [], env_id: null, project_public: true,
       validation: [], refs: [],
@@ -1911,7 +1912,7 @@ describe("D133 导出 toast：成功是 success，问题才 warning", () => {
     render(<MemoryRouter><ScenesPage /></MemoryRouter>);
     await clickExport();
     await waitFor(() => expect(okSpy).toHaveBeenCalled());
-    expect(String(okSpy.mock.calls[0][0])).toContain("已导出 1 条（只读备份快照，当前无导入可回灌）");
+    expect(String(okSpy.mock.calls[0][0])).toContain("已导出 1 条（可在本页用「导入」回灌成新场景）");
     expect(warnSpy).not.toHaveBeenCalled();
     okSpy.mockRestore(); warnSpy.mockRestore();
   });
@@ -2074,9 +2075,106 @@ describe("D214 场景列表高级搜索 / 列设置", () => {
     const panel = await screen.findByTestId("lt-col-panel");
     const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
     const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
-    expect(labels).toEqual(["名称", "模块", "优先级", "最近结果", "步骤数", "定时", "负责人", "更新时间"]);
+    expect(labels).toEqual(["名称", "优先级", "标签", "模块", "最近结果", "步骤数", "定时", "负责人", "更新时间"]);
     fireEvent.click(boxes[labels.indexOf("优先级")]);
     await waitFor(() => expect(thead()).not.toContain("优先级"));
     expect(thead()).toContain("步骤数");
+  });
+});
+
+// ── D274 场景导入：本平台导出的 JSON 快照 → /scenario-import ─────────────────────
+// 只钉前端这条链：选文件 → 解析 scenarios → 调 sceneApi.import 的载荷逐字 → toast 条数。
+// 后端「整批校验/新 id/清空私有资产」由 tests/test_d274_scenario_import.py 钉。
+describe("D274 导入入口", () => {
+  it("选择本平台导出 JSON → 载荷逐字、成功 toast 报导入条数", async () => {
+    const okSpy = vi.spyOn(message, "success").mockImplementation(() => ({}) as never);
+    const importSpy = vi.spyOn(sceneApi, "import").mockResolvedValue({
+      ok: true, imported: 2, names: ["a", "b"], renamed: [], cleared_modules: [],
+      cleared_envs: [], notes: ["导入总会生成新的场景 id：这是新增资产，不是恢复旧 id 的备份"],
+    });
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-row-name");
+    const scenarios = [{ name: "a" }, { name: "b" }];
+    const file = { text: async () => JSON.stringify({ scenarios }) } as unknown as File;
+    fireEvent.change(screen.getByTestId("scene-import-input"), { target: { files: [file] } });
+    await waitFor(() => expect(importSpy).toHaveBeenCalled());
+    expect(importSpy.mock.calls[0][0]).toEqual({ project_id: "p1", scenarios });
+    await waitFor(() => expect(okSpy).toHaveBeenCalled());
+    expect(String(okSpy.mock.calls[0][0])).toContain("已导入 2 个场景");
+  });
+
+  it("文件缺非空 scenarios 数组 → 不调导入、报错（不猜外部格式）", async () => {
+    const errSpy = vi.spyOn(message, "error").mockImplementation(() => ({}) as never);
+    const importSpy = vi.spyOn(sceneApi, "import");
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-row-name");
+    const file = { text: async () => JSON.stringify({ nodes: [] }) } as unknown as File;
+    fireEvent.change(screen.getByTestId("scene-import-input"), { target: { files: [file] } });
+    await waitFor(() => expect(errSpy).toHaveBeenCalled());
+    expect(String(errSpy.mock.calls[0][0])).toContain("scenarios");
+    expect(importSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── D284 场景标签：列渲染 / 精确筛选下推 / 新建带标签 / 行内编辑 ────────────────
+describe("D284 场景标签", () => {
+  it("标签列最多两枚 +「+N」，无标签画「—」", async () => {
+    mockRows([
+      scene({ id: "s1", tags: ["回归", "核心", "冒烟"] }),
+      scene({ id: "s2", name: "无标签场景", tags: [] }),
+    ]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-tags-s1");
+    const c1 = screen.getByTestId("scene-tags-s1");
+    expect(c1.textContent).toContain("回归");
+    expect(c1.textContent).toContain("核心");
+    expect(c1.textContent).toContain("+1");
+    expect(c1.textContent).not.toContain("冒烟");
+    expect(screen.getByTestId("scene-tags-s2").textContent).toBe("—");
+  });
+
+  it("标签筛选回车 → 列表请求带 tag（trim 后上线，前端不本地过滤）", async () => {
+    const h = sceneServer([scene({ tags: ["回归"] })]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-row-name");
+    expect(lastListQ(h).has("tag")).toBe(false);
+    const input = screen.getByTestId("scene-tags-filter");
+    fireEvent.change(input, { target: { value: "  回归  " } });
+    pressEnter(input);
+    await waitFor(() => expect(h.listUrls.length).toBe(2));
+    expect(lastListQ(h).get("tag")).toBe("回归");
+  });
+
+  it("新建空白场景可录入标签 → POST body 带 tags", async () => {
+    const create = vi.spyOn(sceneApi, "create").mockResolvedValue(scene() as never);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-row-name");
+    await hoverOpen(screen.getByTestId("scene-new"));
+    fireEvent.click(menuItemByText("空白场景"));
+    await screen.findByTestId("scene-blank-modal");
+    fireEvent.change(screen.getByTestId("scene-blank-name"), { target: { value: "带标签场景" } });
+    await addTag("scene-blank-tags", "回归");
+    fireEvent.click(screen.getByTestId("scene-blank-ok"));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(create.mock.calls[0][0]).toMatchObject({
+      project_id: "p1", name: "带标签场景", tags: ["回归"],
+    });
+  });
+
+  it("行内编辑标签 → PATCH 带行上的 version 与完整标签数组", async () => {
+    const update = vi.spyOn(sceneApi, "update").mockResolvedValue(scene() as never);
+    mockRows([scene({ id: "s1", tags: ["旧标签"], version: 7 })]);
+    render(<MemoryRouter><ScenesPage /></MemoryRouter>);
+    await screen.findByTestId("scene-tags-edit");
+    fireEvent.click(screen.getByTestId("scene-tags-edit"));
+    await screen.findByTestId("scene-tags-input");
+    expect(screen.getByTestId("scene-tags-input").textContent).toContain("旧标签");
+    await addTag("scene-tags-input", "新标签");
+    fireEvent.click(screen.getByTestId("scene-tags-save"));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0][0]).toBe("s1");
+    expect(update.mock.calls[0][1]).toMatchObject({
+      project_id: "p1", version: 7, tags: ["旧标签", "新标签"],
+    });
   });
 });

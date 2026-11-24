@@ -46,6 +46,11 @@ ADJUDICATED_READ_PERM_WRITES: dict[str, str] = {
     "mock_rule_test": "只用方法与路径在本项目规则表里试匹配顺序；返回命中规则，不落库、不记命中。",
     # D236：POST 只承载 recycled 开关；函数体两次 count/group by，不写库不发外呼。
     "functional_case_stats": "功能用例分组计数（只为承载项目+视图参数用 POST）；只读聚合。",
+    # D274/D275/D276：列表页当前页的批量投影，POST 只为一次装下一批 id（GET 装不下几十个
+    # 且会逐行 N+1）。三个函数体逐行核对过：只有 select + 纯计算，无 commit/flush/add/delete。
+    "api_def_case_summary_batch": "接口列表用例规模批量投影；只 select 三张表后聚合，零写入。",
+    "functional_case_summary_batch": "功能用例评审/执行结论批量投影；只 select 两张 link 表后聚合，零写入。",
+    "plan_status_batch": "计划列表状态/规模批量投影；只 select + 复用 _plan_display/_rates 纯算，零写入。",
     # D269：组织读接口用 POST 承载 org_id/q；函数体只 select，授权在体内按组织成员/管理员判定。
     # 平台面上非管理员只有 auth:*，READONLY 的项目位集又被 `-system:*` 裁掉，触发不到这些口。
     "org_list": "组织列表：只读 select；POST 仅为承载 q/status 筛选，零副作用。",

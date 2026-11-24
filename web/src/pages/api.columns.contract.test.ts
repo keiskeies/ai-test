@@ -56,9 +56,10 @@ const SELECTION_COL = 32;
 const NAME_FLOOR = 220;
 
 describe("api 表列宽：盈余必须落在「接口」列，不许摊给短列", () => {
-  it("分母站得住：8 列都抠到了（抠法脱钩时不许变假绿）", () => {
+  it("分母站得住：12 列都抠到了（抠法脱钩时不许变假绿）", () => {
     expect(Object.keys(widths).sort(), "列声明行的抠法失效了").toEqual(
-      ["badge", "method", "mod", "name", "ops", "owner", "status", "upd"].sort());
+      ["badge", "cases", "created", "method", "mod", "name", "ops", "owner",
+        "passrate", "result", "status", "upd"].sort());
   });
 
   it("tableLayout 必须是 fixed，且 scroll.x 与它同处一个 props 区", () => {
@@ -72,7 +73,11 @@ describe("api 表列宽：盈余必须落在「接口」列，不许摊给短列
 
   it("固定列宽 = 回收站/最长内容实测下限，逐个钉住", () => {
     // 每一格的出处都写在该列上方的注释里（折行会把「运行记录没取到」说成半句话）。
-    expect(widths).toMatchObject({ method: 80, mod: 100, status: 88, owner: 96, upd: 120, badge: 104, ops: 158 });
+    expect(widths).toMatchObject({
+      method: 80, mod: 100, status: 88, owner: 96, upd: 120, badge: 104, ops: 158,
+      // D276 批量用例规模四列
+      cases: 76, result: 96, passrate: 104, created: 120,
+    });
   });
 
   it("998 与列宽算式对齐：固定列 + 选择列 + 接口列下限", () => {

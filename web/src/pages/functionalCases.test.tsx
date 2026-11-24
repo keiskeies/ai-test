@@ -29,12 +29,21 @@ function row(id: string, over: Partial<CaseRow> = {}): CaseRow {
   return {
     id, num: id === "c1" ? 100001 : 100002, project_id: "p1", module_id: "m1",
     template_id: "tpl1", name: "用例" + id, priority: "P2", description: null,
-    recycled: false, custom_fields: {}, created_by: "u1", created_by_name: "张三",
+    precondition: null, steps: [], remark: null, case_status: "prepare",
+    recycled: false, custom_fields: {},
+    owner_id: null, owner_name: null, tags: [],
+    created_by: "u1", created_by_name: "张三",
     updated_by: "u1", updated_by_name: "张三",
     created_at: "2026-11-23T10:00:00+08:00", updated_at: "2026-11-23T10:00:00+08:00", ...over,
   };
 }
-const ROWS = [row("c1", { name: "登录成功", priority: "P0" }), row("c2", { name: "登录失败", module_id: null })];
+const ROWS = [
+  row("c1", { name: "登录成功", priority: "P0", owner_id: "u2", owner_name: "李四",
+    tags: ["回归", "核心", "冒烟"],
+    precondition: "已登录", steps: [{ desc: "点登录", expected: "进入首页" }],
+    remark: "冒烟必跑", case_status: "underway" }),
+  row("c2", { name: "登录失败", module_id: null }),
+];
 
 const calls: { url: string; method: string; body: unknown }[] = [];
 
@@ -70,6 +79,9 @@ function mockBackend(): void {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, method, body });
+    if (url.includes("/projects/p1/members")) {
+      return resp(200, { items: [{ user_id: "u2", account: "li", name: "李四" }] });
+    }
     if (url.includes("/filter-meta")) return resp(200, FC_META);
     if (url.includes("/saved-views")) return resp(200, []);
     if (url.includes("/functional-modules/tree") && method === "GET") {
@@ -100,6 +112,15 @@ function mockBackend(): void {
       return { ok: true, status: 200, blob: async () => new Blob(["x"]),
         json: async () => ({}) } as unknown as Response;
     }
+    // D277：当前页评审/执行结论批量投影（c1 有评审+执行，c2 两件都没发生过）
+    if (url.includes("/functional-case-summary-batch") && method === "POST") {
+      const ids = (body as { case_ids: string[] }).case_ids;
+      return resp(200, { items: ids.map((id) => id === "c1"
+        ? { case_id: id, review_result: "pass", review_name: "初评",
+            exec_result: "blocked", exec_at: "2026-01-01T00:00:00Z" }
+        : { case_id: id, review_result: null, review_name: null,
+            exec_result: null, exec_at: null }), total: ids.length });
+    }
     if (/\/functional-cases\?/.test(url) && method === "GET") {
       const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
       const recycled = q.get("recycled") === "true";
@@ -116,7 +137,9 @@ function mockBackend(): void {
         ]
         : groupBy === "creator"
           ? [{ key: "u1", label: "张三", count: 2 }]
-          : [
+          : groupBy === "owner"
+            ? [{ key: "u2", label: "李四", count: 1 }, { key: "", label: "—", count: 1 }]
+            : [
             { key: "P0", label: "P0", count: 1 },
             { key: "P1", label: "P1", count: 0 },
             { key: "P2", label: "P2", count: 1 },
@@ -128,6 +151,10 @@ function mockBackend(): void {
     }
     if (url.endsWith("/functional-cases") && method === "POST") {
       return resp(201, { ...row("c9"), ...body });
+    }
+    // D289：编辑用例（PATCH 带 *_set 哨兵）；回执按请求覆盖，前端只看成功/失败
+    if (/\/functional-cases\/c1$/.test(url) && method === "PATCH") {
+      return resp(200, { ...row("c1"), ...body });
     }
     if (/\/functional-cases\/batch-update$/.test(url) && method === "POST") {
       return resp(200, { ok: true, affected: (body.case_ids as string[]).length });
@@ -182,6 +209,18 @@ describe("功能用例列表", () => {
     expect(screen.getByTestId("fc-new")).toBeTruthy();
   });
 
+  it("D277 评审/执行两列：一次批量；从未发生画「未评审/未执行」而不是「未通过」", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("fc-review-c1").textContent).toBe("通过"));
+    expect(screen.getByTestId("fc-exec-c1").textContent).toBe("阻塞");
+    // c2 从未评审/执行：画「未评审/未执行」，不把没发生过的画成未通过
+    expect(screen.getByTestId("fc-review-c2").textContent).toBe("未评审");
+    expect(screen.getByTestId("fc-exec-c2").textContent).toBe("未执行");
+    const batches = calls.filter((c) => c.url.includes("/functional-case-summary-batch"));
+    expect(batches).toHaveLength(1);
+  });
+
   it("新建：POST body 带模板与自定义值", async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
@@ -195,7 +234,7 @@ describe("功能用例列表", () => {
       expect(c).toBeTruthy();
       expect(c!.body).toMatchObject({
         project_id: "p1", name: "新用例", priority: "P2",
-        template_id: "tpl1", custom_fields: {}, module_id: null,
+        template_id: "tpl1", custom_fields: {}, module_id: null, owner_id: null, tags: [],
       });
     });
   });
@@ -263,7 +302,8 @@ describe("功能用例列表", () => {
     const panel = await screen.findByTestId("lt-col-panel");
     const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
     const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
-    expect(labels).toEqual(["编号", "名称", "优先级", "模块", "自定义字段", "更新人", "更新时间"]);
+    expect(labels).toEqual(["编号", "名称", "评审结果", "标签", "优先级", "模块", "用例描述",
+      "执行结果", "责任人", "自定义字段", "更新人", "更新时间"]);
     fireEvent.click(boxes[labels.indexOf("自定义字段")]);
     await waitFor(() => expect(thead()).not.toContain("自定义字段"));
     expect(thead()).toContain("优先级");
@@ -608,6 +648,49 @@ describe("D253 回收站批量恢复", () => {
   });
 });
 
+// D281：责任人——列表画姓名（空画「—」）、新建可选人、统计有 owner 轴。
+describe("D281 责任人", () => {
+  it("列表责任人列：有值画姓名，未指派画「—」", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    expect(screen.getByTestId("fc-owner-c1").textContent).toBe("李四");
+    expect(screen.getByTestId("fc-owner-c2").textContent).toBe("—");
+  });
+
+  it("新建弹窗选责任人 → POST body 带 owner_id", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("fc-new"));
+    await waitFor(() => expect(screen.getByTestId("fc-field-owner")).toBeTruthy());
+    await pick("fc-field-owner", "李四");
+    fireEvent.change(screen.getByTestId("fc-field-name"), { target: { value: "指派用例" } });
+    fireEvent.click(screen.getByTestId("fc-save"));
+    await waitFor(() => {
+      const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/functional-cases"));
+      expect(c).toBeTruthy();
+      expect(c!.body).toMatchObject({ project_id: "p1", name: "指派用例", owner_id: "u2" });
+    });
+  });
+
+  it("统计切到「责任人」轴：body 带 group_by=owner，未指派归「—」", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("fc-stats"));
+    await waitFor(() => expect(
+      calls.filter((c) => c.method === "POST" && /\/functional-cases\/stats$/.test(c.url)).length).toBe(1));
+    await pick("fc-stats-groupby", "责任人");
+    await waitFor(() => {
+      const stats = calls.filter((c) => c.method === "POST" && /\/functional-cases\/stats$/.test(c.url));
+      expect(stats[stats.length - 1].body).toMatchObject({ project_id: "p1", group_by: "owner" });
+    });
+    await waitFor(() => {
+      const text = screen.getAllByTestId("fc-stats-row").map((r) => r.textContent ?? "").join("|");
+      expect(text).toContain("李四");
+      expect(text).toContain("—");
+    });
+  });
+});
+
 // D254：批量彻底删除——单条要逐字输用例名，批量改成输固定短语「彻底删除」。
 // 钉：① 弹窗点名要删的用例；② 没输对短语时确认钮禁用；③ body 带 ids 且不可逆说明在。
 describe("D254 回收站批量彻底删除", () => {
@@ -640,6 +723,125 @@ describe("D254 回收站批量彻底删除", () => {
     await waitFor(() => expect(purgeCalls().length).toBe(1));
     expect(purgeCalls()[0].body).toMatchObject({ project_id: "p1", case_ids: ["c1", "c2"] });
     await waitFor(() => expect(screen.queryByTestId("fc-batch-purge")).toBeNull());
+  });
+});
+
+// D283：标签——列表最多画两枚 + 「+N」，空画「—」；表单可录入；筛选走顶层 tag
+// （后端 FIND_IN_SET 精确匹配，不做 LIKE）。
+describe("D283 标签", () => {
+  /** rc-select 的 tags 输入：先在搜索框里改值，再按 Enter 收成标签。
+   *  keyDown 必须带 keyCode/which 13——只给 key: "Enter" 时 rc-select 不收；
+   *  按完要补 keyUp——rc-input 的 keyLockRef 会锁住下一次 keyDown。 */
+  async function addTag(testid: string, value: string): Promise<void> {
+    const input = screen.getByTestId(testid).querySelector("input")!;
+    fireEvent.change(input, { target: { value } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    fireEvent.keyUp(input, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(screen.getByTestId(testid).textContent).toContain(value));
+  }
+
+  it("列表标签列：有值画前两枚 + 「+N」，无标签画「—」", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    const c1 = screen.getByTestId("fc-tags-c1");
+    expect(c1.textContent).toContain("回归");
+    expect(c1.textContent).toContain("核心");
+    expect(c1.textContent).toContain("+1"); // 第三枚「冒烟」收进 +1
+    expect(c1.textContent).not.toContain("冒烟");
+    expect(screen.getByTestId("fc-tags-c2").textContent).toBe("—");
+  });
+
+  it("新建时录入标签 → POST body 带 tags", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("fc-new"));
+    await waitFor(() => expect(screen.getByTestId("fc-field-tags")).toBeTruthy());
+    fireEvent.change(screen.getByTestId("fc-field-name"), { target: { value: "带标签用例" } });
+    await addTag("fc-field-tags", "回归");
+    await addTag("fc-field-tags", "冒烟");
+    fireEvent.click(screen.getByTestId("fc-save"));
+    await waitFor(() => {
+      const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/functional-cases"));
+      expect(c).toBeTruthy();
+      expect(c!.body).toMatchObject({ project_id: "p1", name: "带标签用例", tags: ["回归", "冒烟"] });
+    });
+  });
+
+  it("标签筛选：回车后列表请求带 tag（前端不做本地过滤）", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    const listUrls = (): string[] => calls.filter((c) =>
+      c.method === "GET" && /\/functional-cases\?/.test(c.url)).map((c) => c.url);
+    expect(qsOf(listUrls()[0]).has("tag")).toBe(false);
+
+    const input = screen.getByTestId("fc-filter-tag");
+    expect(input.tagName).toBe("INPUT");
+    fireEvent.change(input, { target: { value: "  回归  " } });
+    // rc-input 的 Enter 有 keyLockRef：keyDown 后要 keyUp 才放行下一次
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    fireEvent.keyUp(input, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(listUrls().length).toBeGreaterThan(1));
+    // trim 后上线；纯空白清空时参数整个不上线（不是 tag=）
+    expect(qsOf(listUrls()[listUrls().length - 1]).get("tag")).toBe("回归");
+  });
+});
+
+// D289：MS v2 功能用例表单——两栏满高（左内容 / 右属性），补前置条件、步骤、备注、用例状态。
+describe("D289 用例表单", () => {
+  it("新建页两栏：内容在左、属性在右；步骤行可增删并随 POST 提交", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("fc-new"));
+    await waitFor(() => expect(screen.getByTestId("fc-form-side")).toBeTruthy());
+    expect(document.querySelector(".tp-record-editor--side-right")).toBeTruthy();
+    expect(screen.getByTestId("fc-field-status")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("fc-step-add"));
+    await waitFor(() => expect(screen.getByTestId("fc-step-desc-0")).toBeTruthy());
+    fireEvent.change(screen.getByTestId("fc-step-desc-0"), { target: { value: "打开登录页" } });
+    fireEvent.change(screen.getByTestId("fc-step-expected-0"), { target: { value: "看到表单" } });
+    fireEvent.change(screen.getByTestId("fc-field-precondition"), { target: { value: "已注册账号" } });
+    fireEvent.change(screen.getByTestId("fc-field-remark"), { target: { value: "冒烟必跑" } });
+    fireEvent.change(screen.getByTestId("fc-field-name"), { target: { value: "带步骤用例" } });
+    fireEvent.click(screen.getByTestId("fc-save"));
+
+    await waitFor(() => {
+      const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/functional-cases"));
+      expect(c).toBeTruthy();
+      expect(c!.body).toMatchObject({
+        project_id: "p1", name: "带步骤用例",
+        precondition: "已注册账号", remark: "冒烟必跑",
+        steps: [{ desc: "打开登录页", expected: "看到表单" }],
+        case_status: "prepare",
+      });
+    });
+  });
+
+  it("编辑：四项回显；清空前置条件与步骤后 PATCH 带 null/[] 与 *_set", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("登录成功")).toBeTruthy());
+    fireEvent.click(screen.getAllByTestId("fc-edit")[0]);
+    await waitFor(() => expect(screen.getByTestId("fc-form-side")).toBeTruthy());
+    expect((screen.getByTestId("fc-field-precondition") as HTMLTextAreaElement).value).toBe("已登录");
+    expect((screen.getByTestId("fc-field-remark") as HTMLTextAreaElement).value).toBe("冒烟必跑");
+    expect((screen.getByTestId("fc-step-desc-0") as HTMLTextAreaElement).value).toBe("点登录");
+
+    fireEvent.change(screen.getByTestId("fc-field-precondition"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("fc-step-del-0"));
+    await waitFor(() => expect(screen.queryByTestId("fc-step-desc-0")).toBeNull());
+    fireEvent.click(screen.getByTestId("fc-save"));
+
+    await waitFor(() => {
+      const c = calls.find((x) => x.method === "PATCH" && /\/functional-cases\/c1$/.test(x.url));
+      expect(c).toBeTruthy();
+      expect(c!.body).toMatchObject({
+        project_id: "p1",
+        precondition: null, precondition_set: true,
+        steps: [], steps_set: true,
+        remark: "冒烟必跑", remark_set: true,
+        case_status: "underway",
+      });
+    });
   });
 });
 

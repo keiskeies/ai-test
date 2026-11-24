@@ -17,8 +17,27 @@ export interface ApiDef {
    *  = 账号已删/查不到，前端照实说，不许画空名字。 */
   owner_name?: string | null;
   project_public: boolean;
+  /** D282：接口说明（自由文本，空 = 没写）。 */
+  description?: string | null;
+  /** D282：标签列表（后端把逗号串 split 成数组；空数组 = 无标签）。 */
+  tags?: string[];
   /** 蓝图 :1376 列表列「更新时间」：后端 ApiDefOut.updated_at（带 +00:00 偏移的 ISO）。 */
   updated_at?: string | null;
+  /** D276 列表列「创建时间」：后端 ApiDefOut.created_at（同上 ISO 口径）。 */
+  created_at?: string | null;
+}
+
+/** D276：接口列表的用例规模批量投影（后端 ApiDefCaseSummaryOut 手写镜像）。
+ *  result 是聚合态：none/running/failed/partial/passed，判据见后端服务注释。 */
+export interface ApiDefCaseSummary {
+  definition_id: string;
+  case_count: number;
+  executed: number;
+  passed: number;
+  failed: number;
+  running: number;
+  case_pass_rate: number;
+  result: string;
 }
 
 export interface CaseRow {

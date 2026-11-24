@@ -156,9 +156,15 @@ async def test_migration_0020_is_on_the_head_of_the_chain() -> None:
     assert parents["0050"] == "0049"
     assert parents["0051"] == "0050"
     assert parents["0052"] == "0051"
+    assert parents["0053"] == "0052"
+    assert parents["0054"] == "0053"
+    assert parents["0055"] == "0054"
+    assert parents["0056"] == "0055"
+    assert parents["0059"] == "0058"
+    assert parents["0060"] == "0059"
     chain = set(parents.values()) - {None}
     heads = set(revs) - chain
-    assert heads == {"0052"}, f"链头应为唯一 0052，实际 {sorted(heads)}（多头 = 各升各的）"
+    assert heads == {"0060"}, f"链头应为唯一 0060，实际 {sorted(heads)}（多头 = 各升各的）"
 
 
 async def test_tables_actually_exist_in_the_migrated_db(conn) -> None:

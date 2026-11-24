@@ -63,6 +63,7 @@ _SERVICE_MODULES = (
     "app.modules.skill.services",
     # D74（1G）：场景导出备份（scenario_export → 只读快照；HTTP 面照 api_export 的路径风格）。
     "app.modules.scenario.export_services",
+    "app.modules.scenario.import_services",
     "app.modules.scenario.module_services",
     "app.modules.scenario.services",
     # composition 层：三路搜索正向读领域模型（契约 1 的正解）

@@ -21,11 +21,13 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.modules.defect.models import (
     DEFECT_CASE_TYPES,
+    DEFECT_SEVERITIES,
     PRIORITIES,
 )
 
 _KEY_PATTERN = "^[a-z][a-z0-9_]{0,31}$"
 _PRIORITY_PATTERN = "^(" + "|".join(PRIORITIES) + ")$"
+_SEVERITY_PATTERN = "^(" + "|".join(DEFECT_SEVERITIES) + ")$"
 _CASE_TYPE_PATTERN = "^(" + "|".join(DEFECT_CASE_TYPES) + ")$"
 
 MAX_TAGS = 20
@@ -81,6 +83,13 @@ class DefectCreateIn(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str | None = None
     priority: str = Field(default="P2", pattern=_PRIORITY_PATTERN)
+    # D280：来源自由文本（MS 是项目可配字典，本仓没有字典表）；严重程度四值词表。
+    # 都可不填：未评估就是未评估，不编默认值。
+    source: str | None = Field(default=None, max_length=64)
+    severity: str | None = Field(default=None, pattern=_SEVERITY_PATTERN)
+    # D289：MS v2 新建表单就带「状态」下拉。None = 项目状态图的起始态；
+    # 显式值必须是该图里存在的 key（服务层校验，未知 422 invalid_status）。
+    status: str | None = Field(default=None, pattern=_KEY_PATTERN)
     handle_user_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     # None = 用场景默认模板；显式 id 必须属于本项目且 scene=bug。
@@ -108,6 +117,11 @@ class DefectUpdateIn(BaseModel):
     description: str | None = None
     description_set: bool = False
     priority: str | None = Field(default=None, pattern=_PRIORITY_PATTERN)
+    # D280：`source`/`severity` 的三态同 handle_user_set：不带 = 不改、带 null = 清空。
+    source: str | None = Field(default=None, max_length=64)
+    source_set: bool = False
+    severity: str | None = Field(default=None, pattern=_SEVERITY_PATTERN)
+    severity_set: bool = False
     handle_user_id: str | None = None
     handle_user_set: bool = False
     status: str | None = Field(default=None, pattern=_KEY_PATTERN)
@@ -171,6 +185,9 @@ class DefectOut(BaseModel):
     description: str | None = None
     status: str
     priority: str
+    # D280：来源/严重程度（空 = 未填/未评估）
+    source: str | None = None
+    severity: str | None = None
     handle_user_id: str | None = None
     handle_user_name: str | None = None
     tags: list[str] = []

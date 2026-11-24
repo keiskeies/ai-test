@@ -286,13 +286,13 @@ test("场景列表勾选两条无环境场景：批量执行点名「无环境�
   const out = JSON.parse(fs.readFileSync(await download.path(), "utf8"));
   expect(out.exported).toBe(2); // scenes.tsx:263 回执按这个数说话
   expect(out.scenarios.map((s) => s.name).sort()).toEqual([n1, n2].sort());
-  // D133 翻案后钉这对：后端场景导出恒带一条「只读快照不可回灌」的固定口径说明
-  // （export_services.py 的 notes 追加），notes 非空 ≠ 有问题——干净成功的导出走
-  // success，不再被固定说明染成 warning（旧断言钉的正是那个染色）。真问题 note
+  // D133 翻案后钉这对：后端场景导出恒带一条固定口径说明（export_services.py 的 notes
+  // 追加；D274 起文案改为「本导出是场景快照…可回灌」），notes 非空 ≠ 有问题——干净成功
+  // 的导出走 success，不再被固定说明染成 warning（旧断言钉的正是那个染色）。真问题 note
   // （图校验 / 跨域引用指针）才配 warning，两条腿在 scenes.test.tsx 的 D133 describe。
   expect(out.notes.length).toBeGreaterThan(0);
   await expect(page.locator(".ant-message"))
-    .toContainText("已导出 2 条（只读备份快照，当前无导入可回灌）");
+    .toContainText("已导出 2 条（可在本页用「导入」回灌成新场景）");
 });
 
 test("接口详情「场景引用」Tab：被引用的接口列出场景名与步骤 key，没人引用的如实说「还没有场景引用这个接口」", async ({ page }) => {

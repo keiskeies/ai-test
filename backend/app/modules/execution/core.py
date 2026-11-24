@@ -47,12 +47,13 @@ def _is_pairs(x: Any) -> bool:
 def _build_kwargs(req: dict) -> dict:
     """渲染后的 request dict → httpx 请求参数（§7.1 body 类型子集）。"""
     kw: dict[str, Any] = {}
+    # 参数支持四元 ["名","值","1|0","描述"]（D288）：执行只取前两位，后两位是文档信息。
     pairs = req.get("params") or []
     if pairs:
-        kw["params"] = [(k, v) for k, v in pairs]
+        kw["params"] = [(p[0], p[1]) for p in pairs]
     hdrs = req.get("headers") or []
     if hdrs:
-        kw["headers"] = [(k, v) for k, v in hdrs]
+        kw["headers"] = [(p[0], p[1]) for p in hdrs]
     body = req.get("body") or {"type": "none"}
     bt = body.get("type") or "none"
     content = body.get("content")

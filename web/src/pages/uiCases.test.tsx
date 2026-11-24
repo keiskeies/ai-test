@@ -793,3 +793,58 @@ describe("D213 UI 用例列表高级搜索 / 列设置", () => {
     expect(screen.getByTestId("ui-case-del")).not.toBeNull();
   });
 });
+
+// ── D273：UI 用例批量回收/恢复（正常视图批量回收，回收站批量恢复）────────────
+// 与 api.tsx D251/D252 同口径。mockBackend 已按 recycled 切片并把 /ui-cases/ POST 全记录，
+// 这里直接复用：勾选 → 确认 → posts 里出现 batch-delete/batch-restore + case_ids。
+describe("uiCases 批量回收/恢复（D273）", () => {
+  function boxes(): HTMLElement[] {
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+  }
+
+  it("勾 2 行 → 批量回收：POST batch-delete 带 case_ids；MEMBER 无删除位不渲染批量条", async () => {
+    mockBackend({ normal: [uiCase("c1"), uiCase("c2"), uiCase("c3")], recycled: [] });
+    render(<MemoryRouter><UiCasesPage /></MemoryRouter>);
+    await screen.findAllByTestId("ui-case-row-name");
+    expect(screen.queryByTestId("ui-case-batch-bar")).toBeNull();
+    fireEvent.click(boxes()[0]);
+    fireEvent.click(boxes()[1]);
+    expect((await screen.findByTestId("ui-case-batch-bar")).textContent).toContain("已选 2 项");
+    fireEvent.click(screen.getByTestId("ui-case-batch-delete"));
+    fireEvent.click(await screen.findByRole("button", { name: "放入回收站" }));
+    await waitFor(() => expect(posts.some((p) => p.url.includes("/ui-cases/batch-delete"))).toBe(true));
+    const call = posts.find((p) => p.url.includes("/ui-cases/batch-delete"))!;
+    expect(call.body.project_id).toBe("p1");
+    expect([...(call.body.case_ids as string[])].sort()).toEqual(["c1", "c2"]);
+    await waitFor(() => expect(screen.queryByTestId("ui-case-batch-bar")).toBeNull());
+  });
+
+  it("MEMBER（-*:delete）：正常视图无勾选列、无批量回收条（隐藏不是禁用）", async () => {
+    useAuth.setState({ project: MEMBER_PROJECT });
+    mockBackend({ normal: [uiCase("c1")], recycled: [] });
+    render(<MemoryRouter><UiCasesPage /></MemoryRouter>);
+    await screen.findAllByTestId("ui-case-row-name");
+    expect(screen.queryByTestId("ui-case-batch-delete")).toBeNull();
+    expect(boxes()).toHaveLength(0);
+  });
+
+  it("回收站视图勾行 → 批量恢复：POST batch-restore 带 case_ids", async () => {
+    mockBackend({ normal: [], recycled: [uiCase("c9", { status: "recycled" }), uiCase("c8", { status: "recycled" })] });
+    render(<MemoryRouter><UiCasesPage /></MemoryRouter>);
+    await waitFor(() => expect(document.body.textContent).toContain("还没有 UI 用例"));
+    fireEvent.click(screen.getByTestId("ui-case-recycled"));
+    await waitFor(() => expect(screen.getAllByTestId("ui-case-row-name")).toHaveLength(2));
+    fireEvent.click(boxes()[0]);
+    expect(await screen.findByTestId("ui-case-batch-restore")).not.toBeNull();
+    fireEvent.click(screen.getByTestId("ui-case-batch-restore"));
+    const m = await waitFor(() => {
+      const el = document.querySelector(".ant-modal-confirm") as HTMLElement | null;
+      if (!el) throw new Error("确认框未出现");
+      return el;
+    });
+    fireEvent.click(within(m).getByRole("button", { name: /^恢\s*复$/ }));
+    await waitFor(() => expect(posts.some((p) => p.url.includes("/ui-cases/batch-restore"))).toBe(true));
+    const call = posts.find((p) => p.url.includes("/ui-cases/batch-restore"))!;
+    expect((call.body.case_ids as string[]).length).toBeGreaterThan(0);
+  });
+});

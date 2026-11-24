@@ -391,6 +391,141 @@ async def api_case_purge(payload: schemas.CasePurgeIn, ctx) -> BaseModel:
     return schemas.OkOut(ok=True)
 
 
+@service(
+    perm="api:case:delete", effect="destructive", name="api_case_batch_delete",
+    description="批量把用例放入回收站（全有或全无：任一不存在/已回收/定义已回收 → 404 整批不动；"
+                "任一被未回收场景引用 → 409 整批不动，不提供批量 force）",
+    http={"method": "POST", "path": "/api-cases/batch-delete", "tags": ["api_test"]},
+    tool=False,
+    resident=False,
+)
+async def api_case_batch_delete(payload: schemas.CaseBatchDeleteIn, ctx) -> BaseModel:
+    """D273：用例批量回收（补 §73 顺延的「接口用例回收站批量入口」缺口）。
+
+    纪律与 api_definition_batch_delete（D251）同款，只有两处是本表特有的判断：
+    - 「定义已回收」的用例与不存在同码 404——单删走 `_visible_case` 里的
+      `assert_def_alive` 就是这个口径（可达性跟着定义走，不泄露存在性），批量不许另开一种。
+    - 引用检查一次批量问完（`_scenario_refs` 天生收列表），任一被引用 → 409 + blocked
+      清单，仍是零写入；**不提供批量 force**：强删必须逐个过「你已看见这一个的引用清单」
+      那段确认，N 份清单叠一键坏的是别人的场景。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("api:case:delete")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.case_ids))
+    if len(uniq) != len(payload.case_ids):
+        raise ApiError("validation_failed", "case_ids 不能重复", 422,
+                       {"case_ids": payload.case_ids})
+    rows = (await ctx.db.execute(select(ApiCase).where(
+        ApiCase.project_id == payload.project_id,
+        ApiCase.id.in_(uniq),
+    ).order_by(ApiCase.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    # 定义回收中的用例视同不可达（assert_def_alive 同口径）：先收集定义状态再判缺
+    def_ids = list({r.definition_id for r in rows})
+    alive_defs = set()
+    if def_ids:
+        alive_defs = set((await ctx.db.execute(select(ApiDefinition.id).where(
+            ApiDefinition.project_id == payload.project_id,
+            ApiDefinition.id.in_(def_ids),
+            ApiDefinition.status != "recycled"),
+        )).scalars().all())
+    missing = [i for i in uniq if i not in found or found[i].status == "recycled"
+               or found[i].definition_id not in alive_defs]
+    if missing:
+        raise ApiError("not_found", "用例不存在", 404, {"case_ids": missing})
+    for r in rows:
+        assert_row_visible(r, ctx, what="用例不存在")
+    refs = await _scenario_refs(ctx, payload.project_id, [r.id for r in rows])
+    blocked = [r for r in rows if (refs.get(r.id) or {}).get("count")]
+    if blocked:
+        details_list = []
+        hidden = False
+        for r in blocked:
+            ref = refs[r.id]
+            item: dict = {"case_id": r.id, "name": r.name,
+                          "count": ref["count"], "scenarios": ref["scenarios"]}
+            if ref["hidden"]:
+                item["hidden"] = True
+                hidden = True
+            details_list.append(item)
+        names = "、".join("「" + b["name"] + "」" for b in details_list[:5])
+        more = " 等 " + str(len(blocked)) + " 条用例" if len(blocked) > 5 else ""
+        details: dict = {"blocked": details_list}
+        if hidden:
+            details["reason"] = "missing_scenario_read"
+        raise ApiError(
+            "referenced_by_scenario",
+            "有 " + str(len(blocked)) + " 条用例被未回收场景引用：" + names + more
+            + "；整批一行未动。批量不提供 force——确认要连带断掉场景步骤请逐个回收",
+            409, details)
+    for r in rows:
+        r.status = "recycled"
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="api:case:update", effect="write", name="api_case_batch_restore",
+    description="批量从回收站恢复用例（全有或全无：任一不存在/不在回收站/定义已回收 → 404 整批不动；"
+                "任一绑定的数据集已不存在 → 409 整批不动）",
+    http={"method": "POST", "path": "/api-cases/batch-restore", "tags": ["api_test"]},
+    tool=False,
+    resident=False,
+)
+async def api_case_batch_restore(payload: schemas.CaseBatchRestoreIn, ctx) -> BaseModel:
+    """与批量回收对称的出口（D273）。
+
+    - 重复 id → 422；任一不存在或**不在回收站** → 404 + 列 ids，整批一行不动。
+      定义已回收的用例同样 404：可达性跟着定义走（单条 restore 的 `_visible_case` 同口径），
+      接口还在回收站时把它的用例单独捞出来没有意义。
+    - R82 数据集体检逐条做：绑定的数据集已不存在 → 409 点名缺哪个数据集，整批不落。
+      不静默清绑（dataset_id 悄悄变 null 是降级，§13 纪律 1）。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("api:case:update")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.case_ids))
+    if len(uniq) != len(payload.case_ids):
+        raise ApiError("validation_failed", "case_ids 不能重复", 422,
+                       {"case_ids": payload.case_ids})
+    rows = (await ctx.db.execute(select(ApiCase).where(
+        ApiCase.project_id == payload.project_id,
+        ApiCase.id.in_(uniq),
+    ).order_by(ApiCase.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    def_ids = list({r.definition_id for r in rows})
+    alive_defs = set()
+    if def_ids:
+        alive_defs = set((await ctx.db.execute(select(ApiDefinition.id).where(
+            ApiDefinition.project_id == payload.project_id,
+            ApiDefinition.id.in_(def_ids),
+            ApiDefinition.status != "recycled"),
+        )).scalars().all())
+    bad = [i for i in uniq if i not in found or found[i].status != "recycled"
+           or found[i].definition_id not in alive_defs]
+    if bad:
+        raise ApiError("not_found", "有用例不存在或不在回收站", 404, {"case_ids": bad})
+    for r in rows:
+        assert_row_visible(r, ctx, what="用例不存在")
+    ds_ids = list({r.dataset_id for r in rows if r.dataset_id})
+    alive_ds = set()
+    if ds_ids:
+        alive_ds = set((await ctx.db.execute(select(DataSet.id).where(
+            DataSet.project_id == payload.project_id,
+            DataSet.id.in_(ds_ids)))).scalars().all())
+    for r in rows:
+        if r.dataset_id and r.dataset_id not in alive_ds:
+            raise ApiError("dataset_missing",
+                           "用例「" + r.name + "」绑定的数据集已不存在（id=" + r.dataset_id +
+                           "），恢复后无法执行；请先编辑用例解绑数据集再恢复", 409,
+                           {"case_id": r.id, "dataset_id": r.dataset_id})
+    for r in rows:
+        r.status = "normal"
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
 
 def _validate_table(columns: list[str], rows: list[list[str]]) -> None:
     if not columns:

@@ -246,6 +246,7 @@ export default function Shell() {
 
   const userMenu = (
     <Dropdown
+      trigger={["click"]}
       menu={{
         items: [
           { key: "who", label: (user?.name ?? "") + "（" + (user?.account ?? "") + "）", disabled: true },

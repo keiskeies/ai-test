@@ -400,8 +400,8 @@ describe("ListMode（§11.4.10 列表模式）", () => {
   it("工具栏 [+ 添加步骤]：addStep(kind, null) 挂顶层；粘贴钮只在有剪贴板时出现且只发 pasteInto(null)", async () => {
     renderWith();
     expect(screen.queryByTestId("list-paste")).toBeNull();
-    // 工具栏这个 Dropdown 没写 trigger → antd 默认 hover：click 打不开（行菜单才是 click）。
-    hoverOpen(screen.getByTestId("list-add-step"));
+    // 工具栏这个 Dropdown 是 click 触发（与行菜单一致）：点一下才挂弹层。
+    fireEvent.click(screen.getByTestId("list-add-step"));
     await clickItem("list-addmenu-foreach");
     expect(act.addStep).toHaveBeenCalledWith("foreach", null);
 

@@ -20,7 +20,8 @@ import { projectMetaApi, type TemplateDetail } from "../api/projectMeta";
 import CustomFieldForm from "../ui/CustomFields";
 import Attachments from "../ui/Attachments";
 import {
-  CASE_TYPE_LABELS, defectApi, defectFlowApi, flowAllowed, flowLabel, isDefectFlow, statusMeta,
+  CASE_TYPE_LABELS, defectApi, defectFlowApi, flowAllowed, flowLabel, isDefectFlow, severityMeta,
+  statusMeta, SEVERITY_OPTIONS,
   type DefectCaseOption, type DefectComment, type DefectFlow, type DefectLink, type DefectRow,
 } from "../api/defect";
 import { fmtTime } from "../shared/timefmt";
@@ -132,6 +133,9 @@ function Detail({ id }: { id: string }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("P2");
+  // D280：缺陷来源（自由文本）与严重程度（null = 未评估）
+  const [source, setSource] = useState("");
+  const [severity, setSeverity] = useState<string | null>(null);
   const [handle, setHandle] = useState<string | null>(null);
   const [status, setStatus] = useState("new");
   const [tags, setTags] = useState<string[]>([]);
@@ -172,6 +176,8 @@ function Detail({ id }: { id: string }) {
       setTitle(d.title);
       setDescription(d.description ?? "");
       setPriority(d.priority);
+      setSource(d.source ?? "");
+      setSeverity(d.severity ?? null);
       setHandle(d.handle_user_id);
       setStatus(d.status);
       setTags(d.tags);
@@ -203,10 +209,15 @@ function Detail({ id }: { id: string }) {
       const out = await defectApi.update(row.id, {
         project_id: pid, title: title.trim(), description, description_set: true,
         priority, handle_user_id: handle, handle_user_set: true, status, tags,
+        // D280：清空来源/退回未评估也要发得出去（哨兵三态）
+        source: source.trim() || null, source_set: true,
+        severity, severity_set: true,
         ...(tpl ? { custom_fields: custom } : {}),
       });
       setRow(out);
       setStatus(out.status);
+      setSource(out.source ?? "");
+      setSeverity(out.severity ?? null);
       message.success("已保存");
     } catch (e) {
       if (e instanceof ApiErr) setSaveErr(e.message);
@@ -306,6 +317,13 @@ function Detail({ id }: { id: string }) {
         <Space size={12} wrap>
           <Tag color={statusMeta(row.status).color}>{flowLabel(flow, row.status)}</Tag>
           <Tag color="default">{row.priority}</Tag>
+          {/* D280：严重程度（未评估不画标签，不冒充「一般」）与来源 */}
+          {row.severity && (
+            <Tag color={severityMeta(row.severity).color} data-testid="defect-detail-severity">
+              {severityMeta(row.severity).label}
+            </Tag>
+          )}
+          {row.source && <Tag data-testid="defect-detail-source">{row.source}</Tag>}
           {row.tags.map((t) => <Tag key={t}>{t}</Tag>)}
         </Space>
         <Divider style={{ margin: "12px 0" }} />
@@ -336,6 +354,18 @@ function Detail({ id }: { id: string }) {
               <Select style={{ width: 100 }} value={priority} disabled={!canUpdate}
                 onChange={(v) => setPriority(String(v))}
                 options={["P0", "P1", "P2", "P3"].map((v) => ({ value: v, label: v }))} />
+            </div>
+            <div>
+              <Typography.Text strong>严重程度</Typography.Text>
+              <Select data-testid="defect-detail-severity-select" style={{ width: 120 }} allowClear
+                value={severity ?? undefined} disabled={!canUpdate} placeholder="未评估"
+                onChange={(v) => setSeverity(v ?? null)} options={SEVERITY_OPTIONS} />
+            </div>
+            <div>
+              <Typography.Text strong>缺陷来源</Typography.Text>
+              <Input data-testid="defect-detail-source-input" style={{ width: 160 }} maxLength={64}
+                value={source} disabled={!canUpdate} placeholder="如「客户反馈」"
+                onChange={(e) => setSource(e.target.value)} />
             </div>
             <div>
               <Typography.Text strong>处理人</Typography.Text>

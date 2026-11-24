@@ -2922,6 +2922,10 @@ export interface components {
              * @default true
              */
             project_public: boolean;
+            /** Description */
+            description?: string | null;
+            /** Tags */
+            tags?: string[];
         };
         /** ApiDefOut */
         ApiDefOut: {
@@ -2955,6 +2959,10 @@ export interface components {
             owner_id?: string | null;
             /** Owner Name */
             owner_name?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Tags */
+            tags?: string[];
             /**
              * Project Public
              * @default true
@@ -4116,6 +4124,8 @@ export interface components {
              * @default P2
              */
             priority: string;
+            /** Tags */
+            tags?: string[];
             /** Step Graph */
             step_graph?: {
                 [key: string]: unknown;
@@ -4246,6 +4256,8 @@ export interface components {
              * @default P2
              */
             priority: string;
+            /** Tags */
+            tags?: string[];
             /** Step Graph */
             step_graph?: {
                 [key: string]: unknown;
@@ -5543,13 +5555,15 @@ export interface components {
             name?: string | null;
             /** Priority */
             priority?: string | null;
+            /** Tags */
+            tags?: string[] | null;
             /** Module Id */
             module_id?: string | null;
             /**
              * Module Set
              * @default false
              */
-            module_set: boolean;
+            module_set?: boolean;
             /** Step Graph */
             step_graph?: {
                 [key: string]: unknown;
@@ -5566,7 +5580,7 @@ export interface components {
              * Max Runtime Set
              * @default false
              */
-            max_runtime_set: boolean;
+            max_runtime_set?: boolean;
             /** Common Assertions */
             common_assertions?: {
                 [key: string]: unknown;
@@ -5575,14 +5589,14 @@ export interface components {
              * Common Assertions Set
              * @default false
              */
-            common_assertions_set: boolean;
+            common_assertions_set?: boolean;
             /** Env Id */
             env_id?: string | null;
             /**
              * Env Set
              * @default false
              */
-            env_set: boolean;
+            env_set?: boolean;
             /** Project Public */
             project_public?: boolean | null;
         };

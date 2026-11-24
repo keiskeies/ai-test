@@ -1,13 +1,20 @@
 """API 接口定义模型（§4.4 S0 子集）。"""
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base, ProjectScopedMixin, TimestampMixin, new_id
 
 
 class ApiDefinition(ProjectScopedMixin, TimestampMixin, Base):
+    """接口定义。D282 补 `description`（说明）与 `tags`（逗号串，同 defect.tags 的存法）。
+
+    两列都有写入口（新建/编辑抽屉）与读方（列表列 / 详情 / 关键字搜索），不是死列。
+    `version` 仍是乐观锁整数，不是发布版本——发布版本是独立能力（gap P2-9），
+    不拿这个整数冒充。
+    """
+
     __tablename__ = "api_definition"
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_apidef_project_name"),)
 
@@ -21,6 +28,9 @@ class ApiDefinition(ProjectScopedMixin, TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     project_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # D282：接口说明（自由文本）与标签（逗号串，去重保序；空 = 无标签）
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
 
 class ApiModule(ProjectScopedMixin, TimestampMixin, Base):

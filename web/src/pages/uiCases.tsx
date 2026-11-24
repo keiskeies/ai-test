@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Alert, Button, Input, Modal, Space, Tag, Typography, message } from "antd";
-import { PlusOutlined, UndoOutlined } from "../ui/icons";
+import { PlusOutlined, ReloadOutlined, UndoOutlined } from "../ui/icons";
 import StateView from "../ui/StateView";
 import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
 import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
@@ -78,6 +78,10 @@ function CasesList() {
   // D213：高级搜索条件 + 列偏好。条件与回收站/模块等顶层开关并行（后端同一个 WHERE）。
   const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
   const [colPref, setColPref] = useColumnPrefs("ui_case", UI_CASE_COL_CHOICES.map((c) => c.key));
+  // D273：批量选择（正常视图=批量回收，回收站=批量恢复）。换视图/翻页清空——批量钮只对
+  // 当前可见行有意义，留着的名单按下去操作的是屏幕上看不见的行。
+  const [selected, setSelected] = useState<string[]>([]);
+  useEffect(() => { setSelected([]); }, [inRecycled, current, pageSize]);
   // inRecycled 只有这一个写入口（runs.tsx 的 patch 同款）：三个 setState 各写各的时，
   // 漏接一个 setCurrent(1) 没人拦得住——停在第 3 页点回收站，落的是回收集里无关的切片，
   // 和换档位不回页是同一个 hazard（listPagination.tsx 注释③）。
@@ -185,6 +189,65 @@ function CasesList() {
     } catch { /* 回收期间名字被占 409（:307-309）：toast 说人话，不静默改名 */ }
   }
 
+  // —— D273 批量回收/恢复（判据在后端：全有或全无；批量不提供 force，同 api.tsx D251/D252）——
+  const [batchRemoving, setBatchRemoving] = useState(false);
+  async function doBatchRemove(): Promise<void> {
+    setBatchRemoving(true);
+    try {
+      await post("/ui-cases/batch-delete", { project_id: pid, case_ids: selected });
+      message.success("已放入回收站（" + selected.length + " 条用例）");
+      setSelected([]);
+      await load();
+    } catch (e) {
+      const blk = (e instanceof ApiErr
+        ? (e.details as { blocked?: { name: string; count: number }[] } | null)
+        : null)?.blocked;
+      if (blk && blk.length > 0) {
+        Modal.error({
+          centered: true,
+          title: "整批未回收：有用例被场景引用",
+          content: (
+            <div>
+              <p>{blk.map((b) => b.name + "（" + b.count + " 个场景）").join("、")}</p>
+              <p>整批一行未动。请先在场景里解除引用；确认要连带断掉场景步骤时，请逐个回收。</p>
+            </div>
+          ),
+        });
+      }
+      // 其余错误 client 已 toast
+    } finally { setBatchRemoving(false); }
+  }
+  function batchRemove(): void {
+    Modal.confirm({
+      centered: true,
+      title: "把选中的 " + selected.length + " 条用例放入回收站？",
+      content: "全有或全无：只要有一条被未回收场景引用，整批都不会删。软删，可随时恢复。",
+      okText: "放入回收站", okButtonProps: { danger: true },
+      onOk: doBatchRemove,
+    });
+  }
+
+  const [batchRestoring, setBatchRestoring] = useState(false);
+  async function doBatchRestore(): Promise<void> {
+    setBatchRestoring(true);
+    try {
+      await post("/ui-cases/batch-restore", { project_id: pid, case_ids: selected });
+      message.success("已恢复（" + selected.length + " 条用例）");
+      setSelected([]);
+      await load();
+    } catch { /* client 已 toast（名被占 409 等）；选择保留让用户改名单 */ }
+    finally { setBatchRestoring(false); }
+  }
+  function batchRestore(): void {
+    Modal.confirm({
+      centered: true,
+      title: "恢复选中的 " + selected.length + " 条用例？",
+      content: "全有或全无：只要有一条不在回收站或名字已被占用，整批都不会恢复。",
+      okText: "恢复",
+      onOk: doBatchRestore,
+    });
+  }
+
   // 彻底删除：逐字输名（confirm_name != c.name → 409 name_mismatch，:338；前端 disabled 只是少跑一次腿）
   const [purge, setPurge] = useState<Row | null>(null);
   const [purgeName, setPurgeName] = useState("");
@@ -236,6 +299,24 @@ function CasesList() {
           回收站里的用例可恢复；彻底删除要逐字输名
         </Typography.Text>
       )}
+      {/* D273 批量条（api.tsx 的 D251/D252 同口径）：选中才出现；正常视图 [批量回收]，
+          回收站 [批量恢复]——彻底删除仍要求逐字确认名称，不做批量。 */}
+      {canDelete && !inRecycled && selected.length > 0 && (
+        <Space style={{ marginBottom: 8 }} data-testid="ui-case-batch-bar">
+          <Typography.Text>已选 {selected.length} 项</Typography.Text>
+          <Button size="small" danger data-testid="ui-case-batch-delete"
+            loading={batchRemoving} onClick={batchRemove}>批量回收</Button>
+          <Button size="small" data-testid="ui-case-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+        </Space>
+      )}
+      {canUpdate && inRecycled && selected.length > 0 && (
+        <Space style={{ marginBottom: 8 }} data-testid="ui-case-batch-bar">
+          <Typography.Text>已选 {selected.length} 项</Typography.Text>
+          <Button size="small" type="primary" icon={<ReloadOutlined />} data-testid="ui-case-batch-restore"
+            loading={batchRestoring} onClick={batchRestore}>批量恢复</Button>
+          <Button size="small" data-testid="ui-case-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+        </Space>
+      )}
       {/* 刻意不给 ×：脚注（:251）与空态都读 loadError，关掉这条会把「用例没取到」
           擦成「还没有 UI 用例」——一条能消证的错误提示，比没有提示更会骗人。 */}
       {loadError && (
@@ -245,6 +326,11 @@ function CasesList() {
       </div>
       <AdminTable<Row> rowKey="id" loading={loading} dataSource={rows}
         pagination={false}
+        rowSelection={(!inRecycled && canDelete) || (inRecycled && canUpdate) ? {
+          selectedRowKeys: selected,
+          onChange: (keys) => setSelected(keys.map(String)),
+          preserveSelectedRowKeys: false,
+        } : undefined}
         locale={{ emptyText: loadError ? (
           // 失败不许画成空：kind="error" + 真重试把手，原文案逐字保留
           <StateView kind="error" title="用例列表没取到，以上方的加载失败提示为准"

@@ -68,10 +68,10 @@ function renderShell() {
   );
 }
 
-/** 头像菜单是 hover 触发：mouseOver 后等 150ms 的 mouseEnterDelay 弹层才挂出来。 */
+/** 头像菜单是 click 触发：点一下才挂弹层（与其它「更多/新建」菜单一致）。 */
 async function openUserMenu() {
   const trigger = screen.getAllByTestId("user-menu").at(-1)!;
-  fireEvent.mouseOver(trigger);
+  fireEvent.click(trigger);
   return screen.findByTestId("menu-change-password", {}, { timeout: 2000 });
 }
 
@@ -106,7 +106,7 @@ describe("D105 入口门禁", () => {
     useAuth.setState({ user: null, project: null, ready: true });
     renderShell();
     const trigger = screen.getAllByTestId("user-menu").at(-1)!;
-    fireEvent.mouseOver(trigger);
+    fireEvent.click(trigger);
     // 退出登录项照常渲染（证明弹层真打开了，不是没弹所以查不到）
     await screen.findByTestId("logout", {}, { timeout: 2000 });
     expect(screen.queryByTestId("menu-change-password")).toBeNull();

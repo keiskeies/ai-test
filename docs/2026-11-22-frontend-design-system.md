@@ -160,6 +160,34 @@ color/background/border 算对比度，28 组全过）——阈值即 §3.1 的�
      + `.ant-tooltip/.ant-popover/.ant-dropdown/.ant-select-dropdown { max-width: calc(100vw - 16px) }`。
 - **页头吸顶重影**：`.tp-page-head` 原来的底部渐隐会让正文透出来，改实色 `--tp-bg-layout`。
 
+## 6.6 全屏记录编辑器版式（接口 / 功能用例 / 缺陷，2026-11-24）
+
+截图诊断：旧版抽屉是 `Row/Col` 按内容高排，内容只占上半屏，右栏 1500 宽里只有一张
+两列空表，下方三块死白；左栏标签与输入框同为 secondary 色，字段平铺无分组。
+
+收敛后的骨架（`styles.css` 的 `.tp-record-editor*`，D287 首用于接口、D289 起三处共用；
+字段壳统一用 `ui/EditorField.tsx`）：
+
+1. **两栏满高**：档案栏 `flex: 0 0 360px` 独立滚动；工作区 `flex: 1 1 auto; min-height: 0`，
+   主面板 `flex: 1` 吃满剩余高度。接口是「左档案 / 右请求」，功能用例与缺陷是「左内容 /
+   右属性」，后者只加 `.tp-record-editor--side-right`（`order: 2` + 改左边框），不复制一套样式。
+2. **满高链要接到 Tabs**：`RequestEditor` 根是普通 div，必须补
+   `.tp-record-editor__fill > div { flex:1; min-height:0; display:flex; flex-direction:column }`
+   再接 `.tp-fill-body`；只给 Tabs 加 `height:100%` 而父级没有确定高度，Body 页签仍会塌成内容高。
+3. **左栏字段三层**：标签 12/500 用 `--tp-text-2`（不再与输入框同为 secondary）、必填点红、
+   提示 `--tp-text-3`；可见性开关是带说明的独立行，不再和输入框混排。
+4. **空态说下一步**：参数表空态写「还没有参数 + 点下方添加一行」，添加行收进表脚；
+   Body=none 给虚线空态而不是空白；调试结果空态收成一行（旧版居中大 Empty 占白板）。
+5. **URL 行是一条工具栏**：method / URL / timeout 同排，fill 模式下 URL flex 基准 200
+   （1024 宽时超时输入框的 `ms` 附加宽约 150，基准 260 会把 timeout 挤到第二行）。
+6. **参数表五列**：参数名 / 参数值 / 必填 / 描述 / 删。必填与描述写四元
+   `["名","值","1|0","描述"]`；没填过元信息的行仍写两元，旧数据/导入/用例覆盖层形状不变。
+   左栏宽度 `clamp(340px, 22vw, 400px)`：1024 不挤工作区，宽屏给档案更多呼吸。
+7. **内容型表单（D289）**：功能用例左栏用 `.tp-case-form` 纵向滚动放名称/前置条件/步骤表/
+   备注，步骤表 `.tp-step-table` 行内输入顶对齐、两列全空的行不提交；缺陷内容用
+   `.tp-field--grow` + `.tp-defect-content` 吃掉左栏剩余高度（等宽字体、可纵向拉伸）。
+   右侧属性栏的必填/提示仍走 `EditorField`，不另起一套标签样式。
+
 ## 七、已知残余
 
 1. 手抄 Token 棘轮基线 34：画布节点与调试面板深色代码块的少量字面量，归 D48-d 待裁色包。

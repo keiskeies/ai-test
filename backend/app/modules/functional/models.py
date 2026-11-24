@@ -22,6 +22,11 @@ PRIORITIES: tuple[str, ...] = ("P0", "P1", "P2", "P3")
 STATUS_NORMAL = "normal"
 STATUS_RECYCLED = "recycled"
 
+# D289：MS v2 功能用例表单内置的「用例状态」三态（Prepare/Underway/Completed）。
+# 存码、展示中文由前端词表负责；必填，新建默认 prepare（与实机表单默认值一致）。
+CASE_STATUSES: tuple[str, ...] = ("prepare", "underway", "completed")
+CASE_STATUS_DEFAULT: str = CASE_STATUSES[0]
+
 
 class FunctionalModule(ProjectScopedMixin, TimestampMixin, Base):
     """功能用例专用模块树（第 5 份，与 api/scenario/ui/adb 四棵同形但不合并）。"""
@@ -39,7 +44,15 @@ class FunctionalModule(ProjectScopedMixin, TimestampMixin, Base):
 
 
 class FunctionalCase(ProjectScopedMixin, TimestampMixin, Base):
-    """用例本体。`template_id` NOT NULL（与 MS 同形；D192 模板地基）。"""
+    """用例本体。`template_id` NOT NULL（与 MS 同形；D192 模板地基）。
+
+    `owner_id`（D281）= 责任人：可空（新建时还没定人是真实状态，不伪造默认指派），
+    必须是本项目成员（服务层校验），只在列表/详情展示与高级搜索筛选，不参与可见性。
+    D289 **撤销** D267「用例状态是模板自定义字段、不建列」的口径：实机 MS v2 的功能
+    用例表单把「用例状态」做成内置必填下拉（而不是模板字段），本仓要复刻表单就必须
+    有真列可写。它与 `status`（normal/recycled 视图位）是两个轴，互不覆盖。
+    同时补前置条件 / 步骤 / 备注三列——都是表单里有写入口的内容字段（D289）。
+    """
 
     __tablename__ = "functional_case"
     __table_args__ = (
@@ -53,7 +66,19 @@ class FunctionalCase(ProjectScopedMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     priority: Mapped[str] = mapped_column(String(4), nullable=False, default="P2")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # D289：MS v2 用例表单的前置条件 / 分步步骤 / 备注 / 用例状态。
+    # `steps` 存 JSON 文本（[{"desc": "...", "expected": "..."}]），只由 functional 服务读写；
+    # 空 = 没有分步，不画假空行。`case_status` 的词表见上方 CASE_STATUSES。
+    precondition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    steps: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+    case_status: Mapped[str] = mapped_column(String(24), nullable=False, default=CASE_STATUS_DEFAULT)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=STATUS_NORMAL, index=True)
+    # D281：责任人（项目成员）。空 = 还没定人；写入方 = create/update/批量复制随抄，
+    # 读方 = 列表/详情/统计 owner 轴。
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # D283：标签（逗号串，`shared/tags.py` 读写；空 = 无标签）。精确筛选走顶层 tag 参数。
+    tags: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 

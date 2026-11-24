@@ -16,12 +16,13 @@
 // 已按单场景反查真列表）。1F T6 起「让 Pilot 生成」
 // 是真入口（跳 /bench 并预选当前项目），不再是说明占位——诚实原则不变：不做点了没动静的假按钮。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Card, Col, Dropdown, Empty, Input, Modal, Row, Select, Space, Table, Tag,
+  Alert, Button, Card, Col, Empty, Input, Menu, Modal, Row, Select, Space, Table, Tag,
   Tooltip, Typography, message,
 } from "antd";
-import { DeleteOutlined, DownOutlined, ExportOutlined, PlusOutlined, ReloadOutlined, RobotOutlined, UndoOutlined } from "../ui/icons";
+import { DeleteOutlined, DownOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined, ReloadOutlined, RobotOutlined, UndoOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
 import { get, ApiErr } from "../api/client";
@@ -32,7 +33,7 @@ import ModuleTree from "../api/ModuleTree";
 import type { ModNode } from "../api/ModuleTree";
 import { downloadBlob } from "../api/ImportWizard";
 import { flatten, ownModuleIds } from "../shared/moduleTree";
-import { sceneApi, type ScenarioListQuery, type ScenarioListRow } from "../api/scene";
+import { sceneApi, type ScenarioImportEntry, type ScenarioListQuery, type ScenarioListRow } from "../api/scene";
 import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
 import type { Option } from "../shared/listToolbar/ListToolbar";
 import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
@@ -66,8 +67,9 @@ const RUN_DOT: Record<string, { color: string; label: string }> = {
 // 「删除人/删除时间」是视图态列、操作列带恢复/彻底删除入口——都不进面板。
 const SCENARIO_COL_CHOICES: ColumnChoice[] = [
   { key: "name", label: "名称" },
-  { key: "mod", label: "模块" },
   { key: "prio", label: "优先级" },
+  { key: "tags", label: "标签" },
+  { key: "mod", label: "模块" },
   { key: "run", label: "最近结果" },
   { key: "steps", label: "步骤数" },
   { key: "cron", label: "定时" },
@@ -126,6 +128,10 @@ function ScenesWorkbench() {
   // 都汇进 onSearch——allowClear 的清空也带 source:'clear' 触发它）。
   const [qText, setQText] = useState("");
   const [kw, setKw] = useState("");
+  // D284：标签筛选（精确）——与关键词同法：tagText 是输入框现值，tagKw 是已提交值
+  // （回车/放大镜/清空才进 load 依赖），空/全空白 = 参数不上线。
+  const [tagText, setTagText] = useState("");
+  const [tagKw, setTagKw] = useState("");
   // D214：高级搜索条件（D47-a 三件套）+ 列偏好（列设置的落盘在 useColumnPrefs）。
   const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
   const [colPref, setColPref] = useColumnPrefs("scenario", SCENARIO_COL_CHOICES.map((c) => c.key));
@@ -140,10 +146,11 @@ function ScenesWorkbench() {
   // （runs.tsx:84 / listPagination.tsx 注释③同款 hazard）；各 setState 漏接一个 reset 没人拦得住。
   // D214：高级搜索与列偏好也走同一个写入口（advFilter 是第四类筛选）。
   const patchFilters = useCallback((p: {
-    moduleId?: string | null; kw?: string; inRecycled?: boolean; advFilter?: FilterDoc;
+    moduleId?: string | null; kw?: string; tag?: string; inRecycled?: boolean; advFilter?: FilterDoc;
   }): void => {
     if ("moduleId" in p) setModuleId(p.moduleId!);
     if ("kw" in p) setKw(p.kw!);
+    if ("tag" in p) setTagKw(p.tag!);
     if ("inRecycled" in p) setInRecycled(p.inRecycled!);
     if ("advFilter" in p) setAdvFilter(p.advFilter!);
     setCurrent(1);
@@ -180,6 +187,8 @@ function ScenesWorkbench() {
       const q: ScenarioListQuery = { project_id: pid, size: pageSize, current };
       if (inRecycled) q.recycled = true;
       if (kw.trim()) q.keyword = kw.trim(); // 空/纯空白 = 不过滤，参数整个不上线
+      // D284：标签精确筛选（后端 FIND_IN_SET；不是包含匹配）
+      if (tagKw.trim()) q.tag = tagKw.trim();
       // D214：空条件不上线（与 keyword 同口径）；非空才拼 filter JSON 串。
       if (!isFilterEmpty(advFilter)) q.filter = JSON.stringify(advFilter);
       if (moduleId) {
@@ -218,7 +227,7 @@ function ScenesWorkbench() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "场景列表加载失败");
     } finally { setLoading(false); }
-  }, [pid, inRecycled, kw, moduleId, current, pageSize, advFilter]);
+  }, [pid, inRecycled, kw, tagKw, moduleId, current, pageSize, advFilter]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     setMembers(MEMBERS_LOADING);
@@ -257,8 +266,11 @@ function ScenesWorkbench() {
   const [blank, setBlank] = useState(false);
   const [blankName, setBlankName] = useState("");
   const [blankPrio, setBlankPrio] = useState("P2");
+  // D284：新建时就能打标签（列表/筛选才有真数据可看）
+  const [blankTags, setBlankTags] = useState<string[]>([]);
   const [gen, setGen] = useState(false);
   const [genName, setGenName] = useState("");
+  const [genTags, setGenTags] = useState<string[]>([]);
   const [cases, setCases] = useState<CaseRow[]>([]);
   // 取回的用例总数（含被 status 过滤掉的）：光看 cases.length 分不清「一条没取到」与
   // 「取到 N 条全被回收站滤光」——后者项目里明明有用例，说「还没有」就是把存在演成 absence。
@@ -278,17 +290,18 @@ function ScenesWorkbench() {
     try {
       await sceneApi.create({
         project_id: pid, name: v, priority: blankPrio, module_id: moduleId,
+        tags: blankTags,
         step_graph: { version: 1, nodes: [] },
         variables: {}, fail_fast: true, project_public: true,
       });
       message.success("场景已创建");
-      setBlank(false); setBlankName("");
+      setBlank(false); setBlankName(""); setBlankTags([]);
       await load();
     } catch { /* toast */ } finally { setBusy(false); }
   }
 
   async function openGen(): Promise<void> {
-    setGen(true); setGenName(""); setCaseSel([]);
+    setGen(true); setGenName(""); setGenTags([]); setCaseSel([]);
     // 复位必须排在 await 之前：重开弹窗若先渲染上一轮的 verdict，就是拿上一次请求
     // 的结论给这一次定罪（同文件环境弹窗的教训，:294 注释）。
     setCasesError(null); setCasesHasMore(false); setCasesFetched(0);
@@ -320,6 +333,7 @@ function ScenesWorkbench() {
       });
       await sceneApi.create({
         project_id: pid, name: v, priority: "P2", module_id: moduleId,
+        tags: genTags,
         step_graph: { version: 1, nodes },
         variables: {}, fail_fast: true, project_public: true,
       });
@@ -339,6 +353,23 @@ function ScenesWorkbench() {
   const [purging, setPurging] = useState(false);
   const [move, setMove] = useState(false);
   const [moveTarget, setMoveTarget] = useState<string | null>(null);
+  // D284：单行标签编辑弹窗（行上有 version，保存带乐观锁；冲突由 client 统一弹 409 原因）
+  const [tagRow, setTagRow] = useState<Row | null>(null);
+  const [tagDraft, setTagDraft] = useState<string[]>([]);
+  const [tagBusy, setTagBusy] = useState(false);
+
+  async function saveTags(): Promise<void> {
+    if (!tagRow) return;
+    setTagBusy(true);
+    try {
+      await sceneApi.update(tagRow.id, {
+        project_id: pid, version: tagRow.version, tags: tagDraft,
+      });
+      message.success("标签已保存");
+      setTagRow(null);
+      await load();
+    } catch { /* toast；409 conflict 由 client 弹出 */ } finally { setTagBusy(false); }
+  }
 
   function removeOne(r: Row) {
     Modal.confirm({
@@ -460,10 +491,52 @@ function ScenesWorkbench() {
       // 干净的成功也染成 warning。缺失 id 走的是整批 404（:108-111），到不了这里；
       // 真正的逐条问题 note（图校验问题 / 跨域引用指针，:116-122）才配 warning，
       // 固定快照说明按内容开头排除。
-      const issues = out.notes.filter((n) => !n.startsWith("本导出是只读备份快照"));
+      const issues = out.notes.filter((n) => !n.startsWith("本导出是场景快照"));
       if (issues.length > 0) message.warning("导出 " + out.exported + " 条，" + issues.length + " 条问题说明：\n" + issues.join("\n"));
-      else message.success("已导出 " + out.exported + " 条（只读备份快照，当前无导入可回灌）");
+      else message.success("已导出 " + out.exported + " 条（可在本页用「导入」回灌成新场景）");
     } catch { /* toast 在 client */ } finally { setExporting(false); }
+  }
+
+  // 导入（D274）：本平台导出的 JSON 快照 → /scenario-import。只认 `scenarios` 数组，
+  // 不猜 MS/JMeter 格式；422 的逐条校验明细要展开到 toast（后端整批不写，用户需要知道
+  // 是哪几条挡住的）。input 每次清空 value，同一份文件可以连续选两次。
+  const importRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+
+  async function onImportFile(e: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    try {
+      let parsed: unknown;
+      try { parsed = JSON.parse(await file.text()); } catch {
+        message.error("文件不是合法 JSON");
+        return;
+      }
+      const list = (parsed as { scenarios?: unknown }).scenarios;
+      if (!Array.isArray(list) || list.length === 0) {
+        message.error("这不是本平台导出的场景文件：缺少非空 scenarios 数组");
+        return;
+      }
+      const out = await sceneApi.import({
+        project_id: pid, scenarios: list as ScenarioImportEntry[] });
+      // 最后一条是固定口径（新 id 不是恢复备份），不算「问题说明」；
+      // 改名/清空模块/跨域引用这类用户需要知道的改写走 warning。
+      const extra = out.notes.filter((n) => !n.startsWith("导入总会生成新的场景 id"));
+      if (extra.length > 0) message.warning("已导入 " + out.imported + " 个场景，" + extra.length + " 条说明：\n" + extra.join("\n"));
+      else message.success("已导入 " + out.imported + " 个场景");
+      await load();
+    } catch (err) {
+      if (err instanceof ApiErr) {
+        const items = (err.details as { items?: { name: string; issues: unknown[] }[] } | null)?.items;
+        if (items?.length) {
+          message.error("导入取消（未写入任何一条）：\n"
+            + items.map((i) => "「" + i.name + "」" + i.issues.length + " 个校验问题").join("\n"));
+        }
+      }
+      // 其余错误 client 已统一 toast
+    } finally { setImporting(false); }
   }
 
   // —— 批量执行（D70 解禁：scenario_run 早已注册，此前只是按钮被锁着撒谎）——
@@ -527,20 +600,52 @@ function ScenesWorkbench() {
       setRunOpen(false);
     }
   }
-  const newMenu = {
-    items: [
-      { key: "blank", icon: <PlusOutlined />, label: "空白场景" },
-      { key: "gen", label: "从用例生成" },
-      { key: "pilot", icon: <RobotOutlined />, label: "让 Pilot 生成" },
-    ],
-    onClick: ({ key }: { key: string }) => {
-      if (key === "blank") { setBlank(true); setBlankName(""); setBlankPrio("P2"); }
-      if (key === "gen") void openGen();
-      // 1F T6 哨兵翻真：此前是 Modal.info 说明占位（「1F 开放」），1F 落地后改跳试验台。
-      // bench 挂载即把当前项目（auth store）预选进项目选择器，不需要额外传参。
-      if (key === "pilot") nav("/bench");
-    },
-  };
+  // —— D290：新建入口菜单自绘（不再用 antd Dropdown）——
+  // 原实现用 Dropdown，但在 DPR 1.25 的内置浏览器里 rc-trigger 的对齐会失效：
+  // 弹层停在预定位 -1000vw/-1000vh（实测 -9600px/-6320px），或按错误基准漂到
+  // 文档右下角；表现为点「新建场景」只闪一下滚动条、菜单始终不出现。
+  // 自绘版在点击时用按钮的实时 rect 定位 fixed 菜单，坐标来自点击事件本身，
+  // 不做二次测量、不依赖 rc-trigger 的挂载时序。样式见 styles.css 的 D290 段。
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [newMenuPos, setNewMenuPos] = useState({ top: 0, left: 0 });
+  const newBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  const toggleNewMenu = useCallback(() => {
+    const r = newBtnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setNewMenuPos({ top: r.bottom + 4, left: r.left });
+    setNewMenuOpen((v) => !v);
+  }, []);
+
+  // fixed 菜单不跟按钮走：页面滚动/窗口缩放/Esc 时收起，宁可不显示也不悬在错位置
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    const close = (): void => setNewMenuOpen(false);
+    const onKey = (e: KeyboardEvent): void => { if (e.key === "Escape") close(); };
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [newMenuOpen]);
+
+  const newMenuItems = [
+    { key: "blank", icon: <PlusOutlined />, label: "空白场景" },
+    { key: "gen", label: "从用例生成" },
+    { key: "pilot", icon: <RobotOutlined />, label: "让 Pilot 生成" },
+  ];
+
+  function onNewMenuPick(key: string): void {
+    setNewMenuOpen(false);
+    if (key === "blank") { setBlank(true); setBlankName(""); setBlankPrio("P2"); setBlankTags([]); }
+    if (key === "gen") void openGen();
+    // 1F T6 哨兵翻真：此前是 Modal.info 说明占位（「1F 开放」），1F 落地后改跳试验台。
+    // bench 挂载即把当前项目（auth store）预选进项目选择器，不需要额外传参。
+    if (key === "pilot") nav("/bench");
+  }
 
   return (
     /* 满高页 + 主从（master–detail）两栏：口径同 api.tsx，两栏各一张吃满列高的面板卡，
@@ -588,17 +693,46 @@ function ScenesWorkbench() {
               Input.Search 把三条路径都汇进 onSearch（clear 图标点击也以 source:'clear' 触发它）。
               第一个入参是 antd 给的当前值（clear 路径上是空串），不读闭包里的 qText——
               onChange 里**绝不**发请求。空/纯空白提交 = 不带 keyword 参数。 */}
-          <Input.Search data-testid="scene-search" allowClear style={{ width: 240 }}
+          <Input.Search data-testid="scene-search" allowClear style={{ width: 220 }}
             placeholder="搜索场景名" value={qText}
             onChange={(e) => setQText(e.target.value)}
             onSearch={(v) => patchFilters({ kw: v.trim() })} />
+          {/* D284：标签精确筛选（后端 FIND_IN_SET）——与关键词各打各的参数，并存不互相替代 */}
+          <Input.Search data-testid="scene-tags-filter" allowClear style={{ width: 170 }}
+            placeholder="标签（精确）" value={tagText}
+            onChange={(e) => setTagText(e.target.value)}
+            onSearch={(v) => patchFilters({ tag: v.trim() })} />
           <Button icon={<ReloadOutlined />} data-testid="scene-reload" onClick={() => void load()}>刷新</Button>
+          {/* D274 导入：MS 场景工具栏有「导入」，此前本仓整条链缺失（差距清单 P0-1）。
+              只认本平台导出 JSON，不猜外部格式；权限与后端 scenario:create 同源。 */}
           {canCreate && !inRecycled && (
-            <Dropdown menu={newMenu} data-testid="scene-new-menu">
-              <Button type="primary" data-testid="scene-new">
+            <>
+              <input ref={importRef} type="file" accept=".json,application/json"
+                data-testid="scene-import-input" style={{ display: "none" }}
+                onChange={(e) => void onImportFile(e)} />
+              <Button icon={<ImportOutlined />} data-testid="scene-import" loading={importing}
+                onClick={() => importRef.current?.click()}>导入</Button>
+            </>
+          )}
+          {canCreate && !inRecycled && (
+            <>
+              <Button ref={newBtnRef} type="primary" data-testid="scene-new"
+                aria-haspopup="menu" aria-expanded={newMenuOpen} onClick={toggleNewMenu}>
                 <Space>新建场景<DownOutlined /></Space>
               </Button>
-            </Dropdown>
+              {newMenuOpen && createPortal(
+                <>
+                  <div className="tp-new-menu-mask" data-testid="scene-new-menu-mask"
+                    onClick={() => setNewMenuOpen(false)} />
+                  <div className="tp-new-menu" data-testid="scene-new-menu"
+                    style={{ top: newMenuPos.top, left: newMenuPos.left }}>
+                    <Menu mode="vertical" items={newMenuItems} selectable={false}
+                      onClick={({ key }) => onNewMenuPick(key)} />
+                  </div>
+                </>,
+                document.body,
+              )}
+            </>
           )}
           </Space>
           )}
@@ -740,6 +874,23 @@ function ScenesWorkbench() {
                 : <Typography.Text type="secondary">—</Typography.Text>) },
             { title: "优先级", dataIndex: "priority", key: "prio", width: 80, render: (v: string) => (
               <Tag data-testid={"scene-prio-" + v} color={PRIO_COLOR[v] ?? "default"}>{v}</Tag>) },
+            // D284：标签列最多画两枚 + 「+N」（Tooltip 给全量）；空画「—」不画空 Tag。
+            { title: "标签", key: "tags", width: 150, render: (_, r) => {
+              const ts = r.tags ?? [];
+              if (!ts.length) return (
+                <Typography.Text type="secondary" data-testid={"scene-tags-" + r.id}>—</Typography.Text>
+              );
+              return (
+                <Space size={4} data-testid={"scene-tags-" + r.id} wrap={false}>
+                  {ts.slice(0, 2).map((t) => <Tag key={t}>{t}</Tag>)}
+                  {ts.length > 2 && (
+                    <Tooltip title={ts.slice(2).join("、")}>
+                      <Tag>+{ts.length - 2}</Tag>
+                    </Tooltip>
+                  )}
+                </Space>
+              );
+            } },
             { title: (
               // 这列读的是场景行上的冗余列，它只在终态回写（orchestration.py:268 的 TERMINAL 门），
               // 调试也不回写（T11 裁定①）——正在跑的那次此刻不反映在这里。表头只写「最近结果」
@@ -784,6 +935,13 @@ function ScenesWorkbench() {
                     {/* 画布路由 #/scene/:id 随 T19 落地：入口从此处直达编辑器 */}
                     <Button size="small" type="link" data-testid="scene-open-canvas"
                       onClick={() => nav("/scene/" + r.id)}>打开画布</Button>
+                    {canUpdate && (
+                      <Tooltip title="编辑标签">
+                        <Button size="small" type="text" icon={<EditOutlined />}
+                          data-testid="scene-tags-edit" aria-label={"编辑标签-" + r.name}
+                          onClick={() => { setTagRow(r); setTagDraft(r.tags ?? []); }} />
+                      </Tooltip>
+                    )}
                     {canDelete && (
                       <Tooltip title="放入回收站">
                         <Button size="small" danger type="text" icon={<DeleteOutlined />}
@@ -834,6 +992,9 @@ function ScenesWorkbench() {
           <Select data-testid="scene-blank-prio" style={{ width: "100%" }} value={blankPrio}
             options={["P0", "P1", "P2", "P3"].map((p) => ({ value: p, label: p }))}
             onChange={setBlankPrio} />
+          <Select mode="tags" data-testid="scene-blank-tags" style={{ width: "100%" }}
+            value={blankTags} placeholder="标签（可选，回车或逗号分隔）"
+            tokenSeparators={[",", "，"]} onChange={(v: string[]) => setBlankTags(v)} />
         </Space>
       </Modal>
 
@@ -845,6 +1006,9 @@ function ScenesWorkbench() {
         <Space direction="vertical" style={{ width: "100%" }}>
           <Input data-testid="scene-gen-name" maxLength={200} value={genName} autoFocus
             placeholder="场景名" onChange={(e) => setGenName(e.target.value)} />
+          <Select mode="tags" data-testid="scene-gen-tags" style={{ width: "100%" }}
+            value={genTags} placeholder="标签（可选，回车或逗号分隔）"
+            tokenSeparators={[",", "，"]} onChange={(v: string[]) => setGenTags(v)} />
           {/* 候选最多 200 条：不内滚会把弹窗顶出视口（centered 也救不了）。
               320 ≈ small 表 8 行（行高约 39px 含分隔线）：够扫一眼，又留出确定/取消按钮区。 */}
           <Table<CaseRow> size="small" rowKey="id" dataSource={cases} pagination={false}
@@ -993,6 +1157,22 @@ function ScenesWorkbench() {
         </Typography.Paragraph>
         <Input data-testid="scene-batch-purge-confirm" value={batchPurgeWord} autoFocus
           placeholder="彻底删除" onChange={(e) => setBatchPurgeWord(e.target.value)} />
+      </Modal>
+
+      {/* D284：单行标签编辑（写入口；保存带行上的 version 乐观锁） */}
+      <Modal centered open={tagRow !== null} width={480} destroyOnHidden
+        title={"编辑标签：" + (tagRow?.name ?? "")}
+        okText="保存" cancelText="取消"
+        okButtonProps={{ loading: tagBusy, "data-testid": "scene-tags-save" }}
+        onOk={() => void saveTags()} onCancel={() => setTagRow(null)}>
+        <Space direction="vertical" style={{ width: "100%" }} size={8}>
+          <Select mode="tags" data-testid="scene-tags-input" style={{ width: "100%" }}
+            value={tagDraft} placeholder="回车或逗号分隔；清空后保存 = 去掉全部标签"
+            tokenSeparators={[",", "，"]} onChange={(v: string[]) => setTagDraft(v)} autoFocus />
+          <Typography.Text className="tp-text-sm" type="secondary">
+            标签按精确值筛选（「bug1」不会被「bug」命中）；列表页工具栏的「标签（精确）」即此值。
+          </Typography.Text>
+        </Space>
       </Modal>
     </Row>
     </div>

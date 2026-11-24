@@ -1,11 +1,11 @@
-"""api_definition @service 四件套（金线全形：HTTP+工具+权限+审计）。"""
+﻿"""api_definition @service 四件套（金线全形：HTTP+工具+权限+审计）。"""
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.sql import column, table
 
 from app.core.errors import ApiError, Page, paginate, paginate_page
@@ -16,6 +16,7 @@ from app.modules.execution.core import run_api
 from app.modules.execution.services import save_run
 from app.shared.filter_registry import FieldDecl, ListViewFilter, register
 from app.shared.filters import _like
+from app.shared.tags import join_tags, split_tags
 from app.shared.vars import MissingVar, merge_vars
 from app.shared.visibility import assert_row_visible, visible_clause
 
@@ -31,6 +32,9 @@ API_LIST_FILTER = ListViewFilter(
     fields={
         "name": FieldDecl(ApiDefinition.name, "text", "接口名称"),
         "path": FieldDecl(ApiDefinition.path, "text", "路径"),
+        # D282：说明（包含匹配）。标签不进条件组：逗号串上 LIKE 会复刻 D190 明令避免的
+        # 「bug1 命中 bug10」；精确标签筛选留给标签体系（P1-4）一起做。
+        "description": FieldDecl(ApiDefinition.description, "text", "描述"),
         # method/status 在库里 NOT NULL：FieldDecl 因此自动拿不到「为空/不为空」，
         # 非空列上摆「为空」是点了没反应的假筛选项。
         "method": FieldDecl(ApiDefinition.method, "enum", "请求方法", nullable=False),
@@ -42,6 +46,10 @@ API_LIST_FILTER = ListViewFilter(
     },
 )
 register(API_LIST_FILTER)
+
+
+# D282：标签以逗号串存储（与 defect 同一存法）；D283 起读写助手收在
+# `app/shared/tags.py`（去空白/去重保序/空 = None/超长 422），这里不再各写一份。
 
 # 契约 1：api_test 不 import iam → 人名解析走表名 join（adb_test/case_services 同形状）。
 # 前端换名字那条路（拉 /projects/{pid}/members）在权限上就是错的：该端点要 ensure_member，
@@ -76,7 +84,9 @@ def _out(e: ApiDefinition, produced: bool = False, owner_name: str | None = None
         id=e.id, project_id=e.project_id, module_id=e.module_id, name=e.name, method=e.method, path=e.path,
         request=e.request, status=e.status, version=e.version,
         owner_id=e.owner_id, owner_name=owner_name, project_public=e.project_public,
+        description=e.description, tags=split_tags(e.tags),
         updated_at=schemas.iso(e.updated_at),
+        created_at=schemas.iso(e.created_at),
         produced=(_produced(e) if produced else []),
     )
 
@@ -111,7 +121,8 @@ async def api_definition_create(payload: schemas.ApiDefCreateIn, ctx) -> schemas
     e = ApiDefinition(project_id=payload.project_id, module_id=payload.module_id, name=payload.name,
                       method=method, path=payload.path, request=req,
                       status="complete" if payload.request else "draft",
-                      owner_id=ctx.user_id, project_public=payload.project_public)
+                      owner_id=ctx.user_id, project_public=payload.project_public,
+                      description=payload.description, tags=join_tags(payload.tags))
     ctx.db.add(e)
     await ctx.db.commit()
     # 出参与列表/单查同形：owner_name 当场查一次（创建人就是 ctx.user_id，一条带 =d 的 SELECT）。
@@ -143,11 +154,11 @@ async def api_definition_list(payload: schemas.ApiDefListIn, ctx) -> ServiceResu
     # - module_ids：前端把「选中节点 + 全部子孙」（MS 语义：点模块看整棵子树，owner 裁定
     #   推翻 T23/R120 的直属旧口径）算好后发来。None = 不加这一路；[] = `IN (NULL)`，
     #   对任何行都不成立——**含 module_id 为 NULL 的未分类行**，空集就是空集。
-    # - keyword：name/path 两列的 OR 包含，`self_group()` 自己把 OR 关进括号（与
+    # - keyword：name/path/tags 三列的 OR 包含，`self_group()` 自己把 OR 关进括号（与
     #   filters.build_conditions 同一条纪律：单独 compile 的 or_ 不带括号，括号必须是
     #   我们能自己钉住的性质）。转义复用 filters._like + ESCAPE '\`：用户敲的 %/_ 是字面量。
-    #   **只匹配 name+path**：MS 还匹配 num/tags，本库的 api_definition 没有这两列
-    #   （列集见 models.py 的 ApiDefinition），不为此造列。
+    #   **只匹配这三列**：MS 还匹配 num，本库的 api_definition 没有编号列
+    #   （列集见 models.py 的 ApiDefinition），不为此造列。tags 自 D282 起是真列。
     clauses: list[Any] = [
         ApiDefinition.project_id == payload.project_id, visible_clause(ApiDefinition, ctx),
         ApiDefinition.status == "recycled" if payload.recycled else ApiDefinition.status != "recycled",
@@ -160,7 +171,12 @@ async def api_definition_list(payload: schemas.ApiDefListIn, ctx) -> ServiceResu
         clauses.append(or_(
             ApiDefinition.name.like(f"%{_like(kw)}%", escape="\\"),
             ApiDefinition.path.like(f"%{_like(kw)}%", escape="\\"),
+            ApiDefinition.tags.like(f"%{_like(kw)}%", escape="\\"),
         ).self_group())
+    # D286：标签精确筛选（FIND_IN_SET，不是 LIKE——「bug1」不被「bug」命中）；
+    # 全空白 = 不过滤。与 keyword 并行 AND：关键字是「找一找」，tag 是「就这一档」。
+    if payload.tag and payload.tag.strip():
+        clauses.append(func.find_in_set(payload.tag.strip(), ApiDefinition.tags) > 0)
     stmt = (
         select(ApiDefinition)
         .where(*clauses)
@@ -183,6 +199,103 @@ async def api_definition_list(payload: schemas.ApiDefListIn, ctx) -> ServiceResu
     names = await _user_names(ctx.db, {e.owner_id for e in page.items if e.owner_id})
     return Page(items=[_out(e, owner_name=names.get(e.owner_id or "")) for e in page.items],
                 next_cursor=page.next_cursor, total=page.total)
+
+
+# D276：接口列表的用例规模批量投影。run_record 用表名反射（不 import execution 的模型，
+# 跨域零横向 import 的既有纪律；testplan 的 _link_results 同款）。
+_RUN_RECORD = table("run_record", column("project_id"), column("subject_type"),
+                    column("subject_id"), column("status"))
+_TERMINAL = ("passed", "failed", "error")
+_FAILING = ("failed", "error")
+_INFLIGHT = ("queued", "running")
+
+
+@service(
+    perm="api:def:read",
+    effect="read",
+    name="api_def_case_summary_batch",
+    description="接口列表的用例规模批量投影（当前页一次：用例数/已执行/通过/失败/通过率/聚合结果；"
+    "只回仍存在且可见的接口，total 供对账）",
+    http={"method": "POST", "path": "/api-def-case-summary-batch",
+          "tags": ["api_test"], "status": 200},
+)
+async def api_def_case_summary_batch(
+    payload: schemas.ApiDefCaseSummaryIn, ctx,
+) -> schemas.ApiDefCaseSummaryBatchOut:
+    """批量算「每个接口下有多少用例、跑到哪了」。
+
+    判据（与计划状态同一条保守口径）：
+    - 一个用例只要出现过 failed/error 就算失败（不看最后一次，历史失败不被后一次通过抹掉）；
+    - 有任一执行中且无失败 → running；没有终态也没有执行中 → none；
+    - 全部用例执行过且全过 → passed；部分执行过且全过 → partial（比把部分当全部诚实）。
+    `case_count` 只数**非回收**用例（回收站里的用例不算这个接口的可执行规模）。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("api:def:read")
+    assert ctx.db is not None
+    ids = list(dict.fromkeys(payload.definition_ids))
+    def_ids = set((await ctx.db.execute(select(ApiDefinition.id).where(
+        ApiDefinition.project_id == payload.project_id,
+        ApiDefinition.id.in_(ids),
+        visible_clause(ApiDefinition, ctx),
+    ))).scalars().all())
+    cases = (await ctx.db.execute(select(ApiCase.id, ApiCase.definition_id).where(
+        ApiCase.project_id == payload.project_id,
+        ApiCase.definition_id.in_(sorted(def_ids)),
+        ApiCase.status != "recycled",
+    ))).all() if def_ids else []
+    by_def: dict[str, list[str]] = {}
+    for case_id, def_id in cases:
+        by_def.setdefault(def_id, []).append(case_id)
+    # 每个用例的「出现过哪些终态/执行中」——distinct 把历史多次运行压成 ≤5 行/用例。
+    case_ids = [case_id for case_id, _def_id in cases]
+    seen: dict[str, set[str]] = {}
+    for i in range(0, len(case_ids), 300):  # SQLite 999 参数上限（同 testplan _link_results）
+        chunk = case_ids[i:i + 300]
+        for sid, st in (await ctx.db.execute(
+            select(_RUN_RECORD.c.subject_id, _RUN_RECORD.c.status)
+            .where(_RUN_RECORD.c.project_id == payload.project_id,
+                   _RUN_RECORD.c.subject_type == "api_case",
+                   _RUN_RECORD.c.subject_id.in_(chunk),
+                   _RUN_RECORD.c.status.in_(_TERMINAL + _INFLIGHT))
+            .distinct()
+        )).all():
+            seen.setdefault(str(sid), set()).add(str(st))
+    items: list[schemas.ApiDefCaseSummaryOut] = []
+    for def_id in ids:
+        if def_id not in def_ids:
+            continue  # 被删/不可见：不回摘要，前端画「—」
+        cids = by_def.get(def_id, [])
+        passed = failed = running = executed = 0
+        for cid in cids:
+            sts = seen.get(cid, set())
+            if sts & set(_FAILING):
+                failed += 1
+            elif sts & set(_INFLIGHT):
+                running += 1
+            if sts & set(_TERMINAL):
+                executed += 1
+                if not (sts & set(_FAILING)):
+                    passed += 1
+        n = len(cids)
+        if n == 0:
+            result = "none"
+        elif failed:
+            result = "failed"
+        elif running:
+            result = "running"
+        elif passed == n:
+            result = "passed"
+        elif passed:
+            result = "partial"
+        else:
+            result = "none"
+        items.append(schemas.ApiDefCaseSummaryOut(
+            definition_id=def_id, case_count=n, executed=executed, passed=passed,
+            failed=failed, running=running,
+            case_pass_rate=(passed / n if n else 0.0), result=result,
+        ))
+    return schemas.ApiDefCaseSummaryBatchOut(items=items, total=len(items))
 
 
 @service(
@@ -236,6 +349,11 @@ async def api_definition_update(payload: schemas.ApiDefUpdateIn, ctx) -> schemas
         e.module_id = payload.module_id
     if payload.project_public is not None:
         e.project_public = payload.project_public
+    # D282：说明三态 + 标签 None=不改 / []=清空
+    if payload.description_set:
+        e.description = payload.description
+    if payload.tags is not None:
+        e.tags = join_tags(payload.tags)
     e.version += 1
     await ctx.db.commit()
     names = await _user_names(ctx.db, {e.owner_id} if e.owner_id else set())
@@ -555,7 +673,8 @@ async def _execute_case(ctx, project_id: str, case_id: str, env_id: str | None,
             dataset_row = {str(k): str(v) for k, v in zip(ds.columns, ds.rows[0], strict=False)}
     env = await _resolve_via_registry(ctx, project_id, env_id)
     variables = merge_vars(dict((k, v) for k, v in env["vars"]), dataset_row, extra_vars or {})
-    own = [[str(k), str(v)] for k, v in (req.get("headers") or [])]
+    # headers 可能带两元/四元（D288 的必填/描述只在参数上用，这里统一只取前两位）
+    own = [[str(p[0]), str(p[1])] for p in (req.get("headers") or [])]
     own_keys = {k.lower() for k, _v in own}
     req["headers"] = [h for h in env["headers"] if h[0].lower() not in own_keys] + own
     if env["timeout_ms"] and not explicit_timeout:
@@ -633,7 +752,8 @@ async def api_debug(payload: schemas.ApiDebugIn, ctx) -> schemas.DebugOut:
     # 变量分层：全局⊕环境（env_resolve 已合并）→ 调试临时覆盖（§7.5 最高优先级）
     variables = merge_vars(dict((k, v) for k, v in env["vars"]), dataset_row, payload.variables)
     # 请求头：环境层为底，请求自身同名（大小写不敏感）覆盖
-    own = [[str(k), str(v)] for k, v in (req.get("headers") or [])]
+    # headers 可能带两元/四元（D288 的必填/描述只在参数上用，这里统一只取前两位）
+    own = [[str(p[0]), str(p[1])] for p in (req.get("headers") or [])]
     own_keys = {k.lower() for k, _v in own}
     req["headers"] = [h for h in env["headers"] if h[0].lower() not in own_keys] + own
     if env["timeout_ms"] and not explicit_timeout:

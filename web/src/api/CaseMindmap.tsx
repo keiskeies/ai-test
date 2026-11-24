@@ -242,7 +242,7 @@ export default function CaseMindmap({ projectId, canEdit, onOpenCase }: Props) {
         {n.kind === "module" && <Tag style={{ marginInlineEnd: 0 }}>{n.case_count}</Tag>}
         {canEdit && (
           <Dropdown
-            trigger={["hover"]}
+            trigger={["click"]}
             menu={{
               items: menuItems,
               onClick: ({ key: action, domEvent }) => {

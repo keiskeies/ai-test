@@ -24,7 +24,7 @@ vi.mock("../components/CodeEditor", () => ({
 
 import RequestEditor, { fromDraft, toDraft } from "./RequestEditor";
 import { cleanRequest } from "./req";
-import type { RequestObject } from "./req";
+import type { Pair, RequestObject } from "./req";
 import { useState } from "react";
 
 describe("toDraft / fromDraft auth 往返（§14）", () => {
@@ -341,5 +341,43 @@ describe("正则断言 + 启用开关 + 排序（D78）", () => {
     fireEvent.click(up1);
     const last = seen.at(-1) as { assertions: { type: string }[] };
     expect(last.assertions.map((a) => a.type)).toEqual(["body_contains", "status_code", "response_time_lt"]);
+  });
+});
+
+// ── D288：接口参数的「必填 / 描述」（四元键值对）──
+// 后端 Pair 允许 ["名","值","1|0","描述"]；执行层只读前两位。前端必须做到：
+// ① 四元载入后两列有值；② 改任何一位都不丢另外两位；③ 没填过元信息的行仍写两元，
+// 旧数据/OpenAPI 导入/用例覆盖层的形状不变。
+describe("D288 参数必填/描述", () => {
+  beforeEach(() => cleanup());
+
+  it("四元参数回显；取消必填后描述不丢", () => {
+    render(<Harness initial={{ method: "GET", url: "/x",
+      params: [["page", "1", "1", "页码，从 1 开始"]] as Pair[] }} />);
+    const box = screen.getByTestId("req-param-required-0") as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect((screen.getByTestId("req-param-desc-0") as HTMLInputElement).value)
+      .toBe("页码，从 1 开始");
+    fireEvent.click(box);
+    expect((screen.getByTestId("req-param-required-0") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId("req-param-desc-0") as HTMLInputElement).value)
+      .toBe("页码，从 1 开始");
+  });
+
+  it("新增行写四元；保存形状只对填过元信息的行升四元", () => {
+    let last: unknown;
+    render(<Harness initial={null} onChange={(v) => { last = v; }} />);
+    fireEvent.click(screen.getByTestId("req-param-add"));
+    expect((last as { params: string[][] }).params[0]).toEqual(["", "", "0", ""]);
+
+    // 填了必填/描述 → 四元；没填 → 两元（旧数据/导入不变）
+    expect(cleanRequest({ method: "GET", url: "/x",
+      params: [["page", "1", "1", "页码"]] as Pair[] }).params)
+      .toEqual([["page", "1", "1", "页码"]]);
+    expect(cleanRequest({ method: "GET", url: "/x",
+      params: [["q", "hi", "0", "关键字"]] as Pair[] }).params)
+      .toEqual([["q", "hi", "0", "关键字"]]);
+    expect(cleanRequest({ method: "GET", url: "/x",
+      params: [["size", "20"]] as Pair[] }).params).toEqual([["size", "20"]]);
   });
 });

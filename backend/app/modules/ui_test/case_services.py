@@ -407,6 +407,124 @@ async def ui_case_purge(payload: schemas.UiCasePurgeIn, ctx) -> BaseModel:
 
 
 @service(
+    perm="ui:case:delete", effect="destructive", name="ui_case_batch_delete",
+    description="批量把 UI 用例放入回收站（全有或全无：任一不存在/已回收 → 404 整批不动；"
+                "任一被未回收场景引用 → 409 整批不动，不提供批量 force）",
+    http={"method": "POST", "path": "/ui-cases/batch-delete", "tags": ["ui"]},
+    tool=False,
+    resident=False,
+)
+async def ui_case_batch_delete(payload: schemas.UiCaseBatchDeleteIn, ctx) -> BaseModel:
+    """D273：UI 用例批量回收（纪律同 api_case_batch_delete / D251）。
+
+    引用检查一次批量问完；任一被引用 → 409 + blocked 清单、零写入。
+    不提供批量 force：N 份引用清单叠一键，坏的是别人的场景步骤。
+    回收逐行落 updated_by（§11.4.18 回收站「删除人」列），与单删同法。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("ui:case:delete")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.case_ids))
+    if len(uniq) != len(payload.case_ids):
+        raise ApiError("validation_failed", "case_ids 不能重复", 422,
+                       {"case_ids": payload.case_ids})
+    rows = (await ctx.db.execute(select(UiCase).where(
+        UiCase.project_id == payload.project_id,
+        UiCase.id.in_(uniq),
+    ).order_by(UiCase.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    missing = [i for i in uniq if i not in found or found[i].status != "normal"]
+    if missing:
+        raise ApiError("not_found", "用例不存在", 404, {"case_ids": missing})
+    for r in rows:
+        assert_row_visible(r, ctx, what="UI 用例不存在")
+    refs = await _scenario_refs(ctx, payload.project_id, [r.id for r in rows])
+    blocked = [r for r in rows if (refs.get(r.id) or {}).get("count")]
+    if blocked:
+        details_list = []
+        hidden = False
+        for r in blocked:
+            ref = refs[r.id]
+            item: dict = {"case_id": r.id, "name": r.name,
+                          "count": ref["count"], "scenarios": ref["scenarios"]}
+            if ref["hidden"]:
+                item["hidden"] = True
+                hidden = True
+            details_list.append(item)
+        names = "、".join("「" + b["name"] + "」" for b in details_list[:5])
+        more = " 等 " + str(len(blocked)) + " 条用例" if len(blocked) > 5 else ""
+        details: dict = {"blocked": details_list}
+        if hidden:
+            details["reason"] = "missing_scenario_read"
+        raise ApiError(
+            "referenced_by_scenario",
+            "有 " + str(len(blocked)) + " 条用例被未回收场景引用：" + names + more
+            + "；整批一行未动。批量不提供 force——确认要连带断掉场景步骤请逐个回收",
+            409, details)
+    for r in rows:
+        r.status = STATUS_RECYCLED
+        r.updated_by = ctx.user_id
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
+    perm="ui:case:update", effect="write", name="ui_case_batch_restore",
+    description="批量从回收站恢复 UI 用例（全有或全无：任一不在回收站 → 404；"
+                "任一名被占用 → 409 整批不动，不静默改名）",
+    http={"method": "POST", "path": "/ui-cases/batch-restore", "tags": ["ui"]},
+    tool=False,
+    resident=False,
+)
+async def ui_case_batch_restore(payload: schemas.UiCaseBatchRestoreIn, ctx) -> BaseModel:
+    """与批量回收对称的出口（D273）。
+
+    重名检查逐条做（uq_ui_case_project_name 让「回收期间名字被占」成为真实风险，
+    单条 restore 的 409 口径不许在批量里退化成覆盖或改名）：任一被占 → 409 点名两条用例。
+    同批内两条回收用例撞同名也是冲突（数据库唯一约束不认「都是恢复中的」）。
+    """
+    await ensure_project_access(ctx, payload.project_id)
+    ctx.require("ui:case:update")
+    assert ctx.db is not None
+    uniq = list(dict.fromkeys(payload.case_ids))
+    if len(uniq) != len(payload.case_ids):
+        raise ApiError("validation_failed", "case_ids 不能重复", 422,
+                       {"case_ids": payload.case_ids})
+    rows = (await ctx.db.execute(select(UiCase).where(
+        UiCase.project_id == payload.project_id,
+        UiCase.id.in_(uniq),
+    ).order_by(UiCase.id))).scalars().all()
+    found = {r.id: r for r in rows}
+    bad = [i for i in uniq if i not in found or found[i].status != STATUS_RECYCLED]
+    if bad:
+        raise ApiError("not_found", "有用例不存在或不在回收站", 404, {"case_ids": bad})
+    for r in rows:
+        assert_row_visible(r, ctx, what="UI 用例不存在")
+    names = [r.name for r in rows]
+    if len(set(names)) != len(names):
+        dup = sorted({n for n in names if names.count(n) > 1})
+        raise ApiError("conflict", "勾选的用例里有重名，恢复后会撞唯一约束："
+                       + "、".join("「" + n + "」" for n in dup)
+                       + "；整批未恢复", 409, {"names": dup})
+    taken = (await ctx.db.execute(select(UiCase.name, UiCase.id).where(
+        UiCase.project_id == payload.project_id,
+        UiCase.name.in_(names),
+        UiCase.status == "normal",
+        UiCase.id.notin_(uniq),
+    ))).all()
+    if taken:
+        raise ApiError("conflict", "回收期间这些名字已被占用："
+                       + "、".join("「" + t[0] + "」" for t in taken)
+                       + "；先处理它们再恢复（整批未恢复）", 409,
+                       {"names": [t[0] for t in taken], "name_exists": True})
+    for r in rows:
+        r.status = "normal"
+        r.updated_by = ctx.user_id
+    await ctx.db.commit()
+    return schemas.OkOut(ok=True)
+
+
+@service(
     perm="ui:case:read", effect="read", name="ui_case_references",
     description="查引用这条 UI 用例的未回收场景（含命中步骤 key；供用例详情「场景引用」Tab）",
     http={"method": "GET", "path": "/ui-case-references", "tags": ["ui"]},

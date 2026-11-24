@@ -83,9 +83,7 @@ const visibleMenuItems = () => Array.from(document.querySelectorAll<HTMLElement>
 
 async function openMenu(label: string): Promise<void> {
   const btn = screen.getByLabelText("脑图菜单-" + label);
-  fireEvent.pointerOver(btn);
-  fireEvent.mouseOver(btn);
-  fireEvent.mouseEnter(btn);
+  fireEvent.click(btn); // trigger=["click"]：点一下才挂弹层
   await waitFor(() => expect(visibleMenuItems().length).toBeGreaterThan(0), { timeout: 4000 });
 }
 

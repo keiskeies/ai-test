@@ -1,9 +1,10 @@
 // 测试计划列表（D183 步 6a，§11.1 任务中心「测试计划」；后端 app/modules/testplan/ 为准）。
 //
 // 本页四条命门口径（写错就是假门/谎数，逐条对后端）：
-// ① 列表行 = PlanOut 九字段，**没有展示态字段**——库里没有 status 列，_plan_display 现算
-//    只从 GET /plans/{id}/status 出口给。列表页只画 archived（真实布尔列）；逐行拉 /status
-//    是 N+1 请求 + 给列表编一个它没给过的数，两头都不许。「计划跑到哪了」归 6b 详情页。
+// ① 列表行 = PlanOut 九字段；「这个计划跑到哪了」由 **D275 批量摘要**回答
+//    （POST /plan-status-batch 一次算齐当前页：状态/通过率/执行率/各类型用例数，
+//    判据与详情页 /plans/{id}/status 同源）。**不逐行拉 /status**（50 行 = 50 份明细，
+//    N+1 且给列表编一个端点没给过的数）；摘要取不到时画「—」+ 提示条，不画 0。
 // ② 归档是**终态**：后端对已归档再归档 409 already_archived，无反归档路径。归档钮只对
 //    未归档行渲染（对已归档行摆把手=点了必 409 的假门）；改名的 PATCH 也改不动归档
 //    （后端把 archived 声明成拒收哨兵位，传值 422）。
@@ -16,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Input, Modal, Space, Tag, Tree, Typography, message,
+  Alert, Button, Input, Modal, Progress, Select, Space, Tag, Tooltip, Tree, Typography, message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { DataNode } from "antd/es/tree";
@@ -26,12 +27,13 @@ import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
-import { ApiErr } from "../api/client";
+import { ApiErr, get } from "../api/client";
 import { planApi } from "../api/plan";
-import type { PlanModuleNode, PlanModuleTree, PlanRow } from "../api/plan";
+import type { PlanModuleNode, PlanModuleTree, PlanRow, PlanStatusSummary } from "../api/plan";
+import type { MemberRow } from "../api/api";
 import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
 import type { Option } from "../shared/listToolbar/ListToolbar";
-import { applyColumnPrefs, emptyFilter, isFilterEmpty } from "../shared/listFilters";
+import { applyColumnPrefs, emptyFilter, isFilterEmpty, timeFromLocalInput, timeToLocalInput } from "../shared/listFilters";
 import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 
 // D212：列设置面板要露的列（key 与下方 columns 的 key 逐字对上，对不上就是
@@ -40,17 +42,28 @@ import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
 const PLAN_COL_CHOICES: ColumnChoice[] = [
   { key: "name", label: "名称" },
   { key: "description", label: "描述" },
+  { key: "tags", label: "标签" },
+  { key: "status", label: "状态" },
+  { key: "progress", label: "进度" },
+  { key: "pass_rate", label: "通过率" },
+  { key: "cases", label: "用例数" },
+  { key: "stage", label: "测试阶段" },
+  { key: "owner", label: "责任人" },
+  { key: "planned_start", label: "计划开始" },
+  { key: "planned_end", label: "计划结束" },
+  { key: "actual_start", label: "实际开始" },
+  { key: "actual_end", label: "实际结束" },
   { key: "archived", label: "归档" },
   { key: "created_at", label: "创建时间" },
   { key: "updated_at", label: "更新时间" },
 ];
-import type { components } from "../api/schema";
 import { fmtTime } from "../shared/timefmt";
 import { ListPager } from "../shared/listPagination";
 import { PLAN_DISPLAY, vocabMeta } from "../shared/runVocab";
 import { tpv } from "../theme";
 
-type PlanOut = components["schemas"]["PlanOut"];
+/** D279：列表/弹窗的行类型 = 后端 PlanListRowOut（含新增六列与 owner_name）。 */
+type PlanOut = PlanRow;
 
 /**
  * 展示态徽标的查表（R112 口径）：词表外的值**渲染原文**，绝不回落成友好标签——
@@ -73,8 +86,15 @@ function EchoBlock({ text, testid }: { text: string; testid?: string }) {
 }
 
 // ── 新建/编辑弹窗 ─────────────────────────────────────────────────────────────
-// 字段 = 后端 PlanCreateIn / plan_update_body 的全部可写位（name/description）；
-// 归档不在这里也不许在这里：PATCH 改不了归档（文件头②），弹窗里放个归档开关就是假门。
+// 字段 = 后端 PlanCreateIn / plan_update_body 的全部可写位（name/description +
+// D279 的 stage/planned_*/actual_*/owner_id）；归档不在这里也不许在这里：PATCH 改不了
+// 归档（文件头②），弹窗里放个归档开关就是假门。
+
+/** 原生 datetime-local ↔ ISO。本仓没有 dayjs 直接依赖（ListToolbar 同一条裁定），
+ *  所以四个时刻用原生控件：value 是可控字符串，往返如实，不靠控件内部状态。 */
+function isoFromLocal(local: string): string | null {
+  return timeFromLocalInput(local) ?? null;
+}
 
 function PlanFormModal({ open, editing, projectId, moduleId, onClose, onSaved }: {
   open: boolean;
@@ -87,6 +107,17 @@ function PlanFormModal({ open, editing, projectId, moduleId, onClose, onSaved }:
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  // D279：阶段/计划与实际起止/责任人（datetime-local 字符串，空串 = 没填）
+  const [stage, setStage] = useState("");
+  const [plannedStart, setPlannedStart] = useState("");
+  const [plannedEnd, setPlannedEnd] = useState("");
+  const [actualStart, setActualStart] = useState("");
+  const [actualEnd, setActualEnd] = useState("");
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  // D285：标签
+  const [tags, setTags] = useState<string[]>([]);
+  const [members, setMembers] = useState<MemberRow[]>([]);
+  const [membersError, setMembersError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
 
@@ -95,20 +126,74 @@ function PlanFormModal({ open, editing, projectId, moduleId, onClose, onSaved }:
     if (!open) return;
     setName(editing?.name ?? "");
     setDescription(editing?.description ?? "");
+    setStage(editing?.stage ?? "");
+    setPlannedStart(timeToLocalInput(editing?.planned_start));
+    setPlannedEnd(timeToLocalInput(editing?.planned_end));
+    setActualStart(timeToLocalInput(editing?.actual_start));
+    setActualEnd(timeToLocalInput(editing?.actual_end));
+    setOwnerId(editing?.owner_id ?? null);
+    setTags(editing?.tags ?? []);
     setSaveErr(null);
   }, [open, editing]);
 
+  // D279：责任人候选 = 本项目成员（与详情页指派执行人同一来源）。取不到就给空列表 +
+  // 一句提示：不编人名，也不把「没取到」演成「项目里没人」。
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setMembersError(false);
+    get<{ items: MemberRow[] }>(
+      "/projects/" + encodeURIComponent(projectId) + "/members", { silent: true })
+      .then((r) => { if (alive) setMembers(r.items); })
+      .catch(() => { if (alive) { setMembers([]); setMembersError(true); } });
+    return () => { alive = false; };
+  }, [open, projectId]);
+
+  const memberOptions = useMemo(
+    () => members.map((m) => ({
+      value: m.user_id,
+      label: m.name || m.account || m.user_id,
+    })),
+    [members],
+  );
+
   async function submit(): Promise<void> {
     if (!name.trim()) { message.warning("计划名称必填"); return; }
+    // 先后校验前端先说一句（后端仍会 422，判据不搬家）：datetime-local 的
+    // "YYYY-MM-DDTHH:mm" 字符串可直接字典序比较，省一次白跑。
+    if (plannedStart && plannedEnd && plannedEnd < plannedStart) {
+      message.warning("计划结束不能早于计划开始"); return;
+    }
+    if (actualStart && actualEnd && actualEnd < actualStart) {
+      message.warning("实际结束不能早于实际开始"); return;
+    }
     setBusy(true);
     setSaveErr(null);
+    const schedule = {
+      stage: stage.trim() || null,
+      planned_start: isoFromLocal(plannedStart),
+      planned_end: isoFromLocal(plannedEnd),
+      actual_start: isoFromLocal(actualStart),
+      actual_end: isoFromLocal(actualEnd),
+      owner_id: ownerId,
+    };
     try {
       if (editing) {
-        await planApi.update(editing.id, { project_id: projectId, name: name.trim(), description });
+        // 六列全部带 `*_set` 哨兵：表单呈现的是「这套计划安排的全貌」，清空也必须发得出去
+        // （不带哨兵的 null 会被后端当成「这次不改」，清空就静默失败）。
+        await planApi.update(editing.id, {
+          project_id: projectId, name: name.trim(), description,
+          ...schedule,
+          stage_set: true, planned_start_set: true, planned_end_set: true,
+          actual_start_set: true, actual_end_set: true, owner_set: true,
+          // D285：整单提交标签（表单呈现的是全貌；[] 在这里 = 清空得出去）
+          tags,
+        });
       } else {
         // D211：module_id 只在新建时带（编辑路径不动模块归属——PlanUpdateIn 要 module_set
         // 哨兵才认，弹窗里没有搬模块这一栏，就不许悄悄发一个改不动的字段）。
         await planApi.create({ project_id: projectId, name: name.trim(), description,
+          ...schedule, tags,
           ...(moduleId ? { module_id: moduleId } : {}) });
       }
       message.success(editing ? "已保存" : "测试计划已创建");
@@ -121,7 +206,7 @@ function PlanFormModal({ open, editing, projectId, moduleId, onClose, onSaved }:
   }
 
   return (
-    <Modal open={open} onCancel={onClose} width={560} centered destroyOnHidden
+    <Modal open={open} onCancel={onClose} width={640} centered destroyOnHidden
       title={editing ? `编辑计划：${editing.name}` : "新建测试计划"}
       okText="保存" okButtonProps={{ loading: busy, "data-testid": "plan-save" }}
       cancelText="取消"
@@ -134,8 +219,50 @@ function PlanFormModal({ open, editing, projectId, moduleId, onClose, onSaved }:
         </div>
         <div>
           <Typography.Text strong>描述（可选）</Typography.Text>
-          <Input.TextArea data-testid="plan-field-description" rows={3} value={description}
+          <Input.TextArea data-testid="plan-field-description" rows={2} value={description}
             placeholder="这套计划覆盖什么" onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        <div>
+          <Typography.Text strong>标签（可选）</Typography.Text>
+          <Select mode="tags" data-testid="plan-field-tags" style={{ width: "100%" }}
+            value={tags} placeholder="回车或逗号分隔；清空后保存 = 去掉全部标签"
+            tokenSeparators={[",", "，"]} onChange={(v: string[]) => setTags(v)} />
+        </div>
+        {/* D279：阶段 + 责任人并排；四个时刻两列网格（窄屏自动折行由 Modal 宽度兜底）。 */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <Typography.Text strong>测试阶段</Typography.Text>
+            <Input data-testid="plan-field-stage" maxLength={32} value={stage}
+              placeholder="如「系统测试」" onChange={(e) => setStage(e.target.value)} />
+          </div>
+          <div>
+            <Typography.Text strong>责任人</Typography.Text>
+            <Select<string | null> data-testid="plan-field-owner" allowClear showSearch
+              optionFilterProp="label" style={{ width: "100%" }} value={ownerId}
+              placeholder={membersError ? "成员列表没取到，稍后再试" : "未指派"}
+              onChange={(v) => setOwnerId(v ?? null)}
+              options={memberOptions} />
+          </div>
+          <div>
+            <Typography.Text strong>计划开始</Typography.Text>
+            <Input type="datetime-local" data-testid="plan-field-planned-start"
+              value={plannedStart} onChange={(e) => setPlannedStart(e.target.value)} />
+          </div>
+          <div>
+            <Typography.Text strong>计划结束</Typography.Text>
+            <Input type="datetime-local" data-testid="plan-field-planned-end"
+              value={plannedEnd} onChange={(e) => setPlannedEnd(e.target.value)} />
+          </div>
+          <div>
+            <Typography.Text strong>实际开始</Typography.Text>
+            <Input type="datetime-local" data-testid="plan-field-actual-start"
+              value={actualStart} onChange={(e) => setActualStart(e.target.value)} />
+          </div>
+          <div>
+            <Typography.Text strong>实际结束</Typography.Text>
+            <Input type="datetime-local" data-testid="plan-field-actual-end"
+              value={actualEnd} onChange={(e) => setActualEnd(e.target.value)} />
+          </div>
         </div>
         {saveErr && (
           <Alert type="error" showIcon closable data-testid="plan-save-error" message="后端拒绝（原话回显）"
@@ -164,6 +291,10 @@ function PlansPanel() {
   // 唯一原因是 catch-all 会把人弹回工作台，那条前提已随 6b 路由消失（⑬ 同批翻）。
   const nav = useNavigate();
   const [rows, setRows] = useState<PlanRow[]>([]);
+  // D275：当前页的状态/规模摘要（plan_id → 摘要）。**不逐行拉 /status**（N+1），
+  // 一次 /plan-status-batch 拿齐；失败时清空并亮提示条，绝不把「没取到」画成 0。
+  const [summaries, setSummaries] = useState<Record<string, PlanStatusSummary>>({});
+  const [summaryError, setSummaryError] = useState(false);
   // 页码状态只有这一份 useState（不进 URL、不进 localStorage——一页两把真相的老账）。
   const [current, setCurrent] = useState(1);
   const [pageSize, setPageSize] = useState(50); // = 后端 PlanListIn 的 size 默认，起步不钳不漂
@@ -184,6 +315,10 @@ function PlansPanel() {
   const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
   // D231：只看我关注（视图轴，后端 followed_by_me；不是高级搜索字段）。
   const [followedOnly, setFollowedOnly] = useState(false);
+  // D285：标签精确筛选——tagText 是输入框现值，tagKw 是已提交值（回车/清空才进 load
+  // 依赖）；空/全空白 = 参数不上线。
+  const [tagText, setTagText] = useState("");
+  const [tagKw, setTagKw] = useState("");
   const [colPref, setColPref] = useColumnPrefs("plan", PLAN_COL_CHOICES.map((c) => c.key));
 
   const loadTree = useCallback(async (): Promise<void> => {
@@ -228,6 +363,8 @@ function PlansPanel() {
         ...(isFilterEmpty(advFilter) ? {} : { filter: JSON.stringify(advFilter) }),
         // D231：攒参也只在这个开关打开时出现（关掉 = 后端不筛，不是 followed_by_me=false）。
         ...(followedOnly ? { followed_by_me: true } : {}),
+        // D285：标签精确筛选（后端 FIND_IN_SET）；空/全空白 = 不过滤。
+        ...(tagKw.trim() ? { tag: tagKw.trim() } : {}),
       });
       setRows(page.items);
       // total 只从响应来，永不由 items.length 客户端现攒（页内行数不是总数）；
@@ -239,8 +376,25 @@ function PlansPanel() {
       setTotal(null);
       setLoadError(e instanceof ApiErr ? e.message : "测试计划列表加载失败");
     } finally { setLoading(false); }
-  }, [projectId, current, pageSize, filter, advFilter, followedOnly]);
+  }, [projectId, current, pageSize, filter, advFilter, followedOnly, tagKw]);
   useEffect(() => { if (mayRead) void load(); }, [mayRead, load]);
+
+  // D275：状态/进度/通过率/用例数一次批量取（依赖 rows 身份：列表任何刷新都会重算，
+  // 归档返回的新行也会让摘要跟着更新）。空页不发请求；失败只清摘要 + 亮提示条。
+  useEffect(() => {
+    if (!mayRead || rows.length === 0) { setSummaries({}); setSummaryError(false); return; }
+    let alive = true;
+    setSummaryError(false);
+    planApi.statusBatch(projectId, rows.map((r) => r.id)).then((out) => {
+      if (!alive) return;
+      setSummaries(Object.fromEntries(out.items.map((it) => [it.plan_id, it])));
+    }).catch(() => {
+      if (!alive) return;
+      setSummaries({});
+      setSummaryError(true);
+    });
+    return () => { alive = false; };
+  }, [mayRead, projectId, rows]);
 
   const upsert = (row: PlanOut): void => setRows((prev) => {
     const i = prev.findIndex((r) => r.id === row.id);
@@ -412,7 +566,11 @@ function PlansPanel() {
   }, [tree]);
 
   const columns: ColumnsType<PlanRow> = [
-    { title: "名称", dataIndex: "name", key: "name",
+    // 名称必须给显式宽：10 列固定宽之和（1670）已超过 1440 视口的可用宽，
+    // 无宽列会被 table-layout:fixed 压成 0（2026-11-24 真机：表头只剩「描述」，名称整列消失）。
+    // 表在卡内横向滚动（.tp-fill-body .ant-table-content 的 overflow:auto），不用 fixed/scroll.x——
+    // 那会插入一条隐藏的 measure-row（rc-table Table.js:501），把 tbody 的勾选框数从 2 变成 3。
+    { title: "名称", dataIndex: "name", key: "name", width: 220,
       render: (v: string, r) => (
         // 6b 已把 /plans/:id 接成真路由（app.tsx），点名字真去详情页——⑬ 当初钉住「暂不
         // 可点」的前提（catch-all 静默弹回工作台）随路由落地消失，入口与测试同批翻。
@@ -431,8 +589,110 @@ function PlansPanel() {
           )}
         </span>
       ) },
-    { title: "描述", dataIndex: "description", key: "description", ellipsis: true, width: 260,
+    { title: "描述", dataIndex: "description", key: "description", ellipsis: true, width: 220,
       render: (v: string | null) => v ?? "—" },
+    // D285：标签列最多画两枚 + 「+N」（Tooltip 给全量）；空画「—」，不画空 Tag。
+    { title: "标签", key: "tags", width: 150,
+      render: (_: unknown, r) => {
+        const ts = r.tags ?? [];
+        if (!ts.length) return <Typography.Text type="secondary" data-testid={"plans-tags-" + r.id}>—</Typography.Text>;
+        return (
+          <Space size={4} data-testid={"plans-tags-" + r.id} wrap={false}>
+            {ts.slice(0, 2).map((t) => <Tag key={t}>{t}</Tag>)}
+            {ts.length > 2 && (
+              <Tooltip title={ts.slice(2).join("、")}><Tag>+{ts.length - 2}</Tag></Tooltip>
+            )}
+          </Space>
+        );
+      } },
+    // D275：以下四列全部来自**一次批量现算**（/plan-status-batch），判据与详情页
+    // /plans/{id}/status 同源。取不到时画「—」+ 顶部提示条，不画 0（0 是真实结论，
+    // 「没取到」不是）——空计划的两个率同理画「—」而不是 0%（0/0 没有可信的百分比）。
+    { title: "状态", key: "status", width: 96,
+      render: (_: unknown, r) => {
+        const s = summaries[r.id];
+        if (!s) return <Tooltip title={summaryError ? "状态取数失败（见上方提示条）" : "状态加载中"}>
+          <Typography.Text type="secondary" data-testid={"plans-status-" + r.id}>—</Typography.Text></Tooltip>;
+        const m = planDisplayMeta(s.status);
+        return <Tag color={m.color} data-testid={"plans-status-" + r.id}>{m.label}</Tag>;
+      } },
+    { title: "进度", key: "progress", width: 132,
+      render: (_: unknown, r) => {
+        const s = summaries[r.id];
+        if (!s) return <Typography.Text type="secondary" data-testid={"plans-progress-" + r.id}>—</Typography.Text>;
+        if (s.total === 0) return <Tooltip title="空计划：没有可执行的关联用例">
+          <Typography.Text type="secondary" data-testid={"plans-progress-" + r.id}>—</Typography.Text></Tooltip>;
+        return (
+          <Tooltip title={`已执行 ${s.executed} / ${s.total}（执行中 ${s.executing}）`}>
+            <Progress percent={Math.round(s.execute_rate * 100)} size="small"
+              data-testid={"plans-progress-" + r.id} />
+          </Tooltip>
+        );
+      } },
+    { title: "通过率", key: "pass_rate", width: 118,
+      render: (_: unknown, r) => {
+        const s = summaries[r.id];
+        if (!s) return <Typography.Text type="secondary" data-testid={"plans-passrate-" + r.id}>—</Typography.Text>;
+        if (s.total === 0) return <Tooltip title="空计划：0/0 没有可信的通过率">
+          <Typography.Text type="secondary" data-testid={"plans-passrate-" + r.id}>—</Typography.Text></Tooltip>;
+        return (
+          <span data-testid={"plans-passrate-" + r.id}>
+            {Math.round(s.pass_rate * 100)}%
+            <Typography.Text type="secondary" className="tp-text-sm">
+              （{s.passed}/{s.total}）
+            </Typography.Text>
+          </span>
+        );
+      } },
+    { title: "用例数", key: "cases", width: 220,
+      render: (_: unknown, r) => {
+        const s = summaries[r.id];
+        if (!s) return <Typography.Text type="secondary" data-testid={"plans-cases-" + r.id}>—</Typography.Text>;
+        const parts: string[] = [];
+        if (s.counts.functional_case) parts.push("功能 " + s.counts.functional_case);
+        if (s.counts.api_case) parts.push("接口 " + s.counts.api_case);
+        if (s.counts.scenario) parts.push("场景 " + s.counts.scenario);
+        if (s.counts.ui_case) parts.push("UI " + s.counts.ui_case);
+        if (s.counts.adb_case) parts.push("ADB " + s.counts.adb_case);
+        return (
+          <div data-testid={"plans-cases-" + r.id}>
+            <span>{s.total}</span>
+            <div><Typography.Text type="secondary" className="tp-text-sm">
+              {parts.length ? parts.join(" · ") : "无关联用例"}
+            </Typography.Text></div>
+          </div>
+        );
+      } },
+    // D279：阶段/责任人/四个时刻。六列都是 plan_record 的真实列（列表行自带，不需要
+    // 额外请求）；没填就画「—」，不拿更新时间冒充实际时间，也不把「未指派」画成某个人。
+    { title: "测试阶段", dataIndex: "stage", key: "stage", width: 110,
+      render: (v: string | null) => (v
+        ? <Tag data-testid="plans-stage">{v}</Tag>
+        : <Typography.Text type="secondary" data-testid="plans-stage">—</Typography.Text>) },
+    { title: "责任人", dataIndex: "owner_name", key: "owner", width: 120, ellipsis: true,
+      render: (v: string | null) => (v
+        ? <span data-testid="plans-owner">{v}</span>
+        : <Typography.Text type="secondary" data-testid="plans-owner">—</Typography.Text>) },
+    { title: "计划开始", dataIndex: "planned_start", key: "planned_start", width: 150,
+      render: (v: string | null) => (
+        <Typography.Text className="tp-text-sm" data-testid="plans-planned-start">
+          {fmtTime(v) ?? "—"}
+        </Typography.Text>) },
+    { title: "计划结束", dataIndex: "planned_end", key: "planned_end", width: 150,
+      render: (v: string | null) => (
+        <Typography.Text className="tp-text-sm" data-testid="plans-planned-end">
+          {fmtTime(v) ?? "—"}
+        </Typography.Text>) },
+    { title: "实际开始", dataIndex: "actual_start", key: "actual_start", width: 150,
+      render: (v: string | null) => (
+        <Typography.Text className="tp-text-sm" data-testid="plans-actual-start">
+          {fmtTime(v) ?? "—"}
+        </Typography.Text>) },
+    { title: "实际结束", dataIndex: "actual_end", key: "actual_end", width: 150,
+      render: (v: string | null) => (
+        <Typography.Text className="tp-text-sm" data-testid="plans-actual-end">
+          {fmtTime(v) ?? "—"}
+        </Typography.Text>) },
     // 归档是 PlanOut 真实布尔列——这一列只回答后端答过的问题（展示态不在列表里，文件头①）。
     { title: "归档", dataIndex: "archived", key: "archived", width: 88,
       render: (v: boolean) => (v
@@ -444,7 +704,7 @@ function PlansPanel() {
     { title: "更新时间", dataIndex: "updated_at", key: "updated_at", width: 168,
       render: (v: string | null) => (
         <Typography.Text className="tp-text-sm" data-testid="plans-updated">{fmtTime(v) ?? "—"}</Typography.Text>) },
-    { title: "操作", key: "ops", width: 260,
+    { title: "操作", key: "ops", width: 240,
       render: (_: unknown, row: PlanRow) => (
         <Space size={4}>
           {canUpdate && (
@@ -481,7 +741,11 @@ function PlansPanel() {
   }
 
   return (
-    <div className="tp-fill tp-fill-body" style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
+    // flexDirection 必须显式写 row：.tp-fill 自带 flex-direction:column，
+    // 只写 display:flex 会被它按列排（2026-11-24 真机截图：左树整块压在工具栏上方，
+    // 右栏折到下一行，整页错位）。
+    <div className="tp-fill tp-fill-body"
+      style={{ display: "flex", flexDirection: "row", gap: 12, alignItems: "stretch" }}>
       {/* D211 左树：模块导航 + 过滤 + 模块管理。树本身只有模块节点；「全部计划 / 未分组」
           是树外的两条入口（未分组不是模块，见后端 PlanModuleTreeOut docstring）。 */}
       <div data-testid="plans-module-tree"
@@ -534,6 +798,11 @@ function PlansPanel() {
         canSaveView={mayRead} canDeleteView={mayRead}
         extra={(
           <Space wrap>
+            {/* D285：标签精确筛选（与高级搜索的条件组是两个入口，彼此并行 AND） */}
+            <Input.Search data-testid="plans-tags-filter" allowClear style={{ width: 170 }}
+              placeholder="标签（精确）" value={tagText}
+              onChange={(e) => setTagText(e.target.value)}
+              onSearch={(v) => { setTagKw(v.trim()); setCurrent(1); }} />
             {/* 刷新 = 重发当前页（load 读 current），不回第 1 页：把用户从第 3 页弹回
                 第 1 页不是「刷新」这个词的意思。 */}
             <Button icon={<ReloadOutlined />} data-testid="plans-reload" onClick={() => void load()}>刷新</Button>
@@ -561,6 +830,12 @@ function PlansPanel() {
         <Alert type="error" showIcon style={{ marginBottom: 12 }} data-testid="plans-load-error"
           message="测试计划列表加载失败" description={<EchoBlock text={loadError} />} />
       )}
+      {summaryError && !loadError && (
+        // 列表本身在，只是这一批现算值没取到：单独说清缺的是哪几列，不把整页判成失败。
+        <Alert type="warning" showIcon style={{ marginBottom: 12 }} data-testid="plans-summary-error"
+          message="状态/进度/通过率/用例数取数失败"
+          description="列表行仍然可用，但这四列现算值没取到（已画「—」而不是 0）。点「刷新」重试。" />
+      )}
       </div>
       <div data-testid="plans-table" className="tp-fill-body">
         <AdminTable<PlanRow> rowKey="id" loading={loading} dataSource={rows}
@@ -579,8 +854,8 @@ function PlansPanel() {
             // grid 三列与内边距归 .tp-cardfoot / .ant-table-footer（styles.css）。
             <div className="tp-cardfoot">
               <Typography.Text className="tp-cardfoot-note tp-text-sm" type="secondary">
-              「归档」是终态列（无反归档）；列表不展示通过率/执行状态——那是详情页每次现算的结论
-              （空计划「全部通过」是空真，列表端点压根没给这个数，这里就不编）。
+              「归档」是终态列（无反归档）；状态/进度/通过率/用例数为当前页一次批量现算
+              （与详情页同源，空计划的 0/0 画「—」而非 0%）。
               </Typography.Text>
               <ListPager
                 current={current}

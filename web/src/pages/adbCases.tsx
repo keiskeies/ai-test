@@ -10,12 +10,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Alert, Button, Empty, Input, Modal, Space, Tag, Typography, message } from "antd";
-import { PlusOutlined } from "../ui/icons";
+import { PlusOutlined, ReloadOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
 import { useAuth } from "../auth/store";
 import { can, patternsForProject } from "../auth/perms";
-import { ApiErr, get } from "../api/client";
+import { ApiErr, get, post } from "../api/client";
 import { adbCaseApi, type AdbCaseOut } from "../api/adbCase";
 import { ownerLabel, MEMBERS_FAILED, MEMBERS_LOADING, membersReady, type MemberLookup } from "../shared/ownerName";
 import { fmtTime } from "../shared/timefmt";
@@ -78,6 +78,10 @@ function CasesList() {
   // D217：高级搜索条件 + 列偏好（列设置落盘键 adb_case，与 filter-meta 的 view_type 同源）
   const [advFilter, setAdvFilter] = useState<FilterDoc>(emptyFilter());
   const [colPref, setColPref] = useColumnPrefs("adb_case", ADB_COL_CHOICES.map((c) => c.key));
+  // D273：批量选择（正常视图=批量回收，回收站=批量恢复）。换视图/翻页清空——批量钮只对
+  // 当前可见行有意义，留着的名单按下去操作的是屏幕上看不见的行。
+  const [selected, setSelected] = useState<string[]>([]);
+  useEffect(() => { setSelected([]); }, [inRecycled, current, pageSize]);
   // inRecycled 只有这一个写入口（runs.tsx 的 patch 同款）：三个 setState 各写各的时，
   // 漏接一个 setCurrent(1) 没人拦得住——停在第 3 页点回收站，落的是回收集里无关的切片
   // （listPagination.tsx 注释③ 的同一个 hazard）。
@@ -156,6 +160,65 @@ function CasesList() {
     } catch { /* 回收期间重名被占 409：toast 说人话，不静默改名 */ }
   }
 
+  // —— D273 批量回收/恢复（判据在后端：全有或全无；批量不提供 force，同 api.tsx D251/D252）——
+  const [batchRemoving, setBatchRemoving] = useState(false);
+  async function doBatchRemove(): Promise<void> {
+    setBatchRemoving(true);
+    try {
+      await post("/adb-cases/batch-delete", { project_id: pid, case_ids: selected });
+      message.success("已放入回收站（" + selected.length + " 条用例）");
+      setSelected([]);
+      await load();
+    } catch (e) {
+      const blk = (e instanceof ApiErr
+        ? (e.details as { blocked?: { name: string; count: number }[] } | null)
+        : null)?.blocked;
+      if (blk && blk.length > 0) {
+        Modal.error({
+          centered: true,
+          title: "整批未回收：有用例被场景引用",
+          content: (
+            <div>
+              <p>{blk.map((b) => b.name + "（" + b.count + " 个场景）").join("、")}</p>
+              <p>整批一行未动。请先在场景里解除引用；确认要连带断掉场景步骤时，请逐个回收。</p>
+            </div>
+          ),
+        });
+      }
+      // 其余错误 client 已 toast
+    } finally { setBatchRemoving(false); }
+  }
+  function batchRemove(): void {
+    Modal.confirm({
+      centered: true,
+      title: "把选中的 " + selected.length + " 条用例放入回收站？",
+      content: "全有或全无：只要有一条被未回收场景引用，整批都不会删。软删，可随时恢复。",
+      okText: "放入回收站", okButtonProps: { danger: true },
+      onOk: doBatchRemove,
+    });
+  }
+
+  const [batchRestoring, setBatchRestoring] = useState(false);
+  async function doBatchRestore(): Promise<void> {
+    setBatchRestoring(true);
+    try {
+      await post("/adb-cases/batch-restore", { project_id: pid, case_ids: selected });
+      message.success("已恢复（" + selected.length + " 条用例）");
+      setSelected([]);
+      await load();
+    } catch { /* client 已 toast（名被占 409 等）；选择保留让用户改名单 */ }
+    finally { setBatchRestoring(false); }
+  }
+  function batchRestore(): void {
+    Modal.confirm({
+      centered: true,
+      title: "恢复选中的 " + selected.length + " 条用例？",
+      content: "全有或全无：只要有一条不在回收站或名字已被占用，整批都不会恢复。",
+      okText: "恢复",
+      onOk: doBatchRestore,
+    });
+  }
+
   // 彻底删除：逐字输名（后端 name_mismatch 同样硬校验）
   const [purge, setPurge] = useState<Row | null>(null);
   const [purgeName, setPurgeName] = useState("");
@@ -204,6 +267,24 @@ function CasesList() {
         <Button data-testid="adb-case-recycled" type={inRecycled ? "primary" : "default"}
           onClick={toggleRecycled}>{inRecycled ? "退出回收站" : "♻ 回收站"}</Button>
       </Space>
+      {/* D273 批量条（api.tsx 的 D251/D252 同口径）：选中才出现；正常视图 [批量回收]，
+          回收站 [批量恢复]——彻底删除仍要求逐字确认名称，不做批量。 */}
+      {canDelete && !inRecycled && selected.length > 0 && (
+        <Space style={{ marginBottom: 8 }} data-testid="adb-case-batch-bar">
+          <Typography.Text>已选 {selected.length} 项</Typography.Text>
+          <Button size="small" danger data-testid="adb-case-batch-delete"
+            loading={batchRemoving} onClick={batchRemove}>批量回收</Button>
+          <Button size="small" data-testid="adb-case-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+        </Space>
+      )}
+      {canUpdate && inRecycled && selected.length > 0 && (
+        <Space style={{ marginBottom: 8 }} data-testid="adb-case-batch-bar">
+          <Typography.Text>已选 {selected.length} 项</Typography.Text>
+          <Button size="small" type="primary" icon={<ReloadOutlined />} data-testid="adb-case-batch-restore"
+            loading={batchRestoring} onClick={batchRestore}>批量恢复</Button>
+          <Button size="small" data-testid="adb-case-clear-selection" onClick={() => setSelected([])}>取消选择</Button>
+        </Space>
+      )}
       {/* 刻意不给 ×：脚注与空态都读 loadError（:140/:212），关掉这条就把「列表加载失败」
           擦成「还没有 ADB 用例」+「共 0 条」——能关掉的故障陈述，等于给了个消证据的按钮。
           要它消失只有刷新成功一条路（同 reportDetail.tsx:346「报告没取到」不 closable）。 */}
@@ -215,6 +296,11 @@ function CasesList() {
       <AdminTable<Row>
         size="middle" rowKey="id" loading={loading} dataSource={rows}
         pagination={false}
+        rowSelection={(!inRecycled && canDelete) || (inRecycled && canUpdate) ? {
+          selectedRowKeys: selected,
+          onChange: (keys) => setSelected(keys.map(String)),
+          preserveSelectedRowKeys: false,
+        } : undefined}
         locale={{ emptyText: loadError ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
           description="用例列表未取到，以上方的加载失败提示为准" />
           : (

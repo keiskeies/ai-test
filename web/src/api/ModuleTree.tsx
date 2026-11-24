@@ -137,7 +137,7 @@ export default function ModuleTree(p: Props) {
         ))}
         {!p.inRecycled && (p.canCreate || p.canManage) && (
           <Dropdown
-            trigger={["hover"]}
+            trigger={["click"]}
             menu={{
               items: [
                 ...(p.canCreate ? [{ key: "child", icon: <PlusOutlined />, label: "新建子模块" }] : []),

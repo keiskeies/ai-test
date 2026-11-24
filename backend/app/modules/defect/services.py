@@ -89,6 +89,9 @@ DEFECT_LIST_FILTER = ListViewFilter(
         "title": FieldDecl(Defect.title, "text", "标题", nullable=False),
         "status": FieldDecl(Defect.status, "enum", "状态", nullable=False),
         "priority": FieldDecl(Defect.priority, "enum", "优先级", nullable=False),
+        # D280：来源自由文本（包含匹配）+ 严重程度四值枚举
+        "source": FieldDecl(Defect.source, "text", "缺陷来源"),
+        "severity": FieldDecl(Defect.severity, "enum", "严重程度"),
         "handle_user_id": FieldDecl(Defect.handle_user_id, "id", "处理人"),
         "template_id": FieldDecl(Defect.template_id, "id", "模板", nullable=False),
         "created_by": FieldDecl(Defect.created_by, "id", "创建人"),
@@ -249,6 +252,7 @@ def _out(row: Defect, names: dict[str, str], counts: tuple[int, int, int], follo
         id=row.id, num=row.num, project_id=row.project_id, template_id=row.template_id,
         title=row.title, description=row.description,
         status=row.status, priority=row.priority, handle_user_id=row.handle_user_id,
+        source=row.source, severity=row.severity,
         handle_user_name=names.get(row.handle_user_id or ""), tags=_split_tags(row.tags),
         custom_fields=custom_fields or {},
         recycled=row.recycled, created_by=row.created_by,
@@ -323,7 +327,7 @@ async def defect_list(payload: schemas.DefectListIn, ctx) -> ServiceResult:
 
 @service(
     perm="defect:defect:create", effect="write", name="defect_create",
-    description="新建缺陷（起始态 new；标题 1-255；标签去重；处理人可为空）",
+    description="新建缺陷（默认落状态图起始态，可显式指定图中状态；标题 1-255；标签去重；处理人可为空）",
     http={"method": "POST", "path": "/defects", "tags": ["defect"], "status": 201},
 )
 async def defect_create(payload: schemas.DefectCreateIn, ctx) -> schemas.DefectOut:
@@ -336,9 +340,14 @@ async def defect_create(payload: schemas.DefectCreateIn, ctx) -> schemas.DefectO
     values = _validate_custom(resolved.fields, payload.custom_fields, require_all=True)
     num = await _next_num(ctx, payload.project_id)
     flow = await defect_flow.load_flow(ctx.db, payload.project_id)
+    # D289：表单可带状态；不指定就落起始态，指定了必须是这张图里真有的 key。
+    status = payload.status or flow.start_key
+    if not flow.has(status):
+        raise ApiError("invalid_status", "未知的缺陷状态：" + status, 422, {"status": status})
     row = Defect(project_id=payload.project_id, num=num, template_id=resolved.template_id,
                  title=payload.title, description=payload.description,
-                 status=flow.start_key, priority=payload.priority,
+                 status=status, priority=payload.priority,
+                 source=payload.source, severity=payload.severity,
                  handle_user_id=payload.handle_user_id, tags=_join_tags(payload.tags),
                  recycled=False, created_by=ctx.user_id, updated_by=ctx.user_id)
     ctx.db.add(row)
@@ -364,6 +373,11 @@ async def defect_update(payload: schemas.DefectUpdateIn, ctx) -> schemas.DefectO
         row.description = payload.description
     if payload.priority is not None:
         row.priority = payload.priority
+    # D280：三态用 *_set 哨兵（不带 = 不改；带 null = 清空）。
+    if payload.source_set:
+        row.source = payload.source
+    if payload.severity_set:
+        row.severity = payload.severity
     if payload.handle_user_set:
         if payload.handle_user_id is not None and not await _user_exists(ctx.db, payload.handle_user_id):
             raise ApiError("unknown_user", "处理人不存在", 422, {"handle_user_id": payload.handle_user_id})

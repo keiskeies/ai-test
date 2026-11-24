@@ -4,12 +4,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
-  Alert, Button, Card, Col, Drawer, Empty, Input, Modal, Row, Select, Space, Switch, Tag,
+  Alert, Button, Card, Col, Descriptions, Drawer, Empty, Input, Modal, Row, Select, Space, Switch, Tag,
   Tooltip, Typography, message,
 } from "antd";
 import { DeleteOutlined, EditOutlined, ExportOutlined, ImportOutlined, PlusOutlined, ReloadOutlined, UndoOutlined } from "../ui/icons";
 import ProjectGate, { PageHead } from "../layout/ProjectGate";
 import AdminTable from "../ui/AdminTable";
+import EditorField from "../ui/EditorField";
 import ShareButton from "../ui/ShareButton";
 import { ApiErr, get, patch, post } from "../api/client";
 import { useAuth } from "../auth/store";
@@ -35,7 +36,7 @@ import { ListToolbar, useColumnPrefs } from "../shared/listToolbar/ListToolbar";
 import type { Option } from "../shared/listToolbar/ListToolbar";
 import { applyColumnPrefs, emptyFilter, filterQuery, isFilterEmpty } from "../shared/listFilters";
 import type { ColumnChoice, FilterDoc } from "../shared/listFilters";
-import type { ApiDef, Page, RunRow } from "../api/api";
+import type { ApiDef, ApiDefCaseSummary, Page, RunRow } from "../api/api";
 import { METHOD_TAG } from "../theme";
 /** 列设置面板要露的列（key 必须与下方 columns 的 key 逐字对上，对不上就是「面板能勾、
  *  表头不动」的假把手——api.test.tsx 的「勾掉方法 → 表头真消失」钉这一环）。
@@ -46,9 +47,24 @@ const API_COL_CHOICES: ColumnChoice[] = [
   { key: "mod", label: "模块" },
   { key: "status", label: "状态" },
   { key: "owner", label: "负责人" },
+  { key: "tags", label: "标签" },
+  { key: "desc", label: "描述" },
+  { key: "cases", label: "用例数" },
+  { key: "result", label: "用例结果" },
+  { key: "passrate", label: "用例通过率" },
+  { key: "created", label: "创建时间" },
   { key: "upd", label: "更新时间" },
   { key: "badge", label: "最近结果" },
 ];
+
+// D276：接口下落【非回收用例】的聚合执行结果。unknown 值渲染原文（不回落成友好标签）。
+const CASE_RESULT: Record<string, { color: string; label: string }> = {
+  none: { color: "default", label: "未执行" },
+  running: { color: "processing", label: "执行中" },
+  partial: { color: "warning", label: "部分执行" },
+  failed: { color: "error", label: "有失败" },
+  passed: { color: "success", label: "全过" },
+};
 
 const STATUS_TAG: Record<string, { color: string; label: string }> = {
   draft: { color: "orange", label: "草稿" },
@@ -114,6 +130,7 @@ function BadgeCell({ b }: { b: Badge | undefined }) {
   );
 }
 
+/** 左栏字段：标签（必填点红）+ 控件 + 一行提示。三个页签/五张表都没有的第二层信息在这里。 */
 function ApiWorkbench() {
   const { project, user } = useAuth();
   const pid = project!.id;
@@ -141,6 +158,10 @@ function ApiWorkbench() {
   // onSearch——allowClear 的清空也带 source:'clear' 触发它，见 extra 的注释）。
   const [qText, setQText] = useState("");
   const [kw, setKw] = useState("");
+  // D286：标签精确筛选（与关键词/模块/回收站并行 AND）——tagText 是输入框现值，
+  // tagKw 是已提交值；空/纯空白提交 = 参数不上线。
+  const [tagText, setTagText] = useState("");
+  const [tagKw, setTagKw] = useState("");
   // D47-b：页码分页（current/size/total）替换「拉 200 条本地过滤」。默认档位 20 在
   // ListPager 档位表（20/50/100）里、后端 size 上限（le=200）内。current 只有 pager
   // 回调与 patchFilters 写，load 永不写它（runs.tsx 同法，一页只许有一个「我在第几页」的真相）。
@@ -154,11 +175,16 @@ function ApiWorkbench() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [envId, setEnvId] = useState<string | null>(null);
   const [badges, setBadges] = useState<Record<string, Badge>>({});
+  // D276：当前页接口下的用例规模/聚合结果（一次 /api-def-case-summary-batch）。
+  // 失败时保持空对象 → 三列画「—」+ tooltip 说「没取到」，绝不画成 0/未执行。
+  const [caseSummary, setCaseSummary] = useState<Record<string, ApiDefCaseSummary>>({});
+  const [caseSummaryErr, setCaseSummaryErr] = useState(false);
   const [seq, setSeq] = useState(0); // 每次 load 自增：徽标 effect 靠它重跑（ids 不变时也要刷新）
 
   const [editing, setEditing] = useState<ApiDef | "new" | null>(null);
   const [draft, setDraft] = useState<Draft>(() => toDraft(null));
-  const [form, setForm] = useState({ name: "", path: "", module_id: null as string | null, project_public: true });
+  const [form, setForm] = useState({ name: "", path: "", module_id: null as string | null, project_public: true,
+    description: "", tags: [] as string[] });
   const [saving, setSaving] = useState(false);
   const [debugging, setDebugging] = useState(false);
   const [result, setResult] = useState<DebugResult | null>(null);
@@ -183,10 +209,11 @@ function ApiWorkbench() {
   // 落的是新条件下无关的切片甚至空页（runs.tsx:84 同款 hazard，listPagination.tsx 注释③）。
   // 四类筛选只有 patchFilters 这一个写入口，回页钉在唯一入口处——各自 setState 漏接一个 reset 没人拦得住。
   const patchFilters = useCallback((p: {
-    moduleId?: string | null; kw?: string; advFilter?: FilterDoc; inRecycled?: boolean;
+    moduleId?: string | null; kw?: string; tag?: string; advFilter?: FilterDoc; inRecycled?: boolean;
   }): void => {
     if ("moduleId" in p) setModuleId(p.moduleId!);
     if ("kw" in p) setKw(p.kw!);
+    if ("tag" in p) setTagKw(p.tag!);
     if ("advFilter" in p) setAdvFilter(p.advFilter!);
     if ("inRecycled" in p) setInRecycled(p.inRecycled!);
     setCurrent(1);
@@ -271,6 +298,8 @@ function ApiWorkbench() {
           const q = new URLSearchParams({ project_id: pid, size: String(pageSize), current: String(current) });
           if (inRecycled) q.set("recycled", "true");
           if (kw.trim()) q.set("keyword", kw.trim()); // 空/纯空白 = 不过滤，参数整个不上线
+          // D286：标签精确筛选（后端 FIND_IN_SET；与关键字的包含搜索并存）
+          if (tagKw.trim()) q.set("tag", tagKw.trim());
           if (moduleId) {
             // 子树 = 选中节点 + 全部子孙，与步4a 的子树徽标配套（subtreeIds 的注释记着这笔账）；
             // 树里查不到该节点时不拼 module_ids——与本地过滤时代的「找不到当不过滤」同款语义。
@@ -304,7 +333,7 @@ function ApiWorkbench() {
       setLoading(false);
       setFirstLoaded(true);
     }
-  }, [pid, inRecycled, advFilter, kw, moduleId, current, pageSize]);
+  }, [pid, inRecycled, advFilter, kw, tagKw, moduleId, current, pageSize]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -344,6 +373,30 @@ function ApiWorkbench() {
     return () => { cancelled = true; };
   }, [visibleIds, pid, seq]);
 
+  // D276：用例规模批量投影（依赖 visibleIds 串 + seq：翻页/刷新/筛选都会重算）。
+  useEffect(() => {
+    const ids = visibleIds ? visibleIds.split(",") : [];
+    if (!ids.length) { setCaseSummary({}); setCaseSummaryErr(false); return; }
+    let cancelled = false;
+    setCaseSummaryErr(false);
+    void (async () => {
+      try {
+        const out = await post<{ items: ApiDefCaseSummary[]; total: number }>(
+          "/api-def-case-summary-batch",
+          { project_id: pid, definition_ids: ids },
+          { silent: true },
+        );
+        if (cancelled) return;
+        setCaseSummary(Object.fromEntries(out.items.map((x) => [x.definition_id, x])));
+      } catch {
+        if (cancelled) return;
+        setCaseSummary({});
+        setCaseSummaryErr(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visibleIds, pid, seq]);
+
   const moduleName = useMemo(() => {
     const map = new Map<string, string>();
     const walk = (ns: ModNode[]) => ns.forEach((n) => { map.set(n.id, n.name); walk(n.children); });
@@ -355,12 +408,14 @@ function ApiWorkbench() {
     setEditing(target); setResult(null);
     if (target === "new") {
       setDraft(toDraft(null));
-      setForm({ name: "", path: "", module_id: moduleId, project_public: true });
+      setForm({ name: "", path: "", module_id: moduleId, project_public: true,
+        description: "", tags: [] });
     } else {
       setDraft(toDraft(target.request));
       setForm({
         name: target.name, path: target.path, module_id: target.module_id,
         project_public: target.project_public,
+        description: target.description ?? "", tags: target.tags ?? [],
       });
     }
   }
@@ -372,16 +427,20 @@ function ApiWorkbench() {
     setSaving(true);
     try {
       const req = fromDraft(draft);
+      const description = form.description.trim() ? form.description : null;
       if (editing === "new") {
         await post<ApiDef>("/api-definitions", {
           project_id: pid, name, method: req.method, path: pathv, request: req,
           module_id: form.module_id, project_public: form.project_public,
+          description, tags: form.tags,
         });
         message.success("接口已创建");
       } else if (editing) {
         const out = await patch<ApiDef>("/api-definitions/" + editing.id, {
           project_id: pid, name, path: pathv, request: req,
           module_id: form.module_id, version: editing.version,
+          // D282：说明三态（本抽屉保存 = 用户眼前所见即所存），标签 [] 即清空
+          description, description_set: true, tags: form.tags,
         });
         message.success("已保存 v" + out.version);
       } else {
@@ -620,6 +679,12 @@ function ApiWorkbench() {
             placeholder="搜索接口名或路径" value={qText}
             onChange={(e) => setQText(e.target.value)}
             onSearch={(v) => patchFilters({ kw: v.trim() })} />
+          {/* D286：标签精确筛选——与关键词各打各的参数（关键字搜标签是包含，
+              这里「就这一档」精确），两个口都保留 */}
+          <Input.Search data-testid="api-tags-filter" allowClear style={{ width: 160 }}
+            placeholder="标签（精确）" value={tagText}
+            onChange={(e) => setTagText(e.target.value)}
+            onSearch={(v) => patchFilters({ tag: v.trim() })} />
           <EnvSelect projectId={pid} value={envId} onChange={setEnvId} width={170}
             canManage={can(perms, "env:config:update")} canCreate={can(perms, "env:config:create")} />
           <Tooltip title="刷新"><Button icon={<ReloadOutlined />} aria-label="刷新"
@@ -703,15 +768,16 @@ function ApiWorkbench() {
                       // 真分支整串是 e2e api.spec.mjs:12 的契约，不许动。
                       : canCreate ? "还没有接口，点右上角新建" : "还没有接口（你没有新建权限）"} />
           ) }}
-          // 998 = 其余固定列 746 + 选择列 32 + 「接口」列下限 220（下面那列刻意不给 width）。
+          // 1744 = 其余固定列 1492（D276 新增 用例数 76 + 用例结果 96 + 通过率 104 + 创建 120；
+          // D282 再补 标签 150 + 描述 200）+ 选择列 32 + 「接口」列下限 220（下面那列刻意不给 width）。
           // fixed：auto 布局会把超出 998 的部分按比例摊给每一列，实测 1680 视口下 8 列各涨
           // 12.7%（方法 80→90、最近结果 104→117、操作 158→178）——盈余落在短列就成了空隙。
           tableLayout="fixed"
-          scroll={{ x: 998 }}
+          scroll={{ x: 1744 }}
           columns={applyColumnPrefs([
             // 「接口」是表里唯一可伸缩的列：table-layout: fixed 下不给 width 就是「吃掉其余
-            // 固定列之外的全部」，窄到 998 时拿到 998−746−32=220 的下限，1680 视口实测 346。
-            // 写死 220 的话盈余就只会去摊别的列（见上面 tableLayout 注释）。加/删列要同步 998。
+            // 固定列之外的全部」，即 scroll.x 1744 里的 220（1680 视口横向滚动，不挤别的列）。
+            // 写死 220 的话盈余就只会去摊别的列（见上面 tableLayout 注释）。加/删列要同步 1744。
             { key: "name", title: "接口", dataIndex: "name", render: (v: string, r) => (
               <Space direction="vertical" size={0}>
                 <a data-testid="api-row" onClick={() => setDetail(r)}>{v}</a>
@@ -739,6 +805,54 @@ function ApiWorkbench() {
               // 说「已删除 <短id>」——查不到人 ≠ 没人负责，画「—」会把悬空负责人伪装成空缺。
               <span data-testid="api-row-owner">{!r.owner_id ? "—"
                 : r.owner_name ?? ("已删除 " + r.owner_id.slice(0, 8))}</span>) },
+            // D282：标签 / 描述（MS 蓝图 :1376 两列）。标签最多画两枚，其余进 Tooltip，
+            // 不撑行高；空都画「—」（没写 ≠ 没取到，这一列是随行返回的）。
+            { title: "标签", key: "tags", width: 150, render: (_, r) => {
+                const tags = r.tags ?? [];
+                if (!tags.length) return <Typography.Text type="secondary"
+                  data-testid={"api-tags-" + r.id}>—</Typography.Text>;
+                return <Tooltip title={tags.join("、")}>
+                  <Space size={4} data-testid={"api-tags-" + r.id}>
+                    {tags.slice(0, 2).map((t) => <Tag key={t}>{t}</Tag>)}
+                    {tags.length > 2 ? <Tag>+{tags.length - 2}</Tag> : null}
+                  </Space>
+                </Tooltip>;
+              } },
+            { title: "描述", key: "desc", width: 200, render: (_, r) => (
+              r.description
+                ? <Typography.Text ellipsis={{ tooltip: r.description }} style={{ maxWidth: "100%" }}
+                    data-testid={"api-desc-" + r.id}>{r.description}</Typography.Text>
+                : <Typography.Text type="secondary" data-testid={"api-desc-" + r.id}>—</Typography.Text>) },
+            // D276：以下三列来自一次 /api-def-case-summary-batch（当前页批量，不逐行 N+1）。
+            // 取不到时画「—」并说「没取到」——0 条用例与「摘要没取到」是两句话，不许混。
+            { title: "用例数", key: "cases", width: 76, render: (_, r) => {
+                const s = caseSummary[r.id];
+                if (!s) return <Tooltip title={caseSummaryErr ? "用例摘要取数失败" : "用例摘要加载中"}>
+                  <Typography.Text type="secondary" data-testid={"api-cases-" + r.id}>—</Typography.Text></Tooltip>;
+                return <span data-testid={"api-cases-" + r.id}>{s.case_count}</span>;
+              } },
+            { title: "用例结果", key: "result", width: 96, render: (_, r) => {
+                const s = caseSummary[r.id];
+                if (!s) return <Typography.Text type="secondary" data-testid={"api-result-" + r.id}>—</Typography.Text>;
+                const t = CASE_RESULT[s.result] ?? { color: "default", label: s.result };
+                return <Tag data-testid={"api-result-" + r.id} color={t.color}>{t.label}</Tag>;
+              } },
+            { title: "用例通过率", key: "passrate", width: 104, render: (_, r) => {
+                const s = caseSummary[r.id];
+                if (!s) return <Typography.Text type="secondary" data-testid={"api-passrate-" + r.id}>—</Typography.Text>;
+                if (s.case_count === 0) return <Tooltip title="没有可执行用例：0/0 没有可信的通过率">
+                  <Typography.Text type="secondary" data-testid={"api-passrate-" + r.id}>—</Typography.Text></Tooltip>;
+                return <span data-testid={"api-passrate-" + r.id}>
+                  {Math.round(s.case_pass_rate * 100)}%
+                  <Typography.Text type="secondary" className="tp-text-sm">
+                    （{s.passed}/{s.case_count}）
+                  </Typography.Text>
+                </span>;
+              } },
+            { title: "创建时间", key: "created", width: 120, render: (_, r) => (
+              <Typography.Text className="tp-text-sm" type="secondary" data-testid="api-row-created">
+                {fmtTime(r.created_at, { seconds: false }) ?? "—"}
+              </Typography.Text>) },
             { title: "更新时间", key: "upd", width: 120, render: (_, r) => (
               // 换算走 shared/timefmt（§3.4-6：UTC 存 / Asia/Shanghai 展示）；
               // 截 ISO 字符串是 ledger R68 记过的 UTC 钟点假绿，禁止。
@@ -815,6 +929,7 @@ function ApiWorkbench() {
       {/* 全屏编辑器：左基本信息 360 + 右请求编辑器 + 下方调试面板（§11.4.2） */}
       <Drawer
         open={editing !== null} onClose={() => setEditing(null)} width="100%" destroyOnHidden
+        styles={{ body: { padding: 0, overflow: "hidden" } }}
         title={editing === "new" ? "新建接口" : editing ? "编辑接口 · v" + editing.version : "编辑接口"}
         extra={(
           <Space>
@@ -828,34 +943,53 @@ function ApiWorkbench() {
           </Space>
         )}
       >
-        <Row gutter={16}>
-          <Col flex="360px">
-            <Space direction="vertical" style={{ width: "100%" }} size={12}>
-              <div>
-                <Typography.Text type="secondary">接口名</Typography.Text>
+        {/* 两栏满高（2026-11-24 版式重做）：左档案独立滚动，右工作区吃满剩余；
+            请求定义是主内容，调试结果钉在底部。旧版 Row/Col 只按内容高，抽屉下半屏整块空着。 */}
+        <div className="tp-record-editor">
+          <aside className="tp-record-editor__side" data-testid="api-editor-side">
+            <div className="tp-record-editor__side-head">
+              <div className="tp-record-editor__pane-title">基本信息</div>
+              <div className="tp-record-editor__pane-sub">接口在列表与详情里展示的档案</div>
+            </div>
+            <div className="tp-record-editor__side-body">
+              <EditorField label="接口名" required>
                 <Input data-testid="def-name" maxLength={200} value={form.name} placeholder="如：查询订单"
                   onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              </div>
-              <div>
-                <Typography.Text type="secondary">路径（展示用，实际执行用右侧 URL）</Typography.Text>
+              </EditorField>
+              <EditorField label="路径" required hint="展示用；实际执行以右侧请求 URL 为准">
                 <Input data-testid="def-path" maxLength={500} className="tp-mono" value={form.path}
                   placeholder="/order/{id}" onChange={(e) => setForm({ ...form, path: e.target.value })} />
-              </div>
-              <div>
-                <Typography.Text type="secondary">所属模块</Typography.Text>
+              </EditorField>
+              <EditorField label="所属模块">
                 <Select allowClear data-testid="def-module" style={{ width: "100%" }}
                   value={form.module_id ?? undefined} placeholder="未分类"
                   options={flatten(tree)} onChange={(v) => setForm({ ...form, module_id: v ?? null })} />
-              </div>
+              </EditorField>
+              {/* 可见性紧跟在「身份」字段之后：它决定这条接口对谁出现，比描述/标签更该在首屏 */}
               {editing === "new" && (
-                <Space>
+                <div className="tp-record-editor__switch">
+                  <div>
+                    <div className="tp-field-label">项目内公开</div>
+                    <div className="tp-field-hint">关闭后仅自己与项目管理员可见</div>
+                  </div>
                   <Switch data-testid="def-public" checked={form.project_public}
                     onChange={(v) => setForm({ ...form, project_public: v })} />
-                  <Typography.Text type="secondary">项目内公开（关掉后仅自己与项目管理员可见）</Typography.Text>
-                </Space>
+                </div>
               )}
+              <EditorField label="描述">
+                <Input.TextArea data-testid="def-description" rows={3} maxLength={2000}
+                  value={form.description} placeholder="这个接口是做什么的（可留空）"
+                  onChange={(e) => setForm({ ...form, description: e.target.value })} />
+              </EditorField>
+              <EditorField label="标签" hint="回车或逗号分隔，如：回归、核心">
+                <Select mode="tags" data-testid="def-tags" style={{ width: "100%" }}
+                  value={form.tags} placeholder="回车或逗号分隔"
+                  tokenSeparators={[",", "，"]}
+                  onChange={(v: string[]) => setForm({ ...form, tags: v })} />
+              </EditorField>
               {refs.length > 0 && (
-                <Card size="small" title="用到的变量">
+                <div className="tp-field">
+                  <div className="tp-field-label">用到的变量</div>
                   <Space size={4} wrap>
                     {refs.map((v) => (
                       <Tooltip key={v} title="取值来自所选环境；同名时请求内写死优先">
@@ -863,24 +997,33 @@ function ApiWorkbench() {
                       </Tooltip>
                     ))}
                   </Space>
-                </Card>
+                  <div className="tp-field-hint">取值来自所选环境；同名时请求内写死优先</div>
+                </div>
               )}
-              <Typography.Text className="tp-text-sm" type="secondary">
-                断言为空时调试只发请求不判定，建议至少加一条状态码断言。
-              </Typography.Text>
-            </Space>
-          </Col>
-          {/* flex 基准必须是 0：`auto` 会拿表格内容的 max-content 当基准，208+宽表 > 行宽，
-          antd Row 的 flex-wrap 就把右列整块折到下一行、横跨全宽（2026-11-22 截图实测）。 */}
-      <Col flex="1 1 0" style={{ minWidth: 0 }}>
-            <RequestEditor value={draft} onChange={setDraft} />
+              <div className="tp-record-editor__side-foot">
+                「调试」只发请求、不保存；保存后可在用例与场景里引用这个接口。
+              </div>
+            </div>
+          </aside>
+
+          <main className="tp-record-editor__main">
+            <section className="tp-record-editor__pane tp-record-editor__pane--fill">
+              <header className="tp-record-editor__pane-head">
+                <div className="tp-record-editor__pane-title">请求定义</div>
+                <span className="tp-record-editor__pane-sub">{"URL 与参数支持 ${var}；超时单位毫秒"}</span>
+              </header>
+              <div className="tp-fill-body tp-record-editor__fill" data-testid="api-editor-req">
+                <RequestEditor value={draft} onChange={setDraft} fill
+                  assertHint="断言为空时调试只发请求、不做校验；建议至少加一条状态码断言。" />
+              </div>
+            </section>
             {/* 「让 Pilot 分析」的对象名：编辑既有接口用定义名，新建只有用户此刻填的名；
                 两处都为空时 DebugPanel 拿到假值 → 钮不渲染（不给点了没内容的假门）。 */}
             <DebugPanel result={result}
               subject={form.name.trim() !== "" ? form.name.trim() : null}
               requestLine={draft.url.trim() === "" ? null : draft.method + " " + draft.url.trim()} />
-          </Col>
-        </Row>
+          </main>
+        </div>
       </Drawer>
 
       {/* 详情抽屉：定义（只读 + 就地调试）/ 用例(N) / 场景引用(N)（D69，§11.4.3） */}
@@ -1070,6 +1213,18 @@ function DetailBody({ def, envId, canDebug, perms, initialTab = "def", onChanged
           场景引用{refs != null ? "(" + refs.items.length + ")" : ""}
         </Button>
       </Space>
+      {/* D282：描述与标签（与列表两列同源）。空画「—」，不藏行——详情是这条接口的完整档案。 */}
+      <Descriptions size="small" column={1} style={{ marginBottom: 12 }}
+        items={[
+          { key: "tags", label: "标签", children: (def.tags ?? []).length ? (
+            <Space size={4} wrap data-testid="detail-tags">
+              {(def.tags ?? []).map((t) => <Tag key={t}>{t}</Tag>)}
+            </Space>
+          ) : <Typography.Text type="secondary" data-testid="detail-tags">—</Typography.Text> },
+          { key: "desc", label: "描述", children: def.description
+            ? <span data-testid="detail-description">{def.description}</span>
+            : <Typography.Text type="secondary" data-testid="detail-description">—</Typography.Text> },
+        ]} />
       {tab === "def" && (
         <div data-testid="detail-def">
           <Space style={{ marginBottom: 12 }}>

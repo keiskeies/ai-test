@@ -9,18 +9,22 @@ plan_record 这一张表是整个计划的「形状示范」：每一个列都�
   形状：存一列没人维护的枚举 = 给未来的自己埋一个说谎的列。实时状态现算归步 3，
   步 1 不提供（那一刀连关联表都没有，没有可现算的输入——与其供一个恒为「未开始」的
   假状态，不如不提供）。
-- **没有「实际结束时间」**：MS 有 set/clear 两条 update 语句但全仓没有任何 service 调
-  set（取证 §三 1）。没有写入方的列不建，直到「计划的结束」由哪个事件说得清。
-- **没有 owner_id / project_public**——这一条最容易被「顺手补上」，别补。本仓没有任何
-  表单/端点能把计划的 project_public 置 false（计划新建就是项目级共享），MS 的计划也
-  没有行级私有语义；列永远只有 true 一个值 = 谓词恒真 = 白建的索引 + 会骗人的 WHERE，
-  而且 `shared/visibility.py` 读的是 `getattr(row, "project_public", True)`——喂给它
-  一张没这列的表 = 每行都公开且不报错，这个静默失效在 0018 记过账，
+- **没有 project_public**——这一条最容易被「顺手补上」，别补。本仓没有任何表单/端点能
+  把计划置为行级私有（计划新建就是项目级共享），MS 的计划也没有行级私有语义；列永远
+  只有 true 一个值 = 谓词恒真 = 白建的索引 + 会骗人的 WHERE，而且
+  `shared/visibility.py` 读的是 `getattr(row, "project_public", True)`——喂给它一张没这列
+  的表 = 每行都公开且不报错，这个静默失效在 0018 记过账，
   `app/modules/schedule/models.py:10-13` 的注释就是为它写的。
   **所以可见性 = 按 project_id 显式过滤**（schedule_task 这一族的落法）：跨项目访问与
   不存在同码同文案 404，不喂 visibility 助手。判据用例钉两面：跨项目不可见 +
   同项目成员**都能**看见彼此的共享计划（正向断言——它守的是「我们没有行级私有」这个
   决定本身；将来有人给列表喂 visible_clause 会红在那里）。
+- **D279 补了 owner_id 与四个时刻列**（stage/planned_start/planned_end/actual_start/
+  actual_end）：与「没有实际结束时间」的旧判断不冲突——旧判断针对的是 MS 那种**没有
+  写入方**的列；这一版每一列都有写入口（计划表单）和读方（列表/详情/筛选），不存在
+  「有 schema 没写入方」。owner_id 只是责任人展示位，**不参与可见性**（仍按 project_id
+  显式过滤，见上一条）；actual_* 是手填而非事件自动写：计划的「真正开始/结束」没有
+  单一事件可挂（人工执行与外部 run_record 都有），自动写就是拿一个事件冒充全部真相。
 - `created_by` 建行的服务写（plan_create）；`updated_by` 每一次改名/改描述/归档都写，
   「谁建的/最后谁动的」是计划列表的展示列（步 6 前端接），审计语义与 schedule_task
   的同名两列一致。
@@ -59,6 +63,21 @@ class PlanRecord(ProjectScopedMixin, TimestampMixin, Base):
     # 模块删除时**不**级联删计划：有计划的模块 409 拒绝删（MS 是递归连计划一起删，
     # 我们不做这种「删文件夹顺手删内容」的隐含级联；计划删除仍只走 plan_delete 显式路径）。
     module_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # D279：测试阶段（自由文本；MS 的阶段来自项目设置的下拉，本仓没有那张设置表，
+    # 收自由文本比凭空造词表诚实）。空 = 未填。
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # D279：计划/实际起止时刻。两对的先后顺序由服务层校验（结束早于开始 → 422），
+    # 列上不再加 DB CHECK——跨方言的 CHECK 行为不一致，服务层是唯一写入口。
+    planned_start: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    planned_end: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    actual_start: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    actual_end: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    # D279：责任人（app_user.id，无外键；写入时校验是本项目成员）。只是展示/筛选位，
+    # 不是可见性列——见类 docstring 的第一条。
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # D285：标签（逗号串，与功能用例/场景/接口定义同存法；`shared/tags.py` 统一读写）。
+    # 空 = 无标签；列表顶层 `tag` 精确筛选用 FIND_IN_SET（不用 LIKE，bug1 不命中 bug10）。
+    tags: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 

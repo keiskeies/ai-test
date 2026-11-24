@@ -7,7 +7,21 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-Pair = list[str]  # ["k","v"]
+# 请求键值对。历史/导入/环境变量一律两元；接口参数的「必填/描述」是可选的
+# 第三、四位（["k","v","1|0","描述"]），执行层只读前两位（execution/core.py）。
+Pair = list[str]
+
+
+def check_pairs(v: list[Pair]) -> list[Pair]:
+    """两元或四元键值对；四元的第三位必须是 "1"/"0"（必填），第四位是描述。"""
+    for it in v:
+        if len(it) not in (2, 4) or not all(isinstance(x, str) for x in it):
+            raise ValueError('键值对必须是 ["key","value"] 或 ["key","value","1|0","描述"] 形式')
+        if len(it) == 4 and it[2] not in ("0", "1"):
+            raise ValueError('键值对第三位（必填）必须是 "1" 或 "0"')
+        if len(it) == 4 and len(it[3]) > 500:
+            raise ValueError("参数描述最长 500 字")
+    return v
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -94,10 +108,7 @@ class RequestObject(BaseModel):
     @field_validator("params", "headers", mode="after")
     @classmethod
     def _pairs(cls, v: list[Pair]) -> list[Pair]:
-        for it in v:
-            if len(it) != 2 or not all(isinstance(x, str) for x in it):
-                raise ValueError('键值对必须是 ["key","value"] 形式')
-        return v
+        return check_pairs(v)
 
 
 class OkOut(BaseModel):
@@ -119,6 +130,9 @@ class ApiDefCreateIn(BaseModel):
     request: RequestObject | None = None
     module_id: str | None = None
     project_public: bool = True
+    # D282：接口说明与标签（标签存逗号串，去重保序；空列表 = 无标签）
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class ApiDefListIn(BaseModel):
@@ -145,14 +159,18 @@ class ApiDefListIn(BaseModel):
     module_ids: list[str] | None = Field(
         default=None, description="模块子树 id 集（选中节点+全部子孙，由前端从树上算好）；[]=不匹配任何行"
     )
-    # 关键字 = name/path 两列的 OR 包含。MS 还匹配 num/tags，**本库的 api_definition
-    # 没有这两列**（列集见 models.py），只匹配 name+path，不为此造列。
+    # 关键字 = name/path/tags 三列的 OR 包含（「搜得到」语义）。MS 还匹配 num，**本库的
+    # api_definition 没有编号列**（列集见 models.py），只匹配这三列，不为此造列。
+    # tags 自 D282 起是真列（逗号串）；D286 起另有顶层 `tag` 做精确筛选（FIND_IN_SET，
+    # 「就这一档」语义），两者并存：关键字负责搜，tag 负责筛。
     # 全空白 = 没筛选（清空输入框和敲了空格是同一件事）。
     # 大小写不敏感来自 utf8mb4_0900_ai_ci 排序规则（前轮已验证）；但 `_ci` 同时是
     # **重音不敏感**的（é 与 e 判等），这比它替代的浏览器端 `.toLowerCase().includes()`
     # **更宽**——搜 "cafe" 能命中 "Café"。这是 shipped 语义，test_d47b_api_pushdown
     # 钉的是它本身，不是旧的浏览器行为。
-    keyword: str | None = Field(default=None, description="名称/路径关键字（大小写与重音不敏感）；全空白=不过滤")
+    keyword: str | None = Field(default=None, description="名称/路径/标签关键字（大小写与重音不敏感）；全空白=不过滤")
+    # D286：标签精确筛选（与 keyword 并行 AND；全空白 = 不过滤）。
+    tag: str | None = Field(default=None, max_length=200, description="标签精确筛选；全空白=不过滤")
 
 
 class ApiDefGetIn(BaseModel):
@@ -212,6 +230,11 @@ class ApiDefUpdateIn(BaseModel):
     module_id: str | None = None
     project_public: bool | None = None
     version: int = Field(ge=1)  # 乐观锁
+    # D282：`description_set` 三态（不带 = 不改、带 null = 清空、带值 = 改）；
+    # tags 用 None/[] 区分（None = 不改，[] = 清空），与 defect 同款。
+    description: str | None = None
+    description_set: bool = False
+    tags: list[str] | None = None
 
 
 class ApiDefOut(BaseModel):
@@ -225,6 +248,9 @@ class ApiDefOut(BaseModel):
     status: str = "draft"
     version: int = 1
     owner_id: str | None = None
+    # D282：说明与标签（标签出参是列表，库里存逗号串——split 在 service 一处做）
+    description: str | None = None
+    tags: list[str] = []
     # 蓝图 :1376 列表列「负责人」：owner_id 是 UUID，画给人看就是骗人。名字由后端 join
     # app_user 回填（adb_test updated_by_name 同款手法）——前端拉成员表换名字在权限
     # （GET /members 要 ensure_member）和性能上都不对。null 有两种：没填负责人，
@@ -235,6 +261,40 @@ class ApiDefOut(BaseModel):
     # 蓝图 :1376 列表列「更新时间」：列一直在 TimestampMixin 里躺着，出参没给过，
     # 前端因此画不出这列（D79 登记时误记成「Mixin 自带所以已有」——库里有条 ≠ 接口给了）。
     updated_at: str | None = None
+    # D276 列表列「创建时间」：同一笔账，created_at 也在 TimestampMixin 里但没出参。
+    created_at: str | None = None
+
+
+# ══════════ D276：接口列表的用例规模批量投影（一页一次，不逐接口 N+1） ══════════
+
+
+class ApiDefCaseSummaryIn(BaseModel):
+    """当前页的接口 id 一批（上限 200 与列表 size 同尺）。"""
+
+    project_id: str
+    definition_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class ApiDefCaseSummaryOut(BaseModel):
+    """一个接口下的用例规模。result 是**聚合态**，词表与判据写在 services 的实现注释里：
+    none（无已执行用例）/ running（有执行中且无失败）/ failed（有失败用例）/
+    partial（部分用例执行且全过）/ passed（全部用例执行且全过）。"""
+
+    definition_id: str
+    case_count: int = 0
+    executed: int = 0
+    passed: int = 0
+    failed: int = 0
+    running: int = 0
+    case_pass_rate: float = 0.0
+    result: str = "none"
+
+
+class ApiDefCaseSummaryBatchOut(BaseModel):
+    """只回仍存在且对调用者可见的接口（页面上被删/被私有化的行不回摘要，前端画「—」）。"""
+
+    items: list[ApiDefCaseSummaryOut] = Field(default_factory=list)
+    total: int = 0
 
 
 class ApiDebugIn(BaseModel):
@@ -359,12 +419,7 @@ class CaseOverlay(BaseModel):
     @field_validator("params", "headers", mode="after")
     @classmethod
     def _pairs(cls, v):
-        if v is None:
-            return v
-        for it in v:
-            if len(it) != 2 or not all(isinstance(x, str) for x in it):
-                raise ValueError('键值对必须是 ["key","value"] 形式')
-        return v
+        return v if v is None else check_pairs(v)
 
 
 class CaseOut(BaseModel):
@@ -457,6 +512,28 @@ class CasePurgeIn(BaseModel):
     project_id: str
     case_id: str
     confirm_name: str = Field(min_length=1, max_length=200)
+
+
+class CaseBatchDeleteIn(BaseModel):
+    """批量放入回收站（对齐 D251 接口定义批删，补 §73 顺延的审计缺口）。
+
+    全有或全无：任一 id 不存在/已回收/定义已回收 → 404 整批不动；任一被未回收场景
+    引用 → 409 整批不动（不提供批量 force——强删必须逐个确认，见 services 同名注释）。
+    """
+
+    project_id: str
+    case_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class CaseBatchRestoreIn(BaseModel):
+    """批量从回收站恢复（与批量回收对称）。
+
+    全有或全无：任一 id 不存在/不在回收站 → 404 整批不动；任一绑定的数据集已不存在
+    （恢复后无法执行，与单条 restore 的 R82 口径同源）→ 409 整批不动。
+    """
+
+    project_id: str
+    case_ids: list[str] = Field(min_length=1, max_length=200)
 
 class CaseUpdateIn(BaseModel):
     project_id: str

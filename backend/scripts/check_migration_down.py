@@ -75,6 +75,20 @@ EXPECT: dict[str, list[str]] = {
     "0051": ["org_user_group", "org_user_group_member"],
     # 0052 建 org_defect_status + org_defect_status_transition 两张表（D271 组织级状态流模板）。
     "0052": ["org_defect_status", "org_defect_status_transition"],
+    # 0053 是 plan_record 纯加列（D279 阶段/计划与实际起止/责任人）；0054 是 defect 纯加列
+    # （D280 来源/严重程度）；0055 是 functional_case 纯加列（D281 责任人）；0056 是
+    # api_definition 纯加列（D282 描述/标签）；0057 是 functional_case 纯加列（D283 标签）；
+    # 0058 是 scenario 纯加列（D284 标签）；0059 是 plan_record 纯加列（D285 标签）；
+    # 0060 是 functional_case 纯加列（D289 前置条件/步骤/备注/用例状态）。
+    # 都没有新表，空清单不是漏登记——只验 up→down→up 能重放。
+    "0053": [],
+    "0054": [],
+    "0055": [],
+    "0056": [],
+    "0057": [],
+    "0058": [],
+    "0059": [],
+    "0060": [],
 }
 
 

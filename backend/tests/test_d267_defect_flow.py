@@ -51,6 +51,28 @@ CUSTOM = (
 )
 
 
+async def test_create_can_pick_existing_status(client, make_user) -> None:
+    """D289：新建表单带「状态」下拉——默认起始态；显式值必须在图里，未知 422。"""
+    _, h = await make_user("d289f", admin=True)
+    pid = await _proj(client, h, "d289flow")
+    statuses, edges = CUSTOM
+    saved = await _save(client, h, pid, statuses, edges)
+    assert saved.status_code == 200, saved.text
+
+    picked = await client.post(_BASE + "/defects", json={
+        "project_id": pid, "title": "直接进处理中", "status": "doing"}, headers=h)
+    assert picked.status_code == 201, picked.text
+    assert picked.json()["status"] == "doing"
+
+    default = await _create(client, h, pid, "默认起始")
+    assert default["status"] == "todo"
+
+    bad = await client.post(_BASE + "/defects", json={
+        "project_id": pid, "title": "坏状态", "status": "ghost"}, headers=h)
+    assert bad.status_code == 422
+    assert bad.json()["code"] == "invalid_status"
+
+
 # ══════════ 1. 迁移形状 ══════════
 async def test_flow_tables_shape(conn) -> None:
     from sqlalchemy import inspect

@@ -1,7 +1,7 @@
 // 调试结果面板（§11.4.4 子集）：状态徽标 + 耗时 + 断言卡 + 响应体折叠。
 // 「调试失败 → 让 Pilot 分析（带响应体）」是蓝图 :1426 的出口，走 D84 诚实切片：
 // 只把现场拼成草稿预填进 Pilot 输入框，发不发由人决定。
-import { Alert, Button, Card, Collapse, Empty, Tag, Tooltip, Typography } from "antd";
+import { Alert, Button, Card, Collapse, Tag, Tooltip, Typography } from "antd";
 import { CheckCircleFilled, CloseCircleFilled } from "../ui/icons";
 import { useNavigate } from "react-router-dom";
 import { statusColor } from "./req";
@@ -72,9 +72,15 @@ export default function DebugPanel({ result, subject, requestLine, assertionsKno
   assertionsKnown?: boolean;
 }) {
   if (!result) {
+    // 空态收成一行（旧版是居中大 Empty：在满屏编辑器里占出一块没有信息的白板）。
+    // 说的还是同一件事：点「调试」才会发真实请求，结果落在这里。
     return (
-      <Card data-testid="debug-panel" size="small" style={{ marginTop: 16 }}>
-        <Empty description="点「调试」发送真实请求" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      <Card data-testid="debug-panel" size="small" style={{ marginTop: 16 }}
+        styles={{ body: { padding: 0 } }}>
+        <div className="tp-debug-empty">
+          <span className="tp-debug-empty__title">调试结果</span>
+          <span className="tp-debug-empty__hint">点右上角「调试」发送真实请求；状态码、耗时与断言结果会显示在这里</span>
+        </div>
       </Card>
     );
   }

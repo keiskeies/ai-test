@@ -8,8 +8,8 @@
 // ③ 点 force → 第二个请求 body 里 force === true（fetch 调用序列断言，不只看 UI）。
 // 正对照：200 正常删除仍删成功、success 照常、列表刷新。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { ConfigProvider, message } from "antd";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { ConfigProvider, message, Modal } from "antd";
 
 Object.defineProperty(window, "matchMedia", {
   writable: true,
@@ -514,5 +514,63 @@ describe("第三十三轮：数据集取失败不许说成「已删除」", () =
     );
     const tag = await screen.findByTestId("case-dataset-tag");
     expect(tag.textContent).toBe("已删除");
+  });
+});
+
+// ── D273：用例批量回收/恢复（正常视图批量回收，回收站批量恢复；不提供 force）────
+// 与 api.tsx D251/D252 同口径：勾选 → Modal 确认 → POST batch-* 带 project_id + case_ids，
+// 成功后清选择并重拉。批量条只在选中时出现（隐藏不是禁用）。
+describe("CaseList 批量回收/恢复（D273）", () => {
+  // Modal.confirm 静态弹窗挂 body 独立 root，cleanup 管不到；上一用例残留的确认框
+  // 会让 .ant-modal-confirm 抓到旧的那个（按钮文案对不上）。每个用例前同步摘净。
+  beforeEach(() => {
+    Modal.destroyAll();
+    document.querySelectorAll(".ant-modal-root").forEach((n) => n.remove());
+  });
+  function boxes(): HTMLElement[] {
+    return Array.from(document.querySelectorAll('.ant-table-tbody tr.ant-table-row input[type="checkbox"]'));
+  }
+  function bodies(urlPart: string): Record<string, unknown>[] {
+    return (global.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => String(c[0]).includes(urlPart))
+      .map((c) => JSON.parse(String(c[1]?.body)) as Record<string, unknown>);
+  }
+
+  it("勾 2 行 → 批量回收：POST batch-delete 带这 2 个 case_ids；成功后清选择并重拉", async () => {
+    const spy = vi.spyOn(message, "success").mockImplementation(() => ({}) as never);
+    renderList([caseRow(), caseRow({ id: "c2", name: "第二用例" }), caseRow({ id: "c3", name: "第三用例" })], "ok");
+    await screen.findAllByTestId("case-row");
+    expect(screen.queryByTestId("case-batch-bar")).toBeNull();
+    fireEvent.click(boxes()[0]);
+    fireEvent.click(boxes()[1]);
+    expect((await screen.findByTestId("case-batch-bar")).textContent).toContain("已选 2 项");
+    fireEvent.click(screen.getByTestId("case-batch-delete"));
+    fireEvent.click(await screen.findByRole("button", { name: "放入回收站" }));
+    await waitFor(() => expect(bodies("/api-cases/batch-delete").length).toBe(1));
+    expect(bodies("/api-cases/batch-delete")[0].project_id).toBe("p1");
+    expect([...(bodies("/api-cases/batch-delete")[0].case_ids as string[])].sort()).toEqual(["c1", "c2"]);
+    expect(spy.mock.calls.some((c) => String(c[0]).includes("2 条用例"))).toBe(true);
+    await waitFor(() => expect(screen.queryByTestId("case-batch-bar")).toBeNull());
+    spy.mockRestore();
+  });
+
+  it("回收站视图勾行 → 批量恢复：POST batch-restore 带 case_ids；取消选择清空", async () => {
+    renderList([caseRow({ status: "recycled" }), caseRow({ id: "c2", name: "第二用例", status: "recycled" })], "ok");
+    await screen.findAllByTestId("case-row");
+    fireEvent.click(screen.getByTestId("case-recycled-toggle"));
+    // 回收站视图的 mockBackend 仍返回同样行（桩不按 recycled 切片），批量条按 inRecycled 切到恢复
+    fireEvent.click(boxes()[0]);
+    expect(await screen.findByTestId("case-batch-restore")).not.toBeNull();
+    expect(screen.queryByTestId("case-batch-delete")).toBeNull();
+    fireEvent.click(screen.getByTestId("case-batch-restore"));
+    const m = await waitFor(() => {
+      const el = document.querySelector(".ant-modal-confirm") as HTMLElement | null;
+      if (!el) throw new Error("确认框未出现");
+      return el;
+    });
+    fireEvent.click(within(m).getByRole("button", { name: /^恢\s*复$/ }));
+    await waitFor(() => expect(bodies("/api-cases/batch-restore").length).toBe(1));
+    expect(bodies("/api-cases/batch-restore")[0].case_ids).toEqual(["c1"]);
+    await waitFor(() => expect(screen.queryByTestId("case-batch-bar")).toBeNull());
   });
 });

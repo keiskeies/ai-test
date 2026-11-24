@@ -26,6 +26,17 @@ class PlanCreateIn(BaseModel):
     description: str | None = None
     # D211：所属模块（可空 = 未分组）。服务层验「同项目存在」，不在 schema 里验。
     module_id: str | None = None
+    # D279：测试阶段/计划与实际起止/责任人（对齐 MS 计划表单的六列）。全部可选；
+    # 两对时间的先后顺序由服务层校验（结束早于开始 → 422），owner_id 必须为本项目成员。
+    # 空 = 未填（不编默认值：没填的计划开始时间就是没有，不是「今天」）。
+    stage: str | None = Field(default=None, max_length=32)
+    planned_start: datetime | None = None
+    planned_end: datetime | None = None
+    actual_start: datetime | None = None
+    actual_end: datetime | None = None
+    owner_id: str | None = None
+    # D285：标签（去空白/去重保序，空 = 无标签；存法见 shared/tags.py）
+    tags: list[str] = Field(default_factory=list)
 
 
 class PlanListIn(BaseModel):
@@ -46,6 +57,8 @@ class PlanListIn(BaseModel):
     # D231：只看我关注的计划（plan_follower 里当前用户的行）。与模块/未分组/条件组并行 AND；
     # 不作为高级搜索字段（「关注」是视图轴，不是计划表上的列——同缺陷 followed_by_me 的口径）。
     followed_by_me: bool = False
+    # D285：标签精确筛选（FIND_IN_SET；全空白 = 不过滤）。与模块/条件组/关注并行 AND。
+    tag: str | None = Field(default=None, max_length=200)
 
 
 class PlanGetIn(BaseModel):
@@ -76,6 +89,23 @@ class PlanUpdateIn(BaseModel):
     # 「传 null」在 pydantic 里分不出来，移出模块（module_id=null）就成了做不到的事。
     module_set: bool = False
     module_id: str | None = None
+    # D279：测试阶段/计划与实际起止/责任人。五个可清空位都用 `*_set` 哨兵显式区分
+    # 「不带」（不动）与「带 null」（清空）——review.ReviewUpdateIn.start_at_set 同款；
+    # 否则「把我从责任人里摘掉」在 pydantic 里与「这次不改责任人」分不开。
+    stage: str | None = Field(default=None, max_length=32)
+    stage_set: bool = False
+    planned_start: datetime | None = None
+    planned_start_set: bool = False
+    planned_end: datetime | None = None
+    planned_end_set: bool = False
+    actual_start: datetime | None = None
+    actual_start_set: bool = False
+    actual_end: datetime | None = None
+    actual_end_set: bool = False
+    owner_id: str | None = None
+    owner_set: bool = False
+    # D285：标签三态——None = 不改、[] = 清空、带值 = 覆盖（与 api/functional/scenario 同款）
+    tags: list[str] | None = None
 
     @field_validator("archived")
     @classmethod
@@ -173,6 +203,16 @@ class PlanOut(BaseModel):
     description: str | None = None
     archived: bool
     module_id: str | None = None
+    # D279：阶段/计划与实际起止/责任人（owner_name 由读路一次批量解析，列表不画裸 UUID）
+    stage: str | None = None
+    planned_start: str | None = None
+    planned_end: str | None = None
+    actual_start: str | None = None
+    actual_end: str | None = None
+    owner_id: str | None = None
+    owner_name: str | None = None
+    # D285：标签数组（空数组 = 无标签；空 ≠ 取数失败，取数失败整行不出）
+    tags: list[str] = Field(default_factory=list)
     created_by: str | None = None
     updated_by: str | None = None
     created_at: str | None = None
@@ -451,6 +491,54 @@ LINK_RESULTS = ("none", "passed", "failed")
 class PlanStatusIn(BaseModel):
     project_id: str
     plan_id: str
+
+
+# ══════════ D275：列表页的状态/规模批量投影（一页一次，不逐行 N+1） ══════════
+
+
+class PlanStatusBatchIn(BaseModel):
+    """判据与 plan_status 逐字同源：同一份关联谓词、同一份 _link_result/_rates/_plan_display，
+    只是把「一个计划」换成「当前页的一批计划」。上限 200 与列表 size 上限同尺。"""
+
+    project_id: str
+    plan_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class PlanSubjectCountsOut(BaseModel):
+    """关联行按 subject_type 的规模（MS 列表的「各类型用例数」）。
+    五种可挂类型各一格；词汇表外的值进不了库（写入口 422），所以没有 other 兜底格。"""
+
+    functional_case: int = 0
+    api_case: int = 0
+    scenario: int = 0
+    ui_case: int = 0
+    adb_case: int = 0
+
+
+class PlanStatusSummaryOut(BaseModel):
+    """一个计划的列表级状态摘要——字段与 PlanStatusOut 的汇总区逐项对齐（links 明细除外），
+    另加 counts。**不返回 links**：列表页不需要明细，返回它是给一页 50 个计划付 50 份明细的钱。"""
+
+    plan_id: str
+    archived: bool
+    status: str
+    total: int
+    passed: int
+    failed: int
+    executed: int
+    executing: int
+    not_executed: int
+    pass_rate: float
+    execute_rate: float
+    counts: PlanSubjectCountsOut
+
+
+class PlanStatusBatchOut(BaseModel):
+    """只回**当前仍存在**的计划（页面上被删掉的行不回摘要，前端画「—」而不是编一个 0）。
+    total = 本次实际返回的条数，调用方拿它和请求条数对账，不必猜。"""
+
+    items: list[PlanStatusSummaryOut] = Field(default_factory=list)
+    total: int = 0
 
 
 class PlanLinkStatusOut(BaseModel):

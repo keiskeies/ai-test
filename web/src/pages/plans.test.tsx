@@ -5,8 +5,9 @@
 //    归档走 **:manage**——若实现拿 :update 当归档门，READONLY+update 的用例形状会露馅，
 //    所以归档钮的在场/缺席只按 :manage 断言（*:read 下必须不在，["*"] 下必须在）；
 // ③ 归档是终态：已归档行**没有**归档把手（后端 409 拒重复归档，摆把手=假门）；
-// ④ 列表不画展示态：PlanOut 没有 status 字段，页面不许逐行拉 /status（N+1 + 编数），
-//    行内文案里不许出现「未开始/进行中/已完成」任何一词；
+// ④ D275 起列表四列（状态/进度/通过率/用例数）来自**一次批量摘要** /plan-status-batch
+//    （与详情页 /status 同源）；逐行拉 /status 仍是禁止的 N+1；摘要失败画「—」+ 提示条，
+//    绝不把「没取到」画成 0；
 // ⑤ 展示态词表外值渲染原文（planDisplayMeta 纯函数，R112：不回落友好标签）；
 // ⑥ POST/PATCH body 字段名与后端逐字段一致（断 JSON 本体）；PATCH 回填断了会把描述
 //    静默洗成空串——编辑用例断**预填原样回传**；
@@ -39,8 +40,20 @@ import { useAuth } from "../auth/store";
 import type { components } from "../api/schema";
 
 type PlanOut = components["schemas"]["PlanOut"];
-/** D231：列表行多一位 followed（后端 PlanListRowOut；现查 plan_follower，不存列表第二份）。 */
-type PlanRow = PlanOut & { followed?: boolean };
+/** D231：列表行多一位 followed（后端 PlanListRowOut；现查 plan_follower，不存列表第二份）。
+ *  D279：再加阶段/计划与实际起止/责任人六列与 owner_name。 */
+type PlanRow = PlanOut & {
+  followed?: boolean;
+  stage?: string | null;
+  planned_start?: string | null;
+  planned_end?: string | null;
+  actual_start?: string | null;
+  actual_end?: string | null;
+  owner_id?: string | null;
+  owner_name?: string | null;
+  /** D285：标签（后端 split 成数组；空 = 无标签） */
+  tags?: string[];
+};
 
 function plan(id: string, over: Partial<PlanRow> = {}): PlanRow {
   return { id, project_id: "p1", name: "计划" + id, description: null, archived: false,
@@ -76,6 +89,22 @@ interface BackendOpts {
   fixedTotal?: number | null;
   /** D211：模块树响应（缺省 = 空树 + 未分组 0）。 */
   tree?: unknown;
+  /** D275：批量状态失败（列表仍在，只缺状态/进度/通过率/用例数四列）。 */
+  summaryFail?: boolean;
+  /** D279：责任人候选（弹窗里的成员下拉）。缺省 = 空列表。 */
+  members?: { id: string; project_id: string; user_id: string; role_code: string;
+    account: string | null; name: string | null }[];
+}
+
+/** D275：批量摘要桩——p1 进行中、p2 归档；数字确定到便于断「画的是摘要不是 0」。 */
+function summaryOf(planId: string): unknown {
+  const archived = !!ROWS.find((r) => r.id === planId)?.archived;
+  return {
+    plan_id: planId, archived, status: archived ? "archived" : "in_progress",
+    total: 3, passed: 2, failed: 0, executed: 2, executing: 0, not_executed: 1,
+    pass_rate: 2 / 3, execute_rate: 2 / 3,
+    counts: { functional_case: 1, api_case: 2, scenario: 0, ui_case: 0, adb_case: 0 },
+  };
 }
 
 function mockBackend(over: BackendOpts = {}) {
@@ -152,6 +181,11 @@ function mockBackend(over: BackendOpts = {}) {
     }
     const md = url.match(/\/plan-modules\/([^/?]+)\/delete$/);
     if (md && method === "POST") return resp(200, { ok: true });
+    if (url.endsWith("/plan-status-batch") && method === "POST") {
+      if (over.summaryFail) return resp(503, LOAD503);
+      const ids = (body as { plan_ids: string[] }).plan_ids;
+      return resp(200, { items: ids.map(summaryOf), total: ids.length });
+    }
     // D212：高级搜索元数据 + 个人视图（工具条首载两请求）。
     if (url.includes("/filter-meta") && method === "GET") {
       return resp(200, {
@@ -169,6 +203,11 @@ function mockBackend(over: BackendOpts = {}) {
       });
     }
     if (url.includes("/saved-views") && method === "GET") return resp(200, []);
+    // D279：责任人候选（弹窗打开时取本项目成员）。空列表 = 项目里暂时没有可指派的人，
+    // 前端画「未指派」，不编人名。
+    if (url.includes("/members") && method === "GET") {
+      return resp(200, { items: over.members ?? [] });
+    }
     throw new Error("未 mock 的请求: " + method + " " + url);
   }) as unknown as typeof fetch;
 }
@@ -370,7 +409,9 @@ describe("D211 计划模块树", () => {
     fireEvent.click(screen.getByTestId("plan-save"));
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/plans"))).toBe(true));
     const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/plans"))!;
-    expect(c.body).toEqual({ project_id: "p1", name: "模块内新计划", description: "", module_id: "m1" });
+    expect(c.body).toEqual({ project_id: "p1", name: "模块内新计划", description: "",
+      stage: null, planned_start: null, planned_end: null,
+      actual_start: null, actual_end: null, owner_id: null, tags: [], module_id: "m1" });
   });
 
   it("新建模块：POST /plan-modules body 恰 {project_id,parent_id,name}，成功重取树；未选中模块时不摆改名/删除把手", async () => {
@@ -437,7 +478,8 @@ describe("D212 计划列表高级搜索 / 列设置", () => {
     const panel = await screen.findByTestId("lt-col-panel");
     const boxes = within(panel).getAllByRole("checkbox") as HTMLInputElement[];
     const labels = boxes.map((b) => (b.closest("label")?.textContent ?? "").trim());
-    expect(labels).toEqual(["名称", "描述", "归档", "创建时间", "更新时间"]);
+    expect(labels).toEqual(["名称", "描述", "标签", "状态", "进度", "通过率", "用例数", "测试阶段",
+      "责任人", "计划开始", "计划结束", "实际开始", "实际结束", "归档", "创建时间", "更新时间"]);
     fireEvent.click(boxes[labels.indexOf("描述")]);
     await waitFor(() => expect(thead()).not.toContain("描述"));
     expect(thead()).toContain("归档");
@@ -482,14 +524,32 @@ describe("行渲染（只画后端答过的问题）", () => {
     await waitFor(() => expect(screen.getByTestId("detail-probe")).not.toBeNull());
   });
 
-  it("列表不画展示态：行内零「未开始/进行中/已完成」，且全程零 /status 请求（不 N+1 编数）", async () => {
+  it("展示态来自**一次批量摘要**：一页一次 /plan-status-batch，不逐行拉 /status（D275）", async () => {
     mockBackend();
     await renderSettled();
     const table = screen.getByTestId("plans-table").textContent ?? "";
-    expect(table).not.toContain("未开始");
-    expect(table).not.toContain("进行中");
-    expect(table).not.toContain("已完成");
-    expect(calls.some((c) => c.url.includes("/status"))).toBe(false);
+    expect(table).toContain("进行中");
+    expect(table).toContain("已归档");
+    // 行内展示态与用例规模都必须来自摘要（数字 3/2 是桩里的确定值，画 0 会露馅）
+    expect(screen.getByTestId("plans-cases-p1").textContent).toContain("3");
+    expect(screen.getByTestId("plans-cases-p1").textContent).toContain("接口 2");
+    expect(screen.getByTestId("plans-passrate-p1").textContent).toContain("67%");
+    // 逐行 /plans/{id}/status 一次都不许发；批量端点恰好一次且 plan_ids 就是当前页
+    expect(calls.some((c) => /\/plans\/[^/?]+\/status/.test(c.url))).toBe(false);
+    const batch = calls.filter((c) => c.url.endsWith("/plan-status-batch"));
+    expect(batch).toHaveLength(1);
+    expect(batch[0].body).toEqual({ project_id: "p1", plan_ids: ["p1", "p2"] });
+  });
+
+  it("批量摘要失败：四列画「—」+ 提示条，绝不把「没取到」画成 0", async () => {
+    mockBackend({ summaryFail: true });
+    await renderSettled();
+    // 列表行仍在（失败只影响摘要那一批）
+    expect(shownPlanRows()).toEqual(["p1", "p2"]);
+    expect(screen.getByTestId("plans-summary-error").textContent).toContain("取数失败");
+    expect(screen.getByTestId("plans-cases-p1").textContent).toBe("—");
+    expect(screen.getByTestId("plans-passrate-p1").textContent).toBe("—");
+    expect(screen.getByTestId("plans-status-p1").textContent).toBe("—");
   });
 });
 
@@ -517,7 +577,9 @@ describe("新建 / 编辑（断 body JSON 本体，不钉「发过请求」）",
     fireEvent.click(screen.getByTestId("plan-save"));
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/plans"))).toBe(true));
     const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/plans"))!;
-    expect(c.body).toEqual({ project_id: "p1", name: "结算回归 v2", description: "跨期" });
+    expect(c.body).toEqual({ project_id: "p1", name: "结算回归 v2", description: "跨期",
+      stage: null, planned_start: null, planned_end: null,
+      actual_start: null, actual_end: null, owner_id: null, tags: [] });
     await waitFor(() => expect(listReqs().length).toBeGreaterThan(before)); // 重拉，不本地插行
   });
 
@@ -535,7 +597,47 @@ describe("新建 / 编辑（断 body JSON 本体，不钉「发过请求」）",
     await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
     const c = calls.find((x) => x.method === "PATCH")!;
     expect(c.url).toContain("/plans/p1");
-    expect(c.body).toEqual({ project_id: "p1", name: "结算回归 v2", description: "覆盖结算主链路" });
+    expect(c.body).toEqual({ project_id: "p1", name: "结算回归 v2", description: "覆盖结算主链路",
+      stage: null, planned_start: null, planned_end: null,
+      actual_start: null, actual_end: null, owner_id: null, tags: [],
+      stage_set: true, planned_start_set: true, planned_end_set: true,
+      actual_start_set: true, actual_end_set: true, owner_set: true });
+  });
+
+  it("D279 阶段/起止/责任人：列表按行显示，编辑预填，清空后 PATCH 显式发 null + *_set", async () => {
+    mockBackend({
+      fixedItems: [plan("p1", {
+        stage: "系统测试",
+        planned_start: "2026-11-20T10:30:00+08:00",
+        planned_end: "2026-11-21T10:30:00+08:00",
+        actual_start: null, actual_end: null,
+        owner_id: "u9", owner_name: "李四",
+      })],
+      fixedTotal: 1,
+      members: [{ id: "m1", project_id: "p1", user_id: "u9", role_code: "MEMBER",
+        account: "lisi", name: "李四" }],
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("plans-edit-p1")).not.toBeNull());
+    // 列表列：阶段/责任人来自行数据，未填的两个时刻画「—」
+    expect(screen.getByTestId("plans-stage").textContent).toBe("系统测试");
+    expect(screen.getByTestId("plans-owner").textContent).toBe("李四");
+    expect(screen.getAllByTestId("plans-actual-start").map((n) => n.textContent)).toEqual(["—"]);
+    // 编辑：预填回行值；清空阶段再保存
+    fireEvent.click(screen.getByTestId("plans-edit-p1"));
+    const stageEl = await screen.findByTestId("plan-field-stage");
+    expect((stageEl as HTMLInputElement).value).toBe("系统测试");
+    fireEvent.change(stageEl, { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("plan-save"));
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    const body = calls.find((c) => c.method === "PATCH")!.body as Record<string, unknown>;
+    expect(body.stage).toBeNull();               // 清空必须发 null，不能被当成「不改」
+    expect(body.owner_id).toBe("u9");             // 责任人原样回传
+    expect(body.stage_set).toBe(true);            // 六枚哨兵全带 = 表单是全量语义
+    expect(body.planned_start_set).toBe(true);
+    expect(body.owner_set).toBe(true);
+    expect(new Date(body.planned_start as string).getTime())
+      .toBe(new Date("2026-11-20T10:30:00+08:00").getTime()); // 计划开始按 ISO 回传
   });
 
   it("后端 409 的 message 逐字节进 Alert（原话回显不翻译），弹窗留着可改可重试", async () => {
@@ -743,5 +845,75 @@ describe("D231 计划关注（视图轴 + 星标）", () => {
     await renderSettled();
     expect(screen.queryByTestId("plans-follow-p1")).toBeNull();
     expect(screen.getByTestId("plans-followed-only")).not.toBeNull();
+  });
+});
+
+// ── D285 计划标签：列渲染 / 精确筛选下推 / 新建与编辑带标签 ─────────────────────
+describe("D285 计划标签", () => {
+  /** rc-select 的 tags 输入：改搜索框现值后按 Enter 收标签（keyDown+keyUp 一对）。 */
+  async function addTag(testid: string, value: string): Promise<void> {
+    const input = screen.getByTestId(testid).querySelector("input")!;
+    fireEvent.change(input, { target: { value } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    fireEvent.keyUp(input, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(screen.getByTestId(testid).textContent).toContain(value));
+  }
+
+  it("标签列最多两枚 +「+N」，无标签画「—」", async () => {
+    mockBackend({
+      fixedItems: [
+        plan("p1", { tags: ["回归", "核心", "冒烟"] }),
+        plan("p2", { name: "老计划", archived: true, tags: [] }),
+      ],
+      fixedTotal: 2,
+    });
+    await renderSettled();
+    const c1 = screen.getByTestId("plans-tags-p1");
+    expect(c1.textContent).toContain("回归");
+    expect(c1.textContent).toContain("核心");
+    expect(c1.textContent).toContain("+1");
+    expect(c1.textContent).not.toContain("冒烟");
+    expect(screen.getByTestId("plans-tags-p2").textContent).toBe("—");
+  });
+
+  it("标签筛选回车 → 列表请求带 tag（trim 后上线）并回第 1 页", async () => {
+    mockBackend();
+    await renderSettled();
+    expect(listReqs().at(-1)!.url).not.toContain("tag=");
+    const input = screen.getByTestId("plans-tags-filter");
+    fireEvent.change(input, { target: { value: "  回归  " } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    fireEvent.keyUp(input, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(listReqs().some((c) => c.url.includes("tag="))).toBe(true));
+    const last = listReqs().at(-1)!.url;
+    expect(new URLSearchParams(last.slice(last.indexOf("?") + 1)).get("tag")).toBe("回归");
+    expect(last).toContain("current=1");
+  });
+
+  it("新建时录入标签 → POST body 带 tags", async () => {
+    mockBackend();
+    await renderSettled();
+    fireEvent.click(screen.getByTestId("plans-create"));
+    await screen.findByTestId("plan-field-name");
+    fireEvent.change(screen.getByTestId("plan-field-name"), { target: { value: "带标签计划" } });
+    await addTag("plan-field-tags", "回归");
+    fireEvent.click(screen.getByTestId("plan-save"));
+    await waitFor(() => expect(calls.some(
+      (c) => c.method === "POST" && c.url.endsWith("/plans"))).toBe(true));
+    const c = calls.find((x) => x.method === "POST" && x.url.endsWith("/plans"))!;
+    expect((c.body as Record<string, unknown>).tags).toEqual(["回归"]);
+  });
+
+  it("编辑预填标签并整单回传 → PATCH body.tags 是完整数组", async () => {
+    mockBackend({ fixedItems: [plan("p1", { tags: ["旧标签"] })], fixedTotal: 1 });
+    await renderSettled();
+    fireEvent.click(screen.getByTestId("plans-edit-p1"));
+    await screen.findByTestId("plan-field-tags");
+    expect(screen.getByTestId("plan-field-tags").textContent).toContain("旧标签");
+    await addTag("plan-field-tags", "新标签");
+    fireEvent.click(screen.getByTestId("plan-save"));
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    const body = calls.find((x) => x.method === "PATCH")!.body as Record<string, unknown>;
+    expect(body.tags).toEqual(["旧标签", "新标签"]);
   });
 });

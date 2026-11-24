@@ -36,6 +36,9 @@ class Scenario(ProjectScopedMixin, TimestampMixin, Base):
     common_assertions: Mapped[list | None] = mapped_column(JSON, nullable=True)
     env_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # D284：标签（逗号串，与功能用例/接口定义同存法；`shared/tags.py` 统一读写）。
+    # 空 = 无标签；列表顶层 `tag` 精确筛选用 FIND_IN_SET（不用 LIKE，bug1 不命中 bug10）。
+    tags: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     project_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # 乐观锁（Review Focus 5）
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 冗余计数，列表不 N+1

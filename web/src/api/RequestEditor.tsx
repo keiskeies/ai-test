@@ -1,7 +1,7 @@
 // 请求编辑器（§11.4.4 子集）：参数/请求头/Body/断言/超时 五 Tab；pairs 表格可增删。
 // 与 req.ts 同层复用；readOnly 供详情只读渲染。
-import { lazy, Suspense } from "react";
-import { Button, Input, InputNumber, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from "antd";
+import { lazy, Suspense, type ReactNode } from "react";
+import { Button, Checkbox, Input, InputNumber, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from "antd";
 import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, PlusOutlined } from "../ui/icons";
 import { ASSERT_TYPES, METHODS } from "./req";
 import type { Assertion, AuthType, Pair, RequestObject } from "./req";
@@ -31,12 +31,17 @@ export interface Draft {
   assertions: Assertion[];
 }
 
+/** 载入时保留四元参数的必填/描述（D288）；两元/四元都归一成四元给编辑器。 */
+const copyPair = (p: Pair): Pair => (p.length >= 4
+  ? [p[0] ?? "", p[1] ?? "", p[2] ?? "0", p[3] ?? ""]
+  : [p[0] ?? "", p[1] ?? ""]);
+
 export function toDraft(r?: Partial<RequestObject> | null): Draft {
   return {
     method: r?.method ?? "GET",
     url: r?.url ?? "",
-    params: r?.params ? r.params.map((p) => [p[0] ?? "", p[1] ?? ""] as Pair) : [],
-    headers: r?.headers ? r.headers.map((p) => [p[0] ?? "", p[1] ?? ""] as Pair) : [],
+    params: r?.params ? r.params.map(copyPair) : [],
+    headers: r?.headers ? r.headers.map(copyPair) : [],
     auth: {
       type: r?.auth?.type ?? "none",
       username: r?.auth?.config?.username ?? "",
@@ -79,47 +84,92 @@ export function fromDraft(d: Draft): RequestObject {
   };
 }
 
-export function PairTable({ rows, onChange, ro, kPh, vPh, idPrefix = "pair" }: {
-  rows: Pair[]; onChange: (v: Pair[]) => void; ro?: boolean; kPh: string; vPh: string;
-  /** 同一页面可能并存多个 pair 表（参数/请求头/环境变量…），用前缀区分避免定位歧义 */
-  idPrefix?: string;
-}) {
-  const data = rows.map((p, i) => ({ i, k: p[0], v: p[1] }));
-  const set = (i: number, side: "k" | "v", val: string) => {
-    const next = rows.map((p) => [...p] as Pair);
-    next[i][side === "k" ? 0 : 1] = val;
-    onChange(next);
-  };
+/** 键值表空态：只说这一张表是什么、下一步点哪里（默认的「暂无」在满宽表格里像加载失败）。 */
+function PairEmpty({ title, hint }: { title: string; hint: string }) {
   return (
-    <div>
-      <Table size="small" pagination={false} rowKey="i" dataSource={data}
-        locale={{ emptyText: "暂无" }}
-        columns={[
-          { title: kPh, render: (_, r) => (
-            <Input data-testid={idPrefix + "-key-" + r.i} size="small" value={r.k} disabled={ro}
-              placeholder={kPh} onChange={(e) => set(r.i, "k", e.target.value)} />
-          ) },
-          { title: vPh, render: (_, r) => (
-            <Input data-testid={idPrefix + "-val-" + r.i} size="small" value={r.v} disabled={ro} placeholder={vPh}
-              onChange={(e) => set(r.i, "v", e.target.value)} />
-          ) },
-          ...(ro ? [] : [{ title: "", width: 44, render: (_: unknown, r: { i: number }) => (
-            <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label={"删行" + r.i}
-              onClick={() => onChange(rows.filter((_, j) => j !== r.i))} />
-          ) }]),
-        ]}
-      />
-      {!ro && (
-        <Button size="small" type="dashed" block icon={<PlusOutlined />} style={{ marginTop: 8 }}
-          data-testid={idPrefix + "-add"} onClick={() => onChange([...rows, ["", ""]])}>
-          添加一行
-        </Button>
-      )}
+    <div className="tp-pair-empty">
+      <div className="tp-pair-empty__title">{title}</div>
+      <div className="tp-pair-empty__hint">{hint}</div>
     </div>
   );
 }
 
-export default function RequestEditor({ value, onChange, readOnly, assertLabel, assertHint, testIdPrefix = "req" }: {
+export function PairTable({ rows, onChange, ro, kPh, vPh, kHint, vHint, emptyText, withMeta = false, idPrefix = "pair" }: {
+  rows: Pair[]; onChange: (v: Pair[]) => void; ro?: boolean; kPh: string; vPh: string;
+  /** 输入框内的示例（列头仍用 kPh/vPh；不给示例就沿用列头） */
+  kHint?: string; vHint?: string;
+  /** 空表提示：参数/请求头/环境变量的「空」含义不同，由调用点给一句话 */
+  emptyText?: ReactNode;
+  /** 接口参数专有：多出「必填 / 描述」两列，写回四元 ["k","v","1|0","描述"]（D288） */
+  withMeta?: boolean;
+  /** 同一页面可能并存多个 pair 表（参数/请求头/环境变量…），用前缀区分避免定位歧义 */
+  idPrefix?: string;
+}) {
+  const data = rows.map((p, i) => ({
+    i, k: p[0] ?? "", v: p[1] ?? "",
+    required: p[2] === "1", description: p[3] ?? "",
+  }));
+  const set = (i: number, side: "k" | "v", val: string) => {
+    onChange(rows.map((p, j) => {
+      if (j !== i) return p;
+      if (withMeta) {
+        const row: Pair = [p[0] ?? "", p[1] ?? "", p[2] ?? "0", p[3] ?? ""];
+        row[side === "k" ? 0 : 1] = val;
+        return row;
+      }
+      return (side === "k" ? [val, p[1] ?? ""] : [p[0] ?? "", val]) as Pair;
+    }));
+  };
+  const setMeta = (i: number, patch: { required?: boolean; description?: string }) => {
+    onChange(rows.map((p, j) => (j === i
+      ? [p[0] ?? "", p[1] ?? "",
+        (patch.required ?? p[2] === "1") ? "1" : "0",
+        patch.description ?? p[3] ?? ""] as Pair
+      : p)));
+  };
+  return (
+    <Table className="tp-pair-table" size="small" pagination={false} rowKey="i" dataSource={data}
+      locale={{ emptyText: emptyText ?? "暂无" }}
+      footer={ro ? undefined : () => (
+        // 表脚而不是整条虚线块：1500 宽的编辑器里一条横贯全宽的「添加一行」像占位条
+        <Button size="small" type="text" icon={<PlusOutlined />} style={{ paddingInline: 4 }}
+          data-testid={idPrefix + "-add"}
+          onClick={() => onChange([...rows, withMeta ? ["", "", "0", ""] : ["", ""]])}>
+          添加一行
+        </Button>
+      )}
+      columns={[
+        { title: kPh, width: withMeta ? "24%" : "42%", render: (_, r) => (
+          <Input data-testid={idPrefix + "-key-" + r.i} size="small" value={r.k} disabled={ro}
+            placeholder={kHint ?? kPh} onChange={(e) => set(r.i, "k", e.target.value)} />
+        ) },
+        { title: vPh, width: withMeta ? "28%" : undefined, render: (_, r) => (
+          <Input data-testid={idPrefix + "-val-" + r.i} size="small" value={r.v} disabled={ro}
+            placeholder={vHint ?? vPh}
+            onChange={(e) => set(r.i, "v", e.target.value)} />
+        ) },
+        ...(withMeta ? [
+          { title: "必填", width: 64, render: (_: unknown, r: { i: number; required: boolean }) => (
+            <Checkbox data-testid={idPrefix + "-required-" + r.i} checked={r.required} disabled={ro}
+              aria-label={"参数必填" + r.i}
+              onChange={(e) => setMeta(r.i, { required: e.target.checked })} />
+          ) },
+          { title: "描述", render: (_: unknown, r: { i: number; description: string }) => (
+            <Input data-testid={idPrefix + "-desc-" + r.i} size="small" value={r.description} disabled={ro}
+              maxLength={500} placeholder="如：页码，从 1 开始"
+              onChange={(e) => setMeta(r.i, { description: e.target.value })} />
+          ) },
+        ] : []),
+        ...(ro ? [] : [{ title: "", width: 44, render: (_: unknown, r: { i: number }) => (
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label={"删行" + r.i}
+            onClick={() => onChange(rows.filter((_, j) => j !== r.i))} />
+        ) }]),
+      ]}
+    />
+  );
+}
+
+export default function RequestEditor({ value, onChange, readOnly, assertLabel, assertHint, testIdPrefix = "req", fill = false }: {
   value: Draft;
   onChange?: (d: Draft) => void;
   readOnly?: boolean;
@@ -127,6 +177,11 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
   assertHint?: string;
   /** 同一屏可能并存两个编辑器（接口定义 / 用例覆盖层），前缀区分避免定位歧义 */
   testIdPrefix?: string;
+  /**
+   * 全屏接口编辑器：URL 行吃掉多余宽度、页签正文（尤其 Body）吃满剩余高度。
+   * 默认 false，保持弹窗/详情里「按内容高」的原样。
+   */
+  fill?: boolean;
 }) {
   const patch = (p: Partial<Draft>) => onChange?.({ ...value, ...p });
   // 页签计数只算将执行的行：enabled===false 的行后端不执行也不产结果行
@@ -142,10 +197,13 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
       {/* 不用 Space：Space 的 .ant-space-item 包层让 Input 的 flex 失效，改为手写弹性行。
           URL 格 260 起、随容器长、560 封顶（960 档浮层内容宽 912 − 方法 110 − 超时 120 − 2×gap8 = 666，
           封顶仍留 100 余量）；minWidth 0 保证窄容器收缩而非溢出。 */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+      <div className="tp-req-line" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
         <Select data-testid={testIdPrefix + "-method"} style={{ width: 110, flex: "none" }} value={value.method} disabled={readOnly}
           options={METHODS.map((m) => ({ value: m, label: m }))} onChange={(m) => patch({ method: m })} />
-        <Input data-testid={testIdPrefix + "-url"} style={{ flex: "1 1 260px", maxWidth: 560, minWidth: 0 }}
+        {/* flex 基准 200（fill）/260（弹窗）：URL 是唯一可长的那一格，基准给小一点，
+            1024 宽下超时框才不会被挤到第二行（2026-11-24 截图实测 120+ms 附加宽 ≈150）。 */}
+        <Input data-testid={testIdPrefix + "-url"}
+          style={{ flex: fill ? "1 1 200px" : "1 1 260px", maxWidth: fill ? undefined : 560, minWidth: 0 }}
           value={value.url} disabled={readOnly}
           placeholder="URL，支持 ${var}，如 ${base_url}/order/1"
           onChange={(e) => patch({ url: e.target.value })} />
@@ -155,30 +213,46 @@ export default function RequestEditor({ value, onChange, readOnly, assertLabel, 
             addonAfter="ms" onChange={(v) => patch({ timeout_ms: Number(v ?? 10000) })} />
         </Tooltip>
       </div>
-      <Tabs size="small" items={[
+      <Tabs size={fill ? "middle" : "small"} items={[
         { key: "params", label: `参数(${used(value.params)})`, children: (
-          <PairTable idPrefix={testIdPrefix + "-param"} kPh="参数名" vPh="参数值" rows={value.params} ro={readOnly}
-            onChange={(v) => patch({ params: v })} />
+          <PairTable idPrefix={testIdPrefix + "-param"} kPh="参数名" vPh="参数值"
+            kHint="如 page" vHint="如 1" withMeta
+            emptyText={<PairEmpty title="还没有参数" hint="点下方「添加一行」添加查询参数；可标必填、写描述，值支持 ${var}" />}
+            rows={value.params} ro={readOnly} onChange={(v) => patch({ params: v })} />
         ) },
         { key: "headers", label: `请求头(${used(value.headers)})`, children: (
-          <PairTable idPrefix={testIdPrefix + "-header"} kPh="头名" vPh="头值" rows={value.headers} ro={readOnly}
-            onChange={(v) => patch({ headers: v })} />
+          <PairTable idPrefix={testIdPrefix + "-header"} kPh="头名" vPh="头值"
+            kHint="如 Authorization" vHint="如 Bearer ${token}"
+            emptyText={<PairEmpty title="还没有自定义请求头" hint="这里的头会原样随请求发出；Auth 页签的凭据不写进这张表" />}
+            rows={value.headers} ro={readOnly} onChange={(v) => patch({ headers: v })} />
         ) },
         { key: "body", label: "Body", children: (
-          <Space direction="vertical" style={{ width: "100%" }}>
-            <Select data-testid={testIdPrefix + "-body-type"} style={{ width: 140 }} value={value.body.type} disabled={readOnly}
-              options={["none", "json", "text", "form"].map((t) => ({ value: t, label: t }))}
-              onChange={(t) => patch({ body: { ...value.body, type: t } })} />
-            {value.body.type !== "none" && (
-              <div data-testid={testIdPrefix + "-body-content"}>
+          <div className={"tp-body-editor" + (fill ? " tp-body-editor--fill" : "")}>
+            <div className="tp-body-editor__bar">
+              <Select data-testid={testIdPrefix + "-body-type"} style={{ width: 140 }} value={value.body.type} disabled={readOnly}
+                options={["none", "json", "text", "form"].map((t) => ({ value: t, label: t }))}
+                onChange={(t) => patch({ body: { ...value.body, type: t } })} />
+              <span className="tp-body-editor__hint">
+                {value.body.type === "none"
+                  ? "不发送请求体"
+                  : value.body.type === "json" ? "JSON 正文，支持 ${var}" : "正文原样发出，支持 ${var}"}
+              </span>
+            </div>
+            {value.body.type === "none" ? (
+              <div className="tp-body-editor__empty" data-testid={testIdPrefix + "-body-empty"}>
+                <div className="tp-body-editor__empty-title">当前不发送请求体</div>
+                <div>把类型切到 json / text / form 后，在这里编辑正文</div>
+              </div>
+            ) : (
+              <div data-testid={testIdPrefix + "-body-content"} style={fill ? { flex: "1 1 auto", minHeight: 160 } : undefined}>
                 <Suspense fallback={editorFallback}>
-                  <CodeEditor height={152} language={value.body.type === "json" ? "json" : "plaintext"}
+                  <CodeEditor height={fill ? "100%" : 152} language={value.body.type === "json" ? "json" : "plaintext"}
                     readOnly={!!readOnly} value={value.body.content ?? ""}
                     onChange={(v) => patch({ body: { ...value.body, content: v } })} />
                 </Suspense>
               </div>
             )}
-          </Space>
+          </div>
         ) },
         { key: "auth", label: value.auth.type === "none" ? "Auth" : `Auth(${value.auth.type})`, children: (
           <Space direction="vertical" style={{ width: "100%" }}>

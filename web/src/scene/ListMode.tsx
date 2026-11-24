@@ -85,6 +85,7 @@ function Toolbar(props: { q: string; setQ: (v: string) => void }) {
       {/* D146：添加/粘贴是写把手，只读隐藏（§11.5.1）；搜索是读把手，留着 */}
       {!readOnly && (<>
       <Dropdown
+        trigger={["click"]}
         menu={{
           items: ADD_KINDS.map((k) => ({
             key: k, label: <span data-testid={"list-addmenu-" + k}>{labelOf(k)}</span>,
